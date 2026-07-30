@@ -73,7 +73,7 @@ jobs:
           --candidate-ref "$OMNI_DIFF_COVERAGE_CANDIDATE"
           --minimum-percent 80
           --test-outcome "$OMNI_DIFF_COVERAGE_TEST_OUTCOME"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: changed-code-coverage
@@ -107,7 +107,7 @@ jobs:
       - run: uv venv /tmp/omni-wheel
       - run: uv pip install --python /tmp/omni-wheel/bin/python dist/*.whl
       - run: /tmp/omni-wheel/bin/omni --version
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: distributions
           path: dist/*
@@ -123,7 +123,7 @@ jobs:
       - run: uvx pip-audit --path cli/.venv/lib/python3.12/site-packages
       - run: uvx pip-licenses --python=cli/.venv/bin/python --format=json --output-file=dependency-licenses.json
       - run: uvx --from cyclonedx-bom cyclonedx-py environment cli/.venv/bin/python --output-file sbom.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: supply-chain-reports
           path: |
