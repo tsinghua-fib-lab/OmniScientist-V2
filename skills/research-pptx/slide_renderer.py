@@ -10,7 +10,6 @@ import asyncio
 import importlib.util as _ilu
 import json
 import logging
-import math
 import os
 import shutil
 import sys as _sys
@@ -392,16 +391,140 @@ def _is_cjk_char(ch: str) -> bool:
 def _estimate_text_height_pt(
     text: str, font_size_pt: float, box_width_pt: float,
 ) -> float:
-    """Estimate rendered text height in points."""
-    if not text.strip():
-        return font_size_pt * 1.35
+    """Estimate rendered text height in points.
 
-    total_width = sum(
-        font_size_pt * (1.0 if _is_cjk_char(ch) else 0.52)
-        for ch in text
-    )
-    lines = max(1, math.ceil(total_width / box_width_pt)) if box_width_pt > 0 else 1
-    return lines * font_size_pt * 1.35
+    Parameters aligned with generate_slides.js ``estimateHeight`` so the
+    overflow check uses the same constants as the renderer:
+      Latin char width  = font_size_pt * 0.55  (was 0.52)
+      CJK   char width  = font_size_pt * 1.0
+      Line height       = font_size_pt * 1.4   (was 1.35)
+    """
+    if not text.strip():
+        return font_size_pt * 1.4
+
+    latin_w = font_size_pt * 0.55
+    cjk_w = font_size_pt * 1.0
+    line_h = font_size_pt * 1.4
+
+    # Detect CJK-dominant paragraphs (same heuristic as JS renderer)
+    cjk_count = sum(1 for ch in text if _is_cjk_char(ch))
+    cjk_dominant = cjk_count > len(text) * 0.3
+
+    if cjk_dominant:
+        # Character-based wrapping
+        used = 0.0
+        lines = 1
+        for ch in text:
+            ch_w = cjk_w if _is_cjk_char(ch) else latin_w
+            if used + ch_w > box_width_pt:
+                lines += 1
+                used = ch_w
+            else:
+                used += ch_w
+    else:
+        # Word-boundary wrapping for Latin scripts
+        words = text.split()
+        used = 0.0
+        lines = 1
+        space_w = latin_w
+        for word in words:
+            word_w = sum(cjk_w if _is_cjk_char(ch) else latin_w for ch in word)
+            if used > 0 and used + space_w + word_w > box_width_pt:
+                lines += 1
+                used = word_w
+            else:
+                used += (space_w if used > 0 else 0) + word_w
+
+    return lines * line_h + 0.25  # +0.25 safety pad matches JS
+
+
+def _check_table_overflow_structured(
+    shape, default_font_pt: float, margin_in: float,
+) -> float:
+    """Estimate max text overflow (in inches) across all cells of a table shape.
+
+    Uses the same _estimate_text_height_pt as text-frame checking so constants
+    stay consistent with the JS renderer.
+    """
+    if not shape.has_table:
+        return 0.0
+
+    table = shape.table
+    total_rows = len(table.rows)
+    total_cols = len(table.columns)
+
+    # Shape dimensions in points
+    shape_h_pt = shape.height / 914400 * 72
+    shape_w_pt = shape.width / 914400 * 72
+    margin_pt = margin_in * 72
+    usable_shape_h = shape_h_pt - 2 * margin_pt
+    usable_shape_w = shape_w_pt - 2 * margin_pt
+
+    if usable_shape_h <= 0 or usable_shape_w <= 0:
+        return 0.0
+
+    # Estimate row height from the shape: even distribution as first guess,
+    # then read actual row heights from the XML if available.
+    row_heights_pt: list[float] = []
+    for row in table.rows:
+        rh = row.height
+        if rh is not None and rh > 0:
+            row_heights_pt.append(rh / 914400 * 72)
+    if not row_heights_pt:
+        # Fallback: JS renderer uses 0.45" header + 0.4"/data row
+        if total_rows > 0:
+            row_heights_pt = [0.45 * 72] + [0.4 * 72] * (total_rows - 1)
+
+    if not row_heights_pt:
+        return 0.0
+
+    total_text_h_pt = 0.0
+    cell_margin_pt = margin_pt  # cells have their own internal margins
+
+    fallback_col_w = shape_w_pt / max(total_cols, 1)
+    column_widths_pt = [
+        (column.width / 914400 * 72) if column.width else fallback_col_w
+        for column in table.columns
+    ]
+
+    for row_idx, row in enumerate(table.rows):
+        row_text_h = 0.0
+        row_height_pt = (
+            row_heights_pt[row_idx]
+            if row_idx < len(row_heights_pt)
+            else row_heights_pt[-1]
+        )
+        usable_row_h = row_height_pt - 2 * cell_margin_pt
+
+        for col_idx, cell in enumerate(row.cells):
+            cell_w_pt = (
+                column_widths_pt[col_idx]
+                if col_idx < len(column_widths_pt)
+                else fallback_col_w
+            )
+            usable_cell_w = max(cell_w_pt - 2 * cell_margin_pt, 1.0)
+            cell_para_h = 0.0
+            for para in cell.text_frame.paragraphs:
+                font_sizes = []
+                for run in para.runs:
+                    if run.text.strip() and run.font.size is not None:
+                        font_sizes.append(run.font.size.pt)
+                fs = max(font_sizes) if font_sizes else default_font_pt
+                cell_para_h += _estimate_text_height_pt(
+                    para.text.strip(), fs, usable_cell_w,
+                )
+            row_text_h = max(row_text_h, cell_para_h)
+
+        # Accumulate: if a row's text exceeds its nominal height,
+        # the excess pushes *this* row down and steals space from
+        # rows below it, so we add the delta to total_text_h.
+        allocated = max(usable_row_h, 0)
+        total_text_h_pt += max(row_text_h, allocated)
+
+    overflow_pt = total_text_h_pt - usable_shape_h
+    if overflow_pt > 5:
+        return overflow_pt / 72
+    return 0.0
 
 
 def check_overflow_structured(pptx_path: str) -> list[dict[str, Any]]:
@@ -434,30 +557,36 @@ def check_overflow_structured(pptx_path: str) -> list[dict[str, Any]]:
         max_overflow_in = 0.0
 
         for shape in slide.shapes:
-            if not shape.has_text_frame:
-                continue
+            # ── Text frame overflow check ──
+            if shape.has_text_frame:
+                box_w_pt = shape.width / 914400 * 72
+                box_h_pt = shape.height / 914400 * 72
+                margin_pt = _MARGIN_IN * 72
+                usable_w = box_w_pt - 2 * margin_pt
+                usable_h = box_h_pt - 2 * margin_pt
 
-            box_w_pt = shape.width / 914400 * 72
-            box_h_pt = shape.height / 914400 * 72
-            margin_pt = _MARGIN_IN * 72
-            usable_w = box_w_pt - 2 * margin_pt
-            usable_h = box_h_pt - 2 * margin_pt
+                if usable_w <= 0 or usable_h <= 0:
+                    continue
 
-            if usable_w <= 0 or usable_h <= 0:
-                continue
+                total_h = 0.0
+                for para in shape.text_frame.paragraphs:
+                    font_sizes = []
+                    for run in para.runs:
+                        if run.text.strip() and run.font.size is not None:
+                            font_sizes.append(run.font.size.pt)
+                    fs = max(font_sizes) if font_sizes else _DEFAULT_FONT_PT
+                    total_h += _estimate_text_height_pt(para.text.strip(), fs, usable_w)
 
-            total_h = 0.0
-            for para in shape.text_frame.paragraphs:
-                font_sizes = []
-                for run in para.runs:
-                    if run.text.strip() and run.font.size is not None:
-                        font_sizes.append(run.font.size.pt)
-                fs = max(font_sizes) if font_sizes else _DEFAULT_FONT_PT
-                total_h += _estimate_text_height_pt(para.text.strip(), fs, usable_w)
+                overflow_pt = total_h - usable_h
+                if overflow_pt > 5:
+                    max_overflow_in = max(max_overflow_in, overflow_pt / 72)
 
-            overflow_pt = total_h - usable_h
-            if overflow_pt > 5:
-                max_overflow_in = max(max_overflow_in, overflow_pt / 72)
+            # ── Table overflow check ──
+            if shape.has_table:
+                max_overflow_in = max(
+                    max_overflow_in,
+                    _check_table_overflow_structured(shape, _DEFAULT_FONT_PT, _MARGIN_IN),
+                )
 
         if max_overflow_in > 0:
             results.append({

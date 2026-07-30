@@ -190,6 +190,8 @@ def _offline_decoder(system_prompt: str, user_prompt: str) -> str:
     principles = match.group(1) if match else ""
     return (
         "## persona: Kaiming He\n"
+        "### 表达语气\n"
+        "由程序注入。\n"
         "### 核心原则\n" + principles + "\n"
         "### 当前任务中的思考方式\n- Prefer the simplest baseline that could work.\n"
         "### 当前取舍\n当前没有触发需要消解的取舍。\n"
@@ -204,7 +206,7 @@ def test_end_to_end_soulagent_activate_omniscientist_feeds_prompt(tmp_path: Path
     example KG (offline decoder), then confirms the adapter surfaces that persona
     on the next turn's prompt and that ``unload`` removes it.
     """
-    kg_root = SKILLS_ROOT / "soulagent" / "examples" / "scientist-kg"
+    kg_root = SKILLS_ROOT / "soulagent" / "assets" / "builtin-scientist-kg"
     with _soulagent_core() as core:
         result = core.run_pipeline(
             project_root=tmp_path,
@@ -219,10 +221,34 @@ def test_end_to_end_soulagent_activate_omniscientist_feeds_prompt(tmp_path: Path
 
         overlay = load_persona_overlay(tmp_path)
         assert overlay.active and overlay.scientist_id == "kaiming-he"
+        assert "### 表达语气" in overlay.text
+        l3 = json.loads(
+            (kg_root / "kaiming-he" / "l3-stances.json").read_text(encoding="utf-8")
+        )
+        tone_exemplars = next(
+            node["tone_exemplars"] for node in l3 if node["question"] == "P04"
+        )
+        assert all(exemplar in overlay.text for exemplar in tone_exemplars)
+        assert "由程序注入。" not in overlay.text
         prompt = build_system_prompt(
             role="You are OmniScientist.", tools=[], persona_overlay=overlay.render()
         )
         assert "[Active scientist persona]" in prompt and "Kaiming He" in prompt
+
+        state_path = tmp_path / ".soulagent" / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["decoder_contract_version"] == core.DECODER_CONTRACT_VERSION
+        state.pop("decoder_contract_version")
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        migrated = core.run_pipeline(
+            project_root=tmp_path,
+            kg_root=kg_root,
+            conversation="How should I design an ablation and baseline for my network's loss?",
+            scientist_id="kaiming-he",
+            host="omniscientist",
+            completion_fn=_offline_decoder,
+        )
+        assert migrated["status"] == "refreshed"
 
         core.unload(tmp_path)
         assert load_persona_overlay(tmp_path).active is False

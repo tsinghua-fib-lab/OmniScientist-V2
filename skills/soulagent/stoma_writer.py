@@ -38,7 +38,10 @@ def _atomic_write(path: Path, data: bytes) -> None:
         os.replace(temporary, path)
     finally:
         if temporary.exists():
-            temporary.unlink()
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
 
 
 def _metadata_path(project_root: Path) -> Path:
@@ -172,15 +175,24 @@ class _WritingLock:
                 time.sleep(0.05)
         self.had_ready = self.ready.exists()
         if self.ready.exists():
-            self.ready.unlink()
+            try:
+                self.ready.unlink()
+            except OSError:
+                pass
 
     def release(self, ready: bool) -> None:
         if self.writing.exists():
-            self.writing.unlink()
+            try:
+                self.writing.unlink()
+            except OSError:
+                pass
         if ready:
             _atomic_write(self.ready, b"ready\n")
         elif self.ready.exists():
-            self.ready.unlink()
+            try:
+                self.ready.unlink()
+            except OSError:
+                pass
 
 
 def write_persona(

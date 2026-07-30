@@ -56,21 +56,23 @@ async def test_compute_tool_persists_queryable_job_lifecycle() -> None:
 async def test_running_local_compute_honors_durable_cancel_request() -> None:
     ctx = await _ctx()
     tools = {tool.spec.name: tool for tool in build_compute_tools(ctx)}
+    # Long enough that a busy CI host still observes ``running`` before the
+    # process exits on its own (``sleep 5`` raced to ``succeeded`` under load).
     running = asyncio.create_task(
-        tools["run_compute"].handler({"command": "sleep 5", "timeout": 10})
+        tools["run_compute"].handler({"command": "sleep 30", "timeout": 60})
     )
     store = ComputeJobStore(ctx.db)
     job = None
-    for _ in range(50):
+    for _ in range(200):
         jobs = await store.list(session_id=ctx.session_id)
         job = jobs[0] if jobs else None
         if job is not None and job.status == "running":
             break
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(0.05)
     assert job is not None and job.status == "running"
 
     cancelled = await tools["cancel_compute"].handler({"job_id": job.id})
-    result = await asyncio.wait_for(running, timeout=3)
+    result = await asyncio.wait_for(running, timeout=10)
     settled = await store.get(job.id)
 
     assert cancelled["status"] == "cancel_requested"

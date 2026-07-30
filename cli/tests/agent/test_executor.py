@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -12,9 +12,15 @@ import pytest
 from omni.agent.plan_revision import provider_authority_snapshot
 from omni.config import load_settings
 from omni.core.llm.client import ChatWithToolsResult, ToolCall
+from omni.core.termination import base_termination_reason
 from omni.runtime.tool_gateway import ToolGateway
 from omni.skills_runtime.context import ExecContext
-from omni.skills_runtime.executor import _prompt_partial_outputs, execute_skill
+from omni.skills_runtime.executor import (
+    SkillExecutionError,
+    _bounded_int_policy,
+    _prompt_partial_outputs,
+    execute_skill,
+)
 from omni.skills_runtime.manifest import (
     DeliveryMode,
     EngineSpec,
@@ -28,7 +34,14 @@ from tests.conftest import CapturingLLM, ScriptedLLM, python_shell_command
 def _ctx(**kw):
     s = load_settings()
     s.paths.ensure_dirs()
+    s.security.os_sandbox = "off"
     return ExecContext(settings=s, paths=s.paths, **kw)
+
+
+def test_prompt_budget_default_is_distinct_from_its_ceiling():
+    assert _bounded_int_policy(None, 20, 32) == 20
+    assert _bounded_int_policy(28, 20, 32) == 28
+    assert _bounded_int_policy(999, 20, 32) == 32
 
 
 def test_prompt_partial_outputs_does_not_interpret_foreign_command_status():
@@ -58,6 +71,36 @@ def test_prompt_partial_outputs_does_not_interpret_foreign_command_status():
 
 
 @pytest.mark.asyncio
+async def test_cli_exec_uses_the_shared_sandbox_prefix(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_exec(*argv, **kwargs):  # noqa: ANN001
+        captured["argv"] = argv
+
+        class _Proc:
+            returncode = 0
+
+            async def communicate(self, _payload=None):
+                return b'{"status":"ok"}', b""
+
+        return _Proc()
+
+    monkeypatch.setattr(
+        "omni.skills_runtime.exec_io.confined_exec_prefix",
+        lambda _ctx, extra_writable=(): ["sandbox-exec", "-p", "(version 1)"],
+    )
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    entry = SkillEntry(
+        name="ex", description="d", kind=SkillKind.CLI_EXEC,
+        exec_spec=ExecSpec(command=sys.executable, args=["-c", "print(1)"], stdout_format="json"),
+    )
+    out = await execute_skill(entry, {}, _ctx())
+    assert out["status"] == "ok"
+    assert captured["argv"][:3] == ("sandbox-exec", "-p", "(version 1)")
+    assert captured["argv"][3] == sys.executable
+
+
+@pytest.mark.asyncio
 async def test_cli_exec_skill_json_roundtrip():
     script = "import sys,json;d=json.load(sys.stdin);print(json.dumps({'got':d.get('q'),'status':'ok'}))"
     entry = SkillEntry(
@@ -67,6 +110,92 @@ async def test_cli_exec_skill_json_roundtrip():
     out = await execute_skill(entry, {"q": "hello"}, _ctx())
     assert out["status"] == "ok"
     assert out["got"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_cli_exec_skill_delivers_omni_output_dir():
+    from omni.skills_runtime.exec_io import OMNI_OUTPUT_ENV, durable_output_dir
+    from omni.storage.artifacts import ArtifactStore
+    from omni.storage.db import get_database
+    from omni.storage.models import TaskORM
+
+    script = (
+        "import json,os,pathlib,sys;"
+        f"p=pathlib.Path(os.environ['{OMNI_OUTPUT_ENV}'])/'plot.svg';"
+        "p.write_text('<svg/>');"
+        "print(json.dumps({'status':'ok','path':str(p)}))"
+    )
+    settings = load_settings()
+    settings.paths.ensure_dirs()
+    settings.security.os_sandbox = "off"
+    db = get_database(settings.paths.project_db)
+    await db.init()
+    task_id = "f" * 32
+    async with db.session() as session:
+        session.add(TaskORM(id=task_id, status="running", kind="turn", title="cli-out"))
+        await session.commit()
+    ctx = ExecContext(
+        settings=settings,
+        paths=settings.paths,
+        task_id=task_id,
+        session_id="sess-cli",
+        artifacts=ArtifactStore(settings.paths, db),
+    )
+    entry = SkillEntry(
+        name="ex-out",
+        description="d",
+        kind=SkillKind.CLI_EXEC,
+        exec_spec=ExecSpec(command=sys.executable, args=["-c", script], stdout_format="json"),
+    )
+    out = await execute_skill(entry, {}, ctx)
+    assert out["status"] == "ok"
+    assert (durable_output_dir(ctx) / "plot.svg").is_file()
+    rows = await ctx.artifacts.list_by_task(task_id)
+    assert any(
+        str(row.title or "") == "plot"
+        and Path(str(row.rel_path or "")).suffix.lower() == ".svg"
+        for row in rows
+    )
+
+
+@pytest.mark.asyncio
+async def test_cli_exec_skill_sanitizes_lone_surrogates_before_stdin(monkeypatch):
+    class SurrogateText:
+        def __str__(self) -> str:
+            return "custom\udc82value"
+
+    script = (
+        "import sys,json;d=json.load(sys.stdin);"
+        "print(json.dumps({'got':d,'status':'ok'}))"
+    )
+    entry = SkillEntry(
+        name="surrogate-safe",
+        description="d",
+        kind=SkillKind.CLI_EXEC,
+        exec_spec=ExecSpec(
+            command=sys.executable,
+            args=["-c", script],
+            stdout_format="json",
+        ),
+    )
+    # Reproduce Windows redirected-pipe defaults on every platform. The CLI
+    # skill transport must override this legacy code page with UTF-8.
+    monkeypatch.setenv("PYTHONIOENCODING", "cp1252")
+
+    out = await execute_skill(
+        entry,
+        {
+            "q": "bad\udc81value",
+            "nested": {"key\udc8f": ["ok", "\ud800"]},
+            "custom": SurrogateText(),
+        },
+        _ctx(),
+    )
+
+    assert out["status"] == "ok"
+    assert out["got"]["q"] == "bad\ufffdvalue"
+    assert out["got"]["nested"] == {"key\ufffd": ["ok", "\ufffd"]}
+    assert out["got"]["custom"] == "custom\ufffdvalue"
 
 
 @pytest.mark.asyncio
@@ -150,6 +279,82 @@ async def test_local_engine_cache_does_not_run_stale_code_after_file_change(tmp_
     )
 
     assert (await execute_skill(entry, {}, _ctx()))["marker"] == "after"
+
+
+def _engine_skill(tmp_path, name: str, marker: str) -> SkillEntry:
+    skill_dir = tmp_path / name
+    skill_dir.mkdir()
+    (skill_dir / "engine.py").write_text(
+        "class Engine:\n"
+        "    async def execute(self, **kw):\n"
+        f"        return {{'status': 'ok', 'marker': {marker!r}}}\n"
+    )
+    return SkillEntry(
+        name=name,
+        source="project_omni",
+        path=skill_dir,
+        description=name,
+        kind=SkillKind.PYTHON_ENGINE,
+        engine=EngineSpec(module="engine", class_name="Engine"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_sealed_execution_does_not_seal_the_next_skill_on_the_same_turn(
+    tmp_path,
+):
+    """One execution's seal must not become the next skill's expected authority."""
+    fetcher = _engine_skill(tmp_path, "abstract-fetcher", "fetched")
+    plotter = _engine_skill(tmp_path, "figure-plotter", "plotted")
+    turn_ctx = _ctx()
+
+    execution_ctx = turn_ctx.for_execution(
+        subtask_id="exec-1",
+        provider_authority=provider_authority_snapshot(plotter),
+    )
+    assert (await execute_skill(plotter, {}, execution_ctx))["marker"] == "plotted"
+
+    assert not turn_ctx.provider_authority
+    # Same turn, a different skill: admitted exactly as on a fresh turn.
+    assert (await execute_skill(fetcher, {}, turn_ctx))["marker"] == "fetched"
+
+
+@pytest.mark.asyncio
+async def test_authority_sealed_for_another_provider_is_never_reused_as_a_seal(
+    tmp_path,
+):
+    """A foreign seal is refused as out of scope, not misreported as tampering."""
+    fetcher = _engine_skill(tmp_path, "abstract-fetcher", "fetched")
+    plotter = _engine_skill(tmp_path, "figure-plotter", "plotted")
+    ctx = _ctx()
+    ctx.provider_authority = provider_authority_snapshot(plotter)
+
+    with pytest.raises(SkillExecutionError) as caught:
+        await execute_skill(fetcher, {}, ctx)
+
+    message = str(caught.value)
+    assert "figure-plotter" in message and "abstract-fetcher" in message
+    # Reserved for a provider actually rewritten under a queued run.
+    assert "changed after enqueue" not in message
+
+
+def test_derived_execution_context_keeps_delegation_depth_and_owner(tmp_path):
+    """Derivation must carry non-field state and re-own lazily-read collaborators."""
+    from omni.storage.artifacts import ContextArtifactStore
+
+    ctx = _ctx(task_id="turn-1")
+    ctx.artifacts = ContextArtifactStore(object(), ctx)
+    ctx.subagent_depth = 2  # non-field: gates delegation nesting
+
+    derived = ctx.for_execution(subtask_id="exec-1", task_id="task-1")
+
+    assert derived.subagent_depth == 2
+    # Artifacts recorded during the execution are owned by the execution.
+    assert derived.artifacts._owned({}) == {  # noqa: SLF001
+        "task_id": "task-1",
+        "subtask_id": "exec-1",
+    }
+    assert ctx.artifacts._owned({}) == {"task_id": "turn-1"}  # noqa: SLF001
 
 
 @pytest.mark.asyncio
@@ -475,94 +680,6 @@ async def test_prompt_only_skill_runs_subagent():
 
 
 @pytest.mark.asyncio
-async def test_prompt_only_skill_transports_direct_provider_assessment():
-    assessment = {
-        "schema": "omni.deliverable-assessment/v1",
-        "deliverable_id": "review",
-        "provider_binding_id": "skill:p:review",
-        "provider": "p",
-        "contract_hash": "provider-contract",
-        "step_id": "review",
-        "feedback": "Provider inspected the review.",
-        "status": "passed",
-        "retryable": False,
-        "effective_inputs": {"mode": "strict"},
-        "criteria": [
-            {
-                "criterion_id": "review_grounded",
-                "status": "passed",
-                "summary": "Claims were checked.",
-                "evidence_refs": ["artifact://review"],
-            }
-        ],
-        "evidence_refs": ["artifact://review"],
-    }
-    entry = SkillEntry(
-        name="p",
-        description="d",
-        kind=SkillKind.PROMPT_ONLY,
-        delivery_mode=DeliveryMode.ASYNC_TASK,
-        body="Review.",
-        quality_contract={
-            "assessment_required": True,
-            "checks": ["review_grounded"],
-        },
-    )
-    ctx = _ctx()
-    ctx.llm = ScriptedLLM(
-        [
-            ChatWithToolsResult(
-                content=json.dumps(
-                    {"deliverable_assessment": assessment}
-                )
-            )
-        ]
-    )
-
-    out = await execute_skill(entry, {"input": "go"}, ctx)
-
-    assert out["deliverable_assessment"] == assessment
-
-
-@pytest.mark.asyncio
-async def test_prompt_only_skill_uses_unknown_only_when_provider_opts_in():
-    entry = SkillEntry(
-        name="p",
-        description="d",
-        kind=SkillKind.PROMPT_ONLY,
-        delivery_mode=DeliveryMode.ASYNC_TASK,
-        body="Review.",
-        deliverables=["review"],
-        quality_contract={
-            "assessment_required": True,
-            "assessment_schema": "omni.deliverable-assessment/v1",
-            "checks": ["review_grounded"],
-            "missing_assessment_status": "unknown",
-        },
-    )
-    ctx = _ctx(workflow_step_key="review-step")
-    ctx.llm = ScriptedLLM(
-        [ChatWithToolsResult(content="Review completed without an envelope.")]
-    )
-
-    out = await execute_skill(entry, {"input": "go"}, ctx)
-
-    assessment = out["deliverable_assessment"]
-    assert assessment["status"] == "unknown"
-    assert assessment["assessment_origin"] == "host_missing_provider_assessment"
-    assert assessment["deliverable_id"] == "review"
-    assert assessment["step_id"] == "review-step"
-    assert assessment["criteria"] == [
-        {
-            "criterion_id": "review_grounded",
-            "status": "unknown",
-            "summary": "Provider assessment was not available to the host.",
-            "evidence_refs": [],
-        }
-    ]
-
-
-@pytest.mark.asyncio
 async def test_prompt_only_skill_emits_nested_tool_progress():
     entry = SkillEntry(
         name="p", description="d", kind=SkillKind.PROMPT_ONLY,
@@ -741,7 +858,7 @@ async def test_prompt_only_skill_returns_partial_contract_on_tool_limit():
         delivery_mode=DeliveryMode.ASYNC_TASK, body="Write too many files.",
     )
     ctx = _ctx()
-    ctx.settings.react.max_tool_calls = 1
+    ctx.settings.skills.default_prompt_tool_calls = 1
     ctx.llm = ScriptedLLM([
         ChatWithToolsResult(
             tool_calls=[
@@ -755,9 +872,15 @@ async def test_prompt_only_skill_returns_partial_contract_on_tool_limit():
 
     assert out["status"] == "partial"
     assert out["warning"]
-    assert out["error_info"]["code"] == "max_tool_calls"
     assert out["recoverable"] is True
-    assert out["terminated_reason"] == "max_tool_calls"
+    # The loop forces a tool-free final pass at the bound, so the reason carries
+    # a ``synthesized_`` prefix describing *how* the answer was produced. The
+    # cause underneath it is unchanged.
+    assert base_termination_reason(out["terminated_reason"]) == "max_tool_calls"
+    assert base_termination_reason(out["error_info"]["code"]) == "max_tool_calls"
+    # Replaying the same run under the same ceiling would only exhaust it again.
+    assert out["error_info"]["retryable"] is False
+    assert out["next_action"] == "re-run with a larger max_tool_calls budget"
     assert out["total_tool_calls"] == 1
     assert out["partial_outputs"]
 
@@ -789,6 +912,6 @@ async def test_prompt_skill_manifest_budget_cannot_exceed_trusted_ceiling(tmp_pa
     out = await execute_skill(entry, {"input": "go"}, ctx)
 
     assert out["status"] == "partial"
-    assert out["terminated_reason"] == "max_tool_calls"
+    assert base_termination_reason(out["terminated_reason"]) == "max_tool_calls"
     assert out["total_tool_calls"] == 2
     assert sum(path.exists() for path in tmp_path.iterdir()) == 2

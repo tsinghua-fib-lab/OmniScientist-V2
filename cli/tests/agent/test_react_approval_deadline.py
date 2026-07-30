@@ -28,6 +28,7 @@ from omni.core.approval import ApprovalDecision, ApprovalGate
 from omni.core.execution_control import ExecutionControl
 from omni.core.llm.client import ChatWithToolsResult, ToolCall
 from omni.core.react_agent import ReActLoopAgent, ToolSpec
+from omni.core.termination import base_termination_reason
 from omni.core.turn_clock import TurnClock, register_clock
 from omni.skills_runtime.executor import _remaining_timeout
 from tests.conftest import ScriptedLLM
@@ -93,8 +94,16 @@ async def test_slow_approval_does_not_time_out_a_successful_turn():
 
 
 @pytest.mark.asyncio
-async def test_without_the_pause_the_slow_approval_still_times_out(monkeypatch):
-    """Control: neutralise the pause and the original timeout bug reappears."""
+async def test_without_the_pause_the_slow_approval_hits_the_deadline_gracefully(monkeypatch):
+    """Control: neutralise the pause and the deadline *is* hit after approval.
+
+    With the redone timeout semantics, hitting the ceiling is no longer a
+    failure: the completed command is retained and the loop forces a best-effort
+    synthesis, settling ``degraded`` (base reason ``timeout``) — never
+    ``error``. The pause (the primary fix) is what lets the *successful* turn in
+    the sibling test avoid the deadline entirely; here we prove that even the
+    unpaused deadline degrades gracefully instead of discarding the result.
+    """
 
     @contextlib.contextmanager
     def _noop():
@@ -105,15 +114,15 @@ async def test_without_the_pause_the_slow_approval_still_times_out(monkeypatch):
     gate = ApprovalGate(_settings(), approver=_slow_approver(1.3))
     llm = ScriptedLLM([
         ChatWithToolsResult(tool_calls=[ToolCall("c1", "bash", {"command": "sleep 0"})]),
-        ChatWithToolsResult(content="done"),
+        ChatWithToolsResult(content="best-effort answer over the completed command"),
     ])
     agent = ReActLoopAgent(llm, _invoker_through_gate(gate), max_iterations=4, max_seconds=1.0)
     res = await agent.run(system_prompt="sys", user_message="go", tools=[BASH])
 
-    # The command still ran, yet the turn is marked timeout -> exactly the bug.
+    # The command still ran and is retained; the deadline degrades, never fails.
     assert res.tool_trace[0].status == "succeeded"
-    assert res.kind == "error"
-    assert res.terminated_reason == "timeout"
+    assert res.kind != "error"
+    assert base_termination_reason(res.terminated_reason) == "timeout"
 
 
 @pytest.mark.asyncio

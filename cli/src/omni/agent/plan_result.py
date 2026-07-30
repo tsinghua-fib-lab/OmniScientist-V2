@@ -21,4 +21,4 @@ class PlanExecutionResult:
     error: str = ""
     plan_summary: str = ""
     degraded_warnings: list[str] = field(default_factory=list)
-    verification_status: str = "pending"
+    settlement_status: str = "pending"

@@ -12,9 +12,10 @@ from pathlib import Path
 
 import typer
 
-from omni.cli.render import error, info
+from omni.cli.render import error, info, warn
 from omni.cli.runner import run_one_shot
 from omni.cli.state import AppState, run_async
+from omni.runtime.turn_outcome import exec_exit_code, persist_exec_output
 
 
 def exec_command(
@@ -26,8 +27,19 @@ def exec_command(
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Hide tool progress."),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Expand live progress: full arguments, results, and stages."),
     detach: bool = typer.Option(False, "--detach", help="Submit background tasks without waiting."),
+    ask: bool = typer.Option(
+        False,
+        "--ask",
+        help="Prompt on a TTY for each sensitive tool instead of workspace-auto.",
+    ),
 ) -> None:
     """Run a task non-interactively.
+
+    Defaults to workspace-auto (Codex ``exec`` / Never) in a trusted
+    workspace-write sandbox: in-workspace writes and sandboxed ``bash`` /
+    ``run_compute`` run without a prompt. An untrusted directory stays
+    read-only. Out-of-workspace writes and IM-origin calls still fail closed.
+    Use ``--ask`` to keep the human approval loop on a terminal.
 
     Examples:
       omni exec -f task.md
@@ -39,12 +51,41 @@ def exec_command(
     if not text.strip():
         error('No task was provided. Use `omni exec -f task.md` or `omni exec "task"`.')
         raise typer.Exit(2)
-    turn = run_async(run_one_shot(state, text, cont=cont, quiet=quiet, verbose=verbose, detach=detach))
+    if ask and not (sys.stdin.isatty() and sys.stdout.isatty()):
+        warn(
+            "`--ask` needs a terminal; without one, sensitive tools still fail closed. "
+            "Omit --ask to use workspace-auto."
+        )
+    turn = run_async(
+        run_one_shot(
+            state,
+            text,
+            cont=cont,
+            quiet=quiet,
+            verbose=verbose,
+            detach=detach,
+            workspace_auto=not ask,
+        )
+    )
     if output and turn is not None:
+        # Codex ``-o`` writes the last agent message for scripting and exits 1
+        # on a failed turn; it never claims the file is an answer. Omni keeps
+        # that file (so CI still has something to inspect) but labels it:
+        # a 429 diagnostic is an error report, a degraded draft is stamped.
         out_path = Path(output).expanduser()
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(turn.text or "", encoding="utf-8")
-        info(f"Answer written to {out_path}")
+        kind, code = persist_exec_output(out_path, turn)
+        if kind == "answer":
+            info(f"Answer written to {out_path}")
+        elif kind == "partial":
+            warn(f"Partial answer written to {out_path}")
+        elif kind == "message":
+            info(f"Last message written to {out_path}")
+        else:
+            error(f"Error report written to {out_path}")
+        if code:
+            raise typer.Exit(code)
+    elif exec_exit_code(turn):
+        raise typer.Exit(1)
 
 
 def _read_task(file: str, prompt: list[str] | None) -> str:

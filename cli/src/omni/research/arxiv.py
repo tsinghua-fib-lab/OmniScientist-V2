@@ -31,6 +31,14 @@ from xml.etree import ElementTree as ET
 
 import httpx
 
+from omni.research.http_policy import (
+    DEFAULT_POLICY,
+    FailureKind,
+    classify,
+    compute_delay,
+    retry_after_seconds,
+)
+
 ARXIV_API = "https://export.arxiv.org/api/query"
 _ATOM = "{http://www.w3.org/2005/Atom}"
 _USER_AGENT = (
@@ -105,9 +113,11 @@ def normalize_arxiv_id(identifier: str) -> str:
 async def _query(params: dict[str, Any], timeout: float = 15.0) -> str:
     """GET the arXiv API with retry/back-off; raise :class:`ArxivError`.
 
-    Network failures (DNS, connect, timeout) and overload responses (429/503)
-    are retried a few times; anything still failing surfaces as a single
-    human-readable error.
+    Shares the transient/quota/auth taxonomy and ``Retry-After`` handling from
+    :mod:`omni.research.http_policy` (arXiv already honoured Retry-After — it
+    becomes a consumer of the shared policy), while keeping the Atom response
+    shape, arXiv's 3-second courtesy gate, and the ``ArxivError`` surface its
+    callers already catch.
     """
     last_error: str | None = None
     for attempt in range(_MAX_RETRIES):
@@ -124,21 +134,19 @@ async def _query(params: dict[str, Any], timeout: float = 15.0) -> str:
         except httpx.HTTPError as exc:  # ConnectError / timeout / etc.
             last_error = f"{type(exc).__name__}: {exc}"
             if attempt < _MAX_RETRIES - 1:
-                await asyncio.sleep(0.5 * (2 ** attempt))
+                await asyncio.sleep(compute_delay(DEFAULT_POLICY, attempt, None))
                 continue
             raise ArxivError(
                 "Could not connect to arXiv (export.arxiv.org). Check the network or proxy and retry; "
                 f"this connector cannot fetch data offline. Cause: {last_error}"
             ) from exc
-        if resp.status_code in (429, 503) and attempt < _MAX_RETRIES - 1:
-            retry_after = resp.headers.get("Retry-After")
-            try:
-                wait_s = float(retry_after) if retry_after else 0.5 * (2 ** attempt)
-            except ValueError:
-                wait_s = 0.5 * (2 ** attempt)
-            await asyncio.sleep(wait_s)
-            continue
         if resp.status_code >= 400:
+            kind = classify(resp.status_code, resp.headers, resp.text)
+            if kind is FailureKind.TRANSIENT and attempt < _MAX_RETRIES - 1:
+                last_error = f"HTTP {resp.status_code}"
+                hinted = retry_after_seconds(resp.headers)
+                await asyncio.sleep(compute_delay(DEFAULT_POLICY, attempt, hinted))
+                continue
             raise ArxivError(
                 f"arXiv API returned HTTP {resp.status_code}: {resp.text[:200]!r}"
             )

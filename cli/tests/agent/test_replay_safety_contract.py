@@ -154,7 +154,8 @@ async def test_non_replay_safe_skill_transient_failure_executes_once(tmp_path: P
     runtime = await _runtime(
         _cli_skill("publish-once", _COUNTING_TRANSIENT, replay_safe=False)
     )
-    counter = tmp_path / "unsafe-count.txt"
+    counter = tmp_path / "io" / "unsafe-count.txt"
+    counter.parent.mkdir()
 
     subtask_id = await runtime.enqueue(
         "publish-once",
@@ -174,7 +175,8 @@ async def test_replay_safe_skill_transient_failure_may_retry_once(tmp_path: Path
     runtime = await _runtime(
         _cli_skill("safe-lookup", _COUNTING_HEAL, replay_safe=True)
     )
-    counter = tmp_path / "safe-count.txt"
+    counter = tmp_path / "io" / "safe-count.txt"
+    counter.parent.mkdir()
 
     subtask_id = await runtime.enqueue(
         "safe-lookup",

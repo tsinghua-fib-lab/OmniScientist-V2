@@ -7,20 +7,20 @@ into the same paper dict shape the rest of omni uses (``title``/``authors``/
 ``year``/``doi``/``url``/``summary``), so results flow straight into the library
 and the literature corpus.
 
-Design mirrors :mod:`omni.research.arxiv`: stdlib + ``httpx`` only, a tiny
-retry/back-off, graceful offline behaviour (one human-readable
-:class:`ConnectorError` instead of a raw transport error), and all network calls
-funnelled through the module-level :func:`_get_json` so they are trivially
-mockable in offline tests.
+Design mirrors :mod:`omni.research.arxiv`: stdlib + ``httpx`` only, graceful
+offline behaviour (one structured :class:`ConnectorError` instead of a raw
+transport error), and all network calls funnelled through the module-level
+:func:`_get_json` so they are trivially mockable in offline tests. Retry,
+``Retry-After`` handling, and the transient/quota/auth failure taxonomy live in
+the shared :mod:`omni.research.http_policy` so every connector behaves the same.
 """
 
 from __future__ import annotations
 
-import asyncio
 import re
 from typing import Any
 
-import httpx
+from omni.research.http_policy import ConnectorFailure, get_json
 
 OPENALEX_API = "https://api.openalex.org/works"
 CROSSREF_API = "https://api.crossref.org/works"
@@ -30,46 +30,33 @@ PUBMED_ESUMMARY = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
 S2_SEARCH = "https://api.semanticscholar.org/graph/v1/paper/search"
 BIORXIV_DETAILS = "https://api.biorxiv.org/details"
 CLINICALTRIALS_STUDIES = "https://clinicaltrials.gov/api/v2/studies"
-_USER_AGENT = (
-    "OmniScientist/0.1 "
-    "(+https://github.com/tsinghua-fib-lab/OmniScientist-V2)"
-)
-_MAX_RETRIES = 3
 _TAG_RE = re.compile(r"<[^>]+>")
 
-
-class ConnectorError(RuntimeError):
-    """Raised when a connector cannot satisfy a request (network/HTTP/bad input)."""
+# ``ConnectorError`` stays the public name for the connector layer; it now *is*
+# the structured failure so ``except ConnectorError`` and bare
+# ``ConnectorError("msg")`` keep working while callers that care can read
+# ``.kind`` / ``.retry_after`` / ``.remediation``.
+ConnectorError = ConnectorFailure
 
 
 async def _get_json(
-    url: str, params: dict[str, Any], *, timeout: float = 15.0, headers: dict[str, str] | None = None
+    url: str,
+    params: dict[str, Any],
+    *,
+    timeout: float = 15.0,
+    headers: dict[str, str] | None = None,
+    provider: str = "",
+    authenticated: bool = False,
 ) -> dict[str, Any]:
-    """GET JSON with retry/back-off; raise :class:`ConnectorError` on failure."""
-    last_error: str | None = None
-    hdrs = {"User-Agent": _USER_AGENT, "Accept": "application/json", **(headers or {})}
-    for attempt in range(_MAX_RETRIES):
-        try:
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-                resp = await client.get(url, params=params, headers=hdrs)
-        except httpx.HTTPError as exc:
-            last_error = f"{type(exc).__name__}: {exc}"
-            if attempt < _MAX_RETRIES - 1:
-                await asyncio.sleep(0.5 * (2**attempt))
-                continue
-            raise ConnectorError(
-                f"Could not connect to {url}; check the network or proxy. This connector cannot fetch data offline. Cause: {last_error}"
-            ) from exc
-        if resp.status_code in (429, 503) and attempt < _MAX_RETRIES - 1:
-            await asyncio.sleep(0.5 * (2**attempt))
-            continue
-        if resp.status_code >= 400:
-            raise ConnectorError(f"{url} returned HTTP {resp.status_code}: {resp.text[:200]!r}")
-        try:
-            return resp.json()
-        except ValueError as exc:
-            raise ConnectorError(f"{url} returned non-JSON content: {exc}") from exc
-    raise ConnectorError(f"Request failed after retries: {last_error}")
+    """GET JSON via the shared policy; raise :class:`ConnectorError` on failure.
+
+    Kept as the module-level funnel (rather than calling ``http_policy.get_json``
+    at each site) so offline tests can still ``monkeypatch`` this one seam.
+    """
+    return await get_json(
+        url, params, timeout=timeout, headers=headers, provider=provider,
+        authenticated=authenticated,
+    )
 
 
 def _strip_tags(text: str) -> str:
@@ -128,7 +115,7 @@ async def openalex_search(
     params: dict[str, Any] = {"search": query, "per_page": max(1, min(int(rows), 25))}
     if email:
         params["mailto"] = email
-    data = await _get_json(OPENALEX_API, params)
+    data = await _get_json(OPENALEX_API, params, provider="openalex")
     return [_normalize_openalex_work(w) for w in (data.get("results") or [])]
 
 
@@ -139,9 +126,11 @@ async def _openalex_fetch_work(work_ref: str, *, email: str = "") -> dict[str, A
         raise ConnectorError("OpenAlex requires a work id or DOI.")
     mailto = {"mailto": email} if email else {}
     if re.search(r"W\d+", ref):
-        return await _get_json(f"{OPENALEX_API}/{_openalex_wid(ref)}", dict(mailto))
+        return await _get_json(f"{OPENALEX_API}/{_openalex_wid(ref)}", dict(mailto), provider="openalex")
     doi = _norm_doi(ref)
-    data = await _get_json(OPENALEX_API, {"filter": f"doi:{doi}", "per_page": 1, **mailto})
+    data = await _get_json(
+        OPENALEX_API, {"filter": f"doi:{doi}", "per_page": 1, **mailto}, provider="openalex"
+    )
     results = data.get("results") or []
     if not results:
         raise ConnectorError(f"OpenAlex found no work for DOI {doi}.")
@@ -161,6 +150,7 @@ async def openalex_references(
     data = await _get_json(
         OPENALEX_API,
         {"filter": f"openalex_id:{'|'.join(refs)}", "per_page": len(refs), **mailto},
+        provider="openalex",
     )
     return [_normalize_openalex_work(w) for w in (data.get("results") or [])]
 
@@ -177,6 +167,7 @@ async def openalex_cited_by(
     data = await _get_json(
         OPENALEX_API,
         {"filter": f"cites:{wid}", "per_page": max(1, min(int(rows), 50)), **mailto},
+        provider="openalex",
     )
     return [_normalize_openalex_work(w) for w in (data.get("results") or [])]
 
@@ -188,7 +179,7 @@ async def crossref_search(
     params: dict[str, Any] = {"query": query, "rows": max(1, min(int(rows), 25))}
     if email:
         params["mailto"] = email
-    data = await _get_json(CROSSREF_API, params)
+    data = await _get_json(CROSSREF_API, params, provider="crossref")
     items = (data.get("message") or {}).get("items", []) or []
     out: list[dict[str, Any]] = []
     for it in items:
@@ -220,9 +211,10 @@ async def unpaywall_lookup(doi: str, *, email: str = "") -> dict[str, Any]:
         raise ConnectorError("Unpaywall requires a valid DOI.")
     if not email:
         raise ConnectorError(
-            "Unpaywall requires a contact email. Configure it with: omni config set research.contact_email you@example.com"
+            "Unpaywall requires a contact email. Configure it with "
+            "`/config set research.contact_email you@example.com`."
         )
-    data = await _get_json(f"{UNPAYWALL_API}/{doi}", {"email": email})
+    data = await _get_json(f"{UNPAYWALL_API}/{doi}", {"email": email}, provider="unpaywall")
     best = data.get("best_oa_location") or {}
     authors = [
         " ".join(p for p in (a.get("given", ""), a.get("family", "")) if p)
@@ -257,7 +249,7 @@ async def pubmed_search(
     if email:
         es_params["email"] = email
         es_params["tool"] = "OmniScientist"
-    data = await _get_json(PUBMED_ESEARCH, es_params)
+    data = await _get_json(PUBMED_ESEARCH, es_params, provider="pubmed")
     ids = list((data.get("esearchresult") or {}).get("idlist") or [])[:n]
     if not ids:
         return []
@@ -265,7 +257,7 @@ async def pubmed_search(
     if email:
         sum_params["email"] = email
         sum_params["tool"] = "OmniScientist"
-    summ = await _get_json(PUBMED_ESUMMARY, sum_params)
+    summ = await _get_json(PUBMED_ESUMMARY, sum_params, provider="pubmed")
     result = summ.get("result") or {}
     out: list[dict[str, Any]] = []
     for uid in ids:
@@ -300,7 +292,10 @@ async def semanticscholar_search(
     fields = "title,abstract,year,authors,externalIds,venue,url"
     params: dict[str, Any] = {"query": query, "limit": max(1, min(int(rows), 25)), "fields": fields}
     headers = {"x-api-key": api_key} if api_key else None
-    data = await _get_json(S2_SEARCH, params, headers=headers)
+    data = await _get_json(
+        S2_SEARCH, params, headers=headers, provider="semanticscholar",
+        authenticated=bool(api_key),
+    )
     out: list[dict[str, Any]] = []
     for p in data.get("data") or []:
         ext = p.get("externalIds") or {}
@@ -332,7 +327,7 @@ async def biorxiv_search(
     if source not in {"biorxiv", "medrxiv"}:
         raise ConnectorError("bioRxiv connector server must be biorxiv or medrxiv")
     n = max(1, min(int(rows), 25))
-    data = await _get_json(f"{BIORXIV_DETAILS}/{source}/{interval}/0/json", {})
+    data = await _get_json(f"{BIORXIV_DETAILS}/{source}/{interval}/0/json", {}, provider="biorxiv")
     terms = [term for term in re.findall(r"[\w-]+", query.lower()) if len(term) > 1]
     out: list[dict[str, Any]] = []
     for item in data.get("collection") or []:
@@ -369,7 +364,7 @@ async def clinicaltrials_search(query: str, *, rows: int = 8) -> list[dict[str, 
         "pageSize": max(1, min(int(rows), 25)),
         "format": "json",
     }
-    data = await _get_json(CLINICALTRIALS_STUDIES, params)
+    data = await _get_json(CLINICALTRIALS_STUDIES, params, provider="clinicaltrials")
     out: list[dict[str, Any]] = []
     for study in data.get("studies") or []:
         protocol = study.get("protocolSection") or {}

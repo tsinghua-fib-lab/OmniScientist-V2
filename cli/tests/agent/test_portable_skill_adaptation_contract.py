@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 from omni.skills_runtime.discovery import active_skill_names
+from omni.skills_runtime.manifest import execution_budget_warnings
 
 SKILLS_ROOT = Path(__file__).resolve().parents[3] / "skills"
 ACTIVE_BUILTIN_SKILLS = frozenset(active_skill_names(SKILLS_ROOT))
@@ -60,7 +61,7 @@ def test_engine_backed_skills_do_not_publish_host_specific_tool_names() -> None:
 
 
 def test_prompt_only_review_skills_publish_bounded_tool_contracts() -> None:
-    expected = {"paper-review", "review-response"}
+    expected = {"review-response"}
     actual = {
         name
         for name in ACTIVE_BUILTIN_SKILLS
@@ -72,8 +73,57 @@ def test_prompt_only_review_skills_publish_bounded_tool_contracts() -> None:
         frontmatter = _frontmatter(skill_name)
         assert frontmatter.get("allowed-tools"), skill_name
         execution = frontmatter["metadata"]["helixforge"]["execution"]
-        assert execution["max_iterations"] <= 8, skill_name
         assert execution["max_tool_calls"] <= 40, skill_name
+        # The iteration ceiling is bounded by coherence with the tool budget,
+        # not by an arbitrary number: a review that may make 40 tool calls but
+        # is allowed only 8 turns always stops on iterations first, which is
+        # what made complex reviews fail short of a verdict.
+        assert execution_budget_warnings(execution, skill_name) == []
+
+
+def test_paper_review_uses_a_complete_pipeline_engine() -> None:
+    frontmatter = _frontmatter("paper-review")
+    helix = frontmatter["metadata"]["helixforge"]
+
+    assert helix["kind"] == "python_engine"
+    assert helix["engine"] == {
+        "module": "engine",
+        "class": "PaperReviewEngine",
+        "method": "execute",
+    }
+    assert "allowed-tools" not in frontmatter
+    assert helix["execution"]["max_seconds"] <= 1200
+
+
+def test_paper_review_declares_bounded_mineru_runtime_options() -> None:
+    frontmatter = _frontmatter("paper-review")
+    properties = frontmatter["metadata"]["helixforge"]["input_schema"]["properties"]
+
+    assert properties["mineru_command"]["type"] == "string"
+    assert properties["mineru_command"]["default"] == "mineru"
+    assert properties["mineru_backend"] == {
+        "type": "string",
+        "enum": ["pipeline"],
+        "default": "pipeline",
+        "description": "bounded MinerU extraction backend",
+    }
+    assert properties["mineru_timeout_s"]["type"] == "number"
+    assert properties["mineru_timeout_s"]["minimum"] == 1
+    assert properties["mineru_timeout_s"]["maximum"] == 600
+    assert properties["mineru_timeout_s"]["default"] == 600
+    assert properties["mineru_device"] == {
+        "type": "string",
+        "default": "auto",
+        "description": "auto-select the freest visible GPU, or pin cpu/cuda:N",
+    }
+
+
+def test_paper_review_enables_historical_review_rag_by_default() -> None:
+    frontmatter = _frontmatter("paper-review")
+    properties = frontmatter["metadata"]["helixforge"]["input_schema"]["properties"]
+
+    assert properties["review_rag"]["default"] == "on"
+    assert properties["review_rag"]["enum"] == ["auto", "on", "off"]
 
 
 def test_omni_tool_policies_are_namespaced_without_losing_existing_permissions() -> None:
@@ -223,6 +273,11 @@ async def test_research_ideation_configuration_failures_are_blocking_and_non_ret
         raise failure
 
     monkeypatch.setattr(engine_module._core, "run_pipeline", fail_pipeline)
+    monkeypatch.setattr(
+        engine_module,
+        "_resolve_s2_key",
+        lambda _ctx: "scoped-s2-secret",
+    )
     engine = engine_module.ResearchIdeationEngine()
     engine.ctx = SimpleNamespace(
         llm=object(),

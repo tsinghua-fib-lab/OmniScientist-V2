@@ -12,7 +12,12 @@ from typing import Any
 
 import httpx
 
-from omni.runtime.presentation import TaskPresentation, TurnPresentation, is_sidecar_artifact
+from omni.runtime.presentation import (
+    MAX_PRESENTED_ARTIFACTS,
+    TaskPresentation,
+    TurnPresentation,
+    output_inventory,
+)
 from omni.runtime.task_results import is_dot_artifact
 from omni.storage.artifacts import slugify_filename
 
@@ -26,6 +31,22 @@ _HASH_STEM = re.compile(r"^[0-9a-f]{16,}$")
 
 class OutboundError(RuntimeError):
     pass
+
+
+# The parts that carry the reply itself, as opposed to the files beside it.
+# ``_message_part_kind`` picks between the first two; the rest are accepted so a
+# hand-built envelope cannot silently be classified as an attachment.
+_MESSAGE_PART_KINDS = frozenset({"rich_text", "plain_text", "text", "code"})
+# The parts that upload a file and, on refusal, spend a second send on a text
+# fallback — the pair a refusing peer must not be offered again in one reply.
+_ATTACHMENT_PART_KINDS = frozenset({"file", "image"})
+# ``MAX_PRESENTED_ARTIFACTS`` bounds each group, but one reply carries a group per
+# task, so a request like "send me every file from today" once queued sixty
+# uploads. WeChat refused the twelfth send and then every send to that peer for
+# nine minutes, including an unrelated task's completion notice. One reply
+# therefore ships at most one inventory's worth of files; the text still names
+# the rest, and `/task show` has all of them.
+MAX_DELIVERED_ATTACHMENTS = MAX_PRESENTED_ARTIFACTS
 
 
 @dataclass(frozen=True)
@@ -59,11 +80,29 @@ class DeliveryReport:
 
     @property
     def failed(self) -> bool:
-        return any(part.status == "failed" for part in self.parts)
+        """Whether the reply itself never reached the recipient.
+
+        An attachment that would not upload is not a failed delivery. The
+        distinction decides whether the *task* is failed: WeChat refused two
+        figure uploads on task 964f17aa after answering the question in full, and
+        the run was recorded as failed — the researcher had their answer on
+        screen while the record said the work did not finish. An artifact that
+        did not send still leaves the link the fallback wrote, and the file
+        itself on disk; an answer that did not send leaves nothing.
+        """
+        return any(
+            part.status == "failed" and part.kind in _MESSAGE_PART_KINDS
+            for part in self.parts
+        )
 
     @property
     def degraded(self) -> bool:
-        return any(part.status == "degraded" for part in self.parts)
+        """Whether anything arrived as less than it should have."""
+        return any(
+            part.status == "degraded"
+            or (part.status == "failed" and part.kind not in _MESSAGE_PART_KINDS)
+            for part in self.parts
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -141,24 +180,35 @@ def uploadable_roots(settings: Any, *, artifacts: Any = None, mirror_dir: Path |
 
 
 def delivery_envelope_from_presentation(presentation: TurnPresentation | TaskPresentation) -> DeliveryEnvelope:
-    # IM rendering: artifact bullets carry name/format/size instead of
-    # server-side absolute paths (the file itself arrives as a native upload).
+    # Artifact bullets still name the file (see ``_chat_artifact_line``); the
+    # upload is the copy the recipient can open. ``include_local_paths=False``
+    # keeps the research-ledger block and CLI follow-up menus off a chat card.
     markdown = presentation.to_markdown(include_local_paths=False)
     parts = [DeliveryPart(kind=_message_part_kind(markdown), text=markdown, title="OmniScientist")]
-    tasks = presentation.tasks if isinstance(presentation, TurnPresentation) else [presentation]
-    for task in tasks:
-        # Upload rendered deliverables (figures, reports, documents). DOT
-        # sources remain internal; other process-shaped files keep the existing
-        # fallback behavior when they are the only deliverable.
-        visible_artifacts = [a for a in task.artifacts if not is_dot_artifact(a)]
-        uploadable = [a for a in visible_artifacts if str(a.path or "")]
-        has_primary = any(not is_sidecar_artifact(a) for a in uploadable)
-        for artifact in visible_artifacts:
-            if has_primary and is_sidecar_artifact(artifact):
-                continue
-            part = _artifact_part(artifact)
-            if part is not None:
-                parts.append(part)
+    seen_paths: set[str] = set()
+    # A result payload often names the same artifact twice: once as a titled
+    # deliverable with a path and once as a bare ``*_uri`` field. Delivering both
+    # spends an extra send on a line of ``artifact://`` text for a file the reader
+    # already has attached.
+    seen_uris: set[str] = set()
+    attached = 0
+    # CLI Outputs and IM attachments share one inventory. Walking task cards
+    # as a second group made WeChat receive files the terminal never listed.
+    for artifact in output_inventory(presentation):
+        if attached >= MAX_DELIVERED_ATTACHMENTS:
+            break
+        if artifact.path and artifact.path in seen_paths:
+            continue
+        if artifact.uri and artifact.uri in seen_uris:
+            continue
+        part = _artifact_part(artifact)
+        if part is not None:
+            parts.append(part)
+            attached += 1
+            if artifact.path:
+                seen_paths.add(artifact.path)
+            if artifact.uri:
+                seen_uris.add(artifact.uri)
     return DeliveryEnvelope(parts=parts)
 
 
@@ -170,11 +220,27 @@ async def send_delivery(
     allowed_roots: list[str | Path] | None = None,
 ) -> DeliveryReport:
     results: list[DeliveryPartResult] = []
+    refused = False
     for part in envelope.parts:
+        if refused and part.kind in _ATTACHMENT_PART_KINDS:
+            # An upload whose text fallback *also* failed means the far side is
+            # refusing this peer outright, not objecting to one file. Each
+            # further attachment then costs two more sends and lengthens the very
+            # burst being refused, so stop and let the retry queue hand these
+            # over once the window closes. A message part that failed on its own
+            # says nothing about uploads, and does not stop them.
+            results.append(DeliveryPartResult(
+                kind=part.kind,
+                status="failed",
+                title=part.title,
+                message="not attempted: the channel refused an earlier message in this reply",
+            ))
+            continue
         try:
             results.append(await _send_delivery_part(client, target, part, allowed_roots=allowed_roots))
         except Exception as exc:  # noqa: BLE001
             logger.warning("delivery part send failed for %s (%s): %s", target, part.kind, exc)
+            refused = refused or part.kind in _ATTACHMENT_PART_KINDS
             results.append(DeliveryPartResult(
                 kind=part.kind,
                 status="failed",
@@ -469,6 +535,16 @@ class FeishuClient(MarkdownOutbound):
         return key
 
 
+# A DingTalk robot webhook carries text, markdown, link and cards — there is no
+# media call on it, so a file needs the configured gateway. Printing the server
+# path instead used to look like a delivery and be recorded as one: the recipient
+# got a directory on somebody else's machine, and the report said "sent".
+_DINGTALK_NO_UPLOAD = (
+    "DingTalk cannot upload a file over a robot webhook; set base_url (or "
+    "gateway_url) in dingtalk.toml to deliver artifacts as attachments"
+)
+
+
 class DingTalkClient(MarkdownOutbound):
     def __init__(self, cfg: dict[str, Any]) -> None:
         self.cfg = cfg
@@ -517,14 +593,12 @@ class DingTalkClient(MarkdownOutbound):
 
     async def send_file(self, target: str, path: str, *, file_name: str | None = None) -> None:
         if not self._gateway_enabled:
-            await self.send_markdown(target, f"File artifact: {path}")
-            return
+            raise OutboundError(_DINGTALK_NO_UPLOAD)
         await self._post_gateway(_file_payload(target, path, kind="file", file_name=file_name))
 
     async def send_image(self, target: str, path: str, *, file_name: str | None = None) -> None:
         if not self._gateway_enabled:
-            await self.send_markdown(target, f"Image artifact: {path}")
-            return
+            raise OutboundError(_DINGTALK_NO_UPLOAD)
         await self._post_gateway(_file_payload(target, path, kind="image", file_name=file_name))
 
     @property
@@ -644,14 +718,24 @@ def _display_filename(part: DeliveryPart) -> str:
 
 
 def _file_fallback_text(part: DeliveryPart, *, include_local_path: bool = True) -> str:
+    """Name a file that could not be attached, without quoting where it lives.
+
+    Reached for two unrelated reasons — the channel has no way to upload, or the
+    upload was refused — and neither is the recipient's to act on. What they can
+    act on is the filename: it is what the artifact is called everywhere else, so
+    it is what makes the file findable from the task it belongs to.
+    """
     target = part.uri or (part.path if include_local_path else "")
     label = "Image" if part.kind == "image" else "File"
+    name = Path(part.path).name if part.path else ""
+    title = part.title or name or "artifact"
     if not target:
+        detail = f"{name}\n" if name and name != title else ""
         return (
-            f"{label} artifact: {part.title or 'artifact'}\n"
-            "The path failed channel security validation; inspect the owning Task locally."
+            f"{label} artifact: {title}\n{detail}"
+            "It could not be attached on this channel; it is stored with its task."
         )
-    return f"{label} artifact: {part.title or 'artifact'}\n{target}"
+    return f"{label} artifact: {title}\n{target}"
 
 
 def _safe_outbound_file(path: str, *, allowed_roots: list[str | Path] | None = None) -> bool:

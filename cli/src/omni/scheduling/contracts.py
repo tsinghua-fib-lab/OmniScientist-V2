@@ -94,16 +94,32 @@ class ScheduleCreateRequest:
     # default; ``[]`` ⇒ fail-closed). Passed through to ``Scheduler.add``.
     requested_grants: list[str] | None = None
     idempotency_key: str = ""
+    # Turn-scoped "now" for past-time admission. When set (agent tool path),
+    # must match the resolver's frozen ``reference_time`` so a time that was
+    # future at planning cannot flip to past mid-turn. Omitted from the
+    # canonical payload / digest — it is not part of the action identity.
+    reference_time: datetime | None = None
+    # Host-only: the requester already committed this goal (open clarification
+    # draft, or a new time on that draft). Near-term IM once-schedules may skip
+    # the extra local-approve round-trip that would miss a two-minute slot.
+    # Not part of the action identity / digest.
+    already_clarified: bool = False
 
     def resolved_input(self) -> dict[str, Any]:
         if self.goal.strip():
             return {"input": self.goal.strip()}
         return dict(self.input or {})
 
+    def resolved_goal(self) -> str:
+        """The work that will run — goal text or the stored input snapshot."""
+        if self.goal.strip():
+            return self.goal.strip()
+        return str((self.input or {}).get("input") or "").strip()
+
     def resolved_title(self) -> str:
         if self.title.strip():
             return self.title.strip()
-        base = self.goal.strip() or str(self.resolved_input().get("input") or "").strip() or self.skill_name
+        base = self.resolved_goal() or self.skill_name
         return (base[:57] + "…") if len(base) > 60 else base
 
     def canonical_payload(self) -> dict[str, Any]:
@@ -125,7 +141,9 @@ class ScheduleCreateRequest:
 
     def digest(self) -> str:
         blob = json.dumps(self.canonical_payload(), sort_keys=True, ensure_ascii=False)
-        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+        return hashlib.sha256(
+            blob.encode("utf-8", errors="backslashreplace")
+        ).hexdigest()
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> ScheduleCreateRequest:
@@ -170,6 +188,7 @@ class ScheduleCreateResult:
     kind: str = ""
     spec: str = ""
     title: str = ""
+    goal: str = ""
     next_run_local: str = ""
     timezone: str = ""
     channel: str = "cli"
@@ -184,6 +203,10 @@ class ScheduleCreateResult:
     approve_command: str = ""
     error: str = ""
     summary: str = ""
+    # Near-term IM once-schedule still waiting on local approve.
+    near_term: bool = False
+    # Owner approved after the original slot had elapsed; the row fires now.
+    slot_elapsed: bool = False
 
     # Every terminal outcome is recorded under a single event type so
     # verification can require a real scheduling result instead of accepting
@@ -211,12 +234,17 @@ class ScheduleCreateResult:
             payload["message"] = self.summary or self.reason
             if self.recovery_choices:
                 payload["recovery_choices"] = self.recovery_choices
+        if self.goal:
+            payload["goal"] = self.goal
+        if self.title and "title" not in payload:
+            payload["title"] = self.title
         if self.schedule_id:
             payload.update(
                 schedule_id=self.schedule_id,
                 kind=self.kind,
                 spec=self.spec,
                 title=self.title,
+                goal=self.goal,
                 next_run=self.next_run_local,
                 channel=self.channel,
                 approved_tools=self.approved_tools,
@@ -308,7 +336,7 @@ def resolve_once_instant(
             # ``astimezone`` yields for a bare datetime).
             parsed = parsed.astimezone()
     else:
-        label = str(parsed.tzinfo)
+        label = timezone.strip() or str(parsed.tzinfo)
     return parsed.astimezone(UTC), label, ""
 
 

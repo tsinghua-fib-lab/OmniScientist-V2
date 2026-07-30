@@ -34,13 +34,15 @@ from urllib.parse import quote
 
 import httpx
 
+from omni.runtime.dist_meta import DIST_NORMALIZED
+
 if TYPE_CHECKING:
     from omni.config.paths import OmniPaths
     from omni.config.settings import OmniSettings
 
 logger = logging.getLogger(__name__)
 
-_PYPI_URL = "https://pypi.org/pypi/omniscientist/json"
+_PYPI_URL = f"https://pypi.org/pypi/{DIST_NORMALIZED}/json"
 _VERSION_RE = re.compile(r"""__version__\s*=\s*["']([^"']+)["']""")
 _CACHE_NAME = "update-check.json"
 _DISABLE_ENV = "OMNI_UPDATE_CHECK"
@@ -193,11 +195,13 @@ _IMMUTABLE_REF_RE = re.compile(r"^([0-9a-fA-F]{40}|v?[0-9]+\.[0-9]+\.[0-9]+([.-]
 
 
 def _installed_direct_url() -> dict:
-    """PEP 610 ``direct_url.json`` for the running omniscientist dist, or ``{}``."""
+    """PEP 610 ``direct_url.json`` for the running OmniScientist-V2 dist, or ``{}``."""
     try:
         import importlib.metadata as md
 
-        raw = md.distribution("omniscientist").read_text("direct_url.json")
+        from omni.runtime.dist_meta import DIST_NAME
+
+        raw = md.distribution(DIST_NAME).read_text("direct_url.json")
     except Exception:  # noqa: BLE001 - not installed as a dist / no metadata.
         return {}
     if not raw:

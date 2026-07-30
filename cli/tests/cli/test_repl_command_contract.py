@@ -34,7 +34,15 @@ def test_repl_route_contract_covers_every_cli_command_path():
     in_process = set(getattr(main, "_REPL_IN_PROCESS_COMMANDS", ()))
     external = set(main._REPL_EXTERNAL_COMMANDS)
 
-    assert in_process == {"lit", "verify", "memory", "resume", "update", "upgrade"}
+    assert in_process == {
+        "lit",
+        "verify",
+        "memory",
+        "model",
+        "resume",
+        "update",
+        "upgrade",
+    }
     assert external == roots - in_process
     assert external.isdisjoint(in_process)
     # These formerly hand-parsed commands must inherit every Typer subcommand
@@ -42,6 +50,7 @@ def test_repl_route_contract_covers_every_cli_command_path():
     assert {"config", "skills", "task", "eval", "bench", "current", "why", "chat"} <= external
     in_process_children = {
         "memory": set(main._MEMORY_SUBCOMMANDS),
+        "model": set(main._MODEL_SUBCOMMANDS),
         "resume": {"help"},
         "lit": set(),
         "verify": set(),
@@ -93,7 +102,8 @@ def test_repl_session_aware_external_translation_uses_cli_syntax():
         "/skills export codex",
         "/skills unexport codex",
         "/task step workflow-1 step-1 --json",
-        "/task delete task-1 --force",
+        "/task rm task-1 task-2 --yes",
+        "/task delete task-1 task-2 --force --yes",
         "/task drain",
         "/task inbox",
         "/eval --record --tag routing",
@@ -155,6 +165,7 @@ async def test_repl_skills_export_and_unexport_codex_end_to_end():
     "line",
     [
         "/config model -p openai -m gpt-test",
+        "/config vlm -u https://vision.example/v1/chat/completions -m vision-test",
         "/config embeddings --disable",
     ],
 )
@@ -190,6 +201,28 @@ async def test_repl_config_mutation_reloads_the_live_agent(monkeypatch, line):
 
     assert calls == [line.lstrip("/"), "closed", "reloaded"]
     assert result.agent is new_agent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("line", ["/config vlm", "/config vlm --test", "/config vlm --help"])
+async def test_repl_read_only_vlm_config_does_not_reload_agent(monkeypatch, line):
+    import omni.cli.main as main
+
+    agent = SimpleNamespace()
+
+    async def fake_external(_state, _command):  # noqa: ANN001
+        return 0
+
+    monkeypatch.setattr(main, "_run_repl_external_command", fake_external)
+    monkeypatch.setattr(
+        main,
+        "make_agent",
+        lambda _state: (_ for _ in ()).throw(AssertionError("must not reload")),
+    )
+
+    result = await main._repl_command(agent, AppState(), line, "session-123")
+
+    assert result.agent is agent
 
 
 def test_repl_help_covers_all_visible_cli_commands():

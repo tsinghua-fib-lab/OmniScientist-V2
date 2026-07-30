@@ -157,6 +157,24 @@ def test_vlm_config_reads_generic_omni_environment(
     assert config.api_key == "generic-vlm-secret"
 
 
+def test_vlm_recognizes_windows_drive_paths_as_local_references() -> None:
+    module = _vlm_module()
+
+    assert module._is_windows_drive_path(r"C:\Users\runner\reference.png")
+    assert module._is_windows_drive_path("D:/figures/reference.png")
+    assert not module._is_windows_drive_path("https://example.invalid/reference.png")
+
+
+def test_vlm_file_uri_is_percent_decoded_exactly_once(tmp_path: Path) -> None:
+    module = _vlm_module()
+    image = tmp_path / "reference%20.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nlocal-reference")
+
+    encoded = module.reference_as_data_url(image.as_uri(), allowed_files=(image,))
+
+    assert encoded.startswith("data:image/png;base64,")
+
+
 @pytest.mark.asyncio
 async def test_vlm_client_uses_fixed_openai_multimodal_contract_without_reference() -> None:
     module = _vlm_module()

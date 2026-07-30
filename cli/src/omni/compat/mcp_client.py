@@ -14,6 +14,7 @@ from typing import Any
 
 from omni.config.settings import MCPServerCfg, OmniSettings
 from omni.core.react_agent import ToolSpec
+from omni.core.tool_result import ToolCallOutcome, ToolResultEnvelope
 from omni.skills_runtime.context import Tool
 
 logger = logging.getLogger(__name__)
@@ -67,7 +68,19 @@ def _wrap_remote_tool(server_name: str, cfg: MCPServerCfg, mt: Any) -> Tool:
         for c in getattr(result, "content", []) or []:
             text = getattr(c, "text", None)
             parts.append(text if text is not None else str(c))
-        return "\n".join(parts) if parts else "(empty result)"
+        observation = "\n".join(parts) if parts else "(empty result)"
+        is_error = bool(
+            getattr(result, "isError", False)
+            or getattr(result, "is_error", False)
+        )
+        return ToolResultEnvelope(
+            observation=observation,
+            event_output={"content": observation, "is_error": is_error},
+            outcome=ToolCallOutcome.completed(
+                success=not is_error,
+                error=observation if is_error else "",
+            ),
+        )
 
     schema = getattr(mt, "inputSchema", None) or {"type": "object", "properties": {}}
     annotations = getattr(mt, "annotations", None)

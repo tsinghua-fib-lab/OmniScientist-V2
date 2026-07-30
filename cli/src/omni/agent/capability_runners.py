@@ -15,7 +15,12 @@ from omni.agent.figure_runner import ArtifactFigureRunner
 from omni.agent.intent_plan import IntentPlan
 from omni.agent.plan_result import PlanExecutionResult
 from omni.agent.plan_revision import provider_authority_for_consumer
-from omni.agent.plan_runner_utils import plan_capabilities, plan_summary, verification_status
+from omni.agent.plan_runner_utils import (
+    completed_skill_answer,
+    plan_capabilities,
+    plan_summary,
+    settlement_status,
+)
 from omni.core.react_agent import ToolInvocationRecord
 from omni.core.tool_contracts import skill_input_contract_error
 from omni.runtime.task_results import (
@@ -132,7 +137,7 @@ class SkillTaskRunner:
                 kind="needs_input",
                 terminated_reason="pre_tool_use_rejected",
                 plan_summary=plan_summary(plan),
-                verification_status="needs_input",
+                settlement_status="needs_input",
             )
         if skill_source:
             # Preserve the forced source so the worker resolves the same
@@ -220,7 +225,7 @@ class SkillTaskRunner:
                 terminated_reason=reason,
                 plan_summary=plan_summary(plan),
                 degraded_warnings=list(plan.degraded_warnings),
-                verification_status="needs_input",
+                settlement_status="needs_input",
             )
         installation_required = installation_required_presentation(drained)
         if installation_required is not None:
@@ -236,14 +241,38 @@ class SkillTaskRunner:
                 error=text,
                 plan_summary=plan_summary(plan),
                 degraded_warnings=list(plan.degraded_warnings),
-                verification_status="failed",
+                settlement_status="failed",
             )
-        text = f"Created `{skill}` execution `id={subtask_id[:8]}` from the validated plan."
-        if ctx.task_id:
-            text += (
-                f" Parent task: `id={ctx.task_id[:8]}`. "
-                f"Use `/task show {ctx.task_id[:8]}` to inspect status and results."
+        if drain_tasks and drained and settlement_status(drained) == "failed":
+            # The plan bet the whole turn on one skill and the skill did not
+            # deliver. Reporting that as the answer makes a routing choice look
+            # like a verdict on the request: the user asked for a literature
+            # review, not for news that one provider was unreachable. The
+            # failure is real and worth reporting, but it is an observation
+            # about a route, so hand it back unhandled — the turn continues into
+            # ReAct, where the model sees what went wrong and still has the
+            # search and web tools to reach the answer another way.
+            return PlanExecutionResult(
+                handled=False,
+                submitted_subtask_ids=[subtask_id],
+                drained_results=drained,
+                tool_trace=[trace_record],
+                terminated_reason="single_skill_failed",
+                plan_summary=plan_summary(plan),
+                degraded_warnings=list(plan.degraded_warnings),
             )
+        if drain_tasks and drained:
+            # The child finished in this turn. Codex would now speak from the
+            # tool result; a ``Created execution`` receipt is only an ack for
+            # work that still outlives the turn (daemon / IM).
+            text = completed_skill_answer(drained, skill=skill)
+        else:
+            text = f"Created `{skill}` execution `id={subtask_id[:8]}` from the validated plan."
+            if ctx.task_id:
+                text += (
+                    f" Parent task: `id={ctx.task_id[:8]}`. "
+                    f"Use `/task show {ctx.task_id[:8]}` to inspect status and results."
+                )
         return PlanExecutionResult(
             handled=True,
             text=text,
@@ -254,6 +283,6 @@ class SkillTaskRunner:
             terminated_reason=plan.intent_type.value,
             plan_summary=plan_summary(plan),
             degraded_warnings=list(plan.degraded_warnings),
-            verification_status="pending_child_task" if not drain_tasks else verification_status(drained),
+            settlement_status="pending_child_task" if not drain_tasks else settlement_status(drained),
         )
 DEFAULT_CAPABILITY_RUNNERS = CapabilityRunnerRegistry([ArtifactFigureRunner(), SkillTaskRunner()])

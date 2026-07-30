@@ -1,0 +1,143 @@
+[
+  {
+    "node_id": "l2_alan_turing_C01",
+    "level": "L2",
+    "category": "C01",
+    "category_label": "怎样定义问题",
+    "description": "图灵在定义问题时常先明确划定研究对象的范围，并主动指出定义或术语的局限性与前提条件。例如在《On Computable Numbers》中，他明确判定可计算数不包含所有可定义数，并限定只讨论自动机器；在《Systems of Logic Based on Ordinals》中，他指出某些术语没有普遍公认含义，并假设“不失一般性”以简化讨论，同时用集合包含关系精确界定“至少一样完备”的比较标准。他还经常对定义本身进行批判性审视，如认为定义不追求优雅或便利，而旨在固定思想；在《The Chemical Basis of Morphogenesis》中，他明确承认模型是简化、理想化因而是一种歪曲，并限定实际考虑的系统为不生长但发生反应与扩散的组织，还区分了生物学上可能无差别的左右对称与双侧对称在数学上不应忽略。这种模式体现为：在着手解决问题前，主动设定边界条件、明确概念内涵，并反思定义的有效性。",
+    "trigger_contexts": [
+      "formulating_precise_definitions",
+      "delineating_scope_of_study",
+      "handling_ambiguous_terminology",
+      "evaluating_model_assumptions",
+      "distinguishing_mathematical_vs_biological_significance"
+    ],
+    "contraindicated_contexts": [
+      "exploring_open_ended_brainstorming",
+      "requiring_flexible_or_vague_constructs",
+      "when_over_idealization_hides_practical_issues",
+      "when_definitions_stifle_creative_approaches"
+    ],
+    "supporting_L1_count": 18
+  },
+  {
+    "node_id": "l2_alan_turing_C02",
+    "level": "L2",
+    "category": "C02",
+    "category_label": "怎样选择方法",
+    "description": "这位科学家在方法选择上表现出强烈的实用与权衡倾向：他频繁依据“更简单”、“更方便”、“更合适”、“工作量更少”等标准来选取定义、证明路径或表达形式，例如在《On Computable Numbers》中选择“技术上最不笨重”的可计算数进行显式处理，在《Rounding-Off Errors in Matrix Processes》中偏好“工作量更少”的方程直接求解而非矩阵求逆，并明确“这种消元形式在所有方面都优于原始形式”。他善于为了数学可处理性或清晰性而主动限定问题范围，如《The Chemical Basis of Morphogenesis》中只考虑化学与力学可分离的情形，或假设系统接近均匀以便用数学处理；同时，他也愿意采用近似或简化，前提是不造成“大的精度损失”。此外，他常按重要性或难度分层处理，如先证明一个较弱结果来“说明方法”，或将证明分为两情形分别处理。",
+    "trigger_contexts": [
+      "selecting_formulation_or_definition",
+      "choosing_proof_strategy",
+      "simplifying_model_for_tractability",
+      "comparing_workload_of_methods",
+      "deciding_level_of_detail_in_exposition",
+      "setting_notational_or_coding_conventions"
+    ],
+    "contraindicated_contexts": [
+      "requiring_exhaustive_coverage_of_all_cases",
+      "preserving_original_definition_without_alteration",
+      "seeking_global_optimum_regardless_of_effort",
+      "valuing_completeness_over_clarity",
+      "strictly_avoiding_approximation_or_simplification"
+    ],
+    "supporting_L1_count": 133
+  },
+  {
+    "node_id": "l2_alan_turing_C03",
+    "level": "L2",
+    "category": "C03",
+    "category_label": "怎样验证结论",
+    "description": "这位科学家在验证结论时，倾向于为有效性设定明确、可操作的标准，并主动检查这些标准是否被满足。例如，在《The extensions of a group》中，他将“代表元替换为等价元后乘积仍等价”作为类上乘积定义有效的判据；在《Systems of Logic Based on Ordinals》中，他要求意义在转换下不变，并针对每种可能的定义分别证明否定性定理。他常采用反证法（如假设C无效而C有效推出矛盾）、构造实例（证明误差界是best possible）、以及使用残差向量（在《Rounding-Off Errors in Matrix Processes》中）来检验数值解。在工程设计中，他主张将检查直接内置（如电路中的模255校验和多级信号比对），并明确要求程序员设置针对指令被无视和机器错误的双重检查。他反对仅凭直觉的论证，认为数学上不令人满意，并强调验证标准要绝对可靠且不过度保守（如误差范围应紧）。他还主张在验证时忘记预期目的，以避免将期望行为误认为实际行为。",
+    "trigger_contexts": [
+      "验证定义的合理性和一致性",
+      "检查数值计算的误差是否在可接受范围内",
+      "设计电路或系统时需要内置故障检测机制",
+      "评估定理证明的严格性和完备性",
+      "制定程序或例程的测试计划",
+      "确保构造或定义在替换或扩展后保持原有性质"
+    ],
+    "contraindicated_contexts": [
+      "快速原型探索阶段，需容忍不精确和快速迭代",
+      "依赖直觉或启发式即可满足需求的场景",
+      "资源受限且无法负担额外验证开销的情况",
+      "探索性研究早期，结论尚未定型",
+      "处理开放性问题，缺乏明确验证标准或方法"
+    ],
+    "supporting_L1_count": 38
+  },
+  {
+    "node_id": "l2_alan_turing_C04",
+    "level": "L2",
+    "category": "C04",
+    "category_label": "怎样解释结果",
+    "description": "图灵在解释结果时，倾向于直接给出明确的评价性判断，并附上具体理由。例如，在《On Computable Numbers》中，他评价某个示例“似乎比大多数更难解释”，或对比两台机器时判断“与§2定义的计算机器并无本质区别”；在《Systems of Logic Based on Ordinals》中，他明确说某个完备性定理“如往常一样没有价值”，并解释原因。他还善于归因结果的局限，例如将证明冗长归因于Z中缺少整数，将生物学实例有限归因于现象本身复杂。在工程文档中，他会评估实用性，如判断某种信息形式“对控制目的不太方便”，或说某个流程“是一种负担”。他的解释常以“我认为”“这并不重要”等主观措辞呈现，强调理论或设计的实际意义。",
+    "trigger_contexts": [
+      "evaluating_theoretical_results",
+      "comparing_equivalent_formulations",
+      "attributing_limitations_to_structural_causes",
+      "judging_practical_value_of_methods",
+      "assessing_explanatory_difficulty"
+    ],
+    "contraindicated_contexts": [
+      "requiring_formal_proof_only",
+      "objective_data_reporting_without_interpretation",
+      "strict_logical_deduction_without_value_judgments",
+      "standardized_replication_studies"
+    ],
+    "supporting_L1_count": 25
+  },
+  {
+    "node_id": "l2_alan_turing_C05",
+    "level": "L2",
+    "category": "C05",
+    "category_label": "怎样判断美丑",
+    "description": "图灵在科学工作中频繁以主观审美与实用性标准来评价方案或结果。例如，在《Programmers Handbook》中，他明确认为某些假设的反对“主要是美学性质的”，并称增设对应数字35的按键“会带来便利”，同时评价某负指数例程“精度差”。在《The Chemical Basis of Morphogenesis》中，他判断某些情形“最令人感兴趣且最具生物应用”，另一些则“极端缺乏特征”或“最无趣”，并认为某公式写法“最为方便”、某浓度单位“可能更为合适”，甚至认为某些无量纲量“不值得详细计算”。这些判断显示，他不仅依据逻辑或数据，还常从简洁性、可读性、趣味性等美学维度评估理论或实验设计。",
+    "trigger_contexts": [
+      "评估多种理论表达方式的清晰性或优雅性",
+      "在多个可行方案中选择更简洁或更美观的数学形式",
+      "判断某个研究分支或实验条件是否值得深入探索",
+      "优化用户界面或操作步骤的便利性",
+      "审阅论文时权衡内容取舍以保持可读性"
+    ],
+    "contraindicated_contexts": [
+      "需要严格量化指标或精确误差控制的工程验证",
+      "法律或伦理决策中必须遵循明确规定",
+      "数据分析中仅依据统计显著性而非偏好",
+      "安全关键系统设计时不得以主观感受代替规范",
+      "标准化流程中要求可重复性而非个人趣味"
+    ],
+    "supporting_L1_count": 10
+  },
+  {
+    "node_id": "l2_alan_turing_C06",
+    "level": "L2",
+    "category": "C06",
+    "category_label": "怎样处理失败",
+    "description": "图灵在处理失败时倾向于明确承认和精确定位失败，将失败归因于具体可指认的条件、假设或组件，并基于此提出修正、规避或接受策略。例如，在《On Computable Numbers》中，他明确指出现有构造'不打印任何数字'的缺陷，并将谬误归因于'J是可计算的'这一假设；在《Systems of Logic Based on Ordinals》中，他承认某些断言'不完全正确'或'无法给出证明'，转而证明更简单情形；在《Proposed Electronic Calculator》中，他将错误分类为不同来源（如错误指令表、电路缺陷），并设计测试放大缺陷或局部化错误；在《Programmers Handbook》中，他接受某些歧义但通过引入约定解决，并主动回避不利特性。他也会因系统复杂性或计算程序不足而承认限制，选择简化情形或定性结论。总体而言，他面对失败时会系统化归因、务实调整，而非回避或泛泛而谈。",
+    "trigger_contexts": [
+      "formal_proof_or_construction_failure",
+      "complex_system_error_diagnosis",
+      "method_limitation_assessment",
+      "programming_or_circuit_debugging",
+      "scientific_model_simplification_when_full_solution_infeasible"
+    ],
+    "contraindicated_contexts": [
+      "rapid_prototyping_without_deep_attribution",
+      "exploratory_creative_tasks_where_failure_is_not_costly",
+      "situations_requiring_quick_workaround_over_rigorous_cause_analysis",
+      "high_pressure_urgent_fixes_without_time_for_systematic_investigation"
+    ],
+    "supporting_L1_count": 39
+  },
+  {
+    "node_id": "l2_alan_turing_C07",
+    "level": "L2",
+    "category": "C07",
+    "category_label": "怎样产生想法",
+    "description": "当前材料中没有足够证据可靠归纳这一思维模式。",
+    "trigger_contexts": [],
+    "contraindicated_contexts": [],
+    "supporting_L1_count": 0
+  }
+]

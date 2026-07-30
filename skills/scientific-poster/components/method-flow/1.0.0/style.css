@@ -1,3 +1,0 @@
-.sp-method-flow { display: flex; flex-direction: column; gap: var(--sp-space-3); align-content: start; }
-.sp-method-flow__steps { display: grid; gap: var(--sp-space-2); margin: 0; padding: 0; list-style-position: inside; }
-.sp-method-flow__annotation { color: var(--sp-muted); }

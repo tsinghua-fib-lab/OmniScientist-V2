@@ -45,7 +45,9 @@ class LiveFigureEngine:
                 output_dir=output_dir,
                 config=config,
                 reference_image_uri=_optional_text(input_data.get("reference_image_uri")),
-                progress=lambda stage, pct: _progress(progress_callback, stage, pct),
+                progress=lambda stage, pct, **data: _progress(
+                    progress_callback, stage, pct, **data
+                ),
             )
         except LiveFigureError as exc:
             message = _redact_authorization(str(exc))
@@ -188,9 +190,10 @@ def _reference_policy(ctx: Any) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
         if not value or value.startswith("artifact://"):
             continue
         if value.startswith("file://"):
-            from urllib.parse import unquote, urlparse
+            from urllib.parse import urlparse
+            from urllib.request import url2pathname
 
-            value = unquote(urlparse(value).path)
+            value = url2pathname(urlparse(value).path)
         if "://" not in value:
             files.append(Path(value))
     return tuple(roots), tuple(files)
@@ -219,10 +222,13 @@ def _resolve_output_dir(ctx: Any, input_data: dict[str, Any]) -> Path:
     return path
 
 
-async def _progress(callback: Any, stage: str, pct: float) -> None:
+async def _progress(callback: Any, stage: str, pct: float, **data: Any) -> None:
     if callback is None:
         return
-    value = callback(stage, pct)
+    try:
+        value = callback(stage, pct, **data)
+    except TypeError:
+        value = callback(stage, pct)
     if hasattr(value, "__await__"):
         await value
 

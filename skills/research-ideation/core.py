@@ -52,6 +52,21 @@ class LLMPort(Protocol):
     def complete(self, payload: dict[str, Any]) -> dict[str, Any]: ...
 
 
+class SearchPort(Protocol):
+    """Where literature comes from, when the caller has somewhere better.
+
+    Standalone this module talks to Semantic Scholar directly, which is the only
+    source a portable copy can assume. A host that already runs a multi-connector
+    funnel supplies it here instead, the same way it supplies :class:`LLMPort`,
+    so one unavailable provider costs one source rather than the whole search.
+
+    Returns papers shaped like :func:`search_papers` — ``title`` and ``abstract``
+    are the two fields the pipeline actually reasons over.
+    """
+
+    def __call__(self, query: str, limit: int) -> list[dict]: ...
+
+
 def classify_llm_error(exc: BaseException) -> str:
     """Return a stable outcome code without depending on one SDK version."""
     status_code = getattr(exc, "status_code", None)
@@ -472,7 +487,7 @@ Return JSON only:
 """
 
 
-GAP_ANALYSIS_PROMPT = """Act as an experienced research advisor and identify 5-8 valuable gaps.
+GAP_ANALYSIS_PROMPT = """Act as an experienced research advisor and identify 4-5 valuable gaps.
 
 Research question:
 {research_question}
@@ -762,11 +777,25 @@ def _s2_tool_handler(query: str, limit: int = 5, **_kw: Any) -> list[dict]:
     return _run_s2_search(query, limit)
 
 
-def _make_s2_tool_handler(api_key: str | None):
-    """Bind the ideation-time search tool to one run's scoped API key."""
+def _make_s2_tool_handler(api_key: str | None, search: SearchPort | None = None):
+    """Bind the ideation-time search tool to this run's source of literature."""
 
     def _handler(query: str, limit: int = 5, **_kw: Any) -> list[dict]:
-        return _run_s2_search(query, limit, api_key=api_key)
+        if search is None:
+            return _run_s2_search(query, limit, api_key=api_key)
+        try:
+            papers = search(query, min(limit, 10))
+        except Exception:  # noqa: BLE001 — mid-reasoning search failure is an empty result
+            return []
+        return [
+            {
+                "title": p.get("title", ""),
+                "abstract": (p.get("abstract") or p.get("summary") or "")[:300],
+                "year": p.get("year"),
+                "citationCount": p.get("citationCount", 0),
+            }
+            for p in papers
+        ]
 
     return _handler
 
@@ -777,7 +806,10 @@ def _run_s2_search(
     *,
     api_key: str | None = None,
 ) -> list[dict]:
-    papers = search_papers(query, limit=min(limit, 10), api_key=api_key)
+    try:
+        papers = search_papers(query, limit=min(limit, 10), api_key=api_key)
+    except (LiteratureSearchError, httpx.HTTPError):
+        return []
     return [
         {
             "title": p.get("title", ""),
@@ -793,13 +825,20 @@ def _run_s2_search(
 # Step 1: search literature, extract concepts, and merge synonyms
 # ---------------------------------------------------------------------------
 
+MAX_TOTAL_PAPERS = 50
+CONCEPT_EXTRACTION_CONCURRENCY = 10
+DEFAULT_N_IDEAS = 2
+DEFAULT_PAPER_LIMIT = 10
+
+
 def search_and_extract(
     research_question: str,
-    paper_limit: int = 20,
+    paper_limit: int = DEFAULT_PAPER_LIMIT,
     progress: Any = None,
     *,
     llm: LLMPort,
     s2_api_key: str | None = None,
+    search: SearchPort | None = None,
 ) -> dict:
     """Search literature, extract concepts, merge synonyms, and return structured results."""
     # 1a. Generate search queries
@@ -819,13 +858,26 @@ def search_and_extract(
     # 1b. Search papers
     all_papers: list[dict] = []
     seen_titles: set[str] = set()
+    search_failures: list[dict[str, str]] = []
     for q in queries:
-        papers = search_papers(q, limit=paper_limit, api_key=s2_api_key)
+        try:
+            if search is None:
+                papers = search_papers(q, limit=paper_limit, api_key=s2_api_key)
+            else:
+                papers = search(q, paper_limit)
+        except (LiteratureSearchError, httpx.HTTPError) as exc:
+            search_failures.append({"query": q, "error": str(exc)})
+            continue
+        except Exception as exc:  # noqa: BLE001 — a host port failing is one failed query
+            search_failures.append({"query": q, "error": str(exc)})
+            continue
         for p in papers:
             t = p.get("title", "").lower().strip()
             if t and t not in seen_titles:
                 seen_titles.add(t)
                 all_papers.append(p)
+
+    all_papers = all_papers[:MAX_TOTAL_PAPERS]
 
     if progress:
         progress(f"Found {len(all_papers)} papers", 0.2)
@@ -881,7 +933,9 @@ def search_and_extract(
                     raise
                 return title, {"core_concepts": [], "application_domains": []}
 
-        with ThreadPoolExecutor(max_workers=min(len(all_papers), 15)) as pool:
+        with ThreadPoolExecutor(
+            max_workers=min(len(all_papers), CONCEPT_EXTRACTION_CONCURRENCY)
+        ) as pool:
             for title, concepts in pool.map(lambda p: _extract_one(p), all_papers):
                 paper_concepts[title] = concepts
 
@@ -932,6 +986,7 @@ def search_and_extract(
         "paper_concepts": paper_concepts,
         "core_concepts": merged_core,
         "domain_concepts": merged_domains,
+        "search_failures": search_failures,
     }
 
 
@@ -948,7 +1003,7 @@ def identify_gaps(
     *,
     llm: LLMPort,
 ) -> list[dict]:
-    """Identify 5-8 research gaps from the concepts and literature."""
+    """Identify 4-5 research gaps from the concepts and literature."""
     abstracts_text = "\n\n".join(
         f"[{i+1}] {p['title']} ({p.get('year', '?')})\n{(p.get('abstract') or '')[:400]}"
         for i, p in enumerate(papers[:20])
@@ -1009,6 +1064,7 @@ def generate_idea(
     *,
     llm: LLMPort,
     s2_api_key: str | None = None,
+    search: SearchPort | None = None,
 ) -> dict:
     """Generate one research idea."""
     refs_text = _format_references(reference_papers)
@@ -1032,7 +1088,7 @@ def generate_idea(
                     system_prompt=system_prompt + "\nCall semantic_scholar_search when verification is needed.",
                     tools=[_SEMANTIC_SCHOLAR_TOOL],
                     tool_handlers={
-                        "semantic_scholar_search": _make_s2_tool_handler(s2_api_key)
+                        "semantic_scholar_search": _make_s2_tool_handler(s2_api_key, search)
                     },
                     max_iters=5,
                     llm=llm,
@@ -1060,13 +1116,14 @@ def generate_ideas(
     target_gap: str,
     core_concepts: list[str],
     reference_papers: list[dict],
-    n: int = 3,
+    n: int = DEFAULT_N_IDEAS,
     research_question: str = "",
     use_tools: bool = True,
     progress: Any = None,
     *,
     llm: LLMPort,
     s2_api_key: str | None = None,
+    search: SearchPort | None = None,
 ) -> list[dict]:
     """Generate n candidate ideas concurrently."""
     def _worker(i: int) -> dict | None:
@@ -1076,6 +1133,7 @@ def generate_ideas(
                 research_question, use_tools,
                 llm=llm,
                 s2_api_key=s2_api_key,
+                search=search,
             )
             idea["id"] = i
             return idea
@@ -1170,14 +1228,15 @@ def _portable_provenance(papers: list[dict[str, Any]]) -> dict[str, Any]:
 
 def run_pipeline(
     research_question: str,
-    n_ideas: int = 3,
+    n_ideas: int = DEFAULT_N_IDEAS,
     use_tools: bool = True,
-    paper_limit: int = 20,
+    paper_limit: int = DEFAULT_PAPER_LIMIT,
     auto_refine: bool = True,
     progress: Any = None,
     *,
     llm: LLMPort,
     s2_api_key: str | None = None,
+    search: SearchPort | None = None,
 ) -> dict:
     """Run the four-stage research ideation pipeline.
 
@@ -1190,6 +1249,7 @@ def run_pipeline(
         progress: Optional callback receiving a message and fraction.
         llm: Host-provided synchronous completion interface.
         s2_api_key: Optional Semantic Scholar API key injected for this run.
+        search: Optional host retrieval port; Semantic Scholar is used without one.
 
     Returns:
         Complete structured pipeline result.
@@ -1206,20 +1266,34 @@ def run_pipeline(
         progress,
         llm=llm,
         s2_api_key=s2_api_key,
+        search=search,
     )
 
+    pipeline_warnings: list[str] = []
+    failures = step1.get("search_failures", []) or []
+    source = "Literature search" if search is not None else "Semantic Scholar"
     if not step1["papers"]:
-        return {
-            "status": "partial",
-            "outcome": {"code": "no_literature_found"},
-            "research_question": research_question,
-            "steps": {"search": step1},
-            "summary": "No relevant literature was found; no grounded idea was generated",
-            "warning": "The literature search completed with zero relevant papers",
-            "recoverable": True,
-            "blocking": False,
-            **_portable_provenance([]),
-        }
+        if failures:
+            reasons = "; ".join(
+                f"{failure.get('query', '?')} → "
+                f"{failure.get('error', 'unknown error')[:120]}"
+                for failure in failures[:3]
+            )
+            pipeline_warnings.append(
+                f"{source} returned no usable literature ({len(failures)} "
+                f"query failure(s): {reasons}). Continuing with LLM-only reasoning."
+            )
+        else:
+            pipeline_warnings.append(
+                f"{source} returned zero relevant papers for the generated "
+                "queries. Continuing with LLM-only reasoning."
+            )
+        _prog(f"{source} unavailable; continuing without citations", 0.4)
+    elif failures:
+        pipeline_warnings.append(
+            f"{len(failures)} {source} query/queries failed but the pipeline "
+            f"continued with the remaining {len(step1['papers'])} paper(s)."
+        )
 
     # Step 2: gap analysis
     _prog("Analyze research gaps", 0.45)
@@ -1261,6 +1335,7 @@ def run_pipeline(
         progress=progress,
         llm=llm,
         s2_api_key=s2_api_key,
+        search=search,
     )
 
     if not ideas:
@@ -1319,9 +1394,12 @@ def run_pipeline(
 
     _prog("Complete", 1.0)
 
-    return {
-        "status": "ok",
-        "outcome": {"code": "ideas_generated", "count": len(ideas)},
+    final_status = "partial" if pipeline_warnings else "ok"
+    outcome_code = "ideas_generated_partial" if pipeline_warnings else "ideas_generated"
+
+    result: dict[str, Any] = {
+        "status": final_status,
+        "outcome": {"code": outcome_code, "count": len(ideas)},
         "research_question": research_question,
         "steps": {
             "search": {
@@ -1330,6 +1408,7 @@ def run_pipeline(
                 "papers": step1["papers"],
                 "core_concepts": step1["core_concepts"],
                 "domain_concepts": step1["domain_concepts"],
+                "search_failures": step1.get("search_failures", []),
             },
             "gaps": gaps,
             "selected_gap": selected_gap,
@@ -1341,3 +1420,8 @@ def run_pipeline(
                    f"best score: {best_score:.1f}/10",
         **_portable_provenance(step1["papers"]),
     }
+    if pipeline_warnings:
+        result["warning"] = " | ".join(pipeline_warnings)
+        result["recoverable"] = True
+        result["blocking"] = False
+    return result

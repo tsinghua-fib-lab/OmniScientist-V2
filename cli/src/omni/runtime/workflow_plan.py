@@ -10,7 +10,6 @@ from omni.core.tool_contracts import (
     provider_schema_definition_errors,
     skill_input_contract_error,
 )
-from omni.skills_runtime.manifest import validate_quality_contract_definition
 from omni.skills_runtime.registry import (
     SKILL_SOURCE_PARAM,
     SkillRegistry,
@@ -97,7 +96,9 @@ def _prepare_workflow_plan(
     *,
     seal_provider_bindings: bool = True,
 ) -> list[dict[str, Any]]:
-    normalised = _normalise_workflow_plan(goal, _normalise_workflow_steps(raw_steps), registry)
+    normalised = _normalise_workflow_plan(
+        goal, _normalise_workflow_steps(raw_steps, registry), registry
+    )
     terminal_support_step_ids = _terminal_support_step_ids(normalised, registry)
     prepared: list[dict[str, Any]] = []
     missing: list[dict[str, Any]] = []
@@ -158,24 +159,6 @@ def _prepare_workflow_plan(
                     "label": str(error.get("schema_field") or "provider_schema"),
                 }
                 for error in schema_errors
-            )
-            prepared.append(next_step)
-            continue
-        quality_errors = validate_quality_contract_definition(
-            getattr(entry, "quality_contract", {}),
-            declared=getattr(entry, "quality_contract_declared", None),
-        )
-        if quality_errors:
-            missing.extend(
-                {
-                    "step_id": next_step.get("id", ""),
-                    "skill_name": next_step.get("skill_name", ""),
-                    "missing": ["provider_quality_contract"],
-                    "provided": [],
-                    "reason": str(error.get("message") or "provider quality contract is invalid"),
-                    "label": str(error.get("path") or "quality_contract"),
-                }
-                for error in quality_errors
             )
             prepared.append(next_step)
             continue
@@ -260,7 +243,9 @@ def _apply_entry_workflow_policy(step: dict[str, Any], entry: Any) -> None:
         step["allow_failed_dependencies"] = True
 
 
-def _normalise_workflow_steps(raw_steps: Any) -> list[dict[str, Any]]:
+def _normalise_workflow_steps(
+    raw_steps: Any, registry: SkillRegistry | None = None
+) -> list[dict[str, Any]]:
     if not isinstance(raw_steps, list):
         raise ValueError("workflow steps must be a list")
     steps: list[dict[str, Any]] = []
@@ -288,8 +273,19 @@ def _normalise_workflow_steps(raw_steps: Any) -> list[dict[str, Any]]:
             provider_type = "native_executor"
             skill_name = ""
             capability = capability or "synthesis.final"
+        if not skill_name and capability and registry is not None:
+            # A step may name what it needs rather than who provides it. Picking
+            # the provider here — at the tool boundary, against the live registry
+            # — is what the planner used to do before it was deleted; doing it
+            # any earlier would just be guessing before the work starts.
+            entry, _ = registry.resolve_capability(capability)
+            if entry is not None:
+                skill_name = entry.name
         if not skill_name and not child_task and not native_step:
-            raise ValueError(f"workflow step {idx} is missing skill")
+            raise ValueError(
+                f"workflow step {idx} is missing skill"
+                + (f" and no provider offers capability '{capability}'" if capability else "")
+            )
         step_id = str(raw.get("id") or f"step_{idx}").strip()
         if step_id in seen:
             raise ValueError(f"duplicate workflow step id '{step_id}'")
@@ -353,8 +349,6 @@ def _normalise_workflow_steps(raw_steps: Any) -> list[dict[str, Any]]:
         ):
             if raw.get(field_name):
                 normalised[field_name] = str(raw[field_name])
-        if isinstance(raw.get("quality_contract"), dict):
-            normalised["quality_contract"] = dict(raw["quality_contract"])
         if raw.get("input_compiled") is True:
             normalised["input_compiled"] = True
         if raw.get("fallback_skill"):
@@ -394,6 +388,8 @@ def _step_failure_policy(step: dict[str, Any], entry: Any) -> str:
 
 
 def _step_failure_recoverable(step: dict[str, Any], entry: Any, result: dict[str, Any]) -> bool:
+    if result.get("blocking") is True or isinstance(result.get("action_required"), dict):
+        return False
     if _step_failure_policy(step, entry) == "continue_with_partial":
         return True
     info = result.get("error_info")

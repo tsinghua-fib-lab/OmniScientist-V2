@@ -49,16 +49,6 @@ from omni.eval.memory_bench import (
     run_memory_benchmark,
 )
 from omni.eval.report import BenchmarkReport, DimensionScore, ScenarioResult
-from omni.eval.research_quality import (
-    QualityCheck,
-    QualityDimension,
-    ResearchQualityReport,
-    evaluate_citation_fidelity,
-    evaluate_reproducibility,
-    evaluate_research_quality,
-    evaluate_statistical_correctness,
-    load_quality_payload,
-)
 from omni.eval.runner import run_benchmark
 from omni.eval.scenarios import Scenario, ScenarioTurn, bundled_scenarios_dir, load_scenarios
 from omni.eval.trend import (
@@ -67,6 +57,16 @@ from omni.eval.trend import (
     format_delta,
     sparkline,
     summarize_history,
+)
+from omni.research.quality import (
+    QualityCheck,
+    QualityDimension,
+    ResearchQualityReport,
+    evaluate_citation_fidelity,
+    evaluate_reproducibility,
+    evaluate_research_quality,
+    evaluate_statistical_correctness,
+    load_quality_payload,
 )
 
 __all__ = [

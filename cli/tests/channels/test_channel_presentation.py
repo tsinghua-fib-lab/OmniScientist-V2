@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -62,6 +64,30 @@ def test_task_presentation_markdown_contains_provenance_and_actions():
     assert "run-dot" in md
     assert "/task show task-123" in md
     assert "/verify --session" in md
+
+
+def test_a_chat_reply_does_not_carry_the_provenance_ledger():
+    """Ids naming rows in a store the reader has no way to open.
+
+    The terminal keeps them, because there they are something to look up. In a
+    thread they arrived as a heading of record keys sitting underneath the
+    figure that had actually been asked for, and every one of them cost a line.
+    """
+    from omni.runtime.presentation import task_presentation_from_result
+
+    presentation = task_presentation_from_result(
+        subtask_id="task-123456",
+        skill="scientific-figure",
+        status="succeeded",
+        result=_task_payload(),
+    )
+
+    chat = presentation.to_markdown(include_local_paths=False)
+
+    assert "**Research record**" not in chat
+    assert "run-dot" not in chat
+    assert "src-vasw" not in chat
+    assert "Transformer PNG (png): `/tmp/transformer.png`" in chat
 
 
 def test_task_presentation_prefers_full_text_over_compact_summary():
@@ -183,14 +209,20 @@ def test_task_presentation_hides_dot_artifacts_from_cli_and_im_results():
     )
 
     im = presentation.to_markdown(include_local_paths=False)
-    assert "/srv/omni" not in im
-    assert "RAG 系统架构图 (png, 33.8 KB)" in im
+    # Chat is told about the same deliverables as the terminal, and no others:
+    # the DOT source is how the figure was made, not the figure. It is reached
+    # the same way on both surfaces, through ``/task show``.
+    assert (
+        "RAG 系统架构图 (png, 33.8 KB): "
+        "`/srv/omni/artifacts/figure/RAG-系统架构图-10ddda65.png`"
+    ) in im
     assert "RAG 系统架构图 DOT" not in im
     assert "artifact://dot1" not in im
+    assert "77aa88bb.dot" not in im
 
     cli = presentation.to_markdown()
     assert "/srv/omni/artifacts/figure/RAG-系统架构图-10ddda65.png" in cli
-    assert "`artifact://png1`" in cli
+    assert "artifact://png1" not in cli
     assert "RAG-系统架构图-DOT-77aa88bb.dot" not in cli
     assert "artifact://dot1" not in cli
 
@@ -215,8 +247,12 @@ def test_im_markdown_truncation_hint_never_falls_back_to_local_path():
     presentation = replace(presentation, artifacts=[art])
 
     im = presentation.to_markdown(include_local_paths=False)
-    assert "/srv/omni" not in im
-    assert "/task show task-123" in im
+    # The hint is an instruction the reader is meant to follow, so it has to name
+    # something they can act on from where they are sitting. The inventory above
+    # it is a different offer and does quote the path.
+    hint = next(line for line in im.splitlines() if "Preview truncated" in line)
+    assert "/srv/omni" not in hint
+    assert "/task show task-123" in hint
 
     cli = presentation.to_markdown()
     assert "open_artifact /srv/omni/artifacts/report/draft-1a2b3c4d.md" in cli
@@ -250,7 +286,7 @@ def test_im_turn_presentation_hides_internal_plan_summary_and_needs_input_verifi
         task_id="run-123456",
         kind="needs_input",
         plan_summary="计划：needs_input；原因：internal planner diagnostic",
-        verification_status="needs_input",
+        settlement_status="needs_input",
     )
 
     presentation = turn_presentation_from_result(turn, channel="wechat")
@@ -276,7 +312,7 @@ def test_im_turn_presentation_hides_partial_raw_tool_trace():
         kind="partial",
         terminated_reason="max_tool_calls",
         plan_summary="计划：react_fallback；原因：debug",
-        verification_status="salvaged",
+        settlement_status="salvaged",
     )
 
     cli = turn_presentation_from_result(turn)
@@ -637,6 +673,51 @@ async def test_send_presentation_does_not_show_or_upload_dot_only_result(tmp_pat
     assert all("pipeline.dot" not in message for _, message in client.markdown)
 
 
+def test_delivery_hides_support_records_and_caps_primary_attachments() -> None:
+    from omni.channels.outbound import delivery_envelope_from_presentation
+    from omni.runtime.presentation import task_presentation_from_result
+
+    artifacts = [
+        {
+            "title": f"Report {index:02d}",
+            "format": "md",
+            "path": f"/workspace/reports/report-{index:02d}.md",
+        }
+        for index in range(14)
+    ]
+    artifacts.extend(
+        [
+            {
+                "title": "Internal receipt",
+                "format": "json",
+                "path": "/workspace/data/receipt.json",
+                "presentation_role": "support",
+            },
+            {
+                "title": "DOT source",
+                "format": "dot",
+                "path": "/workspace/figures/source.dot",
+            },
+        ]
+    )
+    presentation = task_presentation_from_result(
+        subtask_id="task-output-limit",
+        skill="workflow",
+        status="succeeded",
+        result={"summary": "done", "artifacts": artifacts},
+    )
+
+    envelope = delivery_envelope_from_presentation(presentation)
+
+    assert len(envelope.parts) == 13  # one message plus twelve attachments
+    assert "Report 00" in envelope.parts[0].text
+    assert "Report 11" in envelope.parts[0].text
+    assert "Report 12" not in envelope.parts[0].text
+    assert "2 additional artifact" in envelope.parts[0].text
+    assert "Internal receipt" not in envelope.parts[0].text
+    assert "DOT source" not in envelope.parts[0].text
+
+
 @pytest.mark.asyncio
 async def test_send_delivery_rejects_external_artifact_path_without_leaking_absolute_path(tmp_path):
     from omni.channels.outbound import DeliveryEnvelope, DeliveryPart, send_delivery
@@ -905,6 +986,47 @@ async def test_dingtalk_gateway_client_sends_file_and_image_payloads():
     assert sent[0]["file_name"] == "model.dot"
     assert sent[1]["type"] == "image"
     assert sent[1]["file_name"] == "model.png"
+
+
+@pytest.mark.asyncio
+async def test_dingtalk_without_a_gateway_says_it_cannot_attach_a_file(tmp_path):  # noqa: ANN001
+    """A robot webhook has no media call, and pretending otherwise was worse.
+
+    Without a gateway the client used to post the artifact's absolute path as
+    markdown: the recipient got a directory on the host's disk, and because the
+    post succeeded the delivery was recorded as sent. Failing here lets the shared
+    fallback name the file and mark the delivery degraded, which is what happened.
+    """
+    from omni.channels.outbound import (
+        DeliveryPart,
+        DingTalkClient,
+        OutboundError,
+        _send_delivery_part,
+    )
+
+    path = tmp_path / "Scientific-Figure-e5ce4d69-d921117e.png"
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 200)
+    client = DingTalkClient({"webhook_url": "https://oapi.dingtalk.com/robot/send"})
+    said: list[str] = []
+
+    async def capture(target: str, text: str) -> None:
+        said.append(text)
+
+    client.send_text = capture  # type: ignore[method-assign]
+
+    with pytest.raises(OutboundError, match="base_url"):
+        await client.send_file("conversation-1", str(path))
+
+    result = await _send_delivery_part(
+        client,
+        "conversation-1",
+        DeliveryPart(kind="image", title="Scientific Figure", path=str(path)),
+        allowed_roots=[tmp_path],
+    )
+
+    assert result.status == "degraded"
+    assert path.name in said[0]
+    assert str(tmp_path) not in said[0]
 
 
 @pytest.mark.asyncio
@@ -1203,6 +1325,145 @@ async def test_channel_handle_inbound_returns_turn_presentation(settings):
     assert agent.kwargs["handle_turn"]["drain_tasks"] is False
 
 
+class _ChatChannel(_DummyChannel):
+    """Named as one of the IM channels, which is what shapes a reply."""
+
+    name = "wechat"
+
+
+class _RecallingAgent(_DummyAgent):
+    """Answers a follow-up from context, producing nothing of its own.
+
+    This is task e5ce4d69: everything had been generated on the previous turn, so
+    the model re-reported it and quoted where the figure lives. A turn like this
+    carries no artifacts, which is why its reply used to arrive with no
+    attachment and a server path in the body.
+    """
+
+    def __init__(self, mentioned: str) -> None:
+        super().__init__()
+        self._mentioned = mentioned
+
+    async def handle_turn(self, text, **kwargs):  # noqa: ANN001
+        return TurnResult(
+            text=f"三项材料已在上一轮生成完毕。架构图路径：{self._mentioned}",
+            session_id=kwargs["session_id"],
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_chat_channel_attaches_the_deliverable_its_reply_quotes(settings):  # noqa: ANN001
+    """End to end: the channel looks where it is allowed to upload from."""
+    figure = settings.paths.artifacts_dir / "figure" / "Scientific-Figure-e5ce4d69-d921.png"
+    figure.parent.mkdir(parents=True, exist_ok=True)
+    figure.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 300)
+    settings.paths.channels_dir.mkdir(parents=True, exist_ok=True)
+    (settings.paths.channels_dir / "wechat.toml").write_text(
+        "allowlist_enabled = false\n", encoding="utf-8"
+    )
+    channel = _ChatChannel(settings, _RecallingAgent(str(figure)))  # type: ignore[arg-type]
+
+    presentation = await channel.handle_inbound("那些材料呢？", "chat-1")
+
+    assert [Path(art.path).name for art in presentation.artifacts] == [figure.name]
+    chat = presentation.to_markdown(include_local_paths=False)
+    assert str(figure) not in chat.partition("**Outputs**")[0]
+
+
+@dataclass
+class _StoredArtifact:
+    """One row of the artifact store, as the channel would read it."""
+
+    uri: str
+    title: str
+    kind: str
+    rel_path: str
+    path: Path
+    mime: str = ""
+    size_bytes: int = 0
+
+
+class _ThreadArtifacts:
+    """A store holding two tasks' deliverables under one conversation."""
+
+    def __init__(self, rows: list[_StoredArtifact]) -> None:
+        self.rows = rows
+        self.sessions_asked: list[str] = []
+
+    async def list_by_session(self, session_id: str) -> list[_StoredArtifact]:
+        self.sessions_asked.append(session_id)
+        return list(self.rows)
+
+    async def resolve_path(self, uri: str) -> Path | None:
+        for row in self.rows:
+            if row.uri == uri:
+                return row.path
+        return None
+
+
+class _FigureProducingAgent(_DummyAgent):
+    """Generates one figure, the way task ed444423 did."""
+
+    def __init__(self, figure: Path, artifacts: _ThreadArtifacts) -> None:
+        super().__init__()
+        self._figure = figure
+        self.artifacts = artifacts
+
+    async def handle_turn(self, text, **kwargs):  # noqa: ANN001
+        from omni.runtime.presentation import ArtifactRef
+
+        return TurnResult(
+            text="架构图已生成。",
+            session_id=kwargs["session_id"],
+            artifacts=[
+                ArtifactRef(title="Scientific Figure PNG", format="png", path=str(self._figure))
+            ],
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_chat_reply_does_not_carry_another_tasks_deliverables(settings):  # noqa: ANN001
+    """Incident ed444423, end to end.
+
+    The reply completed its inventory from the conversation, so a turn that
+    generated one figure went out carrying a research report from an unrelated
+    question hours earlier — and uploaded it. Both live in this store under the
+    one session, as they did on the day; the reader is owed what ``/task show``
+    lists for this task, which is the figure.
+    """
+    figure = settings.paths.artifacts_dir / "figure" / "Scientific-Figure-ed444423-8021.png"
+    figure.parent.mkdir(parents=True, exist_ok=True)
+    figure.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 300)
+    stranger = settings.paths.artifacts_dir / "report" / "Research-ideation-809ebddb-8124.md"
+    stranger.parent.mkdir(parents=True, exist_ok=True)
+    stranger.write_text("# 隐空间干预\n", encoding="utf-8")
+    settings.paths.channels_dir.mkdir(parents=True, exist_ok=True)
+    (settings.paths.channels_dir / "wechat.toml").write_text(
+        "allowlist_enabled = false\n", encoding="utf-8"
+    )
+    store = _ThreadArtifacts([
+        _StoredArtifact(
+            uri="artifact://figure/ed444423",
+            title="Scientific Figure PNG",
+            kind="figure",
+            rel_path=str(figure.relative_to(settings.paths.artifacts_dir)),
+            path=figure,
+        ),
+        _StoredArtifact(
+            uri="artifact://report/809ebddb",
+            title="Research ideation report",
+            kind="report",
+            rel_path=str(stranger.relative_to(settings.paths.artifacts_dir)),
+            path=stranger,
+        ),
+    ])
+    channel = _ChatChannel(settings, _FigureProducingAgent(figure, store))  # type: ignore[arg-type]
+
+    presentation = await channel.handle_inbound("现在就执行吧", "chat-1")
+
+    assert [Path(art.path).name for art in presentation.artifacts] == [figure.name]
+
+
 @pytest.mark.asyncio
 async def test_channel_plan_command_creates_approval_mode_turn(settings):
     agent = _DummyAgent()
@@ -1399,15 +1660,58 @@ async def test_channel_verify_session_command_reads_research_store(settings):
     assert "handle_turn" not in agent.kwargs
 
 
-@pytest.mark.asyncio
-async def test_im_channel_requires_pairing_before_agent(settings):
+def _product_im_channels():
+    from omni.channels.dingtalk import DingTalkChannel
     from omni.channels.feishu import FeishuChannel
+    from omni.channels.wechat import WeChatChannel
 
+    return (WeChatChannel, FeishuChannel, DingTalkChannel)
+
+
+async def _deliver_im_text(channel, text: str, key: str):
+    name = channel.name
+    if name == "wechat":
+        return await channel.handle_gateway_message({"text": text, "external_key": key})
+    if name == "feishu":
+        return await channel.handle_feishu_message({"chat_id": key, "text": text})
+    if name == "dingtalk":
+        return await channel.handle_dingtalk_message({"text": text, "conversationId": key})
+    raise AssertionError(f"unexpected IM channel {name}")
+
+
+def test_product_im_adapters_are_the_canonical_im_set() -> None:
+    from omni.channels.security import IM_CHANNELS, canonical_im_channel, is_im_channel
+
+    names = {cls.name for cls in _product_im_channels()}
+    assert names == IM_CHANNELS
+    for name in names:
+        assert is_im_channel(name)
+        assert canonical_im_channel(name) == name
+    assert canonical_im_channel("weixin") == "wechat"
+    assert canonical_im_channel("lark") == "feishu"
+    assert canonical_im_channel("dingding") == "dingtalk"
+    assert not is_im_channel("cli")
+
+
+def test_empty_notify_is_not_refilled_from_an_im_parent() -> None:
+    from omni.channels.security import completion_notify_channel
+
+    assert completion_notify_channel("", "wechat") == ""
+    assert completion_notify_channel("", "weixin") == ""
+    assert completion_notify_channel("feishu", "wechat") == "feishu"
+    assert completion_notify_channel("", "cli") == ""
+    assert completion_notify_channel("", "") == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cls", _product_im_channels(), ids=lambda cls: cls.name)
+async def test_im_channel_requires_pairing_before_agent(settings, cls):
     agent = _DummyAgent()
     fake = _FakeOutbound()
-    channel = FeishuChannel(settings, agent, client=fake)  # type: ignore[arg-type]
+    channel = cls(settings, agent, client=fake)  # type: ignore[arg-type]
+    key = f"chat-{channel.name}"
 
-    presentation = await channel.handle_feishu_message({"chat_id": "chat-feishu", "text": "你好"})
+    presentation = await _deliver_im_text(channel, "你好", key)
 
     assert presentation is not None
     assert "not paired" in presentation.assistant_text
@@ -1416,25 +1720,30 @@ async def test_im_channel_requires_pairing_before_agent(settings):
 
 
 @pytest.mark.asyncio
-async def test_im_channel_pairing_allows_followup(settings):
-    from omni.channels.feishu import FeishuChannel
+@pytest.mark.parametrize("cls", _product_im_channels(), ids=lambda cls: cls.name)
+async def test_im_channel_pairing_allows_followup(settings, cls):
     from omni.channels.security import create_pairing_code
 
-    cfg = settings.paths.channels_dir / "feishu.toml"
+    name = cls.name
+    cfg = settings.paths.channels_dir / f"{name}.toml"
     code = create_pairing_code(cfg)
     agent = _DummyAgent()
     fake = _FakeOutbound()
-    channel = FeishuChannel(settings, agent, client=fake)  # type: ignore[arg-type]
+    channel = cls(settings, agent, client=fake)  # type: ignore[arg-type]
+    key = f"chat-{name}"
 
-    paired = await channel.handle_feishu_message({"chat_id": "chat-feishu", "text": f"/pair {code}"})
+    paired = await _deliver_im_text(channel, f"/pair {code}", key)
     assert paired is not None
     assert "Pairing complete" in paired.assistant_text
     assert "handle_turn" not in agent.kwargs
 
-    presentation = await channel.handle_feishu_message({"chat_id": "chat-feishu", "text": "画图"})
+    presentation = await _deliver_im_text(channel, "画图", key)
     assert presentation is not None
     assert presentation.assistant_text == "通道回答"
     assert agent.kwargs["handle_turn"]["text"] == "画图"
+    assert agent.kwargs["handle_turn"]["channel"] == name
+    assert agent.kwargs["handle_turn"]["drain_tasks"] is False
+    assert agent.kwargs["ensure_session"]["channel"] == name
 
 
 @pytest.mark.asyncio
@@ -1466,7 +1775,14 @@ async def test_feishu_inbound_dedupes_duplicate_message_id(settings):
 
 
 @pytest.mark.asyncio
-async def test_wechat_inbound_dedupes_short_window_without_message_id(settings):
+async def test_wechat_answers_the_same_question_asked_twice(settings):
+    """Without a provider id, a repeat is a request rather than a retransmission.
+
+    This used to hash the message text and drop a match within five minutes,
+    which cannot tell a person asking again from the network delivering once
+    twice — and the person got silence. Deduplication needs an identity the
+    sender assigned; the text is not one.
+    """
     from omni.channels.security import add_allowed_external_key
     from omni.channels.wechat import WeChatChannel
 
@@ -1478,10 +1794,32 @@ async def test_wechat_inbound_dedupes_short_window_without_message_id(settings):
     event = {"external_key": "wx-user-1", "text": "重复触发检查"}
 
     first = await channel.handle_gateway_message(event)
-    duplicate = await channel.handle_gateway_message(dict(event))
+    again = await channel.handle_gateway_message(dict(event))
 
     assert first is not None
-    assert duplicate is None
+    assert again is not None
+    assert len(agent.turns) == 2
+    assert len(fake.sent) == 2
+
+
+@pytest.mark.asyncio
+async def test_wechat_still_ignores_the_same_event_delivered_twice(settings):
+    """The retry the guard exists for: one message, two deliveries, one id."""
+    from omni.channels.security import add_allowed_external_key
+    from omni.channels.wechat import WeChatChannel
+
+    cfg = settings.paths.channels_dir / "wechat.toml"
+    add_allowed_external_key(cfg, "wx-user-1")
+    agent = _DummyAgent()
+    fake = _FakeOutbound()
+    channel = WeChatChannel(settings, agent, client=fake)  # type: ignore[arg-type]
+    event = {"external_key": "wx-user-1", "text": "重复触发检查", "message_id": "wx-msg-1"}
+
+    first = await channel.handle_gateway_message(event)
+    redelivered = await channel.handle_gateway_message(dict(event))
+
+    assert first is not None
+    assert redelivered is None
     assert len(agent.turns) == 1
     assert len(fake.sent) == 1
 
@@ -1997,10 +2335,18 @@ async def test_im_channels_send_turn_and_task_notifications(settings):
         assert fake.sent[0][0] == f"chat-{name}"
         assert "Transformer 架构图完成" in fake.sent[0][1]
         assert any("Transformer PNG" in message for _, message in fake.sent)
-        # IM messages never leak server-side absolute paths; artifacts are
-        # listed by name and delivered as uploads (or a path-free fallback).
-        assert all("/tmp/transformer.png" not in message for _, message in fake.sent)
-        assert "run-dot" in fake.sent[0][1]
+        # An artifact is named and located on the one line that announces it.
+        # The path never runs through the prose above, where a phone cannot use
+        # it and the upload beside the message is what the reader acts on.
+        assert all(
+            "/tmp/transformer.png" not in message.partition("**Artifacts**")[0]
+            for _, message in fake.sent
+        )
+        assert any("`/tmp/transformer.png`" in message for _, message in fake.sent)
+        # Ledger ids are for a reader who can look them up. In a thread they are
+        # a heading of record keys sitting under the deliverable that was asked
+        # for; the terminal still prints them.
+        assert all("run-dot" not in message for _, message in fake.sent)
         assert fake.sent[1][0] == f"chat-{name}"
 
 

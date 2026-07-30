@@ -83,6 +83,41 @@ def test_untrusted_skips_project_config_layer(tmp_path):
     assert untrusted.display.ui_mode != "tui"      # skipped when untrusted
 
 
+def test_trusted_load_uses_codex_auto_preset():
+    settings = load_settings(trusted=True)
+    assert settings.security.approval_policy == "on-request"
+    assert settings.security.bash_sandbox == "workspace-write"
+
+
+def test_untrusted_load_forces_readonly_on_request():
+    settings = load_settings(trusted=False)
+    assert settings.security.approval_policy == "on-request"
+    assert settings.security.bash_sandbox == "readonly"
+
+
+def test_library_load_keeps_conservative_factory_defaults():
+    settings = load_settings()
+    assert settings.security.approval_policy == "untrusted"
+    assert settings.security.bash_sandbox == "workspace-write"
+
+
+def test_explicit_untrusted_policy_survives_trusted_preset():
+    settings = load_settings(
+        trusted=True,
+        overrides={"security": {"approval_policy": "untrusted"}},
+    )
+    assert settings.security.approval_policy == "untrusted"
+    assert settings.security.bash_sandbox == "workspace-write"
+
+
+def test_untrusted_overrides_user_workspace_write():
+    settings = load_settings(
+        trusted=False,
+        overrides={"security": {"bash_sandbox": "full"}},
+    )
+    assert settings.security.bash_sandbox == "readonly"
+
+
 def test_mirror_switch_requires_trust(tmp_path):
     repo = _repo(tmp_path)
     assert load_settings(cwd=repo, trusted=True).artifacts.mirror_outputs is True

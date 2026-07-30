@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+from omni.core.execution_budget import ToolExecutionBudget
 from omni.core.llm.client import ChatWithToolsResult, LLMClient, ToolCall
 from omni.core.react_agent import ReActLoopAgent, ToolSpec
 from tests.conftest import ScriptedLLM
@@ -61,15 +62,108 @@ async def test_batch_respects_tool_budget_split():
     # A 3-call batch with a budget of 2: dispatch 2, then trip max_tool_calls.
     agent = ReActLoopAgent(
         _three_call_llm(), _slow_invoker,
-        max_iterations=4, max_tool_calls=2, no_progress_synthesis=False,
+        max_iterations=4, max_tool_calls=2,
     )
     res = await agent.run(system_prompt="s", user_message="u", tools=[SLEEP])
-    assert res.terminated_reason == "max_tool_calls"
+    assert res.terminated_reason == "synthesized_max_tool_calls"
     # Only actually executed calls count as tool calls. The rejected call stays
     # in the auditable trace and receives a protocol-closing result.
     assert res.total_tool_calls == 2
     assert [r.arguments["i"] for r in res.tool_trace if r.status != "rejected"] == ["0", "1"]
     assert [r.arguments["i"] for r in res.tool_trace if r.status == "rejected"] == ["2"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_call_in_batch_cannot_take_a_valid_calls_budget_slot() -> None:
+    llm = ScriptedLLM(
+        [
+            ChatWithToolsResult(
+                tool_calls=[
+                    ToolCall("bad", "run_shell", {}),
+                    ToolCall("good", "sleep", {"i": "1"}),
+                ]
+            ),
+            ChatWithToolsResult(content="done"),
+        ]
+    )
+    events: list[tuple[str, dict]] = []
+    shared_budget = ToolExecutionBudget(1)
+    agent = ReActLoopAgent(
+        llm,
+        _slow_invoker,
+        max_iterations=4,
+        max_tool_calls=1,
+        shared_tool_budget=shared_budget,
+    )
+
+    result = await agent.run(
+        system_prompt="s",
+        user_message="u",
+        tools=[SLEEP],
+        on_tool_event=lambda phase, data: events.append((phase, data)),
+    )
+
+    assert result.content == "done"
+    assert result.total_tool_calls == 1
+    assert result.tool_budget == {
+        "limit": 1,
+        "requested": 1,
+        "admitted": 1,
+        "completed": 1,
+        "rejected": 0,
+        "remaining": 0,
+        "exhausted": True,
+        "enforced": True,
+    }
+    assert shared_budget.snapshot() == result.tool_budget
+    assert [(record.name, record.status) for record in result.tool_trace] == [
+        ("run_shell", "rejected"),
+        ("sleep", "succeeded"),
+    ]
+    assert [data["name"] for phase, data in events if phase == "start"] == ["sleep"]
+    assert [data["name"] for phase, data in events if phase == "done"] == [
+        "run_shell",
+        "sleep",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_malformed_calls_cannot_poison_a_valid_call_in_the_same_batch() -> None:
+    malformed = [
+        ToolCall(
+            f"bad-{index}",
+            "sleep",
+            {},
+            arguments_error="invalid JSON",
+            raw_arguments="{",
+        )
+        for index in range(5)
+    ]
+    llm = ScriptedLLM(
+        [
+            ChatWithToolsResult(
+                tool_calls=[*malformed, ToolCall("good", "sleep", {"i": "ok"})]
+            ),
+            ChatWithToolsResult(content="done"),
+        ]
+    )
+    invoked: list[dict] = []
+
+    async def invoke(_name: str, arguments: dict) -> dict:
+        invoked.append(arguments)
+        return arguments
+
+    agent = ReActLoopAgent(llm, invoke, max_iterations=4, max_tool_calls=1)
+    result = await agent.run(system_prompt="s", user_message="u", tools=[SLEEP])
+
+    assert result.content == "done"
+    assert result.terminated_reason == "done"
+    assert invoked == [{"i": "ok"}]
+    assert result.total_tool_calls == 1
+    assert [record.error_code for record in result.tool_trace[:-1]] == [
+        "tool_arguments_invalid"
+    ] * 5
+    assert result.tool_trace[-1].status == "succeeded"
 
 
 class _BudgetBoundaryLLM(LLMClient):
@@ -93,6 +187,31 @@ class _BudgetBoundaryLLM(LLMClient):
 
     async def chat(self, system, user, **kwargs):  # noqa: ANN001
         return self.final
+
+
+@pytest.mark.asyncio
+async def test_over_budget_batch_announces_the_limit_once():
+    # A 3-call batch under a budget of 2: the whole over-budget batch is announced
+    # exactly once via a single ``budget`` event (not once per refused call).
+    # Per-call ``done`` events for the refused calls are still emitted so durable
+    # recorders can persist them; collapsing them into one line is the display's
+    # job (see test_live_display) — this test guards the single batch-level signal.
+    llm = _BudgetBoundaryLLM()
+    events: list[tuple[str, dict]] = []
+
+    async def on_event(phase: str, data: dict) -> None:
+        events.append((phase, data))
+
+    agent = ReActLoopAgent(llm, _slow_invoker, max_iterations=4, max_tool_calls=2)
+    res = await agent.run(
+        system_prompt="s", user_message="u", tools=[SLEEP], on_tool_event=on_event
+    )
+
+    budget_events = [data for phase, data in events if phase == "budget"]
+    assert len(budget_events) == 1
+    # The refused call stays auditable in the trace and budget snapshot.
+    assert res.tool_budget["rejected"] == 1
+    assert [r.status for r in res.tool_trace].count("rejected") == 1
 
 
 @pytest.mark.asyncio
@@ -123,10 +242,12 @@ async def test_hard_budget_rejection_closes_every_tool_call_before_synthesis():
         "limit": 2,
         "requested": 3,
         "admitted": 2,
-        "completed": 2,
-        "rejected": 1,
-        "exhausted": True,
-    }
+            "completed": 2,
+            "rejected": 1,
+            "remaining": 0,
+            "exhausted": True,
+            "enforced": True,
+        }
 
 
 @pytest.mark.asyncio

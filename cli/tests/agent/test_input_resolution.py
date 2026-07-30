@@ -9,7 +9,6 @@ here so these tests never touch arXiv.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import pytest
@@ -22,34 +21,14 @@ from omni.agent.input_resolution import (
     resolve_identifier_fields,
 )
 from omni.agent.intent_plan import IntentPlan, IntentType
-from omni.agent.model_planner import ModelIntentPlanner
 from omni.agent.plan_validator import PlanValidator
-from omni.agent.planner import IntentPlanner
 from omni.agent.resolver_evidence import (
     materialize_resolver_evidence,
     validate_resolver_evidence,
 )
 from omni.config import load_settings
-from omni.core.llm.client import LLMClient
 from omni.skills_runtime.manifest import DeliveryMode, SkillEntry, SkillKind
 from omni.skills_runtime.registry import SkillRegistry
-
-
-class _ScriptedLLM(LLMClient):
-    """Single-pass planner double: returns one scripted proposal, no binder call."""
-
-    def __init__(self, plan: dict) -> None:
-        self.model = "scripted"
-        self._plan = plan
-
-    async def chat(self, system: str, user: str, **kwargs: Any) -> str:
-        return json.dumps(self._plan, ensure_ascii=False)
-
-    async def chat_with_tools(self, messages, tools, **kwargs: Any):  # noqa: ANN001, ANN201 # pragma: no cover
-        raise AssertionError("scripted planning uses chat only")
-
-    async def embed(self, texts: list[str]) -> list[list[float]]:  # pragma: no cover
-        return [[0.0] for _ in texts]
 
 
 def _registry() -> SkillRegistry:
@@ -102,27 +81,43 @@ def _path_skill() -> SkillEntry:
     )
 
 
-async def _title_only_paper_plan(registry: SkillRegistry, goal: str):
-    """Build a real workflow plan whose ``paper.fetch.arxiv`` step lacks an id.
+def _title_only_paper_plan(registry: SkillRegistry, goal: str) -> IntentPlan:
+    """A workflow plan whose ``paper.fetch.arxiv`` step lacks an id.
 
-    The planner strips the ``<user_provided>`` placeholder, so validation raises a
-    genuine ``step_input_contract`` gap on ``identifier`` — the exact input the
-    in-lane resolver is meant to bind.
+    Validation raises a genuine ``step_input_contract`` gap on ``identifier`` —
+    the exact input the in-lane resolver is meant to bind.
+
+    The step list is written here rather than round-tripped through the planner:
+    multi-step work is now sequenced by the model, so nothing compiles a DAG at
+    planning time any more. The resolver's own contract is unchanged — it binds
+    identifier fields on the steps it is handed — so these units hand it the
+    same steps a model would submit. (That the planner strips ``<user_provided>``
+    placeholders out of a proposal is covered in ``test_ask_last_planning``.)
     """
-    plan = {
-        "intent_type": "workflow",
-        "confidence": 0.85,
-        "workflow_steps": [
-            {"id": "paper", "capability": "paper.fetch.arxiv", "input": {"identifier": "<user_provided>"}},
-            {"id": "figure", "capability": "artifact.figure", "depends_on": ["paper"], "input": {}},
+    return IntentPlan(
+        task_id="run-resolve",
+        user_message=goal,
+        intent_type=IntentType.WORKFLOW,
+        confidence=0.85,
+        outputs=["artifact"],
+        workflow_steps=[
+            {
+                "id": "paper",
+                "capability": "paper.fetch.arxiv",
+                "skill_name": "arxiv-fetch",
+                "input": {},
+                "depends_on": [],
+            },
+            {
+                "id": "figure",
+                "capability": "artifact.figure",
+                "skill_name": "scientific-figure",
+                "input": {},
+                "depends_on": ["paper"],
+            },
         ],
-        "outputs": ["artifact"],
-        "missing_inputs": [{"field": "identifier", "reason": "title-only paper needs a concrete arXiv id"}],
-        "rationale": "title-only paper plus figure",
-    }
-    proposal = await ModelIntentPlanner(_ScriptedLLM(plan), registry).propose(goal)
-    assert proposal is not None
-    return IntentPlanner(registry).plan_from_proposal(goal, proposal, task_id="run-resolve")
+        rationale="title-only paper plus figure",
+    )
 
 
 def _id_contract_findings(validation) -> list:  # noqa: ANN001
@@ -183,7 +178,7 @@ def test_is_identifier_field_false_for_doi_and_unknown():
 async def test_strong_match_binds_the_id_and_clears_the_gap():
     registry = _registry()
     goal = "获取 Attention Is All You Need 摘要"
-    plan = await _title_only_paper_plan(registry, goal)
+    plan = _title_only_paper_plan(registry, goal)
     assert _id_contract_findings(PlanValidator(registry).validate(plan))
 
     seen: list[tuple[str, str]] = []
@@ -211,7 +206,7 @@ async def test_strong_match_binds_the_id_and_clears_the_gap():
 @pytest.mark.asyncio
 async def test_weak_match_binds_nothing_so_recovery_can_take_over():
     registry = _registry()
-    plan = await _title_only_paper_plan(registry, "获取 Attention Is All You Need 摘要")
+    plan = _title_only_paper_plan(registry, "获取 Attention Is All You Need 摘要")
 
     async def searcher(field_format: str, query: str) -> list[tuple[str, str]]:
         # A returned hit whose title barely overlaps must never pin an id.
@@ -245,28 +240,19 @@ def test_vague_single_token_and_ambiguous_top_hits_never_ground_identity() -> No
 
 
 @pytest.mark.asyncio
-async def test_valid_but_wrong_bound_id_is_replaced_from_independent_title_evidence():
+async def test_valid_bound_id_is_trusted_at_plan_time_not_re_searched():
+    # Layer 2: a syntactically valid, already-bound id is trusted at plan time —
+    # never re-searched or silently swapped. The old plan-time title search over
+    # bound ids was the regression that dead-ended good ids (arXiv search is slow
+    # and imprecise). A valid-but-wrong id is instead *surfaced* at execution by
+    # verify-by-fetch (``fetched_identifier_title_warning``), not rewritten here.
     registry = _registry()
-    plan = await _title_only_paper_plan(
+    plan = _title_only_paper_plan(
         registry,
         "获取 Attention Is All You Need 摘要",
     )
     paper = next(step for step in plan.workflow_steps if step["id"] == "paper")
     paper["input"] = {"identifier": "2401.00001"}
-    plan.requested_constraints = [
-        {
-            "constraint_id": "paper-id",
-            "semantic_key": "paper_id",
-            "requested_value": "2401.00001",
-            "source": "model",
-            "evidence": "Attention Is All You Need",
-            "explicit": True,
-            "critical": True,
-            "step_id": "paper",
-            "owner": "model",
-            "evidence_verified": True,
-        }
-    ]
     validation = PlanValidator(registry).validate(plan)
     seen: list[tuple[str, str]] = []
 
@@ -274,22 +260,25 @@ async def test_valid_but_wrong_bound_id_is_replaced_from_independent_title_evide
         seen.append((field_format, query))
         return [("1706.03762", "Attention Is All You Need")]
 
-    corrected, revalidated, records = await resolve_identifier_fields(
+    resolved, revalidated, records = await resolve_identifier_fields(
         plan,
         validation,
         registry=registry,
         searcher=searcher,
     )
 
-    assert seen == [("arxiv_id", "Attention Is All You Need")]
-    assert corrected.workflow_steps[0]["input"]["identifier"] == "1706.03762"
-    assert records[0].via == "arxiv_id.verify"
+    # No plan-time search, no rebind: the bound id is kept exactly as given.
+    assert seen == []
+    assert records == []
+    assert resolved.workflow_steps[0]["input"]["identifier"] == "2401.00001"
+    # The valid id is admitted as a locally-provable fact (syntactic), so it does
+    # not block the plan and needs no grounded evidence.
     assert not _id_contract_findings(revalidated)
-    evidence = materialize_resolver_evidence(corrected, registry)
-    assert evidence[0].value == "1706.03762"
-    assert evidence[0].verification_mode == "grounded_search"
+    evidence = materialize_resolver_evidence(resolved, registry)
+    assert evidence[0].value == "2401.00001"
+    assert evidence[0].verification_mode == "syntactic"
     assert evidence[0].verified is True
-    assert validate_resolver_evidence(corrected, registry) == []
+    assert validate_resolver_evidence(resolved, registry) == []
 
 
 def test_explicit_arxiv_and_doi_literals_are_verified_without_search() -> None:
@@ -336,7 +325,7 @@ def test_explicit_arxiv_and_doi_literals_are_verified_without_search() -> None:
 @pytest.mark.asyncio
 async def test_explicit_user_identifier_is_never_rewritten_by_title_search() -> None:
     registry = _registry()
-    plan = await _title_only_paper_plan(
+    plan = _title_only_paper_plan(
         registry,
         "Fetch Attention Is All You Need as arXiv 1706.03762.",
     )
@@ -368,7 +357,11 @@ async def test_explicit_user_identifier_is_never_rewritten_by_title_search() -> 
     assert exact["verification_mode"] == "user_exact"
 
 
-def test_title_derived_doi_requires_identity_grounding() -> None:
+def test_free_text_identifier_requires_identity_grounding() -> None:
+    # A non-canonical value (a free-text title in an identifier field) is not
+    # locally provable, so the fact gate still requires grounding and fails
+    # closed. A *canonical* DOI, by contrast, is admitted syntactically without a
+    # plan-time network gate (covered in ``test_resolver_evidence``).
     registry = _registry()
     registry.register(_doi_skill())
     plan = IntentPlan(
@@ -381,7 +374,7 @@ def test_title_derived_doi_requires_identity_grounding() -> None:
                 "id": "paper",
                 "capability": "doc.fetch.doi",
                 "skill_name": "doi-fetch",
-                "input": {"identifier": "10.1000/xyz123"},
+                "input": {"identifier": "A Grounded Research Result"},
             }
         ],
     )
@@ -424,10 +417,81 @@ def test_existing_local_path_uses_local_exists_verification(tmp_path) -> None:  
     assert validate_resolver_evidence(plan, registry) == []
 
 
+# ── fetched_identifier_title_warning: execution-time verify-by-fetch (Layer 2) ──
+
+
+def _arxiv_step() -> dict:
+    return {
+        "id": "paper",
+        "capability": "paper.fetch.arxiv",
+        "input": {"identifier": "2401.00001"},
+    }
+
+
+def test_verify_by_fetch_flags_a_title_that_does_not_match_the_request():
+    # The bound id resolved to a *different* paper: the fetched title shares no
+    # information tokens with the requested entity, so an advisory is returned.
+    goal = "获取 Attention Is All You Need 摘要，并生成 RAG 架构图。"
+    result = {
+        "status": "ok",
+        "arxiv_id": "2401.00001",
+        "title": "A Completely Different Survey On Something Else",
+    }
+    warning = input_resolution.fetched_identifier_title_warning(
+        _arxiv_step(), goal, result
+    )
+    assert warning is not None
+    assert "Attention Is All You Need" in warning
+
+
+def test_verify_by_fetch_is_quiet_when_the_fetched_title_matches():
+    goal = "获取 Attention Is All You Need 摘要，并生成 RAG 架构图。"
+    step = {
+        "id": "paper",
+        "capability": "paper.fetch.arxiv",
+        "input": {"identifier": "1706.03762"},
+    }
+    result = {
+        "status": "ok",
+        "arxiv_id": "1706.03762",
+        "title": "Attention Is All You Need",
+    }
+    assert (
+        input_resolution.fetched_identifier_title_warning(step, goal, result) is None
+    )
+
+
+def test_verify_by_fetch_is_quiet_when_the_request_only_named_an_id():
+    # No independent title to cross-check (the goal names the id, not a title).
+    step = {
+        "id": "paper",
+        "capability": "paper.fetch.arxiv",
+        "input": {"identifier": "1706.03762"},
+    }
+    goal = "fetch arXiv 1706.03762"
+    result = {
+        "status": "ok",
+        "arxiv_id": "1706.03762",
+        "title": "Attention Is All You Need",
+    }
+    assert (
+        input_resolution.fetched_identifier_title_warning(step, goal, result) is None
+    )
+
+
+def test_verify_by_fetch_is_quiet_on_a_non_ok_result():
+    goal = "获取 Attention Is All You Need 摘要"
+    result = {"status": "not_found", "arxiv_id": "2401.00001"}
+    assert (
+        input_resolution.fetched_identifier_title_warning(_arxiv_step(), goal, result)
+        is None
+    )
+
+
 @pytest.mark.asyncio
 async def test_searcher_failure_is_swallowed_and_binds_nothing():
     registry = _registry()
-    plan = await _title_only_paper_plan(registry, "获取 Attention Is All You Need 摘要")
+    plan = _title_only_paper_plan(registry, "获取 Attention Is All You Need 摘要")
 
     async def searcher(field_format: str, query: str) -> list[tuple[str, str]]:
         raise ConnectionError("offline")
@@ -452,7 +516,7 @@ class _RecordingTasks:
 @pytest.mark.asyncio
 async def test_apply_narrates_each_bind_as_an_input_resolved_event():
     registry = _registry()
-    plan = await _title_only_paper_plan(registry, "获取 Attention Is All You Need 摘要")
+    plan = _title_only_paper_plan(registry, "获取 Attention Is All You Need 摘要")
     tasks = _RecordingTasks()
     forwarded: list[dict] = []
 
@@ -486,7 +550,7 @@ async def test_apply_narrates_each_bind_as_an_input_resolved_event():
 @pytest.mark.asyncio
 async def test_apply_is_a_noop_offline_when_no_searcher_is_injected():
     registry = _registry()
-    plan = await _title_only_paper_plan(registry, "获取 Attention Is All You Need 摘要")
+    plan = _title_only_paper_plan(registry, "获取 Attention Is All You Need 摘要")
     tasks = _RecordingTasks()
     validation = PlanValidator(registry).validate(plan)
 

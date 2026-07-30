@@ -1,10 +1,23 @@
 # 设计稿 04：SoulAgent
 
+## 目录
+
+- [定位](#定位)
+- [Skill 层与 Core 层](#skill-层与-core-层)
+- [① 感知：从对话推断当前科学任务](#-感知从对话推断当前科学任务)
+- [② 裁剪：扩散激活 → KG 子图](#-裁剪扩散激活--kg-子图)
+- [③ 解码：KG 子图 → 人格 prose](#-解码kg-子图--人格-prose)
+- [④ 覆写与恢复](#-覆写与恢复)
+- [失败安全](#失败安全)
+- [目录结构](#目录结构)
+
 ## 定位
 
 SoulAgent 是一个 **Skill**——它被主 Coding Agent 安装、启用、触发、关闭。Skill 内部封装了一个 Core，执行四步逻辑。
 
-Skill 不内置任何科学家人格。KG 文件是外部输入，放在当前项目的 `scientist-kg/` 目录下。
+Skill 不内置任何科学家人格。KG 文件是外部输入：优先使用当前项目已有的
+`scientist-kg/` 兼容目录，否则使用 `~/.omni/scientist-kg/`；显式 `kg_root`
+可覆盖默认值。扫描和下载必须使用同一个目录。
 
 ---
 
@@ -46,6 +59,49 @@ Skill 不内置任何科学家人格。KG 文件是外部输入，放在当前�
   → 触发 SoulAgent，装载 scientist-kg/kaiming-he/ 目录下的 KG
   → 之后每轮科学任务自动刷新人格
 ```
+
+### 显式点名的三级回退
+
+只有用户显式说出具体科学家姓名、ID 或别名时，SoulAgent 才允许联网：
+
+```text
+本地扫描目录精确解析
+  → 未命中：查询公开 Gitee registry.json
+  → 远端命中：下载到临时同盘目录
+  → 校验注册表 manifest SHA-256、逐文件 SHA-256、KG 结构与路径边界
+  → 原子改名到当前扫描目录，再进入任务感知
+  → 远端明确未命中：终止当前轮，询问是否调用 scientist-kg-distiller
+```
+
+“有哪些人格”“换一个人格”等未指定具体姓名的请求不能访问远端。远端网络失败、
+HTTP 错误或注册表格式错误也不能解释为“远端没有”；此时返回
+`remote_lookup_failed`，不自动进入蒸馏。
+
+远端明确未命中或匹配包不可用时，返回 `status=needs_input`，并设置：
+
+```json
+{
+  "offer_distillation": true,
+  "distiller_skill": "scientist-kg-distiller",
+  "host_must_not_fabricate": true,
+  "action_required": {
+    "kind": "configure",
+    "action": "confirm_scientist_distillation",
+    "skill": "scientist-kg-distiller",
+    "requested_scientist": "<name-or-id>",
+    "distiller_input": {
+      "scientist": "<name-or-id>",
+      "project_root": "<project-root>",
+      "install_root": "<exact-active-scanner-root>"
+    }
+  }
+}
+```
+
+`kind=configure` 是宿主终止边界。宿主必须把询问交给用户并暂停，绝不能自行编写
+人格、临时提示词或假装已装载该科学家。用户明确同意后，才可调用专用蒸馏器。
+蒸馏器必须使用返回的 `distiller_input.install_root`，把校验后的 canonical `kg/`
+原子安装成 `<install_root>/<scientist_id>/`，不能另存到一个 SoulAgent 不扫描的缓存目录。
 
 **切换科学家**——用户有切换意图时，主 Agent 确认：
 
@@ -100,6 +156,12 @@ Skill 不内置任何科学家人格。KG 文件是外部输入，放在当前�
 **constraints 推断**——从对话中捕捉：
 - `compute_constraint`：用户提到"资源有限""GPU 不够""跑不了太多实验"则为 true
 - `time_pressure`：用户提到"赶 deadline""快速""紧急"则为 true
+
+**多轮上下文继承**——任务感知器先判断最新一轮，Core 再与已提交的
+TaskFrame 合并。出现“继续刚才”“同一个实验”或 `same experiment` 等明确
+连续信号，而且 phase 未变化时，沿用稳定 objective；省略的资源与时间约束
+沿用上一轮，只有用户明确收紧或解除时才改变。若一轮只更新约束而感知器返回
+`general`，则沿用上一轮科学 phase。用户明确切换 phase 时始终以新 phase 为准。
 
 ### 触发条件
 
@@ -179,8 +241,8 @@ SoulAgent 正在覆写
 }
 ```
 
-`tone_exemplars` 只控制解码措辞的节奏、句长和谦逊或攻击程度，不作为事实、
-立场或图关系参与裁剪。
+`tone_exemplars` 不作为事实、立场或图关系参与裁剪，也不交给 LLM 解码；
+Core 在 LLM 返回后将其逐字注入最终人格，供 Host 作为语气 few-shot 使用。
 
 ---
 
@@ -201,12 +263,13 @@ SoulAgent 正在覆写
 3. 每条指导必须能从子图中的 L2 找到出处。
 4. 以当前任务为语境——针对用户此刻正在做的具体科学任务来说明该怎么做。
 5. 写中文。自然、可读。
-
-**语气**：用下述原句的语气节奏来写。模仿句长、用词偏好、攻击性/谦逊程度：
-{P04 语气：逐条列出原句}
+6. P01-P03 与 P04 均由程序在 LLM 返回后逐字注入；LLM 不接收、不概括、
+   不改写也不重新生成这些 L3 内容。
 
 输出结构：
 ## 当前人格：{科学家姓名}
+### 表达语气
+{由程序逐字注入 P04 的 3-5 条原句}
 ### 核心原则
 {P01-P03 完整，不压缩}
 ### 当前任务中的思考方式
@@ -311,6 +374,9 @@ SoulAgent 覆写时：
 | 情况 | 行为 |
 |------|------|
 | KG 不存在或格式错误 | 终止，不注入 |
+| 显式点名但本地不存在 | 查询可信远端注册表 |
+| 本地与远端都不存在 | 询问是否调用蒸馏器，并终止宿主当前轮 |
+| 远端不可达或注册表无效 | 返回 `remote_lookup_failed`，不声称远端缺失 |
 | 对话不属于科学任务 | 退出，不操作 |
 | phase 无法判断 | fallback 为 `general` |
 | 解码 LLM 调用失败 | 终止，记日志 |

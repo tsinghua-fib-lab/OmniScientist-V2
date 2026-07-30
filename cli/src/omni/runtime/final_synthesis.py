@@ -15,14 +15,16 @@ deliverable.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 from dataclasses import dataclass, field
 from enum import StrEnum
 from importlib import resources
+from pathlib import Path
 from typing import Any
 
-from omni.runtime.deliverable_assessment import make_provider_binding_id
+from omni.core.llm.client import chat_result
+from omni.core.termination import mark_truncated_output
+from omni.runtime.task_title import manuscript_basename, short_task_title
 
 
 class EvidencePolicy(StrEnum):
@@ -238,62 +240,19 @@ NATIVE_SYNTHESIS_OUTPUT_SCHEMA: dict[str, Any] = {
         "deliverable_assessment": {
             "type": "object",
             "required": [
-                "schema",
                 "deliverable_id",
-                "provider_binding_id",
                 "provider",
-                "contract_hash",
-                "step_id",
-                "feedback",
                 "status",
-                "retryable",
-                "effective_inputs",
-                "criteria",
+                "summary",
             ],
             "properties": {
-                "schema": {
-                    "const": "omni.deliverable-assessment/v1",
-                },
                 "deliverable_id": {"type": "string", "minLength": 1},
-                "provider_binding_id": {"type": "string", "minLength": 1},
                 "provider": {"const": "synthesis.final"},
-                "contract_hash": {"type": "string", "minLength": 1},
-                "step_id": {"type": "string", "minLength": 1},
-                "feedback": {"type": "string", "minLength": 1},
-                "status": {
-                    "enum": ["passed", "degraded", "failed", "unknown"],
-                },
+                "status": {"enum": ["passed", "degraded", "failed", "unknown"]},
+                "summary": {"type": "string", "minLength": 1},
                 "retryable": {"type": "boolean"},
                 "effective_inputs": {"type": "object"},
-                "criteria": {
-                    "type": "array",
-                    "minItems": 1,
-                    "items": {
-                        "type": "object",
-                        "required": ["criterion_id", "status"],
-                        "properties": {
-                            "criterion_id": {"type": "string", "minLength": 1},
-                            "status": {
-                                "enum": [
-                                    "passed",
-                                    "degraded",
-                                    "failed",
-                                    "unknown",
-                                ]
-                            },
-                            "summary": {"type": "string"},
-                            "evidence_refs": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                            },
-                        },
-                    },
-                },
-                "evidence_refs": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                },
-                "summary": {"type": "string"},
+                "evidence_refs": {"type": "array", "items": {"type": "string"}},
             },
         },
         "synthesis_error": {"type": "string"},
@@ -303,18 +262,6 @@ NATIVE_SYNTHESIS_OUTPUT_SCHEMA: dict[str, Any] = {
     },
     "additionalProperties": True,
 }
-
-NATIVE_SYNTHESIS_QUALITY_CONTRACT: dict[str, Any] = {
-    "checks": ["draft_content_present"],
-    "assessment_required": True,
-    "assessment_schema": "omni.deliverable-assessment/v1",
-    "retry": {
-        "max_attempts": 1,
-        "provider_replay_safe_required": True,
-        "side_effect_policy": "idempotency_key_required",
-    },
-}
-
 
 async def run_native_synthesis(
     goal: str,
@@ -413,24 +360,6 @@ def _draft_deliverable_assessment(
     ]
     evidence_refs = [item for item in evidence_refs if item]
     step_input = step.get("input") if isinstance(step.get("input"), dict) else {}
-    step_id = str(step.get("id") or deliverable_id)
-    contract_hash = str(step.get("provider_contract_hash") or "")
-    if not contract_hash:
-        contract_hash = hashlib.sha256(
-            json.dumps(
-                {
-                    "name": "synthesis.final",
-                    "source": "native",
-                    "version": "1",
-                    "input_schema": NATIVE_SYNTHESIS_INPUT_SCHEMA,
-                    "output_schema": NATIVE_SYNTHESIS_OUTPUT_SCHEMA,
-                    "quality_contract": NATIVE_SYNTHESIS_QUALITY_CONTRACT,
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
-        ).hexdigest()
     effective_inputs = {
         "deliverable": str(result.get("deliverable") or ""),
         "topic": str(result.get("topic") or ""),
@@ -440,35 +369,15 @@ def _draft_deliverable_assessment(
         "synthesis_mode": synthesis_mode,
     }
     return {
-        "schema": "omni.deliverable-assessment/v1",
         "deliverable_id": deliverable_id,
-        "provider_binding_id": str(
-            step.get("provider_binding_id")
-            or make_provider_binding_id(
-                provider_type="native_executor",
-                provider_name="synthesis.final",
-                deliverable_id=deliverable_id,
-            )
-        ),
         "provider": "synthesis.final",
-        "contract_hash": contract_hash,
-        "step_id": step_id,
-        "feedback": summary,
         "status": status,
+        "summary": summary,
         # A model error/stub can improve on a subsequent stochastic attempt.
         # Offline template fallback without a failed model rung cannot.
         "retryable": bool(result.get("synthesis_error")),
         "effective_inputs": effective_inputs,
-        "criteria": [
-            {
-                "criterion_id": "draft_content_present",
-                "status": status,
-                "summary": summary,
-                "evidence_refs": evidence_refs,
-            }
-        ],
         "evidence_refs": evidence_refs,
-        "summary": summary,
     }
 
 
@@ -506,20 +415,26 @@ async def _llm_draft(
         "Write the full deliverable now."
     )
     try:
-        text = await asyncio.wait_for(
-            llm.chat(SYNTHESIS_SYSTEM_PROMPT, user, temperature=0.3),
+        answer = await asyncio.wait_for(
+            chat_result(llm, SYNTHESIS_SYSTEM_PROMPT, user, temperature=0.3),
             timeout=_LLM_DRAFT_TIMEOUT_S,
         )
     except TimeoutError:
         return "", f"model draft timed out after {_LLM_DRAFT_TIMEOUT_S:.0f}s"
     except Exception as exc:  # noqa: BLE001 - any model failure falls to the template rung
         return "", f"{type(exc).__name__}: {exc}"[:300]
-    text = (text or "").strip()
+    text = (answer.content or "").strip()
     if len(text) < _MIN_LLM_DRAFT_CHARS:
         return "", (
             f"model draft too short ({len(text)} chars < {_MIN_LLM_DRAFT_CHARS}); "
             "treated as a stub"
         )
+    # A deliverable long enough to hit the cap is worth far more than the
+    # template rung that rejecting it would fall back to, so it is kept — but it
+    # is about to be written to an artifact and read later as finished work, and
+    # by then nothing else remembers that it stops mid-section.
+    if answer.truncated_by_output_cap:
+        return mark_truncated_output(text), ""
     return text, ""
 
 
@@ -591,10 +506,72 @@ async def _store_draft_artifact(
     if not text.strip():
         return None
     topic = str(result.get("topic") or "Research draft")
-    title = f"{topic} Draft"
+    title = short_task_title(topic)
+    meta = {
+        "deliverable": str(result.get("deliverable") or ""),
+        "synthesis_mode": str(result.get("synthesis_mode") or ""),
+    }
+    stored = await _write_short_manuscript(
+        artifacts,
+        text.encode("utf-8"),
+        title=title,
+        session_id=session_id,
+        task_id=task_id,
+        subtask_id=subtask_id,
+        workflow_run_id=workflow_run_id,
+        meta=meta,
+    )
+    if stored is None:
+        return None
+    return {
+        "title": title,
+        "format": "md",
+        "uri": str(getattr(stored, "uri", "") or ""),
+        "path": str(getattr(stored, "path", "") or ""),
+        "mime": str(getattr(stored, "mime", "") or "text/markdown"),
+        "size_bytes": str(getattr(stored, "size_bytes", "") or ""),
+    }
+
+
+async def _write_short_manuscript(
+    artifacts: Any,
+    data: bytes,
+    *,
+    title: str,
+    session_id: str,
+    task_id: str,
+    subtask_id: str,
+    workflow_run_id: str,
+    meta: dict[str, str],
+) -> Any | None:
+    """Prefer a bare ``{title}.md`` in the task bundle; fall back to put_bytes."""
+    filename = manuscript_basename(title)
+    task_output_path = getattr(artifacts, "task_output_path", None)
+    register = getattr(artifacts, "register_existing", None)
+    if callable(task_output_path) and callable(register) and task_id:
+        try:
+            try:
+                dest = await task_output_path(filename, task_id=task_id, kind="report")
+            except TypeError:
+                dest = await task_output_path(filename, kind="report")
+            path = Path(dest)
+            path.write_bytes(data)
+            stored = await register(
+                path,
+                kind="report",
+                title=title,
+                mime="text/markdown",
+                session_id=session_id,
+                task_id=task_id,
+                meta=meta,
+            )
+            if stored is not None:
+                return stored
+        except Exception:  # noqa: BLE001 - fall through to put_bytes
+            pass
     try:
-        stored = await artifacts.put_bytes(
-            text.encode("utf-8"),
+        return await artifacts.put_bytes(
+            data,
             kind="report",
             title=title,
             ext="md",
@@ -603,21 +580,10 @@ async def _store_draft_artifact(
             task_id=task_id,
             subtask_id=subtask_id,
             workflow_run_id=workflow_run_id,
-            meta={
-                "deliverable": str(result.get("deliverable") or ""),
-                "synthesis_mode": str(result.get("synthesis_mode") or ""),
-            },
+            meta=meta,
         )
     except Exception:  # noqa: BLE001 - a storage hiccup must not fail the draft
         return None
-    return {
-        "title": title,
-        "format": "md",
-        "uri": stored.uri,
-        "path": str(stored.path),
-        "mime": stored.mime,
-        "size_bytes": str(stored.size_bytes),
-    }
 
 
 def _upstream_summaries(step: dict[str, Any], results_by_id: dict[str, Any]) -> list[str]:
@@ -786,8 +752,7 @@ def _provenance_note(provenance: dict[str, list[str]]) -> str:
 
 
 def _topic_from_goal(goal: str) -> str:
-    text = " ".join((goal or "").split())
-    return text[:80]
+    return short_task_title(goal)
 
 
 class _SafeTemplateContext(dict[str, str]):

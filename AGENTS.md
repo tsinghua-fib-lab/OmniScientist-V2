@@ -11,10 +11,19 @@ The CLI runs skills; skill content never imports CLI internals.
 
 ```bash
 uv venv --python 3.12 .venv
-uv pip install -e "./cli[dev,mcp,vec]" --python .venv   # the package lives in cli/
-.venv/bin/pytest -q                                      # run from cli/ (or: pytest cli/tests)
+uv pip install -e "./cli[all,dev]" --python .venv   # the package lives in cli/
+.venv/bin/pytest -q                                  # run from cli/ (or: pytest cli/tests)
 .venv/bin/ruff check cli/src
 ```
+
+Install every extra, the same set CI installs with `uv sync --all-extras`, so a
+local run and a CI run execute the same tests. The narrower `[dev,mcp,vec]` this
+once documented left `tokens` out, which meant the tokenizer tests skipped for
+every developer and ran only in CI — and the estimator those tests guard was
+measuring transcripts in different units in the two places. Every extra costs
+41 MB and seven seconds more than the narrow set. Note that having `tiktoken`
+installed does not change what the suite measures: `conftest` pins compaction to
+the estimator that ships, and tests about the real tokenizer opt back in.
 
 ## Conventions
 

@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
 from omni.cli.commands.tasks_cmd import _resolve_task_artifacts, _task_json_payload
 from omni.config import load_settings
 from omni.runtime.task_recorder import TaskRecorder
-from omni.runtime.verification import _verification_artifact_ids
 from omni.storage.artifacts import ArtifactStore
 from omni.storage.db import get_database
-from omni.storage.models import TaskEventORM, TaskORM
+from omni.storage.models import SubtaskORM, TaskORM
 
 
 @pytest.mark.asyncio
@@ -99,6 +99,55 @@ async def test_task_artifact_display_rejects_a_proven_foreign_cached_artifact():
 
 
 @pytest.mark.asyncio
+async def test_a_result_that_names_only_a_uri_still_shows_the_file_it_wrote():
+    """`/task show` prints a path its reader can open, not a store identifier.
+
+    research-ideation reports its report as ``report_uri`` and nothing else, so
+    the entry taken from the result had no path — and, holding the key the
+    stored row would have been pushed under, it kept the one side that knew the
+    file from ever being listed. Task cbffcbb6 showed
+    ``Report artifact://738774…`` for a registered file sitting on disk.
+    """
+    settings = load_settings()
+    settings.paths.ensure_dirs()
+    db = get_database(settings.paths.project_db)
+    await db.init()
+    task_id = "cbffcbb6a1b21234567890abcdefabcd"
+    subtask_id = "e80a6b0d99cc1234567890abcdefabcd"
+    async with db.session() as session:
+        session.add(TaskORM(id=task_id, status="succeeded", kind="turn"))
+        await session.commit()
+
+    artifact = await ArtifactStore(settings.paths, db).put_bytes(
+        b"# Research Ideation Report\n",
+        kind="report",
+        title="Research ideation",
+        ext="md",
+        task_id=task_id,
+    )
+    subtask = SubtaskORM(
+        id=subtask_id,
+        task_id=task_id,
+        skill_name="research-ideation",
+        status="succeeded",
+        result_json={"report_uri": artifact.uri},
+    )
+
+    rows = await _resolve_task_artifacts(
+        task_id=task_id,
+        subtasks=[subtask],
+        steps=[],
+        db=db,
+        paths=settings.paths,
+    )
+
+    assert [uri for _, _, uri in rows] == [artifact.uri]
+    (_, path, _), *rest = rows
+    assert not rest
+    assert Path(path).read_bytes() == b"# Research Ideation Report\n"
+
+
+@pytest.mark.asyncio
 async def test_task_prefix_resolution_is_not_limited_to_the_latest_500_rows():
     settings = load_settings()
     settings.paths.ensure_dirs()
@@ -125,25 +174,6 @@ async def test_task_prefix_resolution_is_not_limited_to_the_latest_500_rows():
     resolved = await recorder.get_task("target00")
     assert resolved is not None and resolved.id == target_id
     assert await recorder.get_task(target_id[-8:]) is None
-
-
-def test_verification_does_not_count_context_references_as_emitted_artifacts():
-    task = TaskORM(id="task", artifact_ids=[])
-    referenced = TaskEventORM(
-        task_id="task",
-        event_type="context.assembled",
-        output_json={"active_target": {"artifact_uri": "artifact://old-artifact"}},
-    )
-    produced = TaskEventORM(
-        task_id="task",
-        event_type="subtask.done",
-        output_json={"artifact_ids": ["new-artifact"]},
-    )
-
-    assert _verification_artifact_ids(task, [], [referenced]) == []
-    assert _verification_artifact_ids(task, [], [referenced, produced]) == [
-        "new-artifact"
-    ]
 
 
 @pytest.mark.asyncio

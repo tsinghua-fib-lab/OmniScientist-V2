@@ -55,7 +55,8 @@ presents the action as `kind: needs_input`. A background task or workflow may
 already have a durable execution record, but that record must contain the same
 action instead of a generic provider failure. It must not silently substitute
 `scientific-figure`, because SVG/PNG is a different deliverable from an editable
-single-slide PPTX.
+single-slide PPTX. Host figure fill covers only a still-owed `artifact.figure` on
+*this* task; it never substitutes LiveFigure or `research-pptx`.
 
 After configuring the owner profile, validate without exposing the key:
 
@@ -288,7 +289,7 @@ Expected result:
 - Steer is consumed once at the next ReAct iteration or workflow wave.
 - Cancellation preserves completed results and ends cooperatively rather than deleting the task.
 
-Workflow DAG and step recovery:
+Workflow step inspection and recovery:
 
 ```bash
 omni -P skill-verify task subtask <task_id>

@@ -210,18 +210,29 @@ async def test_compact_session_folds_history_and_flushes():
 
 
 @pytest.mark.asyncio
-async def test_maybe_compact_auto_triggers_over_budget():
+async def test_maybe_compact_does_not_trigger_on_message_count_alone():
+    """Codex-aligned: many small turns stay intact while the window has room."""
     from omni.agent import OmniAgent
-    from omni.agent.session_compactor import _COMPACT_KEEP_LAST, _COMPACT_THRESHOLD
+    from omni.agent.session_compactor import _COMPACT_THRESHOLD
 
     agent = await OmniAgent.create(load_settings())
     try:
         sid = "auto-sess"
-        for i in range(_COMPACT_THRESHOLD + 4):
+        n = _COMPACT_THRESHOLD + 4
+        for i in range(n):
             await agent._persist_message(sid, "user", f"msg {i} " + "x" * 20)
+        compact_calls = {"n": 0}
+        original = agent.compactor.compact
+
+        async def _spy(*args, **kwargs):
+            compact_calls["n"] += 1
+            return await original(*args, **kwargs)
+
+        agent.compactor.compact = _spy  # type: ignore[method-assign]
         await agent._maybe_compact(sid)
         visible = await agent._visible_normal_messages(sid)
-        assert len(visible) == _COMPACT_KEEP_LAST
+        assert compact_calls["n"] == 0
+        assert len(visible) == n
     finally:
         await agent.aclose()
 
@@ -231,9 +242,9 @@ async def test_maybe_compact_auto_triggers_over_budget():
 
 def test_estimate_tokens_and_window_inference():
     from omni.config.settings import (
-        infer_context_window_tokens,
+        infer_max_input_tokens,
         load_settings,
-        resolve_context_window_tokens,
+        resolve_max_input_tokens,
     )
     from omni.memory.compaction import estimate_tokens
 
@@ -242,14 +253,14 @@ def test_estimate_tokens_and_window_inference():
 
     s = load_settings()
     s.model.model = "claude-3-5-sonnet"
-    assert infer_context_window_tokens(s.model) == 200_000
+    assert infer_max_input_tokens(s.model) == 200_000
     s.model.model = "deepseek-chat"
-    assert infer_context_window_tokens(s.model) == 65_536
+    assert infer_max_input_tokens(s.model) == 1_000_000
     s.model.model = "totally-unknown-model"
-    assert infer_context_window_tokens(s.model) == 32_768
+    assert infer_max_input_tokens(s.model) == 32_768
     # explicit pin wins over inference
     s.memory.context_window_tokens = 12_345
-    assert resolve_context_window_tokens(s) == 12_345
+    assert resolve_max_input_tokens(s) == 12_345
 
 
 def test_microcompact_tool_results_keeps_recent():

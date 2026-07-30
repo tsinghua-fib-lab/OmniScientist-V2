@@ -13,6 +13,7 @@ import hashlib
 import inspect
 import json
 import logging
+import os
 import shlex
 import time
 from collections.abc import Awaitable, Callable
@@ -24,6 +25,7 @@ from omni.config import OmniSettings
 from omni.core.tool_result import (
     is_tool_rejection,
     tool_event_output,
+    tool_outcome_event_fields,
     tool_result_failure,
 )
 from omni.runtime.processes import process_group_options, stop_process_tree
@@ -146,7 +148,7 @@ def execution_arguments_hash(arguments: dict[str, Any]) -> str:
         sort_keys=True,
         separators=(",", ":"),
         default=str,
-    ).encode()
+    ).encode("utf-8", errors="backslashreplace")
     return hashlib.sha256(encoded).hexdigest()
 
 _SECRET_KEYS = ("api_key", "secret", "password", "token", "credential", "authorization")
@@ -236,7 +238,7 @@ class HookManager:
         return HookDecision(warnings=warnings)
 
     async def _run(self, command: str, envelope: dict[str, Any]) -> dict[str, Any]:
-        argv = shlex.split(command)
+        argv = _split_hook_command(command)
         if not argv:
             raise ValueError("empty hook command")
         proc = await asyncio.create_subprocess_exec(
@@ -246,7 +248,9 @@ class HookManager:
             stderr=asyncio.subprocess.PIPE,
             **process_group_options(),
         )
-        raw = json.dumps(envelope, ensure_ascii=False, default=str).encode("utf-8")
+        raw = json.dumps(envelope, ensure_ascii=False, default=str).encode(
+            "utf-8", errors="backslashreplace"
+        )
         try:
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(raw), timeout=max(0.1, float(self._cfg.timeout_s))
@@ -287,10 +291,77 @@ def _redact(value: Any) -> Any:
 
 def _command_label(command: str) -> str:
     try:
-        argv = shlex.split(command)
+        argv = _split_hook_command(command)
     except ValueError:
         return "invalid"
     return argv[0] if argv else ""
+
+
+def _split_hook_command(command: str, *, windows: bool | None = None) -> list[str]:
+    """Split a trusted no-shell hook command without losing NT backslashes."""
+    is_windows = os.name == "nt" if windows is None else windows
+    source = _protect_unquoted_windows_paths(command) if is_windows else command
+    return shlex.split(source, posix=True)
+
+
+def _protect_unquoted_windows_paths(command: str) -> str:
+    """Escape backslashes in unquoted drive-path tokens for POSIX ``shlex``."""
+    out: list[str] = []
+    quote = ""
+    index = 0
+    length = len(command)
+    while index < length:
+        char = command[index]
+        if quote:
+            out.append(char)
+            if char == "\\" and quote == '"' and index + 1 < length:
+                out.append(command[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char == '"' and _is_windows_path_start(command, index + 1):
+            end = command.find('"', index + 1)
+            if end != -1:
+                out.append('"')
+                out.append(command[index + 1 : end].replace("\\", "\\\\"))
+                out.append('"')
+                index = end + 1
+                continue
+        if char in {"'", '"'}:
+            quote = char
+            out.append(char)
+            index += 1
+            continue
+        at_boundary = index == 0 or command[index - 1].isspace()
+        if not at_boundary or not _is_windows_path_start(command, index):
+            out.append(char)
+            index += 1
+            continue
+        end = index
+        while end < length and not command[end].isspace():
+            end += 1
+        out.append(command[index:end].replace("\\", "\\\\"))
+        index = end
+    return "".join(out)
+
+
+def _is_windows_path_start(value: str, index: int) -> bool:
+    """Recognize drive, UNC, rooted, and dot-relative native path prefixes."""
+    if index >= len(value):
+        return False
+    if value[index] == "\\":
+        return True
+    if value.startswith(".\\", index) or value.startswith("..\\", index):
+        return True
+    return (
+        index + 2 < len(value)
+        and value[index].isalpha()
+        and value[index + 1] == ":"
+        and value[index + 2] in {"\\", "/"}
+    )
 
 
 async def invoke_tool_with_hooks(
@@ -398,8 +469,31 @@ async def invoke_tool_with_hooks(
         raise
     if hooks is not None:
         event_result = tool_event_output(result)
-        denied = is_tool_rejection(event_result)
-        failure = tool_result_failure(event_result)
+        denied = is_tool_rejection(result)
+        contract_violation = (
+            event_result
+            if isinstance(event_result, dict)
+            and event_result.get("contract_violation") is True
+            else None
+        )
+        failure = tool_result_failure(result)
+        contract_started = (
+            contract_violation.get("execution_started") is True
+            if contract_violation is not None
+            else False
+        )
+        if denied:
+            outcome_fields = {"lifecycle_status": "blocked", "result_success": None}
+            status = "denied"
+        elif contract_violation is not None:
+            outcome_fields = {
+                "lifecycle_status": "failed" if contract_started else "blocked",
+                "result_success": None,
+            }
+            status = "failed" if contract_started else "rejected"
+        else:
+            outcome_fields = tool_outcome_event_fields(result)
+            status = failure[0] if failure is not None else "succeeded"
         await hooks.emit(
             "post_tool",
             task_id=task_id,
@@ -407,12 +501,9 @@ async def invoke_tool_with_hooks(
                 "tool_name": tool_name,
                 "arguments": copy.deepcopy(policy_arguments),
                 "family": family,
-                "status": (
-                    "denied"
-                    if denied
-                    else (failure[0] if failure is not None else "succeeded")
-                ),
+                "status": status,
                 "result": _result_brief(event_result),
+                **outcome_fields,
             },
         )
     return result

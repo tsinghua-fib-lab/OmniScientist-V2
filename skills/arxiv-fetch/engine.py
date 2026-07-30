@@ -29,6 +29,23 @@ def _load_core():  # noqa: ANN202
 _fetch, _normalize_arxiv_id = _load_core()
 
 
+async def _emit_milestone(progress_callback: Any) -> None:
+    """Report the one completion milestone (a lookup has no intermediate stages)."""
+    if progress_callback is None:
+        return
+    try:
+        emitted = progress_callback(
+            "fetched",
+            1.0,
+            stage_id="arxiv.done",
+            milestone="Paper metadata fetched",
+        )
+    except TypeError:
+        emitted = progress_callback("fetched", 1.0)
+    if hasattr(emitted, "__await__"):
+        await emitted
+
+
 def _invalid_identifier_error() -> dict[str, Any]:
     return {
         "status": "error",
@@ -61,7 +78,7 @@ class ArxivFetchEngine:
             return _invalid_identifier_error()
         return None
 
-    async def execute(self, **input_data: Any) -> dict[str, Any]:
+    async def execute(self, progress_callback: Any = None, **input_data: Any) -> dict[str, Any]:
         identifier = (
             input_data.get("identifier")
             or input_data.get("arxiv_id")
@@ -73,6 +90,7 @@ class ArxivFetchEngine:
         result = await asyncio.to_thread(_fetch, str(identifier))
         if result.get("status") == "ok":
             self._save_to_library(result)
+            await _emit_milestone(progress_callback)
         return result
 
     def _save_to_library(self, paper: dict[str, Any]) -> None:

@@ -27,6 +27,12 @@ from omni.runtime.service_supervisors import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _allow_ephemeral_host_service_for_supervisor_unit_tests(monkeypatch):
+    """This module installs supervisors against tmp OMNI_HOME on purpose."""
+    monkeypatch.setenv("OMNI_ALLOW_EPHEMERAL_HOST_SERVICE", "1")
+
+
 @pytest.fixture
 def isolated_launchd_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(
@@ -67,6 +73,24 @@ def _spec() -> SupervisorSpec:
     )
 
 
+def _write_orphan_launchd_plist(tmp_path: Path) -> tuple[Path, Path, str]:
+    agents = tmp_path / "LaunchAgents"
+    agents.mkdir()
+    label = "com.omniscientist.omni.orphan"
+    plist = agents / f"{label}.plist"
+    plist.write_bytes(
+        plistlib.dumps(
+            {
+                "Label": label,
+                "EnvironmentVariables": {
+                    "OMNI_HOME": str(tmp_path / "deleted-home"),
+                },
+            }
+        )
+    )
+    return agents, plist, label
+
+
 def test_service_label_is_stable_and_home_scoped(tmp_path):
     a = service_label(tmp_path / "homeA")
     b = service_label(tmp_path / "homeB")
@@ -92,6 +116,34 @@ def test_auto_selection_per_platform_prefers_native_then_detached(monkeypatch):
     monkeypatch.setattr(SystemdUserSupervisor, "available", classmethod(lambda cls: True))
     monkeypatch.setattr(sup.sys, "platform", "linux")
     assert select_supervisor_class("auto") is SystemdUserSupervisor
+
+
+@pytest.mark.parametrize(
+    ("returncode", "output"),
+    [
+        (1, "offline"),
+        (1, "Failed to connect to bus: No such file or directory"),
+    ],
+)
+def test_systemd_availability_rejects_unusable_user_manager(
+    monkeypatch, returncode, output
+):
+    monkeypatch.setattr(sup.sys, "platform", "linux")
+    monkeypatch.setattr(sup.shutil, "which", lambda _name: "/usr/bin/systemctl")
+    monkeypatch.setattr(sup, "_run", lambda *_args, **_kwargs: (returncode, output))
+
+    assert SystemdUserSupervisor.available() is False
+
+
+@pytest.mark.parametrize(("returncode", "output"), [(0, "running"), (1, "degraded")])
+def test_systemd_availability_accepts_usable_user_manager(
+    monkeypatch, returncode, output
+):
+    monkeypatch.setattr(sup.sys, "platform", "linux")
+    monkeypatch.setattr(sup.shutil, "which", lambda _name: "/usr/bin/systemctl")
+    monkeypatch.setattr(sup, "_run", lambda *_args, **_kwargs: (returncode, output))
+
+    assert SystemdUserSupervisor.available() is True
 
 
 def test_explicit_manager_is_honoured_even_when_unavailable():
@@ -192,6 +244,28 @@ def test_launchd_activate_bootstraps_once_without_kickstart(
     assert not any("kickstart" in cmd for cmd in commands)
 
 
+def test_launchd_start_does_not_install_on_arbitrary_kickstart_failure(
+    isolated_launchd_paths, monkeypatch
+):
+    commands: list[list[str]] = []
+
+    def _run(cmd, **_kwargs):  # noqa: ANN001
+        commands.append(list(cmd))
+        if "kickstart" in cmd:
+            return 1, "permission denied"
+        if "print" in cmd:
+            return 0, "state = waiting"
+        return 0, "ok"
+
+    monkeypatch.setattr(sup, "_run", _run)
+
+    ok, detail = LaunchdSupervisor(_spec()).start()
+
+    assert ok is False
+    assert "permission denied" in detail
+    assert not any("bootstrap" in cmd or "load" in cmd for cmd in commands)
+
+
 def test_launchd_status_distinguishes_loaded_from_running(monkeypatch):
     monkeypatch.setattr(
         sup,
@@ -207,6 +281,30 @@ def test_launchd_status_distinguishes_loaded_from_running(monkeypatch):
 
     assert supervisor.status() == "loaded"
     assert supervisor.is_quiescent() is False
+
+
+def test_launchd_status_does_not_treat_probe_failure_as_absent(monkeypatch):
+    monkeypatch.setattr(
+        sup,
+        "_run",
+        lambda cmd, **_kwargs: (1, "operation not permitted"),
+    )
+
+    assert LaunchdSupervisor(_spec()).status() == "unknown"
+
+
+def test_launchd_definition_matches_current_spec(isolated_launchd_paths):
+    supervisor = LaunchdSupervisor(_spec())
+    path = supervisor._plist_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(render_launchd_plist(supervisor.label, supervisor.spec))
+
+    assert supervisor.definition_matches() is True
+
+    payload = plistlib.loads(path.read_bytes())
+    payload["ProgramArguments"] = ["/old/python", *payload["ProgramArguments"][1:]]
+    path.write_bytes(plistlib.dumps(payload))
+    assert supervisor.definition_matches() is False
 
 
 def test_launchd_quiescence_includes_the_legacy_job(monkeypatch):
@@ -309,6 +407,57 @@ def test_launchd_does_not_remove_legacy_agent_claiming_another_home(
     assert commands == []
 
 
+def test_prune_orphan_launchd_agent_verifies_unload_before_delete(
+    tmp_path, monkeypatch
+):
+    agents, plist, label = _write_orphan_launchd_plist(tmp_path)
+    monkeypatch.setattr(sup.sys, "platform", "darwin")
+    monkeypatch.setattr(sup, "_launchd_agents_dir", lambda: agents)
+    monkeypatch.setattr(
+        sup,
+        "_run",
+        lambda cmd, **_kwargs: (
+            (1, "not loaded") if "print" in cmd else (0, "ok")
+        ),
+    )
+
+    pruned, failures = sup.prune_orphan_launchd_agents(timeout_s=0.0)
+
+    assert [row["label"] for row in pruned] == [label]
+    assert failures == []
+    assert plist.exists() is False
+
+
+@pytest.mark.parametrize(
+    ("print_result", "status"),
+    [
+        ((0, "state = running"), "running"),
+        ((1, "operation not permitted"), "unknown"),
+    ],
+)
+def test_prune_orphan_launchd_agent_preserves_plist_without_verified_absence(
+    tmp_path, monkeypatch, print_result, status
+):
+    agents, plist, label = _write_orphan_launchd_plist(tmp_path)
+    monkeypatch.setattr(sup.sys, "platform", "darwin")
+    monkeypatch.setattr(sup, "_launchd_agents_dir", lambda: agents)
+    monkeypatch.setattr(
+        sup,
+        "_run",
+        lambda cmd, **_kwargs: (
+            print_result if "print" in cmd else (1, "failed")
+        ),
+    )
+
+    pruned, failures = sup.prune_orphan_launchd_agents(timeout_s=0.0)
+
+    assert pruned == []
+    assert failures == [
+        f"{label}: could not verify launchd job was unloaded (status={status})"
+    ]
+    assert plist.exists() is True
+
+
 def test_systemd_activate_enable_now_once_without_restart(
     isolated_systemd_paths, monkeypatch
 ):
@@ -327,6 +476,19 @@ def test_systemd_activate_enable_now_once_without_restart(
     assert ok is True
     assert sum("enable" in cmd and "--now" in cmd for cmd in commands) == 1
     assert not any("restart" in cmd for cmd in commands)
+
+
+def test_systemd_definition_matches_current_spec(isolated_systemd_paths):
+    supervisor = SystemdUserSupervisor(_spec())
+    path = supervisor._unit_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    expected = render_systemd_unit(supervisor.label, supervisor.spec)
+    path.write_text(expected, encoding="utf-8")
+
+    assert supervisor.definition_matches() is True
+
+    path.write_text(expected.replace("Restart=on-failure", "Restart=no"), encoding="utf-8")
+    assert supervisor.definition_matches() is False
 
 
 @pytest.mark.parametrize("state", ["activating", "deactivating", "reloading"])
@@ -429,6 +591,72 @@ def test_schtasks_activate_retires_same_home_legacy_task(monkeypatch):
         "/Delete" in cmd and supervisor._legacy_label() in cmd
         for cmd in commands
     )
+
+
+def test_schtasks_status_does_not_treat_probe_failure_as_absent(monkeypatch):
+    monkeypatch.setattr(
+        sup,
+        "_run",
+        lambda cmd, **_kwargs: (1, "access is denied"),
+    )
+
+    assert SchtasksSupervisor(_spec()).status() == "unknown"
+
+
+def test_schtasks_definition_matches_wrapper_and_registered_action(
+    monkeypatch,
+):
+    supervisor = SchtasksSupervisor(_spec())
+    wrapper = supervisor._wrapper_path()
+    wrapper.parent.mkdir(parents=True, exist_ok=True)
+    wrapper.write_bytes(render_startup_cmd(supervisor.spec).encode("utf-8"))
+
+    def _task_xml(command: str) -> str:
+        return (
+            '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'
+            f"<Actions><Exec><Command>{command}</Command></Exec></Actions>"
+            "</Task>"
+        )
+
+    monkeypatch.setattr(
+        sup,
+        "_run",
+        lambda cmd, **_kwargs: (
+            (0, _task_xml(str(wrapper)))
+            if "/XML" in cmd
+            else (0, "ok")
+        ),
+    )
+    assert supervisor.definition_matches() is True
+
+    monkeypatch.setattr(
+        sup,
+        "_run",
+        lambda cmd, **_kwargs: (
+            (0, _task_xml(str(wrapper.with_name("other.cmd"))))
+            if "/XML" in cmd
+            else (0, "ok")
+        ),
+    )
+    assert supervisor.definition_matches() is False
+
+    monkeypatch.setattr(
+        sup,
+        "_run",
+        lambda cmd, **_kwargs: (
+            (1, "access is denied") if "/XML" in cmd else (0, "ok")
+        ),
+    )
+    assert supervisor.definition_status() is sup.DefinitionStatus.UNKNOWN
+
+    monkeypatch.setattr(
+        sup,
+        "_run",
+        lambda cmd, **_kwargs: (
+            (0, "<truncated") if "/XML" in cmd else (0, "ok")
+        ),
+    )
+    assert supervisor.definition_status() is sup.DefinitionStatus.UNKNOWN
 
 
 def test_schtasks_does_not_remove_legacy_task_claiming_another_home(

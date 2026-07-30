@@ -19,6 +19,9 @@ soulagent/
 ├── NOTICE.md
 ├── agents/
 ├── core.py
+├── remote_registry.py
+├── scripts/
+│   └── run.py
 ├── task_sensor.py
 ├── graph_pruner.py
 ├── kg_decoder.py
@@ -27,14 +30,26 @@ soulagent/
 ├── references/
 │   ├── runtime-design.md
 │   └── codex测试指导文档.md
-└── examples/
-    └── scientist-kg/
+└── assets/
+    └── builtin-scientist-kg/
+        ├── alan-turing/
+        ├── claude-shannon/
         ├── fengli-xu/
-        └── kaiming-he/
+        ├── herbert-a-simon/
+        ├── john-von-neumann/
+        ├── kaiming-he/
+        ├── norbert-wiener/
+        └── richard-feynman/
 ```
 
-The example KGs are read-only test fixtures. Production KGs remain external to
-the installed Skill and normally live under `<project-root>/scientist-kg/`.
+The packaged KG snapshot is read-only Skill data. On the first OmniScientist
+launch after installation or upgrade, missing bundled KGs are validated and
+atomically installed into `<OMNI_HOME>/scientist-kg/`; an existing scientist
+directory is never overwritten, even when locally modified or invalid.
+SoulAgent uses `<project-root>/scientist-kg/` when that compatibility directory
+exists, otherwise `<OMNI_HOME>/scientist-kg/`; an explicit `kg_root` overrides
+both. The selected location is both the scanner root and the destination for
+verified remote downloads.
 
 ## Installation
 
@@ -45,6 +60,13 @@ listed in `skills/index.toml`, inspect it with:
 
 ```powershell
 omni skills info soulagent
+```
+
+An installed OmniScientist deploys missing built-in personas automatically on
+the first launch. The setup can also be repaired explicitly:
+
+```powershell
+omni skills setup builtin-personas
 ```
 
 To import a copied checkout into an installed Omni environment:
@@ -81,13 +103,9 @@ Copy-Item ".\skills\soulagent" `
 
 ### Python and model configuration
 
-Use Python 3.11 or newer. Install the OpenAI client in the Host environment:
-
-```powershell
-python -m pip install "openai>=2,<3"
-```
-
-Configure the decoder in the same process that starts the Host:
+Use Python 3.11 or newer. No third-party Python package is required. When
+running `core.py` directly outside OmniScientist, configure the decoder in the
+same process that starts the Host:
 
 ```powershell
 $env:SOULAGENT_API_KEY = "<API_KEY>"
@@ -98,6 +116,10 @@ $env:SOULAGENT_BASE_URL = "<OPTIONAL_OPENAI_COMPATIBLE_URL>"
 `SOULAGENT_BASE_URL` is optional for OpenAI and required for other compatible
 providers. Never place the API key in command arguments, KG data, stoma files,
 state files, screenshots, or test logs.
+
+OmniScientist mode needs none of these environment variables: `engine.py` uses
+the Host's configured model service without exposing its credentials to the
+Skill.
 
 ## Prepare a project
 
@@ -110,11 +132,12 @@ A production project supplies one or more validated KGs:
     └── fengli-xu/
 ```
 
-For a local smoke test, copy the bundled examples into an empty test project:
+For a local smoke test outside OmniScientist, copy the bundled snapshot into an
+empty test project:
 
 ```powershell
 New-Item ".\soulagent-smoke" -ItemType Directory -Force
-Copy-Item ".\skills\soulagent\examples\scientist-kg" `
+Copy-Item ".\skills\soulagent\assets\builtin-scientist-kg" `
   ".\soulagent-smoke\scientist-kg" -Recurse
 ```
 
@@ -122,6 +145,44 @@ Copy-Item ".\skills\soulagent\examples\scientist-kg" `
 
 The following commands assume the current directory is the installed
 `soulagent` Skill directory.
+
+The copy-portable JSON runner is the recommended entry point for external
+agents. It accepts JSON either through `--json` or standard input:
+
+```powershell
+python3 scripts/run.py --self-test
+python3 scripts/run.py --json '{"action":"list","project_root":"<PROJECT_ROOT>"}'
+python3 scripts/run.py --json '{"action":"activate","project_root":"<PROJECT_ROOT>","scientist_id":"kaiming-he","host":"codex","conversation":"Design a baseline and ablation experiment."}'
+```
+
+Actions `refresh` and `switch` use the activation path. `status` and `unload`
+need only `project_root`. Activation always requires an explicit Host so the
+runner cannot write the wrong stoma.
+
+## Named-scientist fallback
+
+When the user explicitly names a scientist, SoulAgent resolves the request in
+this order:
+
+```text
+local scanner root -> public Gitee registry -> distillation confirmation
+```
+
+The public registry is
+`https://gitee.com/cvYaowenHu/scientist-kg-registry/raw/master/registry.json`.
+Generic requests and list operations never access it. A remote package is
+downloaded into a temporary sibling directory, checked against the registry
+manifest hash and every KG file hash, structurally loaded, then atomically
+renamed into the scanner root. Existing local directories are never replaced.
+
+If the trusted registry has no matching name or alias, SoulAgent returns a
+terminal `needs_input` result asking whether to invoke
+`scientist-kg-distiller`. `host_must_not_fabricate=true` means the Host must
+stop: it may neither synthesize a substitute persona nor speak as that
+scientist. The response includes `action_required.distiller_input.install_root`,
+which is the exact scanner root the approved distiller must use for its atomic
+installation. A network or malformed-registry failure is reported separately as
+`remote_lookup_failed`; it is not treated as proof that the scientist is absent.
 
 List valid scientists without calling the decoder:
 
@@ -159,20 +220,30 @@ Listing and source compilation do not require an API call:
 
 ```powershell
 python -m compileall -q .
+python3 scripts/run.py --self-test
 python core.py `
   --project-root ".\soulagent-smoke" `
   list
 ```
 
-Expected scientist IDs are `kaiming-he` and `fengli-xu`; `invalid` should be
-empty.
+Expected scientist IDs are `alan-turing`, `claude-shannon`, `fengli-xu`,
+`herbert-a-simon`, `john-von-neumann`, `kaiming-he`, `norbert-wiener`, and
+`richard-feynman`; `invalid` should be empty.
 
 Inside an OmniScientist source checkout, run:
 
 ```powershell
+python skills/soulagent/tests/test_runtime_full.py -v
+python skills/soulagent/tests/test_multiturn_qa.py -v
+python skills/soulagent/tests/test_engine.py -v
+python skills/soulagent/tests/test_remote_registry.py -v
+pytest -q cli/tests/agent/test_react_agent.py `
+  -k soulagent_distillation_confirmation
 pytest -q cli/tests/unit/test_builtin_skill_index.py `
   cli/tests/unit/test_academic_persona_skills.py `
-  cli/tests/unit/test_portable_skills.py
+  cli/tests/unit/test_portable_skills.py `
+  cli/tests/agent/test_persona_stoma_overlay.py `
+  cli/tests/agent/test_react_agent.py
 ```
 
 ### Live activation sequence
@@ -187,12 +258,14 @@ With the decoder environment configured, test these state transitions:
 
 For copy-ready Codex prompts and expected files, use
 [`references/codex测试指导文档.md`](references/codex测试指导文档.md).
+For the stateful end-to-end conversation used by automated regression tests,
+use [`references/multiturn-qa.md`](references/multiturn-qa.md).
 
 ## Host adaptation
 
 | Host | `--host` | Stoma written by Core | Host adapter responsibility |
 |---|---|---|---|
-| OmniScientist | `omniscientist` | `role.md` | Invoke SoulAgent at a stable turn boundary and include the ready stoma in prompt assembly |
+| OmniScientist | `omniscientist` | `role.md` | Bind `persona.scientist` to `engine.py`; use the injected Host model and return the decoded persona for same-turn synthesis |
 | Codex | `codex` | `agent.md` | The `$soulagent` Skill invokes Core, waits for `ready`, reads the stoma, and applies it to the task |
 | Claude Code | `claude` | `claude.md` | The Skill or wrapper invokes Core and reads the ready stoma before continuing |
 | WorkBuddy | `workbuddy` | `soul.md` | The Host wrapper reads the ready stoma at its persona boundary |
@@ -204,11 +277,10 @@ automatically changes an already assembled system prompt. The Host integration
 must invoke SoulAgent before prompt assembly or explicitly read the ready stoma
 after activation.
 
-For OmniScientist, installing the Skill makes it discoverable and runnable. A
-live dynamic system-prompt effect still depends on an Omni turn-boundary adapter
-that invokes the Skill before `build_system_prompt`; a process that cached its
-Role earlier will not be changed merely by a later filesystem write. This
-boundary is deliberate and documented rather than hidden behind file polling.
+For OmniScientist, the executable Skill contract makes activation discoverable
+and schedulable. The engine writes `role.md` for later turns and also returns
+`persona_text` so the current turn's final synthesis can apply the decoded
+persona even when its system prompt was assembled before Skill execution.
 
 ## State and rollback protocol
 
@@ -242,16 +314,28 @@ subgraph first; the model only verbalizes that selected material.
 **Codex calls `kaiming-he` directly:** write `使用 $soulagent` explicitly. A
 direct scientist Skill does not exercise SoulAgent's task sensor or KG pruning.
 
-**No scientists are listed:** confirm `<project-root>/scientist-kg/<id>/` exists,
-or copy the bundled example directory into the smoke project.
+**No scientists are listed:** listing is deliberately local-only. Confirm the
+selected scanner root, run `omni skills setup builtin-personas`, explicitly
+name the scientist to permit a registry lookup, or copy the bundled asset
+directory into the smoke project.
 
-**Missing decoder configuration:** set `SOULAGENT_API_KEY` and
-`SOULAGENT_MODEL`; set `SOULAGENT_BASE_URL` for a compatible third-party API.
+**Named scientist is absent remotely:** accept or decline the returned
+distillation question. Do not let the Host invent a persona while waiting.
+
+**Remote lookup failed:** check HTTPS connectivity and the registry contract.
+Do not claim that the scientist is absent and do not start distillation based
+only on a network failure.
+
+**Missing decoder configuration:** this applies only to direct `core.py` use.
+Set `SOULAGENT_API_KEY` and `SOULAGENT_MODEL`; set `SOULAGENT_BASE_URL` for a
+compatible third-party API. In OmniScientist, verify that the Host model itself
+is configured and available.
 
 **`no_scientific_task`:** provide a research context involving experiments,
 hypotheses, evidence, data, methods, validation, failure analysis, or scientific
 decisions.
 
-**Persona file changed but the answer did not:** verify the Host adapter invoked
-SoulAgent before prompt assembly or read the ready stoma afterward. File polling
+**Persona file changed but the answer did not:** verify the Host consumed the
+engine's returned `persona_text` for the current turn or read the ready stoma on
+the next turn. File polling
 alone is not part of this Skill.

@@ -20,6 +20,25 @@ from omni.storage.db import get_database
 
 SKILLS_ROOT = Path(__file__).resolve().parents[3] / "skills"
 
+
+def _run_portable(
+    args: list[str],
+    *,
+    cwd: Path,
+    input: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """JSON stdout from portable runners is UTF-8, including on Windows."""
+    return subprocess.run(
+        [sys.executable, *args],
+        cwd=cwd,
+        input=input,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=True,
+        timeout=20,
+    )
+
 BUILTIN_SKILLS = frozenset(active_skill_names(SKILLS_ROOT))
 
 EXTERNAL_HOSTS = {
@@ -73,6 +92,8 @@ def test_python_engine_skills_publish_portable_runner_entrypoints():
         assert "import omni" not in text
         assert "from omni" not in text
         assert "--self-test" in text
+        assert "--json-file" in text
+        assert 'encoding="utf-8-sig"' in text
 
         skill_text = (SKILLS_ROOT / skill_name / "SKILL.md").read_text(encoding="utf-8")
         assert "python3 scripts/run.py" in skill_text
@@ -88,14 +109,7 @@ def test_arxiv_fetch_runner_and_engine_share_portable_core():
 
 def test_python_engine_portable_runner_self_tests_pass_offline():
     for skill_name in _python_engine_skills():
-        proc = subprocess.run(
-            [sys.executable, "scripts/run.py", "--self-test"],
-            cwd=SKILLS_ROOT / skill_name,
-            text=True,
-            capture_output=True,
-            check=True,
-            timeout=20,
-        )
+        proc = _run_portable(["scripts/run.py", "--self-test"], cwd=SKILLS_ROOT / skill_name)
         payload = json.loads(proc.stdout)
         assert payload["status"] == "ok"
         assert payload["skill"] == skill_name
@@ -112,13 +126,9 @@ def test_portable_runners_return_structured_input_errors():
         "scientific-figure": {},
     }
     for skill_name, payload in cases.items():
-        proc = subprocess.run(
-            [sys.executable, "scripts/run.py", "--json", json.dumps(payload)],
+        proc = _run_portable(
+            ["scripts/run.py", "--json", json.dumps(payload)],
             cwd=SKILLS_ROOT / skill_name,
-            text=True,
-            capture_output=True,
-            check=True,
-            timeout=20,
         )
         result = json.loads(proc.stdout)
         assert result["status"] == "error"
@@ -127,13 +137,9 @@ def test_portable_runners_return_structured_input_errors():
 
 
 def test_scientific_poster_portable_runner_hands_authoring_to_host_model():
-    proc = subprocess.run(
-        [sys.executable, "scripts/run.py", "--json", "{}"],
+    proc = _run_portable(
+        ["scripts/run.py", "--json", "{}"],
         cwd=SKILLS_ROOT / "scientific-poster",
-        text=True,
-        capture_output=True,
-        check=True,
-        timeout=20,
     )
     result = json.loads(proc.stdout)
 
@@ -152,15 +158,7 @@ def test_research_ideation_runner_returns_structured_invalid_json(source: str):
     else:
         stdin = "{bad-json"
 
-    proc = subprocess.run(
-        command,
-        cwd=SKILLS_ROOT / "research-ideation",
-        input=stdin,
-        text=True,
-        capture_output=True,
-        check=True,
-        timeout=20,
-    )
+    proc = _run_portable(command[1:], cwd=SKILLS_ROOT / "research-ideation", input=stdin)
     result = json.loads(proc.stdout)
 
     assert result["status"] == "error"
@@ -169,19 +167,51 @@ def test_research_ideation_runner_returns_structured_invalid_json(source: str):
     assert "Traceback" not in proc.stderr
 
 
+def test_scientific_figure_json_file_keeps_utf8_output_dir(tmp_path):
+    out_dir = tmp_path / "图表输出"
+    payload = tmp_path / "payload.json"
+    payload.write_text(
+        json.dumps(
+            {"input": "生成 Transformer/RAG 架构科研图", "output_dir": str(out_dir)},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    proc = _run_portable(
+        ["scripts/run.py", "--json-file", str(payload)],
+        cwd=SKILLS_ROOT / "scientific-figure",
+    )
+    result = json.loads(proc.stdout)
+
+    assert result["status"] == "ok"
+    assert result["skill"] == "scientific-figure"
+    assert out_dir.is_dir()
+    for artifact in result["artifacts"]:
+        path = Path(artifact["path"])
+        assert path.is_file()
+        assert path.parent == out_dir
+
+
+def test_research_ideation_json_file_invalid_json_is_structured(tmp_path):
+    payload = tmp_path / "bad.json"
+    payload.write_text("{bad-json", encoding="utf-8")
+    proc = _run_portable(
+        ["scripts/run.py", "--json-file", str(payload)],
+        cwd=SKILLS_ROOT / "research-ideation",
+    )
+    result = json.loads(proc.stdout)
+    assert result["status"] == "error"
+    assert result["error_info"]["code"] == "invalid_json"
+
+
 def test_scientific_figure_portable_runner_creates_local_artifacts(tmp_path):
-    proc = subprocess.run(
+    proc = _run_portable(
         [
-            sys.executable,
             "scripts/run.py",
             "--json",
             json.dumps({"input": "生成 Transformer/RAG 架构科研图", "output_dir": str(tmp_path)}),
         ],
         cwd=SKILLS_ROOT / "scientific-figure",
-        text=True,
-        capture_output=True,
-        check=True,
-        timeout=20,
     )
     result = json.loads(proc.stdout)
 
@@ -194,9 +224,8 @@ def test_scientific_figure_portable_runner_creates_local_artifacts(tmp_path):
 
 
 def test_scientific_figure_generic_runner_does_not_guess_business_vocabulary(tmp_path):
-    proc = subprocess.run(
+    proc = _run_portable(
         [
-            sys.executable,
             "scripts/run.py",
             "--json",
             json.dumps(
@@ -207,10 +236,6 @@ def test_scientific_figure_generic_runner_does_not_guess_business_vocabulary(tmp
             ),
         ],
         cwd=SKILLS_ROOT / "scientific-figure",
-        text=True,
-        capture_output=True,
-        check=True,
-        timeout=20,
     )
     result = json.loads(proc.stdout)
     dot_path = next(Path(item["path"]) for item in result["artifacts"] if item["format"] == "dot")
@@ -231,7 +256,11 @@ def test_claude_codex_openclaw_copy_mode_can_discover_all_builtin_skills(tmp_pat
 
         for skill_name in sorted(BUILTIN_SKILLS):
             copied_skill = host_root / skill_name
-            shutil.copytree(SKILLS_ROOT / skill_name, copied_skill)
+            shutil.copytree(
+                SKILLS_ROOT / skill_name,
+                copied_skill,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "resources"),
+            )
 
             text = (copied_skill / "SKILL.md").read_text(encoding="utf-8")
             frontmatter = yaml.safe_load(text.split("---", 2)[1])
@@ -256,8 +285,8 @@ def test_contributed_skill_notices_record_exact_upstream_revision():
     revisions = {
         "livefigure": "bd6d406de2e1c09652e763f6259cc6167a0f61e7",
         "paper-review": "2f75b9f5a7d20dc744eead1f1100a9673596f88a",
-        "research-ideation": "88dbfe6699fc8fddd04278c00599f252894a1b3d",
-        "research-pptx": "a7def530f1b15434d5eb8344cb5e141d78658f0f",
+        "research-ideation": "b056c68a0ea22022998f68fc7cae1e7347463e79",
+        "research-pptx": "eba86d7822c4f3d3ced19f14c8e4f590af30d291",
         "review-response": "442872e9af4045570ca5d95422cf970a29e5639b",
         "scientific-poster": "b2104fe288aa4869fe5929cac2ecabb609defcb1",
     }
@@ -275,15 +304,12 @@ def test_copied_runner_self_tests_work_in_external_host_layouts(tmp_path):
 
         for skill_name in _python_engine_skills():
             copied_skill = host_root / skill_name
-            shutil.copytree(SKILLS_ROOT / skill_name, copied_skill)
-            proc = subprocess.run(
-                [sys.executable, "scripts/run.py", "--self-test"],
-                cwd=copied_skill,
-                text=True,
-                capture_output=True,
-                check=True,
-                timeout=20,
+            shutil.copytree(
+                SKILLS_ROOT / skill_name,
+                copied_skill,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "resources"),
             )
+            proc = _run_portable(["scripts/run.py", "--self-test"], cwd=copied_skill)
             payload = json.loads(proc.stdout)
             assert payload == {"status": "ok", "skill": skill_name, "portable_runner": True}
 

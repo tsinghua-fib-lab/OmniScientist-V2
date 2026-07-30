@@ -6,6 +6,7 @@ import io
 import re
 import threading
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any
@@ -31,6 +32,15 @@ _SGR_ESCAPE = re.compile(r"\x1b\[[0-9;:]*m")
 # turn runs (Codex-style live "tail"), then commits once as authoritative
 # markdown. Shared with ``live_display`` so both sides agree on the slot name.
 ANSWER_REPLACE_KEY = "turn.answer"
+
+# Codex ``exec_cell::TOOL_CALL_MAX_LINES``: agent tool cells stay short in the
+# main view; Ctrl+T (and ``/task show``) keep the full semantic payload.
+TOOL_CALL_MAX_LINES = 5
+# In-flight process cell (Codex ``active_cell``). Live updates use this slot;
+# ``state=commit`` flushes only this key so the answer/plan slots stay put.
+TRACE_REPLACE_KEY = "turn.trace"
+TRACE_COMMIT_STATE = "commit"
+TRACE_DROP_STATE = "drop"
 
 
 class TranscriptKind(StrEnum):
@@ -58,11 +68,32 @@ class DataTableData:
 
 
 @dataclass(frozen=True)
+class NoticeData:
+    """Serializable card content, laid out at render time like a table.
+
+    A notice is the one block whose gutter has to be drawn per line, so its
+    wrapping cannot be left to the viewport the way ordinary markup is. Carrying
+    the *unwrapped* parts here keeps that layout a render-time decision anyway:
+    the card is laid out against the width it is being shown at, and reflows
+    with everything else when the window changes. Pre-wrapping instead bakes in
+    whatever width the producer happened to see — 80 columns whenever stdout is
+    not a terminal, which in the REPL it never is.
+    """
+
+    title: str
+    message: str = ""
+    actions: tuple[str, ...] = ()
+    style: str = ""
+    glyph: str = "!"
+    fallback: str = "!"
+
+
+@dataclass(frozen=True)
 class TranscriptEvent:
     """One semantic item published by an agent, command, or renderer."""
 
     kind: TranscriptKind
-    payload: str | DataTableData
+    payload: str | DataTableData | NoticeData
     turn_id: str = ""
     replace_key: str = ""
     state: str = ""
@@ -501,6 +532,12 @@ def _entry_group_key(entry: _StoredEntry) -> tuple[str, str | int]:
 def _event_size(event: TranscriptEvent) -> int:
     if isinstance(event.payload, str):
         return len(event.payload)
+    if isinstance(event.payload, NoticeData):
+        return (
+            len(event.payload.title)
+            + len(event.payload.message)
+            + sum(map(len, event.payload.actions))
+        )
     return (
         len(event.payload.title)
         + sum(map(len, event.payload.columns))
@@ -522,6 +559,8 @@ def _render_event(
         if event.foldable:
             rendered = _collapse_long_output(rendered, expanded=expanded)
         return (rendered, ())
+    if isinstance(event.payload, NoticeData):
+        return _ansi_to_text_runs(_markup_ansi(render_notice(event.payload, width)))
     text = str(event.payload)
     if event.kind == TranscriptKind.USER_MESSAGE:
         return (_render_user_message(text, event.state, width), ())
@@ -531,6 +570,10 @@ def _render_event(
         if event.foldable:
             text = _collapse_long_output(text, expanded=expanded)
         return (text, ())
+    if event.kind == TranscriptKind.TOOL_CARD:
+        if event.foldable:
+            text = _collapse_tool_card(text, expanded=expanded)
+        return _ansi_to_text_runs(_markup_ansi(text))
     if event.foldable:
         text = _collapse_long_output(text, expanded=expanded)
     if event.kind == TranscriptKind.MARKDOWN:
@@ -562,6 +605,8 @@ def render_event_ansi(
         if event.foldable:
             rendered = _collapse_long_output(rendered, expanded=expanded)
         return rendered
+    if isinstance(event.payload, NoticeData):
+        return _markup_ansi(render_notice(event.payload, width))
     text = str(event.payload)
     if event.kind == TranscriptKind.USER_MESSAGE:
         lines = normalize_output(text).splitlines() or [""]
@@ -574,6 +619,10 @@ def render_event_ansi(
         return _render_ansi(header, width)
     if event.kind == TranscriptKind.RAW_COMMAND_OUTPUT:
         return _collapse_long_output(text, expanded=expanded) if event.foldable else text
+    if event.kind == TranscriptKind.TOOL_CARD:
+        if event.foldable:
+            text = _collapse_tool_card(text, expanded=expanded)
+        return _markup_ansi(text)
     if event.foldable:
         text = _collapse_long_output(text, expanded=expanded)
     if event.kind == TranscriptKind.MARKDOWN:
@@ -586,6 +635,22 @@ def render_event_ansi(
 # Raw command output folding: how many head/tail lines to keep when collapsed.
 _COLLAPSE_HEAD = 8
 _COLLAPSE_TAIL = 4
+
+
+def _collapse_tool_card(text: str, *, expanded: bool) -> str:
+    """Bound a tool cell to Codex's ``TOOL_CALL_MAX_LINES`` in the main view."""
+    if expanded:
+        return text
+    trailing_nl = text.endswith("\n")
+    body = text[:-1].split("\n") if trailing_nl else text.split("\n")
+    if len(body) <= TOOL_CALL_MAX_LINES:
+        return text
+    hidden = len(body) - (TOOL_CALL_MAX_LINES - 1)
+    folded = [
+        *body[: TOOL_CALL_MAX_LINES - 1],
+        f"… +{hidden} lines · Ctrl+T to expand",
+    ]
+    return "\n".join(folded) + ("\n" if trailing_nl else "")
 
 
 def long_output_needs_folding(text: str) -> bool:
@@ -679,6 +744,8 @@ def _event_style(event: TranscriptEvent) -> str:
         return "class:turn.user"
     if event.kind == TranscriptKind.STATUS:
         return "class:turn.status"
+    if event.kind == TranscriptKind.TOOL_CARD:
+        return "class:turn.status"
     if event.kind == TranscriptKind.ERROR:
         return "class:turn.error"
     if event.kind == TranscriptKind.MARKDOWN:
@@ -686,6 +753,19 @@ def _event_style(event: TranscriptEvent) -> str:
     if event.turn_id:
         return "class:turn.body"
     return ""
+
+
+def render_notice(data: NoticeData, width: int) -> str:
+    """Lay one card out for ``width``, as Rich markup.
+
+    The layout itself lives beside the other card styling in ``render``, which
+    owns the palette and the span helpers. Importing it here at module scope
+    would close a cycle — ``render`` imports this module for the event types —
+    so the call is made where it is used.
+    """
+    from omni.cli.render import notice_markup
+
+    return notice_markup(data, width)
 
 
 def render_data_table(data: DataTableData, width: int) -> str:
@@ -746,7 +826,7 @@ def _render_activity_compact(data: DataTableData, width: int) -> str:
         header_style="bold cyan",
         expand=False,
     )
-    for name in ("#", "event", "status", "detail"):
+    for name in (("step" if "step" in indexes else "#"), "event", "status", "detail"):
         table.add_column(name, overflow="fold")
     for row in data.rows:
         def value(*names: str, _row: tuple[str, ...] = row) -> str:
@@ -766,8 +846,25 @@ def _render_activity_compact(data: DataTableData, width: int) -> str:
             )
             if part
         )
-        table.add_row(value("#"), value("event", "type"), value("status"), context)
+        table.add_row(value("step", "#"), value("event", "type"), value("status"), context)
     return _render_rich(table, width)
+
+
+def _activity_locator(
+    indexes: dict[str, int],
+    value: Callable[..., str],
+) -> str:
+    """The card's position marker: ``step 2/4`` for a plan, ``#12`` for an ordinal.
+
+    Two shapes reach this layout — a task view locating each record in its plan,
+    and older/simpler tables carrying a plain row number — and the prefix has to
+    match, because ``#2/4`` reads as neither.
+    """
+    if "step" in indexes:
+        marker = value("step")
+        return "" if marker in {"", "·"} else f"step {marker}"
+    ordinal = value("#")
+    return f"#{ordinal}" if ordinal else ""
 
 
 def _render_activity_cards(data: DataTableData) -> str:
@@ -781,7 +878,17 @@ def _render_activity_cards(data: DataTableData) -> str:
                     return _row[index]
             return ""
 
-        lines.append(f"#{value('#')} · {value('event', 'type')} · {value('status')}")
+        lines.append(
+            " · ".join(
+                part
+                for part in (
+                    _activity_locator(indexes, value),
+                    value("event", "type"),
+                    value("status"),
+                )
+                if part
+            )
+        )
         fields = (
             ("actor", value("actor", "skill/step")),
             ("workflow", value("workflow")),
@@ -831,15 +938,21 @@ def _render_rich(renderable: Any, width: int) -> str:
 __all__ = [
     "DataTableData",
     "EntrySpan",
+    "NoticeData",
     "StyleRun",
     "TranscriptAnchor",
     "TranscriptEvent",
     "TranscriptKind",
     "TranscriptModel",
     "TranscriptRender",
+    "TOOL_CALL_MAX_LINES",
+    "TRACE_COMMIT_STATE",
+    "TRACE_DROP_STATE",
+    "TRACE_REPLACE_KEY",
     "clean_scrollback_text",
     "long_output_needs_folding",
     "normalize_output",
     "render_data_table",
     "render_event_ansi",
+    "render_notice",
 ]

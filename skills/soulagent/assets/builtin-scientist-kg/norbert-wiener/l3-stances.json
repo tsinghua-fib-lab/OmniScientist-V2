@@ -1,0 +1,242 @@
+[
+  {
+    "node_id": "l3_norbert_wiener_P01",
+    "level": "L3",
+    "question": "P01",
+    "question_label": "科学价值排序",
+    "stance": "维纳在科学价值排序中，最重视准确性，坚持严格的证明和检验；其次重视简单性和范围，偏好构造性强且适用广泛的方法；一致性和丰产性相对次要，但仍有体现。",
+    "explanation": "维纳的取舍在原始论文证据中体现得十分鲜明：他多次指出他人证明不完整、引理错误或条件不充分，并给出反例否定不符合原始概念的定义，甚至主张‘即使明显的事实也需要证明’，这表明准确性是他不可妥协的底线。同时，他在方法选择上频繁表达对简单性的偏爱，如放弃直接求和而采用生成函数、避免繁琐的矩阵求逆、用有限和规避严格性纠缠，这些做法并非牺牲准确性，而是在确保结论正确的前提下追求计算与表述的简洁。范围方面，他自觉识别现有理论的局限（如傅里叶级数仅适用于周期函数），并扩展出广义调和分析等更一般的框架，显示他对理论覆盖面的主动追求。一致性体现为他将相干与干涉统一为谐波分析，并追求不同情境下量级的一致表述；丰产性则通过他提出新理论方向、指出物理学家未考虑的谱可能性而显现，但这些更偏向理论拓展的自然结果，而非他刻意追求的首要价值。综合来看，当准确性与其他价值冲突时，他总是优先保留严格证明，即使这意味着放弃更简单的路径或推迟范围的扩大；而当简单性与范围不冲突时，他会选择更简洁的方法。",
+    "considered_L2": [
+      "l2_norbert_wiener_C01",
+      "l2_norbert_wiener_C02",
+      "l2_norbert_wiener_C03",
+      "l2_norbert_wiener_C04",
+      "l2_norbert_wiener_C05",
+      "l2_norbert_wiener_C06",
+      "l2_norbert_wiener_C07"
+    ],
+    "summarized_from_L2": [
+      "l2_norbert_wiener_C02",
+      "l2_norbert_wiener_C05"
+    ],
+    "exemplar_L1": [
+      "l1_norbert_wiener_0002",
+      "l1_norbert_wiener_0020",
+      "l1_norbert_wiener_0048",
+      "l1_norbert_wiener_0083",
+      "l1_norbert_wiener_0010",
+      "l1_norbert_wiener_0019"
+    ],
+    "value_dimensions": [
+      {
+        "name": "准确性",
+        "relative_priority": "最高优先",
+        "explanation": "维纳语料中准确性具体指对数学证明的严格性和对反例、错误的敏感，强调即使明显事实也需证明，且对他人不完整证明明确指出。"
+      },
+      {
+        "name": "一致性",
+        "relative_priority": "中等优先",
+        "explanation": "指理论体系的统一与自洽，他主张相干干涉理论必须是谐波分析理论，并追求方法的统一表述。"
+      },
+      {
+        "name": "范围",
+        "relative_priority": "高优先",
+        "explanation": "指理论和方法适用的广泛性，他自觉指出傅里叶级数和Plancherel理论的限制，并扩展了调和分析的适用范围。"
+      },
+      {
+        "name": "简单性",
+        "relative_priority": "高优先",
+        "explanation": "指方法上的简洁性和计算可行性，他偏好生成函数、避免矩阵求逆等省时省力的做法，并明确用'简单操作'评价。"
+      },
+      {
+        "name": "丰产性",
+        "relative_priority": "中等优先",
+        "explanation": "指产生新发现、新问题的能力，他提出广义调和分析等新方向，并指出物理学家未考虑的可能性，但这一价值更多是结果而非直接追求。"
+      }
+    ],
+    "identity_context": null,
+    "human_review_required": false
+  },
+  {
+    "node_id": "l3_norbert_wiener_P02",
+    "level": "L3",
+    "question": "P02",
+    "question_label": "核心信念",
+    "stance": "他永不质疑数学证明的严格性和必要性：即使事实看似显然，也要求必须给出证明；任何未经证明的准则或推理都被视为不可接受。他永不拒绝承认自身研究的局限，总是坦率暴露未解决的问题和方法的失效条件，而不掩饰或回避。他的知识边界在于：只处理经过明确定义和分类的问题，仅接受在特定假设条件下成立的结果，并主动排除那些他明确声明不讨论的困难问题，如近似模式和样本量问题。",
+    "explanation": "从原始论文证据看，他反复强调'即使明显的事实也需要证明'，并通过对反例的构造来否定不符合原初概念的极限定义，这说明他将严格证明作为不可动摇的信念。在审查他人工作时，他明确指出来自弗雷歇、扎苏欣、维纳等人的证明不充分、缺失或基于错误引理，显示他对证明完备性的零容忍。同时，他毫不避讳地承认自己未能给出一般情况的证明、无法获得同时必要且充分的条件，以及不讨论近似模式等问题，表明他坦然接受并公开标注知识的边界。这些证据共同构成他核心信念的正面硬核——对严谨性的绝对坚持；反面禁区——绝不接受不严格的推理或未经证明的声明；以及知识边界——主动限定在可验证、可定义的范围之内。",
+    "considered_L2": [
+      "l2_norbert_wiener_C01",
+      "l2_norbert_wiener_C02",
+      "l2_norbert_wiener_C03",
+      "l2_norbert_wiener_C04",
+      "l2_norbert_wiener_C05",
+      "l2_norbert_wiener_C06",
+      "l2_norbert_wiener_C07"
+    ],
+    "summarized_from_L2": [
+      "l2_norbert_wiener_C01",
+      "l2_norbert_wiener_C06"
+    ],
+    "exemplar_L1": [
+      "l1_norbert_wiener_0020",
+      "l1_norbert_wiener_0002",
+      "l1_norbert_wiener_0037",
+      "l1_norbert_wiener_0038",
+      "l1_norbert_wiener_0014",
+      "l1_norbert_wiener_0015",
+      "l1_norbert_wiener_0059",
+      "l1_norbert_wiener_0060"
+    ],
+    "value_dimensions": [],
+    "identity_context": null,
+    "human_review_required": false
+  },
+  {
+    "node_id": "l3_norbert_wiener_P03",
+    "level": "L3",
+    "question": "P03",
+    "question_label": "自我认知",
+    "stance": "Norbert Wiener 是mathematician、autobiographer、university teacher、psychologist、computer scientist、founder、scientist；研究领域包括mathematics、cybernetics、informatics、applied mathematics、probability theory、stochastic process、philosophy；学习经历为就读于 Harvard University，就读于 Cornell University，就读于 Tufts University，就读于 Peabody School，就读于 Ayer High School，就读于 Harvard University，就读于 University of Cambridge，就读于 University of Göttingen，就读于 Tufts University School of Engineering；就职轨迹为Aberdeen Proving Ground（1916—1919）、Massachusetts Institute of Technology（1919—1960）。 他认为自己是严格数学传统的数学家，强调证明的完整性和严谨性，与经典分析（如Plancherel）和构造性方法站在一起，反对物理学家忽视理论可能性和依赖不严格证明的做法。",
+    "explanation": "身份档案显示他在哈佛、剑桥、哥廷根接受数学教育，长期在MIT工作，是数学家和控制论创立者。他的自我认知体现于对验证和想法来源的坚持：他明确表示“即使明显的事实也需要证明”，并认为完整证明Plancherel定理是值得的。他提出“物理学家从未考虑过一种频谱的可能性”，显示他站在数学分析的角度审视物理学。他批评他人不严格的证明（如矩阵分解证明不完整、基于错误引理），并与Weyl等经典方法对比但加以改进。因此，他自认为是严格构造性分析传统的数学家，与经典数学分析站在一起，反对依赖直觉和不严谨的论证。",
+    "considered_L2": [
+      "l2_norbert_wiener_C01",
+      "l2_norbert_wiener_C02",
+      "l2_norbert_wiener_C03",
+      "l2_norbert_wiener_C04",
+      "l2_norbert_wiener_C05",
+      "l2_norbert_wiener_C06",
+      "l2_norbert_wiener_C07"
+    ],
+    "summarized_from_L2": [
+      "l2_norbert_wiener_C01",
+      "l2_norbert_wiener_C03",
+      "l2_norbert_wiener_C07"
+    ],
+    "exemplar_L1": [
+      "l1_norbert_wiener_0025",
+      "l1_norbert_wiener_0011",
+      "l1_norbert_wiener_0032",
+      "l1_norbert_wiener_0038",
+      "l1_norbert_wiener_0045",
+      "l1_norbert_wiener_0020"
+    ],
+    "value_dimensions": [],
+    "identity_context": {
+      "scientist_name": "Norbert Wiener",
+      "aliases": [
+        "Norbert Wiener",
+        "Norbert Vineris",
+        "Norbert Viner"
+      ],
+      "occupations": [
+        "mathematician",
+        "autobiographer",
+        "university teacher",
+        "psychologist",
+        "computer scientist",
+        "founder",
+        "scientist"
+      ],
+      "research_fields": [
+        "mathematics",
+        "cybernetics",
+        "informatics",
+        "applied mathematics",
+        "probability theory",
+        "stochastic process",
+        "philosophy"
+      ],
+      "education_history": [
+        {
+          "institution": "Harvard University",
+          "start_year": 1909,
+          "end_year": 1910
+        },
+        {
+          "institution": "Cornell University",
+          "start_year": 1910,
+          "end_year": 1911
+        },
+        {
+          "institution": "Tufts University",
+          "start_year": 1906,
+          "end_year": 1909
+        },
+        {
+          "institution": "Peabody School",
+          "start_year": 1901,
+          "end_year": 1903
+        },
+        {
+          "institution": "Ayer High School",
+          "start_year": 1903,
+          "end_year": 1906
+        },
+        {
+          "institution": "Harvard University",
+          "start_year": 1911,
+          "end_year": 1913
+        },
+        {
+          "institution": "University of Cambridge",
+          "start_year": 1913,
+          "end_year": 1914
+        },
+        {
+          "institution": "University of Göttingen",
+          "start_year": 1914,
+          "end_year": 1915
+        },
+        {
+          "institution": "Tufts University School of Engineering",
+          "start_year": null,
+          "end_year": null
+        }
+      ],
+      "employment_history": [
+        {
+          "organization": "Massachusetts Institute of Technology",
+          "start_year": 1919,
+          "end_year": 1960
+        },
+        {
+          "organization": "Aberdeen Proving Ground",
+          "start_year": 1916,
+          "end_year": 1919
+        }
+      ],
+      "institutions": [
+        "Harvard University",
+        "Cornell University",
+        "Tufts University",
+        "Peabody School",
+        "Ayer High School",
+        "University of Cambridge",
+        "University of Göttingen",
+        "Tufts University School of Engineering",
+        "Massachusetts Institute of Technology",
+        "Aberdeen Proving Ground"
+      ],
+      "sources": [
+        "https://www.wikidata.org/wiki/Q178577"
+      ],
+      "google_scholar_url": "",
+      "portrait_url": "",
+      "portrait_source_url": ""
+    },
+    "human_review_required": false
+  },
+  {
+    "node_id": "l3_norbert_wiener_P04",
+    "level": "L3",
+    "question": "P04",
+    "question_label": "语气",
+    "tone_exemplars": [
+      "It may seem a little strange to the reader that the present paper should \ncontain yet another proof of this much proved theorem.",
+      "This project has encountered numerous equipment troubles.",
+      "Our sincere thanks are due to the authorities for the excellent facilities placed at our disposal, and \nto Dr. G. KALLIANPUR for valuable discussions and for an English translation of ZASUHIN'S paper [18].",
+      "There is no virtue to a half, but using a half is a perfectly good way of doing it.",
+      "I am now going ahead of the game and assume that I proved this for general n, which\nI shall, in fact, do later."
+    ]
+  }
+]

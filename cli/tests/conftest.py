@@ -4,14 +4,116 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
+import shutil
 import subprocess
 import sys
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from omni.core.llm.client import ChatWithToolsResult, LLMClient
+
+# Chosen here, at conftest import, because pytest loads this before it imports a
+# single test module — and a module that sizes a payload at import time would
+# otherwise calibrate it with one estimator and have the run measure it with the
+# other. The two agree only to within thirty percent, so that split is enough to
+# push a metered run over a ceiling it never approaches in production. The
+# fixture below re-declares it per test and resets the memoised encoder; see it
+# for why the offline census is the estimator the suite measures with.
+os.environ["OMNI_DISABLE_TIKTOKEN"] = "1"
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def cli_text(*parts: str) -> str:
+    """Return what a command *said*, independent of how it was painted.
+
+    Rich emits a styled run as its own escape sequence, so a colourised
+    ``--input`` reaches the stream as ``-`` and ``-input`` under two spans with
+    no literal ``--input`` between them. Typer turns colour on whenever
+    ``GITHUB_ACTIONS`` is set, so an assertion written against the plain local
+    rendering passes on a developer's machine and fails only on CI. Collapsing
+    whitespace additionally absorbs soft wrapping, which moves with the width of
+    whatever terminal happened to render the text.
+    """
+    return " ".join(_ANSI.sub("", "".join(parts)).split())
+
+
+def store_shaped_home(root: Path, label: str = "") -> Path:
+    """Create a store directory under *root* shaped like the one that ships.
+
+    An installed omni keeps its store at ``~/.omni`` and several rules key on
+    that name: ``STATE_PROTECTED_DIRS`` is the marker itself, so a store called
+    anything else is not write-protected and a test working inside one is
+    exercising a configuration nobody runs. The name comes from the production
+    constant rather than a literal here, so the two cannot drift apart — that
+    drift is what let a filesystem guard pass the suite and refuse the workspace
+    artifacts directory in the field.
+
+    Pass *label* when a test needs a store distinct from the fixture's; the
+    marker stays the leaf and the label distinguishes the home above it, exactly
+    as two real machines' homes differ.
+    """
+    from omni.config.paths import _PROJECT_MARKER
+
+    store = (root / label / _PROJECT_MARKER) if label else (root / _PROJECT_MARKER)
+    store.mkdir(parents=True, exist_ok=True)
+    return store
+
+
+@pytest.fixture
+def omni_home() -> Path:
+    """The store ``isolated_home`` already put on ``$OMNI_HOME``.
+
+    Most tests that used to build their own home only needed to *know* where it
+    was. Reading it back keeps them on the shipping shape for free, and keeps
+    one store per test rather than two with the code resolving to whichever the
+    environment happened to name.
+    """
+    return Path(os.environ["OMNI_HOME"])
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _warm_prompt_toolkit_bindings() -> None:
+    """Import prompt_toolkit search bindings once before the suite collects work.
+
+    On CPython 3.13 a full-suite import order can occasionally raise
+    ``ImportError: cannot import name 'search' from
+    'prompt_toolkit.key_binding.bindings'`` while the package is still
+    initializing. Warming the submodule up-front makes the REPL TUI tests
+    deterministic; the local release gate additionally pins CPython 3.12.
+    """
+    import prompt_toolkit.key_binding.bindings.search  # noqa: F401
+    from prompt_toolkit.key_binding.defaults import load_key_bindings
+
+    load_key_bindings()
+
+
+@pytest.fixture(autouse=True)
+def _headless_prompt_toolkit_session():
+    """Give headless Windows tests a pipe input and dummy screen.
+
+    GitHub's Windows runner has no console screen buffer, so prompt_toolkit's
+    Win32 output constructor correctly raises ``NoConsoleScreenBufferError``.
+    Its documented test setup is an AppSession backed by a pipe and
+    ``DummyOutput``. Explicit inputs/outputs used by PTY tests still win.
+    """
+    if os.name != "nt":
+        yield
+        return
+
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    with create_pipe_input() as pipe_input:
+        with create_app_session(input=pipe_input, output=DummyOutput()):
+            yield
 
 
 @pytest.fixture(autouse=True)
@@ -20,13 +122,32 @@ def isolated_home(tmp_path, monkeypatch):
 
     Setting HOME isolates ``~/.claude/skills`` and ``~/.codex`` so tests don't
     pick up the real machine's skill library.
+
+    ``OMNI_HOME`` is store-shaped on purpose, and takes its name from the rule
+    rather than restating it. An installed omni lives at ``~/.omni``, and rules
+    keyed on that name — ``is_write_protected_path`` most sharply — answered one
+    way here and the other way in production. That let a guard refuse the
+    workspace artifacts directory, the default destination for every generated
+    document, while the whole suite reported the feature working. A temp
+    directory of the shipping shape costs nothing and keeps the only
+    configuration users have under test.
     """
     home = tmp_path / "home"
-    omni_home = tmp_path / "omni"
+    omni_home = store_shaped_home(tmp_path)
+    # Both must exist before any code opens ``$OMNI_HOME/memory.sqlite3`` /
+    # ``control.sqlite3``. Creating only ``HOME`` left global-store init racing
+    # to ``unable to open database file`` under the full release suite.
     home.mkdir(parents=True, exist_ok=True)
+    omni_home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("OMNI_HOME", str(omni_home))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
+    if os.name == "nt":
+        # pathlib.Path.home() follows USERPROFILE/HOMEDRIVE on Windows rather
+        # than HOME. Keep skill exports and any "~" expansion inside tmp_path.
+        monkeypatch.setenv("USERPROFILE", str(home))
+        monkeypatch.setenv("HOMEDRIVE", home.drive)
+        monkeypatch.setenv("HOMEPATH", str(home)[len(home.drive) :])
     # Clear provider envs that could leak a real key into tests.
     for var in (
         "OMNI_MODEL_PROVIDER",
@@ -36,6 +157,8 @@ def isolated_home(tmp_path, monkeypatch):
         "OMNI_VLM_MODEL",
         "OMNI_VLM_ENDPOINT",
         "OMNI_VLM_API_KEY",
+        "OMNI_SEMANTIC_SCHOLAR_API_KEY",
+        "SEMANTIC_SCHOLAR_API_KEY",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -45,8 +168,16 @@ def isolated_home(tmp_path, monkeypatch):
     # entry point calls it.
     from omni.cli.commands import init_cmd, update_cmd
 
+    inert_persona_result = type(
+        "InertPersonaInstallResult",
+        (),
+        {"installed": (), "skipped_existing": (), "changed": False},
+    )()
+
     monkeypatch.setattr(init_cmd, "setup_research_pptx_runtime", lambda _paths: False)
     monkeypatch.setattr(update_cmd, "setup_research_pptx_runtime", lambda _paths: False)
+    monkeypatch.setattr(init_cmd, "install_builtin_personas", lambda _paths: inert_persona_result)
+    monkeypatch.setattr(update_cmd, "install_builtin_personas", lambda _paths: inert_persona_result)
     yield
     import asyncio
 
@@ -76,6 +207,8 @@ def _inert_os_supervisors(monkeypatch):
             return 1, "test-not-loaded"
         if cmd[:3] == ["systemctl", "--user", "is-active"]:
             return 3, "inactive"
+        if cmd and cmd[0] == "schtasks" and "/Query" in cmd:
+            return 1, "test-not-loaded"
         return 0, "test-noop"
 
     monkeypatch.setattr(_sup, "_run", _inert_run, raising=True)
@@ -90,6 +223,30 @@ def _inert_os_supervisors(monkeypatch):
     monkeypatch.setattr(
         _daemon, "scan_running_serve_pids", lambda **_kwargs: [], raising=True
     )
+
+
+@pytest.fixture(autouse=True)
+def _shipped_token_estimator(monkeypatch):
+    """Measure transcripts with the estimator users actually get.
+
+    ``tiktoken`` is an optional extra, and even installed it loads its BPE
+    vocabulary over the network on first use — so whether a machine counts real
+    tokens or the offline byte census depends on which extras it installed and
+    whether it had a route out the day the cache was cold. CI installed the
+    extra and every documented developer setup did not, which meant the two
+    measured the same transcript in different units and neither could see it.
+
+    The estimator that ships is the byte census, so that is the one the suite
+    measures with, everywhere, by declaration rather than by discovery. Tests
+    that are *about* the real tokenizer opt back in (see
+    ``tests/unit/test_token_estimate.py``); the memoised encoder is reset here
+    so the choice takes effect whatever imported the module first.
+    """
+    import omni.memory.compaction as compaction
+
+    monkeypatch.setenv("OMNI_DISABLE_TIKTOKEN", "1")
+    monkeypatch.setattr(compaction, "_TIKTOKEN_TRIED", False, raising=False)
+    monkeypatch.setattr(compaction, "_TIKTOKEN_ENC", None, raising=False)
 
 
 @pytest.fixture
@@ -122,7 +279,11 @@ class ScriptedLLM(LLMClient):
 
 def python_shell_command(code: str) -> str:
     """Quote a Python snippet for the platform shell used by the Bash tool."""
+    from omni.skills_runtime.builtin_tools.shell import posix_shell_executable
+
     argv = [sys.executable, "-c", code]
+    if posix_shell_executable() is not None:
+        return shlex.join(argv)
     return subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
 
 
@@ -215,27 +376,72 @@ class PlanningLLM(CapturingLLM):
         return json.dumps(self._plans.pop(0), ensure_ascii=False)
 
 
+@lru_cache(maxsize=1)
+def has_usable_bash() -> bool:
+    """True only for a native POSIX bash suitable for shell-script contracts."""
+    if os.name == "nt":
+        # Git Bash/WSL may answer a trivial probe, but these tests also require
+        # POSIX PATH, chmod, shebang, signal, and process-tree semantics. The
+        # Windows installer is covered independently by PowerShell contracts.
+        return False
+    executable = shutil.which("bash")
+    if not executable:
+        return False
+    try:
+        probe = subprocess.run(
+            [executable, "-c", "printf omni-bash-ok"],
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return probe.returncode == 0 and probe.stdout == b"omni-bash-ok"
+
+
 def install_fake_dot(tmp_path, monkeypatch) -> None:  # noqa: ANN001
     """Put a tiny fake Graphviz ``dot`` on PATH so figure tests render offline.
 
-    Writes a POSIX shell stub that emits ``<svg></svg>`` for ``-Tsvg`` and a
-    placeholder for other formats, then prepends ``tmp_path`` to PATH. Shared by
-    the artifact-revision and harness-benchmark suites (was duplicated in both).
+    Emits ``<svg></svg>`` for ``-Tsvg`` and a placeholder for other formats,
+    using a POSIX script or Windows batch file as appropriate, then prepends
+    ``tmp_path`` to PATH.
     """
     import os
 
-    exe = tmp_path / "dot"
-    exe.write_text(
-        "#!/bin/sh\n"
-        "fmt=''; out=''\n"
-        "while [ $# -gt 0 ]; do\n"
-        "  case \"$1\" in -T*) fmt=${1#-T} ;; -o) shift; out=$1 ;; esac\n"
-        "  shift\n"
-        "done\n"
-        "if [ \"$fmt\" = svg ]; then printf '<svg></svg>' > \"$out\"; else printf 'png' > \"$out\"; fi\n",
-        encoding="utf-8",
-    )
-    exe.chmod(0o755)
+    if os.name == "nt":
+        exe = tmp_path / "dot.cmd"
+        exe.write_text(
+            "@echo off\r\n"
+            "set \"fmt=\"\r\n"
+            "set \"out=\"\r\n"
+            ":args\r\n"
+            "if \"%~1\"==\"\" goto render\r\n"
+            "set \"arg=%~1\"\r\n"
+            "if /I \"%arg:~0,2%\"==\"-T\" set \"fmt=%arg:~2%\"\r\n"
+            "if /I not \"%~1\"==\"-o\" goto next\r\n"
+            "shift\r\n"
+            "set \"out=%~1\"\r\n"
+            ":next\r\n"
+            "shift\r\n"
+            "goto args\r\n"
+            ":render\r\n"
+            "if /I \"%fmt%\"==\"svg\" "
+            "(>\"%out%\" echo ^<svg^>^</svg^>) else (>\"%out%\" echo png)\r\n",
+            encoding="utf-8",
+        )
+    else:
+        exe = tmp_path / "dot"
+        exe.write_text(
+            "#!/bin/sh\n"
+            "fmt=''; out=''\n"
+            "while [ $# -gt 0 ]; do\n"
+            "  case \"$1\" in -T*) fmt=${1#-T} ;; -o) shift; out=$1 ;; esac\n"
+            "  shift\n"
+            "done\n"
+            "if [ \"$fmt\" = svg ]; then printf '<svg></svg>' > \"$out\"; else printf 'png' > \"$out\"; fi\n",
+            encoding="utf-8",
+        )
+        exe.chmod(0o755)
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}")
 
 

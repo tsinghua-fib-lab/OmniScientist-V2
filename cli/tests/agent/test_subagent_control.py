@@ -26,14 +26,24 @@ from omni.skills_runtime.context import ExecContext
 class RoutingLLM(LLMClient):
     """Deterministic content-addressed LLM (mirrors test_subagents.RoutingLLM)."""
 
-    def __init__(self, responder: Callable[[str], ChatWithToolsResult], *, delay: float = 0.0) -> None:
+    def __init__(
+        self,
+        responder: Callable[[str], ChatWithToolsResult],
+        *,
+        delay: float = 0.0,
+        marks: list[tuple[float, float]] | None = None,
+    ) -> None:
         self.model = "routing"
         self._responder = responder
         self._delay = delay
+        self._marks = marks
 
     async def chat_with_tools(self, messages, tools, **kw: Any) -> ChatWithToolsResult:  # noqa: ANN001
+        started = time.perf_counter()
         if self._delay:
             await asyncio.sleep(self._delay)
+        if self._marks is not None:
+            self._marks.append((started, time.perf_counter()))
         last_user = next(
             (str(m.get("content", "")) for m in reversed(messages) if m.get("role") == "user"),
             "",
@@ -47,8 +57,28 @@ class RoutingLLM(LLMClient):
         return [[0.0, 1.0, 0.0, 0.5] for _ in texts]
 
 
-def _echo_llm(*, delay: float = 0.0) -> RoutingLLM:
-    return RoutingLLM(lambda user: ChatWithToolsResult(content=f"ANSWER::{user}"), delay=delay)
+def _echo_llm(
+    *, delay: float = 0.0, marks: list[tuple[float, float]] | None = None
+) -> RoutingLLM:
+    return RoutingLLM(
+        lambda user: ChatWithToolsResult(content=f"ANSWER::{user}"),
+        delay=delay,
+        marks=marks,
+    )
+
+
+def _llm_calls_overlapped(marks: list[tuple[float, float]]) -> bool:
+    """Whether any two LLM sleeps ran at the same time.
+
+    Wall-clock totals lie on Windows CI: ``run_subagent`` does enough sync I/O
+    that three overlapping 0.2s sleeps still land near 0.6s. Interval overlap
+    is the property (serial calls never overlap).
+    """
+    for i, left in enumerate(marks):
+        for right in marks[i + 1 :]:
+            if left[0] < right[1] and right[0] < left[1]:
+                return True
+    return False
 
 
 def _ctx(llm: Any, **overrides: Any) -> ExecContext:
@@ -127,17 +157,15 @@ async def test_wait_any_returns_first_finished():
 
 @pytest.mark.asyncio
 async def test_async_subagents_overlap_instead_of_serializing():
-    ctx = _ctx(_echo_llm(delay=0.2), max_active=4)
+    marks: list[tuple[float, float]] = []
+    ctx = _ctx(_echo_llm(delay=0.2, marks=marks), max_active=4)
     control = _control(ctx)
     try:
-        start = time.perf_counter()
         nicks = [await control.spawn(SubagentSpec(goal=f"t{i}")) for i in range(3)]
-        # Collect all three; they should have run concurrently.
         for nick in nicks:
             await control.wait(nick, 2.0)
-        elapsed = time.perf_counter() - start
-        # Serial would be ~0.6s; concurrent is well under.
-        assert elapsed < 0.45
+        assert len(marks) == 3
+        assert _llm_calls_overlapped(marks)
     finally:
         await control.aclose(grace_s=0.1)
 

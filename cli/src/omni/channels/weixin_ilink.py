@@ -23,10 +23,10 @@ Every request carries ``iLink-App-Id``/``iLink-App-ClientVersion`` headers; POST
 <token>`` once logged in) and a ``base_info`` body field. ``base_info.bot_agent`` is
 observability-only and honestly identifies the client as OmniScientist.
 
-This experimental interoperability path accesses Tencent's bot backend with a
-non-OpenClaw client. It is not endorsed or supported by Tencent or OpenClaw; the
-backend may rate-limit or deny by ``bot_agent``, and WeChat terms and account
-restrictions may apply. Prefer the managed WeCom path for production use.
+Tencent publishes this bot API as the "WeChat ClawBot" plugin functionality, under
+its own terms of use, which govern the paired account. OmniScientist is an
+independent client of that public API rather than the official plugin, so the
+backend may still rate-limit or deny by ``bot_agent``.
 """
 
 from __future__ import annotations
@@ -82,6 +82,13 @@ _ITEM_TYPE_IMAGE = 2
 _ITEM_TYPE_VOICE = 3
 _ITEM_TYPE_FILE = 4
 _ITEM_TYPE_VIDEO = 5
+_ITEM_TYPE_NAMES = {
+    _ITEM_TYPE_TEXT: "text",
+    _ITEM_TYPE_IMAGE: "image",
+    _ITEM_TYPE_VOICE: "voice",
+    _ITEM_TYPE_FILE: "file",
+    _ITEM_TYPE_VIDEO: "video",
+}
 
 # proto: UploadMediaType
 UPLOAD_MEDIA_IMAGE = 1
@@ -117,7 +124,7 @@ class WeixinIlinkError(RuntimeError):
 
 # ── AES-128-ECB media crypto ────────────────────────────────────────────────
 # Weixin CDN media is AES-128-ECB with PKCS7 padding. ``cryptography`` is an
-# optional dependency (install ``omniscientist[channels]``); text chat never
+# optional dependency (install ``OmniScientist-V2[channels]``); text chat never
 # needs it, so the import is lazy and callers fall back to a text link when it
 # is missing.
 def is_crypto_available() -> bool:
@@ -138,7 +145,7 @@ def _crypto():  # noqa: ANN202
         return Cipher, algorithms, modes, PKCS7
     except Exception as exc:  # noqa: BLE001
         raise WeixinIlinkError(
-            "WeChat media encryption requires the 'cryptography' package. Install `omniscientist[channels]` "
+            "WeChat media encryption requires the 'cryptography' package. Install `OmniScientist-V2[channels]` "
             "or run `pip install cryptography`."
         ) from exc
 
@@ -239,7 +246,9 @@ def _omni_version() -> str:
         from importlib.metadata import PackageNotFoundError, version
 
         try:
-            return version("omniscientist")
+            from omni.runtime.dist_meta import DIST_NAME
+
+            return version(DIST_NAME)
         except PackageNotFoundError:
             return "0.0.0"
     except Exception:  # noqa: BLE001
@@ -356,6 +365,10 @@ class WeixinIlinkClient:
         self.cdn_base_url = (cdn_base_url or DEFAULT_CDN_BASE_URL).rstrip("/")
         self.timeout_s = float(timeout_s)
         self.long_poll_timeout_s = float(long_poll_timeout_s)
+        # Position within the current reply, for diagnosing refusals. Only the
+        # reply being sent matters, so one token is remembered rather than a map.
+        self._reply_token = ""
+        self._reply_length = 0
 
     @classmethod
     def from_config(cls, cfg: dict[str, Any]) -> WeixinIlinkClient:
@@ -552,12 +565,36 @@ class WeixinIlinkClient:
         }
         if context_token:
             msg["context_token"] = context_token
+        position = self._position_in_reply(context_token)
         data = await self._post(
             "ilink/bot/sendmessage", {"msg": msg, "base_info": self._base_info()}
         )
         ret = data.get("ret")
         if ret not in (None, 0):
-            raise WeixinIlinkError(f"sendmessage failed: ret={ret} errmsg={data.get('errmsg')}")
+            raise WeixinIlinkError(
+                f"sendmessage failed: ret={ret} errmsg={data.get('errmsg')} "
+                f"(item={_ITEM_TYPE_NAMES.get(int(item.get('type') or 0), 'unknown')}, "
+                f"message {position} of this reply)"
+            )
+
+    def _position_in_reply(self, context_token: str | None) -> int:
+        """Which message of the current reply this is, counting from one.
+
+        Upstream answered ``ret=-2 prepare failed`` to every send from the
+        eleventh onward on task 964f17aa, having accepted the ten before it — the
+        reply was a whole paper split into bubbles, and the figures queued after
+        it never went out. Whether the rule is a per-reply quota is not something
+        this side can see, so the count travels with the error instead of being
+        guessed at: the next report says outright which message was refused.
+
+        ``context_token`` identifies the inbound message being answered, which is
+        exactly the scope of "this reply".
+        """
+        token = context_token or ""
+        if token != self._reply_token:
+            self._reply_token, self._reply_length = token, 0
+        self._reply_length += 1
+        return self._reply_length
 
     # ── typing indicator ─────────────────────────────────────────────────────
     async def get_config(

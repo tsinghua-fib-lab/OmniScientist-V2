@@ -1,8 +1,9 @@
 """AcceptanceEngine — a configurable research-fact acceptance layer.
 
-Structural verification (:class:`omni.runtime.verification.VerificationRunner`)
-already gates a turn's *terminal status* on contract checks (required events,
-artifacts, provenance). This engine is a **complementary, research-fact** layer
+Settlement (:mod:`omni.runtime.settlement`) gates a turn's *terminal status* on
+what the durable record shows: whether its children finished and whether a
+claimed side effect left a trace. This engine is a **complementary,
+research-fact** layer
 that judges whether the honesty audit (grounding + semantic citation support +
 contradictions) is strong enough to *accept* the result.
 

@@ -54,7 +54,7 @@ allowed-tools: [web_fetch, arxiv-fetch]
 
 Put this at `~/.claude/skills/lit-gap-finder/SKILL.md` and both OmniScientist and Claude Code can
 use it. Import and trust it to make it part of Omni's managed catalogue. Omni's
-ReAct agent can discover it by description through `find_skill` / `use_skill`;
+ReAct agent can discover it by description through `find_skill` / `run_skill`;
 `$lit-gap-finder ...` forces exact selection.
 
 For a skill that will be published or copied outside its source repository, also include:
@@ -81,7 +81,8 @@ Design each skill so it degrades gracefully across three modes:
    or OpenClaw. The host agent reads `SKILL.md` and follows the instructions
    with its normal tools. Prompt-only skills usually need nothing more.
 2. **Portable runner mode**: `python_engine` skills include a
-   self-contained `scripts/run.py` that accepts `--json` or JSON on stdin,
+   self-contained `scripts/run.py` that accepts `--json-file` (UTF-8), `--json`,
+   or JSON on stdin,
    prints structured JSON, writes local artifacts/provenance when requested,
    and does not import Omni. External agents should call this script instead of
    importing `engine.py`.
@@ -149,7 +150,8 @@ scripts/run.py
 
 The portable runner should:
 
-- parse `--json` and stdin JSON;
+- parse `--json-file` (UTF-8, preferred on Windows/PowerShell), `--json`, and
+  stdin JSON decoded as UTF-8 — never trust the console code page for paths;
 - support `--self-test` without network access;
 - print a JSON object with at least `status`, `skill`, `summary` or `error`,
   `artifacts`, and `provenance` when applicable;
@@ -265,12 +267,21 @@ For Omni-maintained research skills, the expected contract is:
   `research` ids, warning/recoverability fields, and `error_info`.
 - `allowed-tools`: the actual tool surface for prompt-only skills.
 - `execution`: per-skill budgets (`max_iterations`, `max_tool_calls`,
-  `max_seconds`, `tool_limits`).
+  `max_seconds`, `stall_seconds`, `tool_limits`).
 - `workflow`: failure policy, failed-dependency behavior, and named
   `failure_types`.
 
 The intended behavior is not "skills never fail"; it is "skills fail visibly,
 persist partial state, and let the workflow recover when recovery is honest."
+
+When a failure asks the user to run something, write the command in **slash
+form** (`` `/config set research.contact_email you@example.com` ``) and put it in
+`next_actions`, not in the summary. A skill cannot tell whether its reader is at
+a REPL prompt or in a shell, so the host respells the slash form as
+`omni config set …` when the reader is in a shell; a hard-coded `omni …` would
+be wrong at the prompt where most readers see it. Keeping the command out of the
+summary matters for the same reason the host prints summary and actions
+together: a command written into both is a command the reader is told twice.
 
 `output_schema` is not a closed whitelist. Do not set
 `additionalProperties: false` for Omni research skills. The stable fields are
@@ -313,7 +324,7 @@ metadata:
   helixforge:
     kind: prompt_only
     execution:
-      max_iterations: 4
+      max_iterations: 8
       max_tool_calls: 16
       tool_limits:
         search_corpus: 4
@@ -325,6 +336,76 @@ message and the skill should synthesize from already retrieved evidence. If it
 still hits timeout/iteration/tool-call limits, Omni makes one no-tool salvage
 pass and records a partial result rather than treating the entire workflow as
 lost.
+
+Two rules keep a budget honest:
+
+- **Only cap what costs something.** `tool_limits` belongs on acquisition and
+  execution tools — `search_corpus`, `web_fetch`, `read_file`, `bash`. It must
+  not be placed on the tools that emit the deliverable (`write_file`,
+  `edit_file`, `cite_source`, `record_claim`, `add_evidence`, `log_run`,
+  `package_artifact`, `attach_provenance`): how many times a skill needs those
+  is decided by the content it produced, so no manifest number can be right. A
+  cap declared there is logged as an authoring defect and ignored.
+- **Leave enough turns to spend the budget.** A run stops on iterations first,
+  so `max_iterations` below roughly `max_tool_calls / 2` means the declared tool
+  budget is unreachable. That mismatch is also reported at parse time.
+
+### Wall clock: `max_seconds` and `stall_seconds`
+
+`max_seconds` resolves as **skill-specific > skill-global > envelope**: your
+declaration wins over `skills.default_seconds`, may raise it up to the ceiling
+for your kind (`skills.max_python_seconds`, `max_cli_seconds`,
+`max_prompt_seconds`), and is then bounded for real by whatever the live
+workflow envelope has left. A skill that declares nothing gets the conservative
+fallback — declaring is how you ask for more, and asking for more than the
+envelope only writes down a number the run can never reach, so that is logged as
+an authoring defect.
+
+For work whose total duration is genuinely unpredictable, bound *silence*
+instead of total time. Declare `stall_seconds` and report progress:
+
+```yaml
+execution:
+  max_seconds: 1800    # runaway backstop
+  stall_seconds: 600   # primary guard: no progress for this long means stuck
+```
+
+The watchdog only arms for engines that accept a `progress_callback`, since a
+silent engine cannot feed one. Every progress report resets the window, so a
+long-but-productive run finishes while a hung one fails in minutes instead of
+holding the envelope until the deadline. This mirrors the coordinator loop,
+where `react.stall_timeout_s` is the primary stuck-detector and the wall clock
+is only the backstop. Keep `stall_seconds` well under `max_seconds`; a window
+wider than the deadline can never fire and is reported at parse time.
+
+### Private tools for a prompt-only Skill
+
+A prompt-only Skill may declare a trusted Python helper that is private to its
+own sub-agent. Use `metadata.helixforge.local_tools` when the helper is part of
+the same user-facing workflow and should not become a separate global Skill:
+
+```yaml
+allowed-tools: [inspect_local_input]
+metadata:
+  helixforge:
+    kind: prompt_only
+    local_tools:
+      - name: inspect_local_input
+        description: "Inspect one local input and return structured evidence."
+        module: local_tool
+        class: LocalInspectionTool
+        method: execute
+        input_schema:
+          type: object
+          properties: {input: {type: string}}
+          required: [input]
+```
+
+The module is loaded from the Skill directory, receives `self.ctx`, and is
+offered only inside that Skill's prompt run. It is not added to the global Skill
+catalog or the coordinator's direct tool surface. Private tools run only for
+trusted Skills and must obey the same public-runtime import boundary as other
+bundled Skill code.
 
 For workflow composition, distinguish hard dependencies from soft/degraded
 dependencies:
@@ -378,7 +459,7 @@ So a skill is reachable several ways:
 
 - as a **direct tool** for sync engine/exec skills;
 - through **semantic capability selection** from the contracted catalog;
-- through **model-side catalogue discovery** (`find_skill` → `use_skill`);
+- through **model-side catalogue discovery** (`find_skill` → `run_skill`);
 - through **explicit selection** (`$skill-name ...`);
 - through **single-skill scheduling** (`run_skill`, foreground or background);
 - as a step in a **model-planned workflow** (`run_workflow`).

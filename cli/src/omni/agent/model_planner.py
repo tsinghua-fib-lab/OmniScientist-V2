@@ -11,13 +11,72 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 from weakref import WeakKeyDictionary
 
-from omni.agent.workflow_plan_builder import _compose_step_input
+from omni.agent.capabilities import CAPABILITY_TASK_INSPECT, CAPABILITY_TASK_REVIEW
+from omni.core.field_contract import instruction_field
 from omni.core.llm.client import LLMClient
 from omni.core.tool_contracts import skill_input_contract_error
 from omni.skills_runtime.registry import SkillRegistry
+
+# One whitespace-free token ending in a letter-initial extension. The leading
+# letter is what keeps a dotted *identifier* — an arXiv id (1706.03762), a DOI,
+# a version string — from being read as a path.
+_PATHLIKE_RE = re.compile(r"^[\w~][\w./~+-]*\.[A-Za-z][A-Za-z0-9]{0,7}$")
+
+
+def missing_file_reference(value: object) -> str:
+    """A filename this value names that is not on disk, or ""."""
+    if not isinstance(value, str):
+        return ""
+    candidate = value.strip()
+    if not _PATHLIKE_RE.match(candidate):
+        return ""
+    try:
+        return "" if Path(candidate).expanduser().exists() else candidate
+    except OSError:  # pragma: no cover - an unparseable path is not a usable one
+        return ""
+
+
+def _has_value(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, dict, tuple, set)):
+        return bool(value)
+    return True
+
+
+def _compose_step_input(
+    entry: object | None,
+    capability_input: dict[str, object] | None,
+    step_input: object,
+    goal: str,
+) -> tuple[dict[str, object], bool]:
+    """Fold per-capability inputs into a step and bind its instruction slot.
+
+    The semantic planner emits contract-declared per-capability inputs (a
+    figure's title and figure_kind, say) separately from the step scaffold,
+    whose ``input`` is often empty. An explicit per-step ``input`` wins on
+    conflicts, and the provider's declared *instruction* slot is bound from the
+    goal when it is otherwise empty — bounded to that one slot, never a strict
+    identifier/DOI/path/enum field, so executability is restored without
+    stuffing the goal into arbitrary provider fields.
+
+    Returns the composed input and whether the instruction slot was goal-bound.
+    """
+    merged: dict[str, object] = dict(capability_input or {})
+    if isinstance(step_input, dict):
+        merged.update(step_input)
+    bound_from_goal = False
+    instruction_slot = instruction_field(getattr(entry, "input_schema", None))
+    if instruction_slot and _has_value(goal) and not _has_value(merged.get(instruction_slot)):
+        merged[instruction_slot] = goal
+        bound_from_goal = True
+    return merged, bound_from_goal
 
 _ALLOWED_INTENTS = {
     "direct_answer",
@@ -35,19 +94,46 @@ _CAPABILITY_RE = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$")
 # — language-neutral, never a keyword list — so a placeholder is neither counted
 # as a binding nor allowed to flow into a provider's input.
 _PLACEHOLDER_RE = re.compile(r"^\s*(?:<[^<>]*>|\{\{.*\}\})\s*$", re.DOTALL)
+# A locator asserts that a specific address holds the user's material. It is a
+# different act from resolving a *named* work to its canonical identifier
+# (title → ``1706.03762``), which the runtime proves by fetching it; a locator
+# the request never mentioned was read off the model's own weights, and
+# following it retrieves something nobody asked for. Matched at the string
+# level only — language-neutral, never a keyword list — and deliberately
+# narrow: identifiers stay the resolver's business.
+_LOCATOR_RE = re.compile(r"(?:https?|file)://[^\s\"'<>)\]]+", re.IGNORECASE)
+# Marks a gap this module created by refusing a value, as opposed to one the
+# model declared. They are routed differently and must stay distinguishable:
+# see ``planner._plan_from_proposal``.
+GROUNDING_GAP_SOURCE = "grounding_gate"
 _NATIVE_CAPABILITIES = {
     "artifact.revise",
     "draft.manuscript",
     "draft.section",
     "memory.update",
     "synthesis.final",
+    CAPABILITY_TASK_INSPECT,
+    CAPABILITY_TASK_REVIEW,
 }
 _PLANNER_PROMPT_CACHE: WeakKeyDictionary[
     SkillRegistry,
     dict[tuple[int, int], _PlannerPromptBase],
 ] = WeakKeyDictionary()
-_PLANNER_CONTRACT_SHORTLIST_LIMIT = 8
+# Wide enough to describe the whole shipped catalogue. The cut bounds the prompt
+# on a machine carrying many installed providers; it was never meant to withhold
+# the providers that ship. Below the catalogue size it does exactly that, and it
+# picks its victims by whoever sorts last — which, on a request the lexical pass
+# cannot read, is declared priority alone. At 8 against eleven shipped providers,
+# three presented no field names at all for any Chinese request. One contract
+# costs roughly 400 tokens, so covering the catalogue is by far the cheaper
+# error. ``test_the_contract_shortlist_covers_the_shipped_catalogue`` fails once
+# the catalogue reaches this number, making the next raise a decision rather
+# than a silent regression.
+_PLANNER_CONTRACT_SHORTLIST_LIMIT = 16
 _PLANNER_INDEX_PROSE_LIMIT = 160
+# CJK, kana, and hangul: scripts written without spaces between words.
+_CJK_RANGES = "\u4e00-\u9fff\u3400-\u4dbf\u3040-\u30ff\uac00-\ud7af"
+_CJK_RUN = re.compile(rf"[{_CJK_RANGES}]+")
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +152,12 @@ class ModelPlanProposal:
     outputs: list[str] = field(default_factory=lambda: ["answer"])
     capability_inputs: dict[str, dict[str, Any]] = field(default_factory=dict)
     missing_inputs: list[dict[str, Any]] = field(default_factory=list)
+    # An observation, never a control. Nothing branches on it, and nothing
+    # should: run dc787efa was planned at 0.95 on a reading that was wrong, so a
+    # self-reported score is not evidence about the world. It is carried to the
+    # ``plan.model.proposed`` event so calibration can be reviewed after the
+    # fact. Anything that must stop a run belongs in a gate that checks the
+    # request — the locator check below, or the model explicitly choosing to ask.
     confidence: float = 0.0
     execution_mode: str = "react"
     provenance_mode: str = "light"
@@ -83,9 +175,13 @@ class ModelPlanProposal:
         caps = _clean_capabilities(payload.get("required_capabilities") or payload.get("capabilities") or [])
         steps = _clean_workflow_steps(payload.get("workflow_steps") or [])
         outputs = [str(item) for item in payload.get("outputs") or ["answer"] if str(item)]
+        # A gap earns its place by naming a field *or* by saying something the
+        # user can answer. Requiring ``field`` alone discarded questions whose
+        # only fault was arriving without a slot name to hang on.
         missing = [
             item for item in payload.get("missing_inputs") or []
-            if isinstance(item, dict) and item.get("field")
+            if isinstance(item, dict)
+            and (item.get("field") or item.get("ask") or item.get("reason"))
         ]
         raw_inputs = payload.get("capability_inputs")
         capability_inputs = {
@@ -163,6 +259,12 @@ class ModelIntentPlanner:
         if payload is None:
             return None
         proposal = ModelPlanProposal.from_payload(payload)
+        # Refuse invented locators before executability is judged, so a plan that
+        # only looked runnable because of a fabricated address is measured
+        # without it — and one that is genuinely runnable without it still runs.
+        proposal = _refuse_invented_locators(
+            proposal, user_message=user_message, context_summary=context_summary
+        )
         # Codex-aligned: the planner binds step inputs in the single planning
         # pass (no extra per-step binding LLM calls). We only run a
         # deterministic reconciliation that drops stale ``missing_inputs`` the
@@ -211,11 +313,19 @@ class ModelIntentPlanner:
             )
             if skill_input_contract_error(entry, dict(composed)):
                 return proposal
+        # A gate gap is not advisory and cannot go stale: it exists because a
+        # value was *removed*, so the very contract check above passed only in
+        # its absence. Dropping it here would restore the hole this pass is
+        # meant to close.
+        kept = [item for item in proposal.missing_inputs if _is_gate_gap(item)]
+        dropped = [item for item in proposal.missing_inputs if not _is_gate_gap(item)]
+        if not dropped:
+            return proposal
         audit = {
             **proposal.binding_audit,
-            "dropped_missing_inputs": [dict(item) for item in proposal.missing_inputs],
+            "dropped_missing_inputs": [dict(item) for item in dropped],
         }
-        return replace(proposal, missing_inputs=[], binding_audit=audit)
+        return replace(proposal, missing_inputs=kept, binding_audit=audit)
 
 
 def parse_model_plan_payload(raw: str) -> dict[str, Any] | None:
@@ -283,6 +393,12 @@ def _build_planner_system_prompt(
         "memory_update, schedule, needs_input, react_fallback. "
         "Capabilities currently executable through contracts or native runners: "
         f"{base.capabilities}. "
+        "Strongly prefer making a reasonable assumption and executing over stopping to ask. "
+        "Stopping is not a pause here: the task ends and waits for a person. So when a detail "
+        "is unspecified but a sensible choice exists, record the gap with a \"default\" holding "
+        "the value you would use, and keep planning the work — the turn will run on that value "
+        "and declare it in the answer. Reserve a gap with no \"default\" for what nobody can "
+        "guess and a wrong guess would waste real work: which paper, which file, which account. "
         "Use needs_input only when the request is too vague AND nothing in the turn context "
         "or recent activity could resolve it. When the request refers to your own prior work "
         "(in any language: recently/last time/that one/again/\"the figure you generated\"), do "
@@ -291,14 +407,42 @@ def _build_planner_system_prompt(
         "to re-describe something you produced and could retrieve. When you know a canonical identifier "
         "(e.g. a well-known paper's arXiv id), bind it directly into the relevant step input; list "
         "a value in missing_inputs only when you cannot bind it AND no listed capability could "
-        "discover it. Never list a field you have already bound. Use direct_answer only for a short "
-        "answer that needs no tools or artifacts. "
-        "Local filesystem and shell work in the working directory — listing, reading, searching, "
-        "creating, editing, moving, copying, or deleting files, or running a shell command — is a "
-        "real job handled by the capable assistant turn: use react_fallback for it, not direct_answer "
-        "(which has no tools) or needs_input, whenever a target path is given or discoverable in the "
-        "working directory. For answer plus figure, use qa_plus_artifact with "
+        "discover it. Never list a field you have already bound. Use direct_answer for a short answer "
+        "you can give immediately; it keeps a read-only tool floor as a safety net, so do not pick it "
+        "when the request clearly needs tools. "
+        "General local filesystem and shell work in the working directory — listing, reading, "
+        "searching, creating, editing, moving, copying, or deleting files, or running a shell "
+        "command — and "
+        "questions about OmniScientist itself (its architecture, storage, memory, commands, or design, "
+        "answered from built-in documentation) are handled by the capable assistant turn: use "
+        "react_fallback for them, not direct_answer or needs_input, whenever a target path is given or "
+        "discoverable in the working directory, or the answer should come from built-in docs. A local "
+        "file supplied as the input to a declared scientific capability is not filesystem management: "
+        "select that capability directly. Treat an existing @-prefixed local file as one attachment, "
+        "including spaces in its path, and bind the clean path without @ or trailing user instruction. "
+        "If Active target or Recent activity identifies an earlier task and the user asks for its "
+        "status, success/failure, cause, or artifact location, use react_fallback with the native "
+        "capability in required_capabilities=[\"task.inspect\"]; do not launch the provider again "
+        "or answer from memory. "
+        "If the user instead asks about MANY prior tasks — a time window (\"what did we do in the "
+        "last N days\"), a cross-project retrospective, or \"which ones did you not handle well\" — "
+        "use react_fallback with required_capabilities=[\"task.review\"] (not task.inspect, which is "
+        "for a single task); it enumerates and reads tasks across every workspace. "
+        "For answer plus figure, use qa_plus_artifact with "
         "qa.grounded and artifact.figure. For multiple ordered skills, use workflow_steps. "
+        "When one role=task provider in the index already spans the request, prefer its "
+        "capability over decomposing the work into role=support tools plus synthesis: a task "
+        "provider runs a fuller pipeline than a raw retrieval step and a write-up can "
+        "reproduce. Decompose only when no single provider covers the goal. "
+        "Spanning means the provider's capability is the user's goal, not that a larger "
+        "pipeline includes a needed step. literature.search retrieves existing papers "
+        "(a literature search, literature review, related-work survey, or source list). "
+        "research.ideation generates and pressure-tests research ideas; searching papers "
+        "is only its first stage. Do not select research.ideation for a literature-only "
+        "request. If the user "
+        "also wants a written survey, add synthesis.final so the host can retrieve then write. "
+        "Do not use react_fallback for a survey that is only literature.search plus "
+        "synthesis.final. "
         "Choose artifact.figure for an ordinary lightweight flowchart, architecture diagram, or "
         "system schematic whose output is DOT/SVG/PNG. Choose figure.editable.pptx only for one "
         "editable scientific figure delivered as a single-slide PPTX. Choose slides.generate for "
@@ -316,6 +460,17 @@ def _build_planner_system_prompt(
         "schedule. Do NOT perform the work now and do NOT route it to a workflow: this turn only "
         "registers the schedule. Put the recurring goal (the work to run each time, in the user's "
         "language) in capability_inputs.schedule.task.goal; scheduling itself needs no capability. "
+        "The scheduled goal is the work THIS conversation asked to run later — the current user "
+        "message, or an open schedule clarification's stored goal. Do NOT take the goal from Active "
+        "target or Recent activity unless the user refers to that artifact as the work (\"revise this "
+        "figure at 6pm\", \"re-run this report tomorrow\"). A message that only supplies a new time, "
+        "or answers a pending time clarification, keeps the pending draft's goal; never substitute a "
+        "different recent research-ideation report. "
+        "In capability_inputs.schedule, put worded time in when={raw_expression,trigger_kind,"
+        "constraints}; raw_expression must be copied verbatim from the request. Extract only stated "
+        "constraints: a bare hour has day_period=null and no inferred 24-hour system. For an explicit "
+        "AM/PM phrase outside English or Chinese, copy that phrase into clock.day_period_evidence. Use cron, "
+        "every_seconds, or at instead of when only when the user supplied that exact machine value. "
         "When the user explicitly asks the agent to remember durable information, use memory_update "
         "with capability memory.update and put only the fact to retain in "
         "capability_inputs.memory.update.content. Preserve the fact's original language. "
@@ -336,6 +491,22 @@ def _build_planner_system_prompt(
         f"Available skill contracts:\n{catalog}\n\n"
         f"{base.connectors}\n\n"
         f"{base.domains}\n\n"
+        "Committing on the user's behalf: execution_mode \"ask\" is honoured and "
+        "returns a question instead of running anything. Choose it when the "
+        "request could reasonably mean more than one thing, or reads as pasted "
+        "material rather than an instruction — a wrong reading spends a full "
+        "delegated run. Never put a URL or file:// path in an input unless the "
+        "user supplied it: resolving a named work to its canonical identifier is "
+        "expected, inventing the address it lives at is not, and such a value is "
+        "dropped and turned into a question. \"confidence\" is recorded for review "
+        "and never gates anything, so report it honestly rather than defensively.\n\n"
+        "Every entry in \"missing_inputs\" needs an \"ask\": the one question the "
+        "user answers, in their language, answerable in a line. Put the internal "
+        "justification in \"reason\". A gap with no \"ask\" is shown to the user as "
+        "a generic sentence naming neither what you need nor why. Add a \"default\" "
+        "whenever you can name a sensible value: with one the turn runs on it and "
+        "declares the assumption in its answer, and only gaps without one stop the "
+        "turn to ask.\n\n"
         "JSON shape: {"
         "\"intent_type\": string, "
         "\"confidence\": number, "
@@ -343,7 +514,7 @@ def _build_planner_system_prompt(
         "\"workflow_steps\": [{\"id\": string, \"capability\": string, \"depends_on\": string[], \"input\": object, \"reason\": string}], "
         "\"outputs\": string[], "
         "\"capability_inputs\": {\"capability.name\": object}, "
-        "\"missing_inputs\": [{\"field\": string, \"reason\": string}], "
+        "\"missing_inputs\": [{\"field\": string, \"ask\": string, \"default\": string, \"reason\": string}], "
         "\"execution_mode\": \"react|background|foreground|ask|direct\", "
         "\"provenance_mode\": \"light|full\", "
         "\"rationale\": string"
@@ -376,8 +547,9 @@ def _planner_skill_catalog(
     ``char_budget`` remains accepted for extension compatibility but raw string
     clipping is intentionally forbidden: it can silently erase a late provider
     or a late schema field. The budget is structural instead—every selectable
-    provider gets one index row, while at most eight relevant providers receive
-    their complete compact input contract.
+    provider gets one index row, while the most relevant providers, up to
+    ``_PLANNER_CONTRACT_SHORTLIST_LIMIT``, receive their complete compact input
+    contract.
     """
     del char_budget
     index = (
@@ -404,7 +576,8 @@ def _planner_skill_index(registry: SkillRegistry) -> str:
         caps = ", ".join(entry.capabilities) if entry.capabilities else "none"
         line = (
             f"- {entry.name}: source={entry.source}; contract={entry.contract_level}; "
-            f"mode={entry.delivery_mode.value}; capabilities={caps}; "
+            f"mode={entry.delivery_mode.value}; role={entry.skill_role}; "
+            f"capabilities={caps}; "
             f"description={_bounded_index_prose(entry.description)}"
         )
         when = _bounded_index_prose(entry.when_to_use)
@@ -455,6 +628,30 @@ def _planner_relevant_contracts(
     return "\n".join(lines) or "(no relevant provider contract)"
 
 
+def _lexical_tokens(text: str) -> set[str]:
+    """Overlap tokens for text that may have no word delimiters.
+
+    ``\\w+`` treats an unspaced Chinese sentence as a single token, so it
+    matched nothing and every provider scored zero — the shortlist then fell
+    back to an intent-blind ordering for the whole language. Worse, the Latin
+    words embedded in that sentence (``llm``, ``agentic``) were swallowed by the
+    same run and lost with it. Split on script boundaries, and index CJK runs as
+    character bigrams, the usual stand-in for a segmenter.
+    """
+    tokens: set[str] = set()
+    # ``\w`` matches CJK too, so the Latin alternative has to exclude those
+    # ranges explicitly or Latin words with no surrounding spaces re-fuse into
+    # the neighbouring ideographic run.
+    for run in re.findall(
+        rf"[{_CJK_RANGES}]+|[^\W{_CJK_RANGES}]+", text, flags=re.UNICODE
+    ):
+        if _CJK_RUN.fullmatch(run):
+            tokens.update(run[i : i + 2] for i in range(len(run) - 1))
+        elif len(run) > 1:
+            tokens.add(run)
+    return tokens
+
+
 def _planner_relevant_entries(
     registry: SkillRegistry,
     *,
@@ -464,11 +661,7 @@ def _planner_relevant_entries(
     """Deterministically shortlist provider contracts without classifying intent."""
     entries = list(registry.list_selectable())
     message = (user_message or "").casefold()
-    message_tokens = {
-        token
-        for token in re.findall(r"\w+", message, flags=re.UNICODE)
-        if len(token) > 1
-    }
+    message_tokens = _lexical_tokens(message)
     scored: list[tuple[float, int, str, Any]] = []
     for entry in entries:
         score = 0.0
@@ -505,11 +698,7 @@ def _planner_relevant_entries(
                 str(entry.when_to_use or ""),
             )
         ).casefold()
-        metadata_tokens = {
-            token
-            for token in re.findall(r"\w+", metadata, flags=re.UNICODE)
-            if len(token) > 1
-        }
+        metadata_tokens = _lexical_tokens(metadata)
         score += min(
             10.0,
             float(len(metadata_tokens & message_tokens)),
@@ -523,20 +712,27 @@ def _planner_relevant_entries(
                     entry,
                 )
             )
-    if not scored:
-        scored = [
-            (
-                float(_contract_field_count(entry)),
-                int(entry.priority or 0),
+    scored.sort(key=lambda item: (-item[0], -item[1], item[2]))
+    shortlist = [entry for *_rank, entry in scored[: max(0, limit)]]
+    if len(shortlist) < limit:
+        # Keep the contract list at full breadth: a decisive lexical hit should
+        # lead the list, not shrink it to one provider and leave every other
+        # step without an input schema. Rank the remainder by declared priority.
+        # Schema width says nothing about relevance, and ranking by it put a
+        # poster generator ahead of the research provider on every request the
+        # lexical pass could not read — which is all of them in a language
+        # written without spaces.
+        picked = {id(entry) for entry in shortlist}
+        filler = sorted(
+            (entry for entry in entries if id(entry) not in picked),
+            key=lambda entry: (
+                -int(entry.priority or 0),
+                -_contract_field_count(entry),
                 str(entry.name or ""),
-                entry,
-            )
-            for entry in entries
-        ]
-    scored.sort(
-        key=lambda item: (-item[0], -item[1], item[2])
-    )
-    return [entry for *_rank, entry in scored[: max(0, limit)]]
+            ),
+        )
+        shortlist.extend(filler[: limit - len(shortlist)])
+    return shortlist
 
 
 def _contract_field_count(entry: Any) -> int:
@@ -582,6 +778,137 @@ def _strip_placeholder_values(data: Any) -> dict[str, Any]:
     if not isinstance(data, dict):
         return {}
     return {key: value for key, value in data.items() if not _is_placeholder(value)}
+
+
+def _is_gate_gap(item: Any) -> bool:
+    """Whether this gap exists because the gate refused a value."""
+    return isinstance(item, dict) and item.get("source") == GROUNDING_GAP_SOURCE
+
+
+def has_refused_value(missing_inputs: Any) -> bool:
+    """Whether any gap names a value the gate removed rather than never had.
+
+    The two kinds route differently. A model-declared gap names something the
+    agent may well discover on its own, so it must not veto an executable plan.
+    A refused value is not discoverable by anyone — the planner made it up and
+    it was taken away — so the only honest next move is to ask.
+    """
+    return any(_is_gate_gap(item) for item in missing_inputs or [])
+
+
+def _locators(value: Any) -> list[str]:
+    """Every address embedded in a planner-supplied value."""
+    if not isinstance(value, str):
+        return []
+    return [match.group(0).rstrip(".,;") for match in _LOCATOR_RE.finditer(value)]
+
+
+def _invented_path(value: Any, grounding: str) -> str:
+    """A filename the request never mentioned and the disk does not have.
+
+    A bare ``attention_is_all_you_need.pdf`` is no less invented than the
+    ``https://`` the same plan carried, and in run 138c7b6e it was the one that
+    survived the first cut of this gate and became the review's source. Two
+    facts clear a path without asking anyone: the user named it, or it is
+    actually there.
+    """
+    if isinstance(value, str) and value.strip().casefold() in grounding:
+        return ""
+    return missing_file_reference(value)
+
+
+def _ground_locators(
+    data: Any, grounding: str, gaps: list[dict[str, Any]], *, check_paths: bool
+) -> dict[str, Any]:
+    """Keep only fields whose addresses the user actually supplied.
+
+    An ungrounded field is removed *and* recorded as a gate gap, which forces
+    the plan to a question (see ``planner._plan_from_proposal``). Removing it
+    alone would be worse than not checking: it turns "this address is wrong"
+    into "there is no address", and nothing downstream can tell the difference.
+    The fabricated value stays in ``reason`` for the event log while ``ask``
+    carries the plain question the user answers.
+    """
+    if not isinstance(data, dict):
+        return {}
+    kept: dict[str, Any] = {}
+    for key, value in data.items():
+        kind = "link"
+        invented = [loc for loc in _locators(value) if loc.casefold() not in grounding]
+        if not invented and check_paths:
+            invented = [path for path in [_invented_path(value, grounding)] if path]
+            kind = "file"
+        if not invented:
+            kept[key] = value
+            continue
+        # Name the *kind* of thing that is missing, not the contract's field.
+        # Half the providers call their source slot ``input``, and "the input to
+        # use" asks the user to answer a question they were never shown.
+        slot = str(key).replace("_", " ")
+        gaps.append(
+            {
+                "field": str(key),
+                "ask": f"the {kind} to use" if slot in {"input", kind} else f"the {kind} to use for {slot}",
+                "reason": (
+                    f"planner supplied {invented[0]} for {key}, "
+                    "which appears nowhere in the request"
+                ),
+                "source": GROUNDING_GAP_SOURCE,
+            }
+        )
+    return kept
+
+
+def _refuse_invented_locators(
+    proposal: ModelPlanProposal, *, user_message: str, context_summary: str
+) -> ModelPlanProposal:
+    """Turn every address the request never mentioned into a question."""
+    grounding = f"{user_message}\n{context_summary}".casefold()
+    gaps: list[dict[str, Any]] = []
+    capability_inputs = {
+        capability: _ground_locators(value, grounding, gaps, check_paths=True)
+        for capability, value in proposal.capability_inputs.items()
+    }
+    steps = [
+        {
+            **step,
+            "input": _ground_locators(
+                step["input"],
+                grounding,
+                gaps,
+                # A dependent step's filename is a claim about the plan, not
+                # about the disk: the step that writes it has not run, so it
+                # cannot exist yet. Whether the promise holds is settled when
+                # the upstream step survives resolution — the workflow
+                # builder's contract, not this gate's.
+                check_paths=not step.get("depends_on"),
+            ),
+        }
+        if isinstance(step.get("input"), dict)
+        else step
+        for step in proposal.workflow_steps
+    ]
+    if not gaps:
+        return proposal
+    seen = {
+        str(item.get("field"))
+        for item in proposal.missing_inputs
+        if isinstance(item, dict)
+    }
+    added: list[dict[str, Any]] = []
+    for gap in gaps:
+        if gap["field"] in seen:
+            continue
+        seen.add(gap["field"])
+        added.append(gap)
+    return replace(
+        proposal,
+        capability_inputs=capability_inputs,
+        workflow_steps=steps,
+        # Gate gaps go first: the cap must never be what silently discards the
+        # one gap that has to be asked.
+        missing_inputs=[*added, *proposal.missing_inputs][:5],
+    )
 
 
 def _clean_capabilities(values: Any) -> list[str]:

@@ -87,6 +87,61 @@ def test_research_pptx_setup_requires_node_toolchain(
         runtime_setup.setup_research_pptx_runtime(paths, skill_dir=skill_dir)
 
 
+def test_research_pptx_setup_requires_npm_when_node_is_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Node-only toolchains must not be told to install Node.js again."""
+    skill_dir = tmp_path / "research-pptx"
+    _write_renderer_manifests(skill_dir)
+    paths = SimpleNamespace(cache_dir=tmp_path / "omni-cache")
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **_kwargs):  # noqa: ANN001, ANN202
+        calls.append(list(argv))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(runtime_setup.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        runtime_setup.shutil,
+        "which",
+        lambda name: "/usr/bin/node" if name == "node" else None,
+    )
+    monkeypatch.setattr(runtime_setup, "_node_version", lambda _node: (24, 0, 0))
+
+    with pytest.raises(runtime_setup.SkillRuntimeSetupError) as caught:
+        runtime_setup.setup_research_pptx_runtime(paths, skill_dir=skill_dir)
+    message = str(caught.value)
+    assert "requires npm" in message
+    assert "Node 24.0.0 is installed" in message
+    assert "npm is not on PATH" in message
+    assert "Install Node.js" not in message
+    assert "pnpm" not in message
+    assert calls == []
+
+
+def test_research_pptx_setup_mentions_pnpm_cannot_replace_npm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    skill_dir = tmp_path / "research-pptx"
+    _write_renderer_manifests(skill_dir)
+    paths = SimpleNamespace(cache_dir=tmp_path / "omni-cache")
+
+    monkeypatch.setattr(
+        runtime_setup.shutil,
+        "which",
+        lambda name: f"/usr/bin/{name}" if name in {"node", "pnpm"} else None,
+    )
+    monkeypatch.setattr(runtime_setup, "_node_version", lambda _node: (24, 4, 1))
+
+    with pytest.raises(runtime_setup.SkillRuntimeSetupError) as caught:
+        runtime_setup.setup_research_pptx_runtime(paths, skill_dir=skill_dir)
+    message = str(caught.value)
+    assert "requires npm" in message
+    assert "pnpm is on PATH" in message
+    assert "does not use pnpm" in message
+    assert "Install Node.js" not in message
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [

@@ -17,6 +17,7 @@ import typer
 from omni import __version__
 from omni.cli.render import banner, data_table, info, success, warn
 from omni.cli.state import AppState, make_agent
+from omni.config.paths import OmniPaths
 from omni.runtime.daemon import (
     daemon_info,
     daemon_info_from_pidfile,
@@ -33,6 +34,18 @@ _SERVE_SUBCOMMANDS = (
 
 class DaemonAlreadyRunning(RuntimeError):
     """Raised when this workspace already has a live daemon owner."""
+
+
+def _refuse_live_daemon(paths: OmniPaths) -> None:
+    existing = daemon_info(paths)
+    if not existing:
+        return
+    warn(f"omni serve is already running for workspace {paths.project_dir}")
+    warn(
+        f"Existing daemon/poller: pid={existing['pid']}, "
+        f"heartbeat {existing['age']:.0f}s ago."
+    )
+    raise DaemonAlreadyRunning(f"daemon already running for {paths.project_dir}")
 
 
 def _is_ghost_record(record: dict) -> bool:
@@ -176,9 +189,10 @@ def _terminate_and_wait(
         return not _pid_alive(pid)
     if _wait_pid_gone(pid, timeout):
         return True
-    if sys.platform != "win32":
+    hard_kill = getattr(signal, "SIGKILL", None)
+    if hard_kill is not None:
         try:
-            os.kill(pid, signal.SIGKILL)
+            os.kill(pid, hard_kill)
         except (ProcessLookupError, PermissionError, OSError):
             pass
         else:
@@ -440,7 +454,7 @@ def render_serve_usage_help() -> None:
             ["run", "Run the home service in the foreground (supervisor entrypoint)", "/serve run"],
             ["daemon", "Foreground home service (alias of a bare `omni serve`)", "/serve daemon"],
             ["poller", "Foreground home service without messaging channels", "/serve poller"],
-            ["prune", "Stop and remove ghost legacy daemon workspaces", "/serve prune"],
+            ["prune", "Stop ghosts; --orphans boots out leaked LaunchAgents", "/serve prune"],
             ["help", "Show this help", "/serve help"],
         ],
     )
@@ -462,6 +476,10 @@ async def _run_service(state: AppState, *, channels: str, workers: int, task_onl
     # The daemon owns its launch directory: treat it as trusted so IM/task
     # deliverables mirror there (see ``_adopt_launch_dir_for_serve``).
     _adopt_launch_dir_for_serve()
+    # Reject an already-running service before opening databases, rebuilding
+    # indexes, or loading skills.  Keep the post-setup check below as a second
+    # guard against another process starting during agent initialization.
+    _refuse_live_daemon(state.settings().paths)
     agent = await make_agent(state)
     hb: asyncio.Task | None = None
     manager_task: asyncio.Task | None = None
@@ -476,11 +494,7 @@ async def _run_service(state: AppState, *, channels: str, workers: int, task_onl
         except (NotImplementedError, RuntimeError):
             pass
 
-        existing = daemon_info(agent.paths)
-        if existing:
-            warn(f"omni serve is already running for workspace {agent.paths.project_dir}")
-            warn(f"Existing daemon/poller: pid={existing['pid']}, heartbeat {existing['age']:.0f}s ago.")
-            raise DaemonAlreadyRunning(f"daemon already running for {agent.paths.project_dir}")
+        _refuse_live_daemon(agent.paths)
 
         explicit_names = [] if task_only else [c.strip() for c in channels.split(",") if c.strip()]
         if not task_only:
@@ -696,7 +710,7 @@ def restart_cmd(ctx: typer.Context) -> None:
     """Restart the home service onto the current configuration and code."""
     from omni.runtime import service_control
 
-    result = service_control.restart(ctx.obj.settings(), wait_s=8.0)
+    result = service_control.restart(ctx.obj.settings())
     (success if result.ok else warn)(result.detail)
     if not result.ok:
         raise typer.Exit(1)
@@ -767,21 +781,41 @@ def prune_cmd(
     ctx: typer.Context,
     yes: bool = typer.Option(False, "--yes", "-y", help="Prune without confirmation."),
     keep_data: bool = typer.Option(False, "--keep-data", help="Stop ghosts without deleting data directories."),
+    orphans: bool = typer.Option(
+        False,
+        "--orphans",
+        help="Also boot out LaunchAgents whose OMNI_HOME is missing or ephemeral (test leaks).",
+    ),
 ) -> None:
     """Stop ghost daemons and optionally remove their data directories."""
     state: AppState = ctx.obj
     ghosts = [r for r in list_running_daemons(state.settings().paths.home) if _is_ghost_record(r)]
-    if not ghosts:
-        success("No ghost daemons were found.")
+    orphan_rows: list[dict[str, str]] = []
+    if orphans:
+        from omni.runtime.service_supervisors import list_orphan_launchd_agents
+
+        orphan_rows = list_orphan_launchd_agents()
+
+    if not ghosts and not orphan_rows:
+        success("No ghost daemons or orphan LaunchAgents were found.")
         return
 
-    rows = [
-        [str(g.get("pid")), f"{float(g.get('age') or 0):.0f}s", str(g.get("project_dir") or "")]
-        for g in ghosts
-    ]
-    data_table("Ghost daemons to prune", ["pid", "heartbeat", "dir"], rows)
+    if ghosts:
+        rows = [
+            [str(g.get("pid")), f"{float(g.get('age') or 0):.0f}s", str(g.get("project_dir") or "")]
+            for g in ghosts
+        ]
+        data_table("Ghost daemons to prune", ["pid", "heartbeat", "dir"], rows)
+    if orphan_rows:
+        data_table(
+            "Orphan LaunchAgents to prune",
+            ["label", "reason", "omni_home"],
+            [[r["label"], r["reason"], r["omni_home"]] for r in orphan_rows],
+        )
     action = "stop and delete data directories" if not keep_data else "stop and keep data directories"
-    if not yes and not typer.confirm(f"Apply '{action}' to these {len(ghosts)} ghosts?"):
+    if orphans and orphan_rows:
+        action = f"{action}; boot out orphan LaunchAgents" if ghosts else "boot out orphan LaunchAgents"
+    if not yes and not typer.confirm(f"Apply '{action}'?"):
         warn("Cancelled.")
         raise typer.Exit(1)
 
@@ -803,9 +837,22 @@ def prune_cmd(
             shutil.rmtree(project_dir, ignore_errors=True)
             removed += 1
 
-    success(f"Stopped {stopped} ghosts and removed {removed} data directories.")
+    pruned_orphans = 0
+    if orphans and orphan_rows:
+        from omni.runtime.service_supervisors import prune_orphan_launchd_agents
+
+        pruned_rows, prune_failures = prune_orphan_launchd_agents()
+        pruned_orphans = len(pruned_rows)
+        failures.extend(prune_failures)
+
+    parts = []
+    if ghosts or stopped or removed:
+        parts.append(f"Stopped {stopped} ghosts and removed {removed} data directories")
+    if orphans:
+        parts.append(f"pruned {pruned_orphans} orphan LaunchAgent(s)")
+    success("; ".join(parts) + ".")
     if failures:
-        warn("Some stops failed: " + "; ".join(failures))
+        warn("Some cleanup actions failed: " + "; ".join(failures))
         raise typer.Exit(1)
 
 

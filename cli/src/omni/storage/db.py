@@ -4,6 +4,12 @@ One physical SQLite file per project holds every structured table
 (sessions, messages, tasks, subtasks, memory_entries, artifacts). WAL mode is
 enabled so a long-running ``omni serve`` daemon and short-lived ``omni``
 commands can read/write concurrently.
+
+A store whose generation, watermark, and ORM shape already match this build
+opens as a **reader**: inspect commands such as ``/task show`` must not take
+the SQLite write lock. Additive DDL and a one-shot artifact-owner backfill run
+only when the on-disk shape is actually behind. A busy lock is a queue, never
+a signal to drop the schema.
 """
 
 from __future__ import annotations
@@ -12,13 +18,16 @@ import asyncio
 import json
 import logging
 import sqlite3
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
+from typing import TypeVar
 
 from sqlalchemy import event, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -28,6 +37,8 @@ from sqlalchemy.ext.asyncio import (
 from omni.storage.models import Base
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 _DATABASES: dict[str, Database] = {}
 # Current store shape (tasks / workflows / steps / subtasks / schedules / …).
@@ -53,11 +64,19 @@ _BACKUP_KEEP = 5
 class Database:
     """A SQLAlchemy async engine bound to one SQLite file."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, busy_timeout_ms: int = 5000) -> None:
         self.path = path
+        self._busy_timeout_ms = max(0, int(busy_timeout_ms))
         path.parent.mkdir(parents=True, exist_ok=True)
         url = f"sqlite+aiosqlite:///{path}"
-        self.engine = create_async_engine(url, echo=False, future=True)
+        # aiosqlite's connect event often never applies PRAGMA busy_timeout, so
+        # the sqlite3 timeout is the wait that actually runs. Cap it so a
+        # cancel persist can retry inside a short turn instead of blocking 5s.
+        timeout_s = max(0.05, min(1.0, self._busy_timeout_ms / 1000.0))
+        timeout_ms = int(timeout_s * 1000)
+        self.engine = create_async_engine(
+            url, echo=False, future=True, connect_args={"timeout": timeout_s}
+        )
         self._sessionmaker = async_sessionmaker(
             self.engine, expire_on_commit=False, class_=AsyncSession
         )
@@ -67,7 +86,10 @@ class Database:
         def _set_pragmas(dbapi_conn, _rec):  # noqa: ANN001
             cur = dbapi_conn.cursor()
             cur.execute("PRAGMA synchronous=NORMAL")
-            cur.execute("PRAGMA busy_timeout=5000")
+            # Match the connect timeout. A 5s PRAGMA plus 15 retries turns a
+            # cancel persist into a 75s tool failure on Linux, where the
+            # pragma actually applies.
+            cur.execute(f"PRAGMA busy_timeout={timeout_ms}")
             cur.execute("PRAGMA foreign_keys=ON")
             cur.close()
 
@@ -75,101 +97,71 @@ class Database:
         """Open the store, reconciling its schema to this codebase.
 
         Within the current schema generation (``PRAGMA application_id``),
-        reconcile is **additive and data-preserving** on every start: snapshot
-        when the on-disk watermark differs (:meth:`_backup`), then apply known
-        column renames, create new tables, and add missing columns/indexes.
-        Column adds do not bump ``user_version``; the watermark stays at the
-        single baseline until a future compatibility cut needs a boundary.
+        missing columns/tables/indexes are added in place. Column adds do not
+        bump ``user_version``; the watermark stays at the single baseline until
+        a future compatibility cut needs a boundary.
+
+        When the on-disk generation, watermark, journal, and ORM shape already
+        match this build, init is a read of sqlite_master / PRAGMA and returns
+        without a write transaction — so ``omni serve`` can keep writing while
+        a CLI inspects the same file.
 
         A store whose watermark is *ahead* of this build is left intact
         (forward-compatible), never rebuilt. A store from an **older
         generation** (different ``application_id``) is snapshotted and rebuilt
         from scratch — a deliberate clean break rather than a lossless
-        migration.
+        migration. A busy lock during a needed write is retried, then raised;
+        it never drops the schema.
         """
         if self._initialized:
             return
+        # Fail closed on a missing parent rather than ``unable to open database
+        # file`` from sqlite (common when a caller opens a brand-new OMNI_HOME).
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         with _database_init_lock(self.path):
+            dialect = self.engine.sync_engine.dialect
             async with self.engine.connect() as conn:
-                stored = int((await conn.execute(text("PRAGMA user_version"))).scalar_one() or 0)
-                generation = int(
-                    (await conn.execute(text("PRAGMA application_id"))).scalar_one() or 0
+                stored, generation, has_tables, journal = await _read_store_fingerprint(conn)
+                legacy = has_tables and generation != _SCHEMA_GENERATION
+                normalize_watermark = (
+                    has_tables and not legacy and stored > _SCHEMA_VERSION and stored < 100
                 )
-                has_tables = (
-                    await conn.execute(
-                        text(
-                            "SELECT 1 FROM sqlite_master WHERE type='table' "
-                            "AND name NOT LIKE 'sqlite_%' LIMIT 1"
-                        )
-                    )
-                ).scalar_one_or_none() is not None
-            legacy = has_tables and generation != _SCHEMA_GENERATION
-            # Watermarks left by earlier interim counters on this generation —
-            # normalize them back to the single baseline on the next open.
-            normalize_watermark = (
-                has_tables and not legacy and stored > _SCHEMA_VERSION and stored < 100
+                future = has_tables and not legacy and stored >= 100
+                needs_ddl = (not has_tables) or legacy or await _schema_needs_ddl(conn)
+            needs_write = needs_ddl or (
+                has_tables
+                and not future
+                and (stored != _SCHEMA_VERSION or normalize_watermark or journal != "wal")
             )
-            future = has_tables and not legacy and stored >= 100
+            if not needs_write:
+                self._initialized = True
+                return
             backup: Path | None = None
             if has_tables and (legacy or stored != _SCHEMA_VERSION):
                 backup = await self._backup(stored)
-            dialect = self.engine.sync_engine.dialect
-            async with self.engine.begin() as conn:
-                await conn.execute(text("PRAGMA journal_mode=WAL"))
-                if legacy:
-                    # Older-generation vocabulary. Deliberate clean break:
-                    # snapshot (above), drop everything, rebuild current schema.
-                    await _drop_sqlite_schema(conn)
-                    await conn.run_sync(Base.metadata.create_all)
-                    logger.warning(
-                        "Rebuilt legacy store as the current schema "
-                        "(previous watermark=%d); snapshot: %s",
-                        stored,
-                        backup or "unavailable",
+
+            async def _write() -> None:
+                async with self.engine.begin() as conn:
+                    await _apply_schema_writes(
+                        conn,
+                        dialect=dialect,
+                        legacy=legacy,
+                        future=future,
+                        has_tables=has_tables,
+                        needs_ddl=needs_ddl,
+                        stored=stored,
+                        backup=backup,
                     )
-                elif future:
-                    # DB watermark is ahead of this build. Keep the store and
-                    # its watermark; only ensure our known tables exist.
-                    await conn.run_sync(Base.metadata.create_all)
+
+            try:
+                await retry_while_busy(_write)
+            except OperationalError as exc:
+                if sqlite_busy(exc):
                     logger.warning(
-                        "Local store watermark %d is ahead of this build (%d); "
-                        "preserving the additive store.",
-                        stored,
-                        _SCHEMA_VERSION,
+                        "Schema update deferred; another process holds the write lock on %s",
+                        self.path,
                     )
-                else:
-                    # Current generation (fresh, current, or interim watermark):
-                    # create_all + additive reconcile are both idempotent.
-                    await conn.run_sync(Base.metadata.create_all)
-                    if has_tables:
-                        try:
-                            await _migrate_schema_additively(conn, dialect)
-                            if stored != _SCHEMA_VERSION or normalize_watermark:
-                                backup_note = (
-                                    f" (pre-reconcile backup: {backup})" if backup else ""
-                                )
-                                logger.info(
-                                    "Reconciled the local schema in place "
-                                    "(watermark %d → %d)%s",
-                                    stored,
-                                    _SCHEMA_VERSION,
-                                    backup_note,
-                                )
-                        except Exception:
-                            logger.exception(
-                                "Additive reconcile failed; rebuilding after "
-                                "preserving backup %s",
-                                backup,
-                            )
-                            await _drop_sqlite_schema(conn)
-                            await conn.run_sync(Base.metadata.create_all)
-                # Stamp the generation marker. Advance/normalize the watermark
-                # for current-generation stores; a true future watermark
-                # (reserved range) is left alone so newer processes still
-                # recognise it.
-                await conn.execute(text(f"PRAGMA application_id = {_SCHEMA_GENERATION}"))
-                if not future:
-                    await conn.execute(text(f"PRAGMA user_version = {_SCHEMA_VERSION}"))
+                raise
         self._initialized = True
 
     async def _backup(self, stored_version: int) -> Path | None:
@@ -208,6 +200,57 @@ class Database:
         await self.engine.dispose()
 
 
+def sqlite_busy(exc: BaseException) -> bool:
+    """True when SQLite refused a write because another writer holds the lock."""
+    detail = str(getattr(exc, "orig", exc)).lower()
+    return "locked" in detail or "busy" in detail
+
+
+_BUSY_RETRY_ATTEMPTS: ContextVar[int | None] = ContextVar(
+    "omni_busy_retry_attempts", default=None
+)
+
+
+@contextmanager
+def busy_retry_budget(attempts: int) -> Iterator[None]:
+    """Cap nested :func:`retry_while_busy` calls for a fail-fast cancel persist."""
+    token = _BUSY_RETRY_ATTEMPTS.set(max(1, int(attempts)))
+    try:
+        yield
+    finally:
+        _BUSY_RETRY_ATTEMPTS.reset(token)
+
+
+async def retry_while_busy(
+    write: Callable[[], Awaitable[T]],
+    *,
+    attempts: int = 15,
+    backoff_seconds: float = 0.05,
+) -> T:
+    """Run ``write`` again while SQLite says another writer holds the lock.
+
+    SQLite admits one writer at a time. A cancelled skill may still hold the
+    file lock on its aiosqlite worker thread after the asyncio task is gone —
+    Windows keeps that lock long enough that five short retries lose and the
+    run stays ``running``. Cap each sleep so the queue fits inside a 2s turn.
+    Only the caller knows whether replaying its write is the same write.
+    A cancel persist installs :func:`busy_retry_budget` so this queue cannot
+    replace ``CancelledError`` with a 15-second tool failure.
+    """
+    cap = _BUSY_RETRY_ATTEMPTS.get()
+    if cap is not None:
+        attempts = min(attempts, cap)
+        backoff_seconds = min(backoff_seconds, 0.02)
+    for attempt in range(attempts):
+        try:
+            return await write()
+        except OperationalError as exc:
+            if not sqlite_busy(exc) or attempt == attempts - 1:
+                raise
+            await asyncio.sleep(min(0.08, backoff_seconds * (attempt + 1)))
+    raise AssertionError("unreachable: the loop above either returns or raises")
+
+
 def get_database(path: Path) -> Database:
     """Return a cached :class:`Database` for ``path`` (one per file)."""
     key = str(path.resolve())
@@ -223,6 +266,23 @@ async def reset_databases() -> None:
     for db in list(_DATABASES.values()):
         await db.dispose()
     _DATABASES.clear()
+
+
+async def dispose_databases_under(root: Path) -> None:
+    """Dispose cached engines whose SQLite files live below ``root``.
+
+    Evaluation attempts use independent temporary roots and may run in
+    parallel, so a process-wide reset would close another active attempt.
+    Scoped disposal releases Windows file handles before each temporary
+    directory is removed without disturbing databases owned by other roots.
+    """
+    resolved_root = root.resolve()
+    for key, db in list(_DATABASES.items()):
+        if not Path(key).is_relative_to(resolved_root):
+            continue
+        cached = _DATABASES.pop(key, None)
+        if cached is db:
+            await db.dispose()
 
 
 def code_schema_version() -> int:
@@ -292,6 +352,95 @@ def _prune_backups(backup_dir: Path, stem: str, suffix: str, keep: int) -> None:
             pass
 
 
+async def _read_store_fingerprint(conn) -> tuple[int, int, bool, str]:  # noqa: ANN001
+    """Return ``(user_version, application_id, has_tables, journal_mode)``."""
+    stored = int((await conn.execute(text("PRAGMA user_version"))).scalar_one() or 0)
+    generation = int((await conn.execute(text("PRAGMA application_id"))).scalar_one() or 0)
+    has_tables = (
+        await conn.execute(
+            text(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name NOT LIKE 'sqlite_%' LIMIT 1"
+            )
+        )
+    ).scalar_one_or_none() is not None
+    journal = str((await conn.execute(text("PRAGMA journal_mode"))).scalar_one() or "").lower()
+    return stored, generation, has_tables, journal
+
+
+async def _schema_needs_ddl(conn) -> bool:  # noqa: ANN001
+    """True when the ORM has a table, column, rename, or index the file lacks.
+
+    Pure reads of sqlite_master / PRAGMA table_info. Callers that get False
+    can skip the write transaction entirely.
+    """
+    tables = await _existing_table_names(conn)
+    for table, renames in _COLUMN_RENAMES.items():
+        if table not in tables:
+            continue
+        cols = await _table_column_names(conn, table)
+        for old, new in renames:
+            if old in cols and new not in cols:
+                return True
+    indexes = await _existing_index_names(conn)
+    for table in Base.metadata.sorted_tables:
+        if table.name not in tables:
+            return True
+        existing = await _table_column_names(conn, table.name)
+        for col in table.columns:
+            if col.name not in existing and not col.primary_key:
+                return True
+        for idx in table.indexes:
+            if idx.name and idx.name not in indexes:
+                return True
+    return False
+
+
+async def _apply_schema_writes(
+    conn,  # noqa: ANN001
+    *,
+    dialect: object,
+    legacy: bool,
+    future: bool,
+    has_tables: bool,
+    needs_ddl: bool,
+    stored: int,
+    backup: Path | None,
+) -> None:
+    """Apply WAL, DDL, and watermarks. Never drops the store on a busy lock."""
+    await conn.execute(text("PRAGMA journal_mode=WAL"))
+    if legacy:
+        await _drop_sqlite_schema(conn)
+        await conn.run_sync(Base.metadata.create_all)
+        logger.warning(
+            "Rebuilt legacy store as the current schema "
+            "(previous watermark=%d); snapshot: %s",
+            stored,
+            backup or "unavailable",
+        )
+    elif needs_ddl:
+        await conn.run_sync(Base.metadata.create_all)
+        if future:
+            logger.warning(
+                "Local store watermark is ahead of this build (%d); "
+                "preserving the additive store while ensuring known tables exist.",
+                stored,
+            )
+        elif has_tables:
+            await _migrate_schema_additively(conn, dialect)
+            if stored != _SCHEMA_VERSION:
+                backup_note = f" (pre-reconcile backup: {backup})" if backup else ""
+                logger.info(
+                    "Reconciled the local schema in place (watermark %d → %d)%s",
+                    stored,
+                    _SCHEMA_VERSION,
+                    backup_note,
+                )
+    await conn.execute(text(f"PRAGMA application_id = {_SCHEMA_GENERATION}"))
+    if not future:
+        await conn.execute(text(f"PRAGMA user_version = {_SCHEMA_VERSION}"))
+
+
 async def _existing_table_names(conn) -> set[str]:  # noqa: ANN001
     rows = (
         await conn.execute(
@@ -304,6 +453,15 @@ async def _existing_table_names(conn) -> set[str]:  # noqa: ANN001
 async def _table_column_names(conn, table: str) -> set[str]:  # noqa: ANN001
     rows = (await conn.execute(text(f'PRAGMA table_info("{table}")'))).fetchall()
     return {str(r[1]) for r in rows}  # r = (cid, name, type, notnull, dflt, pk)
+
+
+async def _existing_index_names(conn) -> set[str]:  # noqa: ANN001
+    rows = (
+        await conn.execute(
+            text("SELECT name FROM sqlite_master WHERE type='index' AND name IS NOT NULL")
+        )
+    ).fetchall()
+    return {str(r[0]) for r in rows if r[0]}
 
 
 def _sql_literal(value: object) -> str:
@@ -390,8 +548,9 @@ async def _apply_column_renames(conn) -> None:  # noqa: ANN001
                 logger.info("schema migrate: renamed %s.%s → %s", table, old, new)
 
 
-async def _add_missing_columns(conn, dialect) -> None:  # noqa: ANN001
+async def _add_missing_columns(conn, dialect) -> list[tuple[str, str]]:  # noqa: ANN001
     """Add ORM columns absent from an existing table (additive; keeps rows)."""
+    added: list[tuple[str, str]] = []
     tables = await _existing_table_names(conn)
     for table in Base.metadata.sorted_tables:
         if table.name not in tables:
@@ -408,7 +567,9 @@ async def _add_missing_columns(conn, dialect) -> None:  # noqa: ANN001
             elif literal is not None:
                 ddl += f" DEFAULT {literal}"
             await conn.execute(text(ddl))
+            added.append((table.name, col.name))
             logger.info("schema migrate: added column %s.%s", table.name, col.name)
+    return added
 
 
 async def _create_missing_indexes(conn) -> None:  # noqa: ANN001
@@ -604,11 +765,17 @@ async def _reconcile_artifact_task_ownership(conn) -> None:  # noqa: ANN001
 
 
 async def _migrate_schema_additively(conn, dialect) -> None:  # noqa: ANN001
-    """Reconcile an older store to the current ORM without dropping data."""
+    """Reconcile an older store to the current ORM without dropping data.
+
+    Artifact-owner backfill runs only when this pass actually added
+    ``artifacts.task_id``. A current store must not UPDATE artifacts on every
+    CLI open — that write contends with ``omni serve``.
+    """
     await _apply_column_renames(conn)
     await conn.run_sync(Base.metadata.create_all)  # brand-new tables (+ their indexes)
-    await _add_missing_columns(conn, dialect)
-    await _reconcile_artifact_task_ownership(conn)
+    added = await _add_missing_columns(conn, dialect)
+    if any(table == "artifacts" and column == "task_id" for table, column in added):
+        await _reconcile_artifact_task_ownership(conn)
     await _create_missing_indexes(conn)
 
 

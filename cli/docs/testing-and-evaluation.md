@@ -174,12 +174,12 @@ Use protected scheduled environments and sanitize trajectories before uploading 
 For each model/provider/version combination, publish more than one aggregate score:
 
 - per-scenario success rate over repeated isolated runs;
-- hard-contract pass rate (status, policy, required/forbidden events and tools);
+- hard-contract pass rate (settled status, termination reason, policy, routed and executed skills);
 - provenance/citation accuracy and unsupported-claim rate;
 - artifact validity and reproducibility checks;
 - manual rework turns;
 - p50/p95 wall time, total tokens, and estimated cost;
-- failure taxonomy: model/provider, tool, policy, budget, network, storage, verifier, or presentation;
+- failure taxonomy: model/provider, tool, policy, budget, network, storage, settlement, or presentation;
 - benchmark-owned score for external suites.
 
 ## Implementation sequence

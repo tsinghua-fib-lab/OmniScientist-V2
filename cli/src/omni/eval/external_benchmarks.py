@@ -133,6 +133,7 @@ async def run_biomystery_cases(
     from omni.agent import OmniAgent
     from omni.config import load_settings
     from omni.eval.blackbox import isolated_eval_settings
+    from omni.storage.db import dispose_databases_under
 
     source_settings = settings or load_settings()
     factory = agent_factory or OmniAgent.create
@@ -152,8 +153,9 @@ async def run_biomystery_cases(
                 workspace = attempt_settings.paths.workspace_root
                 data_files = extract_biomystery_data(case, workspace)
                 prompt = build_biomystery_prompt(case, data_files=data_files)
-                agent = await factory(attempt_settings)
+                agent = None
                 try:
+                    agent = await factory(attempt_settings)
                     result = await agent.handle_turn(
                         prompt,
                         channel="biomystery",
@@ -163,7 +165,11 @@ async def run_biomystery_cases(
                     events = await agent.tasks.list_events(result.task_id)
                     cost = await agent.tasks.cost_summary(result.task_id, include_child_tasks=True)
                 finally:
-                    await agent.aclose()
+                    try:
+                        if agent is not None:
+                            await agent.aclose()
+                    finally:
+                        await dispose_databases_under(root)
             answers.append(
                 {
                     "id": case.id,

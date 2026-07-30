@@ -42,6 +42,24 @@ async def test_execution_control_interrupts_an_inflight_await() -> None:
         await asyncio.wait_for(control.run(work()), timeout=0.5)
 
     assert control.cancel_requested is True
+    assert control.durable_cancel is True
+
+
+@pytest.mark.asyncio
+async def test_outer_task_cancel_is_not_a_durable_user_cancel() -> None:
+    control = ExecutionControl(lambda: [], poll_interval=0.01)
+
+    async def work() -> str:
+        await asyncio.sleep(30)
+        return "late"
+
+    task = asyncio.create_task(control.run(work()))
+    await asyncio.sleep(0.02)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert control.durable_cancel is False
 
 
 @pytest.mark.asyncio

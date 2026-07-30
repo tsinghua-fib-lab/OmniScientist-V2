@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-
 PHASE_TO_L2: dict[str, list[str] | None] = {
     "problem_formulation": ["C01"],
     "method_selection": ["C02", "C05"],

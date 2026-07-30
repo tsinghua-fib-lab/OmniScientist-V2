@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -46,6 +47,192 @@ _PROJECT_SKILL_SUBDIRS = (
 def default_user_home() -> Path:
     """Return the default OmniScientist data directory."""
     return (Path.home() / ".omni").resolve()
+
+
+def os_user_home() -> Path:
+    """The account home directory, ignoring a remapped ``HOME`` / ``USERPROFILE``.
+
+    Subprocess tests (and a child that exports ``HOME``) must not make the real
+    ``~/.omni`` look like an in-place project of ``/Users/<name>``. ``Path.home()``
+    follows the process environment; the directory the OS assigned this uid does
+    not.
+    """
+    if os.name == "posix":
+        try:
+            import pwd
+
+            raw = pwd.getpwuid(os.getuid()).pw_dir
+            if raw:
+                return Path(raw).expanduser().resolve()
+        except (ImportError, KeyError, OSError):
+            pass
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            buf = ctypes.create_unicode_buffer(260)
+            # CSIDL_PROFILE = 40; ignores a pytest-remapped USERPROFILE.
+            if ctypes.windll.shell32.SHGetFolderPathW(None, 40, None, 0, buf) == 0 and buf.value:
+                return Path(buf.value).expanduser().resolve()
+        except (AttributeError, OSError, ValueError):
+            pass
+    return Path.home().resolve()
+
+
+def os_default_user_home() -> Path:
+    """The account-default store (``<os_user_home>/.omni``), environment-proof."""
+    return (os_user_home() / _PROJECT_MARKER).resolve()
+
+
+_CONTROL_STORE_FILES = (
+    "config.toml",
+    "control.sqlite3",
+    "memory.sqlite3",
+    "workspaces.json",
+    "update-state.json",
+    "update-check.json",
+)
+_CONTROL_STORE_DIRS = (
+    "workspaces",
+    "projects",
+    "service",
+    "memories",
+    "scientist-kg",
+)
+
+
+def looks_like_control_store(path: Path) -> bool:
+    """True when *path* is a user data store, not an in-place project marker.
+
+    In-place ``repo/.omni`` holds ``sessions.sqlite3`` / artifacts. The user
+    store holds config, the control DB, and the ``workspaces/`` / ``projects/``
+    trees. Name alone is not enough — that is what let a walk adopt the real
+    ``~/.omni`` as a project of ``/Users/<name>``.
+    """
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    if not resolved.is_dir():
+        return False
+    files = sum(1 for name in _CONTROL_STORE_FILES if (resolved / name).exists())
+    dirs = sum(1 for name in _CONTROL_STORE_DIRS if (resolved / name).is_dir())
+    return files >= 2 or (files >= 1 and dirs >= 1)
+
+
+def is_control_store_path(path: Path, store: Path | None = None) -> bool:
+    """True when *path* is the active store, the OS-account store, or store-shaped."""
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    active = (store or user_home()).resolve()
+    if resolved == active:
+        return True
+    if resolved == os_default_user_home():
+        return True
+    try:
+        if resolved == default_user_home():
+            return True
+    except OSError:
+        pass
+    return looks_like_control_store(resolved)
+
+
+def opens_control_store(root: Path, store: Path | None = None) -> bool:
+    """True when a write root at *root* would include the control-state store.
+
+    A root that *is* the store, *contains* the store (``/tmp`` above a pytest
+    home), or *sits inside* the store (``workspaces/<slug>``) all reopen the
+    control plane. Scratch and outbox must be listed as their own roots.
+    """
+    try:
+        base = (store or user_home()).resolve()
+        resolved = root.resolve()
+    except OSError:
+        return False
+    if resolved == base:
+        return True
+    try:
+        base.relative_to(resolved)
+        return True
+    except ValueError:
+        pass
+    try:
+        resolved.relative_to(base)
+        return True
+    except ValueError:
+        return False
+
+
+def frozen_control_stores() -> list[Path]:
+    """Control-state roots the host freezes before a tool starts.
+
+    Codex never puts ``CODEX_HOME`` in ``WorkspaceWrite``. Omni's equivalent
+    set is the active store, the process-default store, the OS-account store,
+    a persisted custom home, and the bootstrap pointer that names it. A child
+    that remaps ``HOME`` / ``OMNI_HOME`` must not drop the real stores from
+    this list — that is what let pytest adopt ``~/.omni`` as an in-place
+    project.
+    """
+    seen: set[Path] = set()
+    out: list[Path] = []
+    candidates = [
+        user_home(),
+        default_user_home(),
+        os_default_user_home(),
+    ]
+    if saved := _saved_user_home():
+        candidates.append(saved)
+    try:
+        candidates.append(home_selection_file())
+    except OSError:
+        pass
+    for raw in candidates:
+        try:
+            resolved = Path(raw).resolve()
+        except OSError:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        out.append(resolved)
+    return out
+
+
+def opens_any_control_store(root: Path, stores: list[Path] | None = None) -> bool:
+    """True when *root* would include any frozen control-state path."""
+    for store in stores if stores is not None else frozen_control_stores():
+        if opens_control_store(root, store):
+            return True
+    return False
+
+
+def sits_in_any_control_store(path: Path, stores: list[Path] | None = None) -> bool:
+    """True when *path* is a frozen store or lives inside one.
+
+    Unlike ``opens_any_control_store``, an ancestor of the store (``/tmp``
+    above a pytest home) is not a hit — scratch may live beside the store
+    under the same temp root. Used before ``mkdir`` so a symlink parent
+    cannot create directories inside ``~/.omni``.
+    """
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    for store in stores if stores is not None else frozen_control_stores():
+        try:
+            base = Path(store).resolve()
+        except OSError:
+            continue
+        if resolved == base:
+            return True
+        try:
+            resolved.relative_to(base)
+            return True
+        except ValueError:
+            continue
+    return False
 
 
 def home_selection_file() -> Path:
@@ -160,10 +347,13 @@ def iter_project_skill_dirs(start: Path | None = None, subpath: str = ".claude/s
     """
     cur = (start or Path.cwd()).resolve()
     home = Path.home().resolve()
+    account_home = os_user_home()
     out: list[Path] = []
     for directory in (cur, *cur.parents):
-        # Don't treat the home dir (or above) as a project root.
-        if directory == home:
+        # Don't treat the home dir (or above) as a project root. Stop at the
+        # remapped ``Path.home()`` *and* the host-fixed account home so a child
+        # that exported ``HOME`` cannot walk into ``/Users/<name>/.omni``.
+        if directory == home or directory == account_home:
             break
         candidate = directory / subpath
         if candidate.is_dir():
@@ -215,8 +405,9 @@ def find_vcs_root(start: Path | None = None) -> Path | None:
     """Nearest enclosing VCS root (``.git``/``.hg``), never the home dir or above."""
     cur = (start or Path.cwd()).resolve()
     home = Path.home().resolve()
+    account_home = os_user_home()
     for directory in (cur, *cur.parents):
-        if directory == home:  # don't treat the home dir (or above) as a workspace
+        if directory == home or directory == account_home:
             break
         if any((directory / m).exists() for m in _VCS_MARKERS):
             return directory
@@ -226,18 +417,45 @@ def find_vcs_root(start: Path | None = None) -> Path | None:
 def find_project_root(start: Path | None = None) -> Path | None:
     """Walk up from ``start`` looking for an in-place ``.omni`` project dir.
 
-    Stops at a VCS root, the home directory, or the filesystem root. Returns the
-    directory that *contains* the ``.omni`` folder, or ``None`` when there is no
-    in-place project (callers then fall back to path-keyed workspace resolution).
-    The home guard prevents ``~/.omni`` (the user home) from ever being mistaken
-    for an in-place project root.
+    Stops at a VCS root, the process home, the host-fixed account home, or the
+    filesystem root. Returns the directory that *contains* the ``.omni`` folder,
+    or ``None`` when there is no in-place project (callers then fall back to
+    path-keyed workspace resolution).
+
+    ``.omni`` names two different things: the store, and the marker a user drops
+    in a repository to adopt it. Only the second is an in-place project, and the
+    two are told apart by identity — where the directory *is* — never by name.
+    Matching on the name alone read the store as an adoption of whichever
+    directory contains it, so every sibling of the home resolved as part of a
+    project, and a launch from inside ``~/.omni/workspaces/<x>`` keyed a
+    workspace off the home's parent with ``project_dir`` set to the store.
+
+    Comparing against ``Path.home()`` looked like it covered this and did not:
+    the store sits in the OS home only while ``OMNI_HOME`` keeps its default, and
+    relocating it is a supported, bootstrapped option. The guard has to ask where
+    the store actually is.
     """
     cur = (start or Path.cwd()).resolve()
     home = Path.home().resolve()
+    account_home = os_user_home()
+    store = user_home()
     for directory in (cur, *cur.parents):
-        if directory == home:
+        if directory == home or directory == account_home:
             break
-        if (directory / _PROJECT_MARKER).is_dir():
+        if is_within_home(directory, store):
+            # The store holds projects; it is not one, and neither is anything
+            # filed inside it.
+            break
+        marker = directory / _PROJECT_MARKER
+        if marker.is_dir():
+            # Identity, not the leaf name. Skip the active store, a parent
+            # store that contains the (possibly remapped) home, the
+            # account-default ``~/.omni``, and any directory that is shaped
+            # like control state. A real in-place marker is none of these.
+            if is_within_home(marker, store) or is_within_home(store, marker):
+                continue
+            if is_control_store_path(marker, store):
+                continue
             return directory
         if any((directory / m).exists() for m in _VCS_MARKERS):
             # Reached a repo boundary without an .omni dir → no in-place project.
@@ -282,6 +500,11 @@ class OmniPaths:
     @property
     def user_skills_dir(self) -> Path:
         return self.home / "skills"
+
+    @property
+    def scientist_kg_dir(self) -> Path:
+        """Writable SoulAgent scanner root (``<OMNI_HOME>/scientist-kg``)."""
+        return self.home / "scientist-kg"
 
     @property
     def channels_dir(self) -> Path:

@@ -20,7 +20,6 @@ import shutil
 import subprocess
 import sys
 from collections import Counter, defaultdict
-from typing import Any
 
 import typer
 from rich.pager import Pager
@@ -293,8 +292,6 @@ def render_skills_command_help() -> None:
             ["restore <name>", "Restore a disabled skill", "/skills restore scientific-figure"],
             ["enable <name>", "Alias for restore", "/skills enable scientific-figure"],
             ["sources", "Show skill discovery roots", "/skills sources"],
-            ["evolve", "Generate candidates from successful traces; defaults to dry-run", "/skills evolve --install"],
-            ["proposals", "Scan and review skill creation or improvement proposals", "/skills proposals list"],
             ["export [tools]", "Export built-in skills to Claude Code, Codex, or OpenClaw", "/skills export codex"],
             ["unexport [tools]", "Remove previously exported built-in skills", "/skills unexport codex"],
             ["examples", "Show research workflow examples", "/skills examples"],
@@ -313,8 +310,6 @@ def render_skills_command_help() -> None:
             ["--source", "list", "/skills list --source builtin"],
             ["--disabled", "list", "/skills list --disabled"],
             ["--force", "add", "/skills add ~/work/my-skill --force"],
-            ["--install / --limit / --min-support", "evolve", "/skills evolve --install --min-support 3"],
-            ["--json / --all", "proposals", "/skills proposals list --all --json"],
             ["--all", "remove", "/skills remove ext-skill --all"],
             ["--physical --force", "remove", "/skills remove ext-skill --all --physical --force"],
             ["[tools] / --all", "export / unexport", "/skills export claude codex; /skills export --all"],
@@ -346,12 +341,36 @@ def setup_cmd(
     force: bool = typer.Option(False, "--force", help="Reinstall even when the pinned runtime is ready."),
 ) -> None:
     """Prepare a bundled Skill runtime outside the Python installation."""
-    if name != "research-pptx":
+    if name not in {"research-pptx", "builtin-personas", "all"}:
         error(
             f"Skill '{name}' has no owner-managed setup. "
-            "Available setup target: research-pptx."
+            "Available setup targets: research-pptx, builtin-personas, all."
         )
         raise typer.Exit(2)
+
+    paths = ctx.obj.settings().paths
+    paths.ensure_dirs()
+    if name in {"builtin-personas", "all"}:
+        from omni.personas.installer import (
+            BuiltinPersonaInstallError,
+            install_builtin_personas,
+        )
+
+        info("Installing missing bundled scientist personas...")
+        try:
+            personas = install_builtin_personas(paths)
+        except BuiltinPersonaInstallError as exc:
+            error(str(exc))
+            raise typer.Exit(1) from exc
+        if personas.installed:
+            success(
+                f"Installed {len(personas.installed)} scientist personas: "
+                f"{', '.join(personas.installed)}."
+            )
+        else:
+            success("Bundled scientist personas already available; existing data preserved.")
+        if name == "builtin-personas":
+            return
 
     from omni.skills_runtime.runtime_setup import (
         SkillRuntimeSetupError,
@@ -359,8 +378,6 @@ def setup_cmd(
         setup_research_pptx_runtime,
     )
 
-    paths = ctx.obj.settings().paths
-    paths.ensure_dirs()
     info("Preparing the lockfile-pinned research-pptx renderer runtime...")
     try:
         changed = setup_research_pptx_runtime(paths, force=force)
@@ -741,334 +758,6 @@ def sources_cmd(ctx: typer.Context) -> None:
         "`omni skills list --all`, or add another root to skills.sources."
     )
     info("Project-level discovery walks upward from the current directory to the repository root.")
-
-
-def render_evolution_report(report: Any, *, installed: bool) -> None:  # noqa: ANN401
-    """Render an ``EvolutionReport`` (shared by CLI and REPL)."""
-    if not report.outcomes:
-        info(f"Scanned {report.considered} successful traces; no reusable candidate reached the clustering threshold.")
-        info("Run more similar tasks or lower --min-support.")
-        return
-    rows = [
-        [o.name, str(o.support), o.action, "; ".join(o.reasons)[:70], o.path or "—"]
-        for o in report.outcomes
-    ]
-    data_table(
-        f"Self-evolution candidates ({report.considered} traces scanned)",
-        ["name", "support", "action", "reasons", "path"], rows,
-    )
-    if installed:
-        success(
-            f"Installed {report.installed} gated skills into the active Omni skills directory; "
-            "they are available in this session."
-        )
-    else:
-        info("This was a dry run. Add --install to persist candidates that pass the gate.")
-
-
-async def _open_evolve_ctx(settings: Any):  # noqa: ANN202
-    """Shared setup for evolve/proposals: (db, registry, llm-or-None)."""
-    from omni.core.llm.client import create_llm_client
-    from omni.storage.db import get_database
-
-    settings.paths.ensure_dirs()
-    db = get_database(settings.paths.project_db)
-    await db.init()
-    reg = SkillRegistry(settings)
-    reg.build_index()
-    try:
-        llm = create_llm_client(settings)
-    except Exception:  # noqa: BLE001 — distillation degrades to heuristic without a model
-        llm = None
-    return db, reg, llm
-
-
-async def _run_evolution_operation(
-    settings: Any,
-    db: Any,
-    llm: Any,
-    *,
-    command: str,
-    execute: Any,
-):  # noqa: ANN202, ANN401
-    """Give explicit self-evolution commands their own verified cost ledger."""
-    from omni.agent.cost import record_text_cost_event
-    from omni.runtime.task_recorder import TaskRecorder
-
-    recorder = TaskRecorder(db, project=settings.paths.project_name)
-    task = await recorder.create_task(
-        session_id="",
-        channel="cli",
-        user_input=command,
-        title=command,
-        kind="maintenance",
-    )
-    await recorder.record_plan(
-        task.id,
-        {
-            "intent_type": "skill_evolution",
-            "verification_plan": {"required_events": ["evolution.completed"]},
-        },
-        status="validated",
-    )
-
-    async def meter(component: str, system: str, user: str, output: str) -> None:
-        await record_text_cost_event(
-            recorder,
-            settings,
-            llm,
-            task.id,
-            system=system,
-            user_message=user,
-            output=output,
-            component=component,
-        )
-
-    try:
-        result = await execute(meter)
-    except Exception as exc:
-        await recorder.append_event(
-            task.id,
-            event_type="evolution.completed",
-            status="failed",
-            name="evolution",
-            error=str(exc),
-            summary=f"{command} failed",
-        )
-        await recorder.finish_task(
-            task.id,
-            status="failed",
-            summary=f"{command} failed",
-            error=str(exc),
-        )
-        raise
-    await recorder.append_event(
-        task.id,
-        event_type="evolution.completed",
-        status="succeeded",
-        name="evolution",
-        summary=f"{command} completed",
-    )
-    await recorder.finish_task(
-        task.id,
-        status="succeeded",
-        summary=f"{command} completed",
-    )
-    return result
-
-
-async def _run_evolve(settings: Any, *, install: bool, limit: int, min_support: int):  # noqa: ANN202
-    from omni.skills_runtime.evolution import evolve_skills
-
-    db, reg, llm = await _open_evolve_ctx(settings)
-    return await _run_evolution_operation(
-        settings,
-        db,
-        llm,
-        command="omni skills evolve",
-        execute=lambda observer: evolve_skills(
-            db,
-            reg,
-            settings.paths,
-            llm,
-            install=install,
-            limit=limit,
-            min_support=min_support,
-            on_llm_call=observer,
-        ),
-    )
-
-
-@app.command("evolve")
-def evolve_cmd(
-    ctx: typer.Context,
-    install: bool = typer.Option(
-        False,
-        "--install",
-        help="Persist gated candidates in the active Omni skills directory; defaults to dry-run",
-    ),
-    limit: int = typer.Option(200, "--limit", help="Maximum successful traces to scan"),
-    min_support: int = typer.Option(2, "--min-support", help="Minimum similar successes required for a cluster"),
-    as_json: bool = typer.Option(False, "--json", help="Emit JSON"),
-) -> None:
-    """Distill reusable skill candidates from successful historical traces.
-
-    The pipeline collects, clusters, distills prompt-only SKILL.md candidates,
-    validates names/manifests/contracts, and optionally installs them.
-    """
-    import asyncio
-    import json as _json
-
-    settings = ctx.obj.settings()
-    report = asyncio.run(_run_evolve(settings, install=install, limit=limit, min_support=min_support))
-    if as_json:
-        console.print_json(_json.dumps(report.to_dict(), ensure_ascii=False))
-        return
-    render_evolution_report(report, installed=install)
-
-
-# ── self-evolution proposals: the human-review queue ─────────────────────────
-proposals_app = typer.Typer(no_args_is_help=False, help="Human review queue for self-evolution proposals")
-app.add_typer(proposals_app, name="proposals")
-
-
-def _proposal_metrics_blurb(prop: Any) -> str:  # noqa: ANN401
-    m = prop.metrics or {}
-    if prop.kind == "improve_skill":
-        return f"failures {m.get('failures', '?')}/{m.get('total', '?')} ({int(float(m.get('failure_rate', 0)) * 100)}%)"
-    return f"support={m.get('support', '?')}"
-
-
-def render_proposals_table(proposals: list[Any], *, title: str) -> None:  # noqa: ANN401
-    if not proposals:
-        info(
-            "No proposals. Run `/skills proposals scan` in the REPL or "
-            "`omni skills proposals scan` in the shell."
-        )
-        return
-    rows = [
-        [p.id, p.kind, p.skill_name, p.status, _proposal_metrics_blurb(p), "; ".join(p.reasons)[:48]]
-        for p in proposals
-    ]
-    data_table(title, ["id", "kind", "skill", "status", "metrics", "reasons"], rows)
-
-
-async def _run_scan(settings: Any, *, limit: int, min_support: int, min_failures: int):  # noqa: ANN202
-    from omni.skills_runtime.proposals import generate_and_enqueue
-
-    db, reg, llm = await _open_evolve_ctx(settings)
-    return await _run_evolution_operation(
-        settings,
-        db,
-        llm,
-        command="omni skills proposals scan",
-        execute=lambda observer: generate_and_enqueue(
-            db,
-            reg,
-            settings.paths,
-            llm=llm,
-            limit=limit,
-            min_support=min_support,
-            min_failures=min_failures,
-            on_llm_call=observer,
-        ),
-    )
-
-
-@proposals_app.command("scan")
-def proposals_scan_cmd(
-    ctx: typer.Context,
-    limit: int = typer.Option(200, "--limit", help="Maximum historical tasks to scan"),
-    min_support: int = typer.Option(2, "--min-support", help="Minimum similar successes for a new-skill cluster"),
-    min_failures: int = typer.Option(2, "--min-failures", help="Minimum failures required to propose a skill improvement"),
-    as_json: bool = typer.Option(False, "--json", help="Emit JSON"),
-) -> None:
-    """Scan recent outcomes and queue new-skill or improvement proposals."""
-    import asyncio
-    import json as _json
-
-    settings = ctx.obj.settings()
-    summary = asyncio.run(_run_scan(settings, limit=limit, min_support=min_support, min_failures=min_failures))
-    added = summary.pop("added", [])
-    if as_json:
-        console.print_json(_json.dumps(summary, ensure_ascii=False))
-        return
-    info(
-        f"Scanned {summary['considered']} traces: {summary['candidates']} new-skill candidates, "
-        f"{summary['improvements']} improvement candidates, {summary['queued']} queued."
-    )
-    render_proposals_table(list(added), title="Newly queued proposals")
-    if summary["queued"]:
-        info(
-            "Review with `/skills proposals` or `omni skills proposals`; use "
-            "`approve <id>` to persist or `reject <id>` to reject."
-        )
-
-
-@proposals_app.command("list")
-def proposals_list_cmd(
-    ctx: typer.Context,
-    show_all: bool = typer.Option(False, "--all", help="Include approved and rejected proposal history"),
-    as_json: bool = typer.Option(False, "--json", help="Emit JSON"),
-) -> None:
-    """List self-evolution proposals awaiting human review."""
-    import json as _json
-
-    from omni.skills_runtime.proposals import PENDING, default_proposals_path, load_proposals
-
-    settings = ctx.obj.settings()
-    path = default_proposals_path(settings.paths)
-    proposals = load_proposals(path, status=None if show_all else PENDING)
-    if as_json:
-        console.print_json(_json.dumps([p.to_dict() for p in proposals], ensure_ascii=False))
-        return
-    render_proposals_table(proposals, title="Self-evolution proposals" + (" (all)" if show_all else " (pending)"))
-
-
-@proposals_app.command("show")
-def proposals_show_cmd(
-    ctx: typer.Context,
-    pid: str = typer.Argument(..., help="Proposal ID or unique prefix"),
-) -> None:
-    """Show complete proposal content."""
-    from omni.skills_runtime.proposals import default_proposals_path, get
-
-    settings = ctx.obj.settings()
-    prop = get(default_proposals_path(settings.paths), pid)
-    if prop is None:
-        error(f"Proposal '{pid}' was not found or its prefix is ambiguous.")
-        raise typer.Exit(1)
-    kv_table(f"Proposal {prop.id}", [
-        ("kind", prop.kind), ("skill", prop.skill_name), ("status", prop.status),
-        ("metrics", _proposal_metrics_blurb(prop)), ("reasons", "; ".join(prop.reasons)),
-        ("created_at", prop.created_at),
-    ])
-    if prop.kind == "improve_skill":
-        console.print("\n[bold]Lesson to append to SKILL.md:[/bold]\n")
-        console.print(str(prop.payload.get("lesson") or ""))
-    else:
-        console.print("\n[bold]New skill SKILL.md:[/bold]\n")
-        console.print(str(prop.payload.get("skill_md") or ""))
-
-
-@proposals_app.command("approve")
-def proposals_approve_cmd(
-    ctx: typer.Context,
-    pid: str = typer.Argument(..., help="Proposal ID or unique prefix to approve and persist"),
-) -> None:
-    """Approve a proposal, persist it in ~/.omni/skills, and rebuild the index."""
-    from omni.skills_runtime.proposals import approve, default_proposals_path
-
-    settings = ctx.obj.settings()
-    path = default_proposals_path(settings.paths)
-    reg = SkillRegistry(settings)
-    reg.build_index()
-    try:
-        prop, applied_path = approve(path, pid, settings.paths, reg)
-    except (OSError, ValueError) as exc:
-        error(f"Could not persist proposal: {exc}")
-        raise typer.Exit(1) from exc
-    if prop is None:
-        error(f"Proposal '{pid}' was not found or its prefix is ambiguous.")
-        raise typer.Exit(1)
-    reg.build_index()
-    success(f"Approved and persisted {prop.skill_name} -> {applied_path}")
-
-
-@proposals_app.command("reject")
-def proposals_reject_cmd(
-    ctx: typer.Context,
-    pid: str = typer.Argument(..., help="Proposal ID or unique prefix to reject"),
-) -> None:
-    """Reject a proposal without persisting it."""
-    from omni.skills_runtime.proposals import default_proposals_path, reject
-
-    settings = ctx.obj.settings()
-    prop = reject(default_proposals_path(settings.paths), pid)
-    if prop is None:
-        error(f"Proposal '{pid}' was not found or its prefix is ambiguous.")
-        raise typer.Exit(1)
-    info(f"Rejected proposal {prop.id} ({prop.skill_name}).")
 
 
 def _parse_export_tools(tools: list[str] | None, targets: str) -> list[str]:

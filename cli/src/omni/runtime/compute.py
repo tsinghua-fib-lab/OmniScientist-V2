@@ -246,7 +246,7 @@ class ModalBackend:
         if not cfg.modal_app:
             return False, "modal_app not configured"
         if not modal_available():
-            return False, "modal package/CLI not installed (pip install 'omniscientist[compute]')"
+            return False, "modal package/CLI not installed (pip install 'OmniScientist-V2[compute]')"
         return True, ""
 
     def build(self, command: str, cfg: Any, *, exec_prefix: list[str] | None) -> ExecPlan:
@@ -290,22 +290,26 @@ async def _exec(
     cwd: str,
     timeout: float,
     cancel_check: CancelCheck | None = None,
+    env: dict[str, str] | None = None,
 ) -> tuple[int, str]:
     """Run ``argv`` (or a shell string when ``shell``) and capture combined output.
 
     Isolated behind one function so tests can monkeypatch remote execution.
     """
+    spawn = process_group_options()
+    if env is not None:
+        spawn["env"] = env
     if shell:
         proc = await asyncio.create_subprocess_shell(
             argv[0], stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT, cwd=cwd or None,
-            **process_group_options(),
+            **spawn,
         )
     else:
         proc = await asyncio.create_subprocess_exec(
             *argv, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT, cwd=cwd or None,
-            **process_group_options(),
+            **spawn,
         )
     communicate = asyncio.create_task(proc.communicate())
     deadline = asyncio.get_running_loop().time() + timeout
@@ -350,6 +354,7 @@ async def run_compute(
     backend: str = "",
     exec_prefix: list[str] | None = None,
     cancel_check: CancelCheck | None = None,
+    env: dict[str, str] | None = None,
 ) -> ComputeResult:
     """Execute ``command`` on the configured (or overridden) compute backend.
 
@@ -382,6 +387,7 @@ async def run_compute(
                     timeout=timeout,
                     exec_prefix=exec_prefix,
                     cancel_check=cancel_check,
+                    env=env,
                 )
                 res.detail = f"fell back to local: {reason}"
                 return res
@@ -395,19 +401,23 @@ async def run_compute(
         timeout=timeout,
         exec_prefix=exec_prefix,
         cancel_check=cancel_check,
+        env=env,
     )
 
 
 async def _dispatch(
     impl: ComputeBackend, command: str, *, cfg: Any, cwd: str, timeout: float,
     exec_prefix: list[str] | None, cancel_check: CancelCheck | None = None,
+    env: dict[str, str] | None = None,
 ) -> ComputeResult:
     """Build → exec → finalize for one backend, mapping failures to results."""
     plan = impl.build(command, cfg, exec_prefix=exec_prefix)
     try:
-        kwargs = {"shell": plan.shell, "cwd": cwd, "timeout": timeout}
+        kwargs: dict[str, Any] = {"shell": plan.shell, "cwd": cwd, "timeout": timeout}
         if cancel_check is not None:
             kwargs["cancel_check"] = cancel_check
+        if env is not None and impl.name == "local":
+            kwargs["env"] = env
         code, out = await _exec(plan.argv, **kwargs)
     except ComputeCancelled:
         return ComputeResult(impl.name, "cancelled", -1, "", command, "cancelled by user")

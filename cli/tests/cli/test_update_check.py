@@ -405,7 +405,7 @@ def test_editable_update_pulls_then_syncs_before_fresh_runtime_setup(monkeypatch
             "omni.cli.main",
             "skills",
             "setup",
-            "research-pptx",
+                "all",
         ],
     ]
 
@@ -446,7 +446,7 @@ def test_non_editable_update_uses_fresh_cli_for_runtime_setup(monkeypatch):
             "omni.cli.main",
             "skills",
             "setup",
-            "research-pptx",
+                "all",
         ],
     ]
 
@@ -762,8 +762,9 @@ def test_git_pull_uses_repo_dir_so_update_is_cwd_independent():
     """`git -C <repo>` pins the recorded checkout, so cwd never matters."""
     import omni.cli.commands.update_cmd as uc
 
-    argv = uc._git_pull_argv(uc.Path("/somewhere/else/repo"))
-    assert argv[:3] == ["git", "-C", "/somewhere/else/repo"]
+    repo = uc.Path("/somewhere/else/repo")
+    argv = uc._git_pull_argv(repo)
+    assert argv[:3] == ["git", "-C", str(repo)]
 
 
 # ── git branch channel freshness (commit-based notifier) ─────────────────────

@@ -1,4 +1,4 @@
-"""Exact provider identity is shared by planning, facts, and verification."""
+"""Exact provider identity is sealed once and shared by planning and execution."""
 
 from __future__ import annotations
 
@@ -25,11 +25,6 @@ def _entry(
         source=source,
         trusted=True,
         capabilities=["artifact.fixture"],
-        quality_contract={
-            "checks": ["fixture_quality"],
-            "assessment_required": True,
-            "assessment_schema": "omni.deliverable-assessment/v1",
-        },
         input_schema={
             "type": "object",
             "properties": {
@@ -117,30 +112,6 @@ def test_contract_change_changes_binding_and_is_resealed() -> None:
     assert plan.provider_bindings[0]["contract_hash"] == provider_contract_hash(
         entry
     )
-
-
-def test_task_contract_quality_check_is_bound_to_exact_consumer() -> None:
-    registry = SkillRegistry(load_settings(), sources=())
-    registry.register(_entry(source="builtin", enum=["full"]))
-    plan = _plan(source="builtin")
-
-    validation = PlanValidator(registry).validate(plan)
-
-    assert validation.ok
-    step = plan.workflow_steps[0]
-    requirement = next(
-        item
-        for item in plan.task_contract["deliverables"]
-        if item["id"] == "render"
-    )
-    assert requirement["consumer_step_id"] == "render"
-    assert requirement["provider_binding_id"] == step["provider_binding_id"]
-    assert (
-        requirement["provider_contract_hash"]
-        == step["provider_contract_hash"]
-    )
-    assert requirement["required_checks"] == ["fixture_quality"]
-    assert plan.verification_plan.deliverable_checks == ["fixture_quality"]
 
 
 def test_accepted_v1_workflow_is_validated_without_rewriting_its_hash() -> None:

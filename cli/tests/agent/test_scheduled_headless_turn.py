@@ -17,6 +17,7 @@ import pytest
 from omni.agent import OmniAgent
 from omni.agent.turn_execution import TurnResult
 from omni.config import load_settings
+from omni.runtime.presentation import ArtifactRef
 
 
 @pytest.mark.asyncio
@@ -66,14 +67,22 @@ class _ScriptedTurns:
         return self._results[min(len(self.calls) - 1, len(self._results) - 1)]
 
 
-def _turn(status: str, *, task_id: str = "t", warnings: list[str] | None = None, kind: str = "text") -> TurnResult:
+def _turn(
+    status: str,
+    *,
+    task_id: str = "t",
+    warnings: list[str] | None = None,
+    kind: str = "text",
+    artifacts: list[ArtifactRef] | None = None,
+) -> TurnResult:
     return TurnResult(
         text=f"turn:{status}",
         session_id="s",
         task_id=task_id,
         kind=kind,
         degraded_warnings=list(warnings or []),
-        verification_status=status,
+        settlement_status=status,
+        artifacts=list(artifacts or []),
     )
 
 
@@ -100,7 +109,7 @@ async def test_degraded_run_triggers_one_bounded_continuation_then_delivers_succ
             schedule_id="",  # skip observability binding
         )
         assert result is not None
-        assert result.verification_status == "passed"
+        assert result.settlement_status == "passed"
         # Exactly one continuation was enqueued (initial + 1).
         assert len(scripted.calls) == 2
         # The continuation goal nudges "finish only what's missing" and carries
@@ -131,7 +140,7 @@ async def test_no_continuation_when_auto_continue_disabled(monkeypatch):
             goal="do a big multi-part job", task_id="", channel="cli", session_id="s", schedule_id="",
         )
         assert len(scripted.calls) == 1  # no continuation
-        assert result.verification_status == "degraded"
+        assert result.settlement_status == "degraded"
         assert agent.notifier.read_all()[-1]["status"] == "degraded"
     finally:
         await agent.aclose()
@@ -150,8 +159,53 @@ async def test_passed_run_is_not_continued(monkeypatch):
             goal="one clean deliverable", task_id="", channel="cli", session_id="s", schedule_id="",
         )
         assert len(scripted.calls) == 1
-        assert result.verification_status == "passed"
+        assert result.settlement_status == "passed"
         assert agent.notifier.read_all()[-1]["status"] == "succeeded"
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_scheduled_notification_preserves_artifacts_across_continuation(monkeypatch):
+    settings = load_settings()
+    settings.schedules.auto_continue = True
+    settings.schedules.max_continuations = 1
+    agent = await OmniAgent.create(settings)
+    first = ArtifactRef(
+        title="Figure",
+        format="png",
+        uri="artifact://figure",
+        path="/workspace/figures/figure.png",
+    )
+    second = ArtifactRef(
+        title="Paper",
+        format="md",
+        uri="artifact://paper",
+        path="/workspace/reports/paper.md",
+    )
+    try:
+        scripted = _ScriptedTurns(
+            [
+                _turn("degraded", warnings=["paper missing"], artifacts=[first]),
+                _turn("passed", artifacts=[second]),
+            ]
+        )
+        monkeypatch.setattr(agent._scheduled_goals, "_run_turn", scripted)
+
+        await agent.run_scheduled_goal(
+            goal="draw a figure and write a paper",
+            task_id="",
+            channel="cli",
+            session_id="s",
+            schedule_id="",
+        )
+
+        note = agent.notifier.read_all()[-1]
+        assert note["artifacts"] == ["artifact://figure", "artifact://paper"]
+        assert [item["uri"] for item in note["payload"]["artifacts"]] == [
+            "artifact://figure",
+            "artifact://paper",
+        ]
     finally:
         await agent.aclose()
 
@@ -205,7 +259,7 @@ async def test_pending_turn_is_delivered_from_the_settled_task_row_not_degraded(
         result = await agent.run_scheduled_goal(
             goal="settled work", task_id=task.id, channel="cli", session_id="s", schedule_id="",
         )
-        assert result is not None and result.verification_status == "pending"
+        assert result is not None and result.settlement_status == "pending"
         note = agent.notifier.read_all()[-1]
         assert note["status"] == "succeeded"  # the settled row wins over the fallback
     finally:

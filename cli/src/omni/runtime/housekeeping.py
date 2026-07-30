@@ -1,11 +1,14 @@
 """Task-history hygiene: stale-task reconcile and age-based retention.
 
 Both policies are settings-gated and run from the subtask runtime at service
-startup, periodically on the poller, and once per one-shot ``task drain``:
+startup, periodically on the poller, and once per one-shot ``task drain``.
+Lost skill-execution owners are reconciled first (see
+``execution_ownership``), then:
 
 - ``tasks.interrupt_stale_after_s`` — a task stuck in running/recovering with
   no event for the window lost its process and is settled as ``interrupted``
-  (terminal, prunable). ``0`` disables.
+  (terminal, prunable). ``0`` disables. The same window is the time lease for
+  legacy executions that never recorded ``owner_pid``.
 - ``tasks.retention_days`` — failed/cancelled/interrupted tasks whose
   completion is older than the window are deleted, cascading to subtasks and
   events. Succeeded/degraded tasks are provenance and are never auto-deleted;

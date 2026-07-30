@@ -24,9 +24,18 @@
         execution_mode: background
         provenance_mode: light
         rationale: "literature search and research-gap synthesis"
+      tool_calls:
+        - name: run_workflow
+          args:
+            goal: "检索 RAG 事实一致性文献、归纳研究缺口，最后写成一段研究综述"
+            mode: foreground
+            steps:
+              - {id: lit, capability: literature.search, input: {query: "RAG factual consistency"}}
+              - {id: idea, capability: research.ideation, depends_on: [lit], input: {input: "Identify research gaps in RAG factual consistency."}}
+              - {id: final, capability: synthesis.final, depends_on: [idea], deliverable: draft.section, input: {}}
+      drain: true
       expect:
-        kind: workflow
-        capabilities_include: [literature.search, research.ideation, synthesis.final]
+        capabilities_executed: [literature.search, research.ideation, synthesis.final]
         verification: any
 
 - id: sci_paper_ideation_deck
@@ -47,9 +56,18 @@
         outputs: [artifact.slides]
         execution_mode: background
         rationale: "fetch, ideate follow-ups, then create a full slide deck"
+      tool_calls:
+        - name: run_workflow
+          args:
+            goal: "获取 arXiv 1706.03762、提出后续研究点子，并生成一套完整答辩幻灯片"
+            mode: foreground
+            steps:
+              - {id: paper, capability: paper.fetch.arxiv, input: {identifier: "1706.03762"}}
+              - {id: idea, capability: research.ideation, depends_on: [paper], input: {input: "follow-up research ideas"}}
+              - {id: slides, capability: slides.generate, depends_on: [idea], input: {input: "Transformer follow-up thesis defense"}}
+      drain: true
       expect:
-        kind: workflow
-        capabilities_include: [paper.fetch.arxiv, research.ideation, slides.generate]
+        capabilities_executed: [paper.fetch.arxiv, research.ideation, slides.generate]
 
 - id: sci_editable_single_slide_figure
   title: "Scientist: editable single-slide scientific figure routes to LiveFigure"
@@ -86,25 +104,6 @@
         - {name: bash, args: {command: "python analyze.py --summary"}}
       expect:
         safety: allowed
-
-# L4 journey (self-evolution): a research skill has failed repeatedly with the
-# same error. The corrective half of self-evolution mines those failures and
-# proposes an *improvement* — a distilled "known pitfalls" section appended to
-# the skill — into the human-review queue (never auto-applied). Exercises the
-# ``self_evolution`` dimension the way a researcher's recurring failure would.
-- id: sci_evolve_improve_after_failures
-  title: "Scientist: repeated skill failures propose an improvement for review"
-  persona: scientist
-  channel: cli
-  tags: [self_evolution]
-  turns:
-    - user: "这个分析技能最近老是失败，能不能从失败里学点东西、把它改稳一点？"
-      seed_tasks:
-        - {skill: "analyze-dataset", status: failed, count: 3,
-           goal: "分析实验数据并给出统计显著性",
-           error: "KeyError: 'pvalue' not found in results dict"}
-      expect:
-        evolution: "improves:analyze-dataset"
 
 # L4 journey (provenance): a produced artifact is bound to the evidence that
 # justifies it — a *grounded* provenance capsule (sources + claims). Exercises
@@ -179,6 +178,28 @@
         rationale: "The request explicitly requires a complete multi-slide research presentation."
       expect:
         skill_selected: research-pptx
+
+# L4 journey (skill_routing): a literature survey reaches literature.search,
+# not the ideation pipeline that happens to search papers as its first stage.
+- id: sci_skill_routing_literature_survey
+  title: "Scientist: literature survey resolves openalex-search, not research-ideation"
+  persona: scientist
+  channel: cli
+  tags: [skill_routing]
+  turns:
+    - user: "帮我做联邦学习的文献调研，列出可引用的代表性论文。"
+      plan:
+        intent_type: single_skill_task
+        required_capabilities: [literature.search]
+        capability_inputs:
+          literature.search:
+            query: "federated learning"
+        outputs: [sources]
+        execution_mode: background
+        confidence: 0.96
+        rationale: "The request is a literature survey, not idea generation."
+      expect:
+        skill_selected: openalex-search
 
 # L4 journey (skill_routing): a novelty request reaches research-ideation.
 - id: sci_skill_routing_research_ideation

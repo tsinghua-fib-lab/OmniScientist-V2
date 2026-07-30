@@ -6,14 +6,15 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
+from functools import partial
 from typing import Any
+
+from sqlalchemy.exc import OperationalError
 
 from omni.core.execution_budget import ToolExecutionBudget
 from omni.core.execution_control import ExecutionCancelled, ExecutionControl
 from omni.core.turn_clock import TurnClock, register_clock
-from omni.runtime.deliverable_assessment import (
-    bind_deliverable_assessment_identity,
-)
+from omni.runtime.cancel_persist import persist_best_effort
 from omni.runtime.final_synthesis import (
     NATIVE_SYNTHESIS_INPUT_SCHEMA,
     NATIVE_SYNTHESIS_OUTPUT_SCHEMA,
@@ -25,7 +26,8 @@ from omni.runtime.tool_gateway import ToolGateway
 from omni.runtime.workflow_lifecycle import (
     WorkflowExecutionError,
     mark_workflow_cancelled,
-    settle_cancelled_wave,
+    persist_cancelled_wave,
+    persist_workflow_done,
 )
 from omni.runtime.workflow_plan import (
     _is_child_task_step,
@@ -48,12 +50,13 @@ from omni.runtime.workflow_state import (
 )
 from omni.runtime.workflow_state_store import WorkflowStateStore
 from omni.runtime.workflow_step_outcomes import (
+    annotate_identifier_title_check,
     classify_workflow_outcome,
     execute_child_task,
 )
 from omni.skills_runtime.context import ExecContext
 from omni.skills_runtime.registry import SkillRegistry, resolve_step_entry
-from omni.storage.db import Database
+from omni.storage.db import Database, sqlite_busy
 
 Progress = Callable[..., Any]
 StepExecutor = Callable[
@@ -285,8 +288,16 @@ class WorkflowRuntime:
                     results_by_id[step_id] = result
                     terminal_ids.add(step_id)
                     failed_step_ids.add(step_id)
-                    await self._state_store.persist_step_outcome(workflow_run_id, record)
-                await persist_state("cancelled")
+                    try:
+                        await self._state_store.persist_step_outcome(workflow_run_id, record)
+                    except OperationalError as exc:
+                        if not sqlite_busy(exc):
+                            raise
+                try:
+                    await persist_state("cancelled")
+                except OperationalError as exc:
+                    if not sqlite_busy(exc):
+                        raise
                 break
 
             limit_reason = usage_limit_reason()
@@ -401,14 +412,22 @@ class WorkflowRuntime:
             except (ExecutionCancelled, asyncio.CancelledError):
                 execution_control.request_cancel()
                 cancelled = True
-                await settle_cancelled_wave(
-                    workflow_run_id=workflow_run_id, wave=wave, step_records=step_records,
-                    results_by_id=results_by_id, terminal_ids=terminal_ids,
-                    failed_step_ids=failed_step_ids, state_store=self._state_store,
-                    progress=progress, total=total,
+                await persist_best_effort(
+                    partial(
+                        persist_cancelled_wave,
+                        persist_state=persist_state,
+                        workflow_run_id=workflow_run_id,
+                        wave=wave,
+                        step_records=step_records,
+                        results_by_id=results_by_id,
+                        terminal_ids=terminal_ids,
+                        failed_step_ids=failed_step_ids,
+                        state_store=self._state_store,
+                        progress=progress,
+                        total=total,
+                    )
                 )
-                await persist_state("cancelled")
-                continue
+                break
             for step, outcome in sorted(
                 zip(wave, outcomes, strict=True),
                 key=lambda item: order[str(item[0]["id"])],
@@ -431,20 +450,19 @@ class WorkflowRuntime:
         result["checkpoint"] = workflow_checkpoint_summary(
             steps, step_records, status=result["status"]
         )
-        await progress(
-            "workflow.done",
-            1.0,
-            total_steps=total,
-            skills_used=result["skills_used"],
-            status=result["status"],
-        )
-        await self._state_store.persist_checkpoint(
-            workflow_run_id,
-            ctx.task_id,
-            steps,
-            step_records,
-            status=result["status"],
-            snapshot=result,
+        await persist_workflow_done(
+            progress=progress,
+            persist_checkpoint=lambda: self._state_store.persist_checkpoint(
+                workflow_run_id,
+                ctx.task_id,
+                steps,
+                step_records,
+                status=result["status"],
+                snapshot=result,
+            ),
+            cancelled=cancelled,
+            total=total,
+            result=result,
         )
         if result["status"] == "failed":
             raise WorkflowExecutionError(workflow_failure_message(step_records), result)
@@ -553,7 +571,6 @@ class WorkflowRuntime:
                 input_schema=NATIVE_SYNTHESIS_INPUT_SCHEMA,
                 output_schema=NATIVE_SYNTHESIS_OUTPUT_SCHEMA,
             )
-            bind_deliverable_assessment_identity(result, step)
             result_status = str(result.get("status", "")).lower()
             failed = result_status in {"error", "failed"} or result.get("contract_violation") is True
             status = (
@@ -648,6 +665,7 @@ class WorkflowRuntime:
             child_ctx,
             step_progress,
         )
+        annotate_identifier_title_check(step, goal, outcome)
         return await classify_workflow_outcome(
             self._registry,
             step,

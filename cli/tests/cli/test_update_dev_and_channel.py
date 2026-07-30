@@ -10,7 +10,6 @@ argument validation (which exits before any network probe) and the recorded
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -20,6 +19,7 @@ from typer.testing import CliRunner
 
 import omni.cli.commands.update_cmd as uc
 from omni.cli.main import app
+from tests.conftest import has_usable_bash
 
 runner = CliRunner()
 
@@ -78,11 +78,11 @@ def test_ref_is_moving(ref, moving):
 @pytest.mark.parametrize(
     ("spec", "moving"),
     [
-        ("omniscientist[x] @ git+https://gitee.com/o/r.git@master#subdirectory=cli", True),
-        ("omniscientist @ git+https://gitee.com/o/r.git@v2.0.0#subdirectory=cli", False),
-        ("omniscientist @ git+https://gitee.com/o/r.git@" + "a" * 40 + "#subdirectory=cli", False),
+        ("OmniScientist-V2[x] @ git+https://gitee.com/o/r.git@master#subdirectory=cli", True),
+        ("OmniScientist-V2 @ git+https://gitee.com/o/r.git@v2.0.0#subdirectory=cli", False),
+        ("OmniScientist-V2 @ git+https://gitee.com/o/r.git@" + "a" * 40 + "#subdirectory=cli", False),
         ("git+ssh://git@host/o/r.git", False),  # userinfo '@', no ref → not moving
-        ("omniscientist==2.0.0", False),
+        ("OmniScientist-V2==2.0.0", False),
         ("/local/path/cli", False),
     ],
 )
@@ -101,7 +101,7 @@ def test_installed_source_spec_prefers_branch_over_commit():
             "subdirectory": "cli",
         }
     )
-    assert uc._installed_source_spec(dist) == "omniscientist @ git+https://gitee.com/o/r.git@master#subdirectory=cli"
+    assert uc._installed_source_spec(dist) == "OmniScientist-V2 @ git+https://gitee.com/o/r.git@master#subdirectory=cli"
 
 
 def test_installed_source_spec_pins_commit_without_requested_revision():
@@ -163,7 +163,7 @@ def test_published_uv_tool_update_uses_the_owning_package_manager(monkeypatch):
         "/usr/bin/uv",
         "tool",
         "upgrade",
-        "omniscientist",
+        "OmniScientist-V2",
         "--compile-bytecode",
     ]
 
@@ -214,7 +214,7 @@ def test_uv_owned_source_update_preserves_the_existing_receipt(monkeypatch):
     )
 
     assert kind == "uv"
-    assert argv[:4] == ["/usr/bin/uv", "tool", "upgrade", "omniscientist"]
+    assert argv[:4] == ["/usr/bin/uv", "tool", "upgrade", "OmniScientist-V2"]
     assert "--refresh-package" in argv
     assert "--reinstall-package" in argv
     assert "/checkout/cli" not in argv
@@ -233,7 +233,7 @@ def test_published_pipx_update_uses_the_owning_package_manager(monkeypatch):
     )
 
     assert kind == "pipx"
-    assert argv == ["/usr/bin/pipx", "upgrade", "omniscientist"]
+    assert argv == ["/usr/bin/pipx", "upgrade", "OmniScientist-V2"]
 
 
 def test_pipx_owned_source_reinstall_keeps_pipx_metadata_current(monkeypatch):
@@ -268,7 +268,7 @@ def test_pipx_owned_source_update_preserves_existing_metadata(monkeypatch):
     )
 
     assert kind == "pipx"
-    assert argv == ["/usr/bin/pipx", "upgrade", "omniscientist", "--force"]
+    assert argv == ["/usr/bin/pipx", "upgrade", "OmniScientist-V2", "--force"]
     assert "/checkout/cli" not in argv
 
 
@@ -282,14 +282,14 @@ def test_manager_commands_are_bound_to_the_current_custom_registry(
         lambda name: "/another/install/bin/omni" if name == "omni" else None,
     )
 
-    uv_prefix = tmp_path / "uv-tools" / "omniscientist"
+    uv_prefix = tmp_path / "uv-tools" / "omniscientist-v2"
     monkeypatch.setattr(uc.sys, "prefix", str(uv_prefix))
     uv_env = uc._manager_environment("uv")
     assert uv_env is not None
     assert uv_env["UV_TOOL_DIR"] == str(uv_prefix.parent.resolve())
     assert "UV_TOOL_BIN_DIR" not in uv_env
 
-    pipx_prefix = tmp_path / "pipx-home" / "venvs" / "omniscientist"
+    pipx_prefix = tmp_path / "pipx-home" / "venvs" / "omniscientist-v2"
     monkeypatch.setattr(uc.sys, "prefix", str(pipx_prefix))
     pipx_env = uc._manager_environment("pipx")
     assert pipx_env is not None
@@ -303,14 +303,14 @@ def test_manager_commands_are_bound_to_the_current_custom_registry(
 def test_package_command_passes_the_bound_manager_environment(
     monkeypatch, tmp_path: Path
 ):
-    uv_prefix = tmp_path / "uv-tools" / "omniscientist"
+    uv_prefix = tmp_path / "uv-tools" / "omniscientist-v2"
     monkeypatch.setattr(uc.sys, "prefix", str(uv_prefix))
     monkeypatch.setattr(uc.sys, "argv", ["python", "-m", "omni.cli.main"])
     monkeypatch.setattr(uc.shutil, "which", lambda _name: None)
     seen: dict[str, str] = {}
 
     def fake_run(argv, *, check, env):  # noqa: ANN001
-        assert argv == ["uv", "tool", "upgrade", "omniscientist"]
+        assert argv == ["uv", "tool", "upgrade", "OmniScientist-V2"]
         assert check is False
         seen.update(env)
         return uc.subprocess.CompletedProcess(argv, 0)
@@ -318,7 +318,7 @@ def test_package_command_passes_the_bound_manager_environment(
     monkeypatch.setattr(uc.subprocess, "run", fake_run)
 
     uc._run_package_command(
-        ["uv", "tool", "upgrade", "omniscientist"],
+        ["uv", "tool", "upgrade", "OmniScientist-V2"],
         "uv",
     )
 
@@ -331,7 +331,7 @@ def test_update_command_display_redacts_url_credentials_and_queries():
             "uv",
             "pip",
             "install",
-            "omniscientist @ git+https://user:secret@example.test/repo.git"
+            "OmniScientist-V2 @ git+https://user:secret@example.test/repo.git"
             "?access_token=also-secret#subdirectory=cli",
         ]
     )
@@ -354,7 +354,7 @@ def test_prepare_runtimes_spawns_updated_cli(monkeypatch):
 
     monkeypatch.setattr(uc.subprocess, "run", _record_run)
     uc._prepare_bundled_skill_runtimes_with_updated_cli(paths)
-    assert calls and calls[0][1:] == ["-m", "omni.cli.main", "skills", "setup", "research-pptx"]
+    assert calls and calls[0][1:] == ["-m", "omni.cli.main", "skills", "setup", "all"]
 
 
 def test_source_pull_reports_missing_native_owner_without_traceback(
@@ -504,7 +504,7 @@ def test_update_local_without_checkout_errors(monkeypatch):
 
 
 def test_update_local_conflicts_with_to():
-    res = runner.invoke(app, ["update", "--local", "--to", "omniscientist==2.0.0", "--no-restart-serve"])
+    res = runner.invoke(app, ["update", "--local", "--to", "OmniScientist-V2==2.0.0", "--no-restart-serve"])
     assert res.exit_code == 2
     assert "cannot be combined" in res.output
 
@@ -535,6 +535,10 @@ def test_update_local_serializes_a_concurrent_bare_launch(
     from omni.cli import main as cli_main
     from omni.runtime import service_control, service_state
 
+    # The suite intentionally points OMNI_HOME at pytest's temp tree. Product
+    # code correctly refuses to launch a durable service there unless a
+    # supervisor-focused test explicitly opts in.
+    monkeypatch.setenv("OMNI_ALLOW_EPHEMERAL_HOST_SERVICE", "1")
     activation_calls: list[str] = []
     reservation_seen = False
     worker_done = threading.Event()
@@ -632,7 +636,7 @@ def test_update_local_serializes_a_concurrent_bare_launch(
 
 # ── installer channel argument validation (bash, offline, no install) ────────
 
-_HAS_BASH = shutil.which("bash") is not None
+_HAS_BASH = has_usable_bash()
 
 
 @pytest.mark.skipif(not _HAS_BASH, reason="bash is required to exercise install.sh")
@@ -670,7 +674,7 @@ def test_record_installation_persists_channel(settings):
     path = uninstall.record_installation(
         settings.paths,
         method="uv",
-        source="omniscientist @ git+https://gitee.com/o/r.git@master#subdirectory=cli",
+        source="OmniScientist-V2 @ git+https://gitee.com/o/r.git@master#subdirectory=cli",
         channel="master",
     )
     data = json.loads(path.read_text(encoding="utf-8"))

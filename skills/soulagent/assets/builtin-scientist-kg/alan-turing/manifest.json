@@ -1,0 +1,66 @@
+{
+  "store_version": "1.0.0",
+  "scientist_id": "alan-turing",
+  "bundle": "../kg.json",
+  "bundle_sha256": "b857d1dfa7a338abf808b025c681ef7147e119b8c1cfadcd38cbba592cbeac75",
+  "files": [
+    {
+      "path": "meta.json",
+      "sha256": "9fe9af24616308e2eb94bdfe23aca7571a12abbc92e2788d56e9a490b9c0796b"
+    },
+    {
+      "path": "identity.json",
+      "sha256": "a0de8650a06239f195e39be2df6c93e7894d7b3bb350f972e88c2124e3f6ef0e"
+    },
+    {
+      "path": "l3-stances.json",
+      "sha256": "4ed8a62ad257664123264834b9bcf397191215cc27f981ee04ee9c52ff54ef43"
+    },
+    {
+      "path": "l2-patterns.json",
+      "sha256": "ed037cd19738b00a72d2530628c020e7a5f3566914a318c70c1066e5487e0477"
+    },
+    {
+      "path": "edges.json",
+      "sha256": "fb156c7576d6ceecccd518c8e87e32ccaa9c25bd1d446035e14c1aadc9b0308b"
+    },
+    {
+      "path": "l1-evidence/index.json",
+      "sha256": "29e191bed6c02f24cbac44cd77b83af03814a4198e706f8979911e2b97b7a7c4"
+    },
+    {
+      "path": "l1-evidence/c01.jsonl",
+      "sha256": "54339edc7352453897e9a4ffc01694f8ea90b7f0dfeabe5eb56e64208da92f4f"
+    },
+    {
+      "path": "l1-evidence/c02.jsonl",
+      "sha256": "a0ba660943ab15ab2a4f28c67962ac3206dd9c37e5715bbebc5d2ca32a3d80b4"
+    },
+    {
+      "path": "l1-evidence/c03.jsonl",
+      "sha256": "885018f6ab8fe4428f67d456fede0f9897cc51cdd8d2c72763cdc42e0bb121f8"
+    },
+    {
+      "path": "l1-evidence/c04.jsonl",
+      "sha256": "2d1bd6e3db35993243099a6ecf706835a7ce5241652dd1e58a348ef02684259e"
+    },
+    {
+      "path": "l1-evidence/c05.jsonl",
+      "sha256": "5db452c59bc4d4c4334be21c69476854daa4771755556adc899591f6f5c8ce64"
+    },
+    {
+      "path": "l1-evidence/c06.jsonl",
+      "sha256": "df039aa53b797659560189ae5cc232550ba15a8a5283777105a5a187e40ba74c"
+    },
+    {
+      "path": "l1-evidence/c07.jsonl",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "counts": {
+    "L1": 263,
+    "L2": 7,
+    "L3": 4
+  },
+  "evidence_index_sha256": "29e191bed6c02f24cbac44cd77b83af03814a4198e706f8979911e2b97b7a7c4"
+}

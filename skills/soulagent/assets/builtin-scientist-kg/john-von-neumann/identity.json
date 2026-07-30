@@ -1,0 +1,131 @@
+{
+  "scientist_name": "John von Neumann",
+  "aliases": [
+    "J. Neumann",
+    "John Von Neumann",
+    "Janos Lajos Neumann",
+    "János Lajos Neumann",
+    "von Neumann",
+    "Neumann János Lajos",
+    "John Louis von Neumann",
+    "冯·诺伊曼, J.",
+    "冯·诺伊曼"
+  ],
+  "occupations": [
+    "mathematician",
+    "computer scientist",
+    "physicist",
+    "economist",
+    "university teacher",
+    "consultant",
+    "Manhattan Project"
+  ],
+  "research_fields": [
+    "functional analysis",
+    "operator theory",
+    "mathematics",
+    "physics",
+    "game theory",
+    "cellular automaton",
+    "set theory",
+    "quantum physics",
+    "nuclear bomb",
+    "informatics"
+  ],
+  "education_history": [
+    {
+      "institution": "Fasori Gimnázium",
+      "start_year": 1911,
+      "end_year": 1921
+    },
+    {
+      "institution": "Frederick William University Berlin",
+      "start_year": 1921,
+      "end_year": 1923
+    },
+    {
+      "institution": "ETH Zurich",
+      "start_year": 1923,
+      "end_year": 1925
+    },
+    {
+      "institution": "Eötvös Loránd University",
+      "start_year": 1926,
+      "end_year": 1926,
+      "degree": "Doctor of Philosophy"
+    },
+    {
+      "institution": "University of Göttingen",
+      "start_year": 1926,
+      "end_year": 1927
+    }
+  ],
+  "employment_history": [
+    {
+      "organization": "Princeton University",
+      "start_year": 1930,
+      "end_year": 1933
+    },
+    {
+      "organization": "Frederick William University Berlin",
+      "start_year": 1926,
+      "end_year": 1929
+    },
+    {
+      "organization": "United States Atomic Energy Commission",
+      "start_year": 1955,
+      "end_year": 1957
+    },
+    {
+      "organization": "University of Hamburg",
+      "start_year": 1929,
+      "end_year": 1930
+    },
+    {
+      "organization": "Institute for Advanced Study",
+      "start_year": 1933,
+      "end_year": 1957
+    },
+    {
+      "organization": "Armed Forces Special Weapons Project",
+      "start_year": 1950,
+      "end_year": 1955
+    },
+    {
+      "organization": "Ballistic Research Laboratory",
+      "start_year": 1940,
+      "end_year": 1941
+    },
+    {
+      "organization": "Naval Ordnance Laboratory",
+      "start_year": 1941,
+      "end_year": 1955
+    },
+    {
+      "organization": "Los Alamos National Laboratory",
+      "start_year": 1943,
+      "end_year": 1955
+    }
+  ],
+  "institutions": [
+    "Fasori Gimnázium",
+    "Frederick William University Berlin",
+    "ETH Zurich",
+    "Eötvös Loránd University",
+    "University of Göttingen",
+    "Princeton University",
+    "United States Atomic Energy Commission",
+    "University of Hamburg",
+    "Institute for Advanced Study",
+    "Armed Forces Special Weapons Project",
+    "Ballistic Research Laboratory",
+    "Naval Ordnance Laboratory",
+    "Los Alamos National Laboratory"
+  ],
+  "sources": [
+    "https://www.wikidata.org/wiki/Q17455"
+  ],
+  "google_scholar_url": "",
+  "portrait_url": "",
+  "portrait_source_url": ""
+}

@@ -13,6 +13,7 @@ import importlib.util as _ilu
 import logging
 import math
 import os
+import re as _re
 import sys as _sys
 from copy import deepcopy
 from pathlib import Path
@@ -136,6 +137,154 @@ def _hex_to_rgb(hex_str: str) -> RGBColor:
     if len(h) == 6:
         return RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
     return RGBColor(0x1E, 0x27, 0x61)
+
+
+# ── Text sanitization (defence against HTML entities in LLM output) ──
+
+# Map common HTML entities that LLMs sometimes emit in place of real characters.
+_ENTITY_MAP: dict[str, str] = {
+    "&#8226;": "•", "&#x2022;": "•", "&bull;": "•",
+    "&#8211;": "–", "&ndash;": "–",
+    "&#8212;": "—", "&mdash;": "—",
+    "&#8216;": "‘", "&lsquo;": "‘",
+    "&#8217;": "’", "&rsquo;": "’",
+    "&#8220;": "“", "&ldquo;": "“",
+    "&#8221;": "”", "&rdquo;": "”",
+    "&#160;": " ", "&nbsp;": " ",
+    "&#38;": "&", "&amp;": "&",
+    "&#60;": "<", "&lt;": "<",
+    "&#62;": ">", "&gt;": ">",
+    "&quot;": '"', "&#34;": '"',
+    "&#39;": "'", "&apos;": "'",
+    "&times;": "×", "&plusmn;": "±",
+    "&alpha;": "α", "&beta;": "β", "&gamma;": "γ",
+    "&lambda;": "λ", "&mu;": "μ", "&sigma;": "σ",
+}
+_ENTITY_RE = _re.compile(
+    "|".join(_re.escape(k) for k in sorted(_ENTITY_MAP.keys(), key=len, reverse=True)),
+)
+
+
+def _sanitize_entities(text: str) -> str:
+    """Replace common HTML/XML entities with their Unicode equivalents.
+
+    This is the last line of defence: LLM planners sometimes emit ``&bull;``
+    or ``&#8226;`` in bullet text instead of the actual ``•`` character.
+    Those entities leak into the OOXML and render as garbled text (e.g.
+    ``&#2022``) in WPS / PowerPoint.
+    """
+    if not text:
+        return text
+    return _ENTITY_RE.sub(lambda m: _ENTITY_MAP[m.group(0)], text)
+
+
+def _sanitize_mapping_fields(mapping: dict[str, Any], fields: tuple[str, ...]) -> None:
+    """Normalize entity-encoded text in selected display fields in-place."""
+    for field in fields:
+        value = mapping.get(field)
+        if isinstance(value, str):
+            mapping[field] = _sanitize_entities(value)
+
+
+def _sanitize_plan_entities(plan: Any) -> None:
+    """Normalize every user-visible text field used by the template backend.
+
+    File and URI fields are deliberately excluded: a valid path may itself
+    contain an ampersand sequence and must not be rewritten while rendering.
+    """
+    for field in ("title", "authors", "affiliation", "venue"):
+        value = getattr(plan, field, None)
+        if isinstance(value, str):
+            setattr(plan, field, _sanitize_entities(value))
+
+    for reference in getattr(plan, "references", ()) or ():
+        if isinstance(reference, dict):
+            _sanitize_mapping_fields(reference, ("key", "text"))
+
+    for slide in getattr(plan, "slides", ()) or ():
+        for field in ("title", "subtitle", "figure_caption", "notes"):
+            value = getattr(slide, field, None)
+            if isinstance(value, str):
+                setattr(slide, field, _sanitize_entities(value))
+
+        slide.bullets = [
+            _sanitize_entities(value) if isinstance(value, str) else value
+            for value in (slide.bullets or [])
+        ]
+        slide.table_headers = [
+            _sanitize_entities(value) if isinstance(value, str) else value
+            for value in (slide.table_headers or [])
+        ]
+        slide.table_rows = [
+            [
+                _sanitize_entities(value) if isinstance(value, str) else value
+                for value in row
+            ]
+            for row in (slide.table_rows or [])
+        ]
+
+        for metric in slide.metrics or []:
+            if isinstance(metric, dict):
+                _sanitize_mapping_fields(metric, ("value", "label"))
+        for citation in slide.citations or []:
+            if isinstance(citation, dict):
+                _sanitize_mapping_fields(citation, ("key", "text"))
+
+        extra = slide.extra or {}
+        for column in extra.get("columns", ()) or ():
+            if not isinstance(column, dict):
+                continue
+            _sanitize_mapping_fields(column, ("sub_title", "figure_caption"))
+            column["bullets"] = [
+                _sanitize_entities(value) if isinstance(value, str) else value
+                for value in (column.get("bullets") or [])
+            ]
+        for row in extra.get("rows", ()) or ():
+            if isinstance(row, dict):
+                _sanitize_mapping_fields(row, ("label", "header", "description"))
+        for step in extra.get("steps", ()) or ():
+            if isinstance(step, dict):
+                _sanitize_mapping_fields(
+                    step,
+                    ("step_number", "step_title", "step_desc"),
+                )
+        _sanitize_mapping_fields(
+            extra,
+            ("box_text", "emphasis_note", "authors", "affiliation"),
+        )
+
+
+def _set_paragraph_bullet(para, char: str = "•") -> None:
+    """Attach a native bullet character to *para* via ``a:buChar``.
+
+    Uses python-pptx's XML-level bullet properties so the renderer never
+    needs to prefix literal ``•`` characters into the text itself.
+    """
+    from pptx.oxml.ns import qn as _qn
+    pPr = para._p.get_or_add_pPr()
+    typeface = getattr(para.font, "name", "Arial") or "Arial"
+    # Remove any existing bullet settings to avoid duplicates.
+    for child in list(pPr):
+        tag = child.tag.split("}", 1)[-1]
+        if tag in (
+            "buChar", "buNone", "buAutoNum", "buBlip", "buFont", "buFontTx",
+        ):
+            pPr.remove(child)
+    # Set the bullet font to the paragraph font so the bullet renders in the
+    # same typeface as the text (avoids dingbat / symbol fallback issues).
+    buFont = pPr.makeelement(_qn("a:buFont"), {
+        "typeface": typeface,
+    })
+    pPr.insert_element_before(
+        buFont,
+        "a:buNone", "a:buAutoNum", "a:buChar", "a:buBlip",
+        "a:tabLst", "a:defRPr", "a:extLst",
+    )
+    buChar = pPr.makeelement(_qn("a:buChar"), {"char": char})
+    pPr.insert_element_before(
+        buChar,
+        "a:buBlip", "a:tabLst", "a:defRPr", "a:extLst",
+    )
 
 
 def _role_from_layout_name(name: str) -> str | None:
@@ -391,6 +540,8 @@ def _render_sync(plan, template_path, work_dir, output_filename) -> str | None:
     reuse = can_reuse_template(template_path)
     if reuse is None:
         return None
+
+    _sanitize_plan_entities(plan)
 
     # Prefer plan-supplied roles: engine._apply_template_theme may have
     # already refined them with an async LLM classifier. Fall back to the
@@ -724,7 +875,7 @@ def _fill_body_bullets(
 
         for i, b in enumerate(s.bullets):
             p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
-            p.text = b
+            p.text = _sanitize_entities(b)
             p.font.size = Pt(fs)
             p.font.color.rgb = _hex_to_rgb("2D2D2D")
             p.space_after = Pt(para)
@@ -936,9 +1087,10 @@ def _fill_two_column(slide, s, colors) -> set[int]:
 
             for i, b in enumerate(bullets):
                 p = tf.paragraphs[0] if (i + start) == 0 else tf.add_paragraph()
-                p.text = f"• {b}"
+                p.text = _sanitize_entities(b)
                 p.font.size = Pt(bullet_fs)
                 p.font.color.rgb = _hex_to_rgb(colors["bodyText"])
+                _set_paragraph_bullet(p, "•")
 
             if col.get("figure_path") and os.path.exists(col["figure_path"]):
                 try:
@@ -1007,9 +1159,10 @@ def _fill_two_column(slide, s, colors) -> set[int]:
                 Inches(x + 0.1), Inches(y), Inches(col_w - 0.1), Inches(0.35),
             )
             p = tb.text_frame.paragraphs[0]
-            p.text = f"• {b}"
+            p.text = _sanitize_entities(b)
             p.font.size = Pt(bullet_fs)
             p.font.color.rgb = _hex_to_rgb(colors["bodyText"])
+            _set_paragraph_bullet(p, "•")
             y += 0.35
 
         if col.get("figure_path") and os.path.exists(col["figure_path"]):
@@ -1304,7 +1457,7 @@ def _fill_emphasis_box(slide, s, colors) -> int | None:
 # ── Absolute-position helpers ──
 
 def _add_bullets_absolute(slide, bullets, font_size=18):
-    """Add bullets as absolute textbox."""
+    """Add bullets as absolute textbox with native bullet formatting."""
     if not bullets:
         return
     W, H = _slide_dims(slide)
@@ -1317,9 +1470,10 @@ def _add_bullets_absolute(slide, bullets, font_size=18):
     tf.word_wrap = True
     for i, b in enumerate(bullets):
         p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
-        p.text = f"• {b}"
+        p.text = _sanitize_entities(b)
         p.font.size = Pt(font_size)
         p.font.color.rgb = _hex_to_rgb("2D2D2D")
+        _set_paragraph_bullet(p, "•")
 
 
 def _add_picture_absolute(slide, path, side="right"):

@@ -23,7 +23,12 @@ from omni.memory.files import load_curated_memory
 from omni.memory.service import MemoryLayer, MemoryService
 from omni.runtime.notifications import InboxNotifier
 from omni.runtime.subtask_runtime import SubtaskRuntime, _collect_artifacts
-from omni.runtime.taskref import extract_task_ids, is_task_lookup, is_task_reference
+from omni.runtime.taskref import (
+    extract_task_ids,
+    is_bare_task_id,
+    is_task_lookup,
+    is_task_reference,
+)
 from omni.skills_runtime.builtin_tools.recall import build_recall_tools
 from omni.skills_runtime.context import ExecContext
 from omni.skills_runtime.manifest import DeliveryMode, ExecSpec, SkillEntry, SkillKind
@@ -94,8 +99,13 @@ def test_taskref_lookup_vs_reference():
     assert extract_task_ids(generative) == ["14121f34"]
     assert not is_task_lookup(generative)
     assert is_task_reference(generative)
+    assert not is_bare_task_id(generative)
     # A generative request must NOT be hijacked into a status view.
     assert _normalize_command_text(generative) is None
+
+    assert is_bare_task_id("c98e4330")
+    assert is_bare_task_id("6978342b")
+    assert not is_bare_task_id("/task show c98e4330")
 
 
 def is_task_reference_only(text: str) -> bool:

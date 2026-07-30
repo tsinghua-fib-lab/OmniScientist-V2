@@ -27,6 +27,7 @@ from omni.runtime.presentation import (
     turn_presentation_from_result,
 )
 from omni.runtime.task_object_resolver import TaskObjectResolution, resolve_task_object
+from omni.runtime.taskref import is_bare_task_id
 from omni.storage.models import SubtaskORM
 
 
@@ -34,6 +35,8 @@ async def handle_channel_command(agent: Any, text: str, session_id: str) -> Turn
     """Handle an inbound IM command, or return ``None`` for normal agent chat."""
     command = _normalize_command_text(text)
     if command is None:
+        if is_bare_task_id(text) and await _bare_task_id_resolves(agent, text.strip()):
+            return await _handle_tasks(agent, f"show {text.strip()}", session_id)
         return None
     if command == "/task" or command.startswith("/task "):
         return await _handle_tasks(agent, command.removeprefix("/task").strip(), session_id)
@@ -138,6 +141,21 @@ async def _handle_tasks(agent: Any, arg: str, session_id: str) -> TurnPresentati
         limit=int(parsed["limit"]),
         session=str(parsed["session"]),
     )
+
+
+async def _bare_task_id_resolves(agent: Any, object_id: str) -> bool:
+    """Whether a pasted id names a durable object this agent can inspect."""
+    resolution = await _channel_object_resolution(agent, object_id)
+    if resolution is not None:
+        return resolution.status in {"ok", "ambiguous"}
+    runtime = getattr(agent, "runtime", None)
+    if runtime is None:
+        return False
+    try:
+        found = await resolve_subtask(runtime, object_id)
+    except Exception:  # noqa: BLE001 - unknown ids fall through to a normal turn
+        return False
+    return found is not None
 
 
 async def _channel_object_resolution(

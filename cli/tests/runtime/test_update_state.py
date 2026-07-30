@@ -92,7 +92,7 @@ def test_fingerprint_changes_when_package_manager_updates_a_dependency(monkeypat
         def read_text(self, _name: str) -> str:
             return ""
 
-    omni = _Dist("omniscientist", "2.0.0")
+    omni = _Dist("OmniScientist-V2", "2.0.0")
     dependency = _Dist("dependency", "1.0.0")
     monkeypatch.setattr(update_state.md, "distribution", lambda _name: omni)
     monkeypatch.setattr(
@@ -110,7 +110,7 @@ def test_fingerprint_changes_when_package_manager_updates_a_dependency(monkeypat
 
 def test_fingerprint_does_not_depend_on_direct_url_credentials(monkeypatch):
     class _Dist:
-        metadata = {"Name": "omniscientist"}
+        metadata = {"Name": "OmniScientist-V2"}
         version = "2.0.0"
 
         def __init__(self) -> None:
@@ -139,10 +139,10 @@ def test_fingerprint_does_not_depend_on_direct_url_credentials(monkeypatch):
 
 
 def test_owner_detection_supports_custom_uv_and_pipx_roots(tmp_path):
-    uv_prefix = tmp_path / "custom-tools" / "omniscientist"
+    uv_prefix = tmp_path / "custom-tools" / "omniscientist-v2"
     uv_prefix.mkdir(parents=True)
     (uv_prefix / "uv-receipt.toml").write_text("", encoding="utf-8")
-    pipx_prefix = tmp_path / "custom-apps" / "omniscientist"
+    pipx_prefix = tmp_path / "custom-apps" / "omniscientist-v2"
     pipx_prefix.mkdir(parents=True)
     (pipx_prefix / "pipx_metadata.json").write_text("{}", encoding="utf-8")
 

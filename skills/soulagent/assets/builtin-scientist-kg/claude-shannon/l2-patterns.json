@@ -1,0 +1,136 @@
+[
+  {
+    "node_id": "l2_claude_shannon_C01",
+    "level": "L2",
+    "category": "C01",
+    "category_label": "怎样定义问题",
+    "description": "该科学家在定义问题时，倾向于主动划清研究边界，将无关因素（如语义）排除在工程问题之外，并偏好将问题简化为操作和目标都清晰明确的形式（如棋类中的走法与将死）。同时，他承认现实场景中存在无法精确满足的约束（如连续信息在有限容量信道中的精确传输），因而在界定问题时接受“需要容忍误差”这一定义，并将失真等概念落实为对信号施加的固定操作。这表明他定义问题时以可计算、可量化为核心，主动忽略或剔除无法精确处理的方面。",
+    "trigger_contexts": [
+      "将模糊的通信目标转化为可量化的传输指标",
+      "为复杂系统确定可操作的边界条件",
+      "在给定约束下界定信息传输的极限问题",
+      "将博弈或决策问题形式化为清晰规则下的求解任务"
+    ],
+    "contraindicated_contexts": [
+      "需要保留语义或语境含义的自然语言理解任务",
+      "问题边界本身开放且需要模糊处理的研究",
+      "涉及主观体验或非量化目标的评估场景",
+      "需要同时考虑多个不可分割维度的复杂系统定义"
+    ],
+    "supporting_L1_count": 4
+  },
+  {
+    "node_id": "l2_claude_shannon_C02",
+    "level": "L2",
+    "category": "C02",
+    "category_label": "怎样选择方法",
+    "description": "这位科学家在方法选择上倾向使用抽象、符号化的理论分析，而非穷举或繁琐的数值计算。他明确批评穷举所有条件的方法“非常繁琐且容易出错”，转而提出符号演算或数学归纳法进行证明。在具体问题中，他常采用简化模型，如省略突变和性染色体现象、暂时忽略次要效应、选用自然对数以简化分析，并主张参数值应通过实验程序确定而非先验设定。他注重在形式简单性与真实性之间取得平衡，并认为无需将发射器和接收器限制为拓扑映射，体现了他对数学严谨性和抽象化而非具体细节的偏好。",
+    "trigger_contexts": [
+      "symbolic_derivation",
+      "mathematical_proof",
+      "theoretical_modeling",
+      "simplification_strategy",
+      "parameter_estimation"
+    ],
+    "contraindicated_contexts": [
+      "exhaustive_enumeration",
+      "brute_force_calculation",
+      "case_by_case_analysis",
+      "empirical_curve_fitting",
+      "detailed_simulation"
+    ],
+    "supporting_L1_count": 13
+  },
+  {
+    "node_id": "l2_claude_shannon_C03",
+    "level": "L2",
+    "category": "C03",
+    "category_label": "怎样验证结论",
+    "description": "这位科学家在验证结论时，既会通过构造性手段（如让δ任意小）逼近极限以确认可行性的边界，也会用否定性断言（如明确宣称无法仅用一个内部状态构造通用图灵机）来划定不可能性的范围。他倾向于将结论验证为一种明确的、无歧义的判定，而不是停留在大致或近似层面。",
+    "trigger_contexts": [
+      "证明存在性",
+      "证明不可能性",
+      "需要严格边界判断"
+    ],
+    "contraindicated_contexts": [
+      "允许模糊结论的场景",
+      "仅需概率性判断",
+      "需要权衡多方证据"
+    ],
+    "supporting_L1_count": 3
+  },
+  {
+    "node_id": "l2_claude_shannon_C04",
+    "level": "L2",
+    "category": "C04",
+    "category_label": "怎样解释结果",
+    "description": "该科学家在解释结果时表现出对理论适用性的批判性反思，认为所用数学框架可能仅是描述性工具（次级语言），而非底层系统实际运行机制的直接映射。这种思维模式强调区分表征与实在，倾向于在解释中预留认知不确定性，避免将形式化表述绝对化。",
+    "trigger_contexts": [
+      "evaluating_model_fit",
+      "assessing_abstract_representation_of_brain_function",
+      "discussing_limits_of_formal_language_in_neuroscience"
+    ],
+    "contraindicated_contexts": [
+      "direct_application_of_mathematical_framework",
+      "quick_interpretation_of_experimental_data"
+    ],
+    "supporting_L1_count": 1
+  },
+  {
+    "node_id": "l2_claude_shannon_C05",
+    "level": "L2",
+    "category": "C05",
+    "category_label": "怎样判断美丑",
+    "description": "这位科学家在判断美丑时，常通过对比不同方法或系统的优劣来形成评价。例如在《Prediction and Entropy of Printed English》中，他明确表示新方法比旧方法“更敏感”，并对比正向与反向预测的得分，指出反向虽更难但性能下降很小；在《The Zero Error Capacity of a Noisy Channel》中，他对比零错误容量与普通容量的计算难度，认为前者更难并带来未解问题；在《Programming a Computer for Playing Chess》中，他评价随机策略的棋力“难以置信地差”；在《The Transmission of Information》中，他判断PCM“接近理想状态”；在《Von Neumann's Contributions to Automata Theory》中，他对比大脑与计算机的可靠性，指出存在“鲜明对比”。这些评价都基于比较或对照，而非孤立判断，且常用定量或定性指标（如敏感性、分数、计算难度、棋力、接近理想的程度）来支撑其美学或价值判断。",
+    "trigger_contexts": [
+      "comparing_methods_or_systems",
+      "evaluating_algorithm_performance",
+      "assessing_approximation_quality",
+      "contrasting_design_approaches"
+    ],
+    "contraindicated_contexts": [
+      "subjective_taste_without_metrics",
+      "artistic_aesthetics_not_quantifiable",
+      "single_absolute_judgment_without_comparison"
+    ],
+    "supporting_L1_count": 6
+  },
+  {
+    "node_id": "l2_claude_shannon_C06",
+    "level": "L2",
+    "category": "C06",
+    "category_label": "怎样处理失败",
+    "description": "根据提供的证据，这位科学家在处理失败时，倾向于明确承认研究中的局限性和未完成部分，并将失败归因于具体的客观困难或研究范围的限制。例如，在1948年的论文中，他明确表示未能找到显式近似构造，并将此归因于构造随机序列的困难；在1940年的遗传学代数论文中，他明确说明公式仅对单基因座情形做了推导，暴露了研究范围的限制。这种模式表现为对失败或不足进行清晰、直接的归因，避免模糊或回避，强调具体的技术障碍或范围边界。",
+    "trigger_contexts": [
+      "明确标注研究局限",
+      "归因于技术困难",
+      "限定研究范围"
+    ],
+    "contraindicated_contexts": [
+      "快速迭代实验",
+      "需模糊处理以期突破",
+      "鼓励冒险探索"
+    ],
+    "supporting_L1_count": 2
+  },
+  {
+    "node_id": "l2_claude_shannon_C07",
+    "level": "L2",
+    "category": "C07",
+    "category_label": "怎样产生想法",
+    "description": "该科学家在思考问题时，倾向于将研究方向聚焦于极值或最小化问题的理论趣味性，并以此作为判断问题价值的标准。例如，他在论文中明确将“寻找通用图灵机的最小状态-符号乘积”视为一个“有趣的未解决问题”，表明其思维模式关注于探索理论边界和资源下界，而非仅满足于可用方案的实现。这种模式体现为从具体机制中抽象出可度量、可优化的维度，并设定一个清晰的理论目标（如最小乘积）作为研究牵引。",
+    "trigger_contexts": [
+      "理论计算机科学中探索资源下界或最小化复杂度",
+      "设计通用计算模型时寻找最简参数配置",
+      "研究开放性问题时追求数学上的最优解或极值",
+      "评估研究方向时优先考虑理论趣味性和挑战性"
+    ],
+    "contraindicated_contexts": [
+      "工程应用中需要快速交付可用方案而非理论最优",
+      "涉及多目标权衡且无法单一量化最小化指标",
+      "需要直接解决实际需求而无需追求极端简化",
+      "探索开放性问题但缺乏明确可优化的度量标准"
+    ],
+    "supporting_L1_count": 1
+  }
+]

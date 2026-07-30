@@ -30,6 +30,42 @@ class LLMProviderError(RuntimeError):
         self.fallback_allowed = info.fallback_allowed
 
 
+# The reason code for a response the output-token cap cut short. It is the
+# host's ceiling, not a provider fault, so it is neither retryable nor
+# recoverable by failing over: the identical request would be cut at the
+# identical place.
+OUTPUT_CAP_TRUNCATED_REASON = "output_cap_truncated"
+
+
+class LLMOutputTruncated(LLMProviderError):
+    """The response stopped at the output-token cap partway through the answer.
+
+    Raised only where the caller has no other channel to learn it — a streaming
+    generator, which has already handed every delta to its consumer and cannot
+    hand back a finish reason afterwards. Callers holding a
+    :class:`~omni.core.llm.client.ChatWithToolsResult` read ``finish_reason``
+    instead and keep the partial text.
+    """
+
+    def __init__(self, *, model: str = "", produced_chars: int = 0) -> None:
+        super().__init__(
+            LLMErrorInfo(
+                category="output_truncated",
+                terminated_reason=OUTPUT_CAP_TRUNCATED_REASON,
+                user_message=(
+                    "The answer stopped at the model's output-token limit and is "
+                    "incomplete. Ask for the remainder, or request the answer in "
+                    "sections."
+                ),
+                internal_detail=(
+                    f"model={model or '-'} produced_chars={produced_chars} "
+                    "finish_reason=length"
+                ),
+            )
+        )
+        self.produced_chars = produced_chars
+
+
 def classify_llm_exception(exc: Exception) -> LLMErrorInfo:
     if isinstance(exc, LLMProviderError):
         return exc.info
@@ -133,5 +169,7 @@ def _request_id(response: Any) -> str:
 
 
 __all__ = [
-    "LLMErrorInfo", "LLMProviderError", "classify_llm_exception", "from_http_status_error",
+    "OUTPUT_CAP_TRUNCATED_REASON",
+    "LLMErrorInfo", "LLMOutputTruncated", "LLMProviderError",
+    "classify_llm_exception", "from_http_status_error",
 ]

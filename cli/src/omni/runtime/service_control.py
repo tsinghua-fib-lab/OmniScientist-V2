@@ -25,8 +25,10 @@ from typing import Any
 from omni import __version__
 from omni.config import OmniSettings
 from omni.runtime import service_state
+from omni.runtime.dist_meta import DIST_NAME
 from omni.runtime.service_state import ServiceDesiredState, lifecycle_lock
 from omni.runtime.service_supervisors import (
+    DefinitionStatus,
     Supervisor,
     SupervisorSpec,
     describe_platform,
@@ -42,6 +44,13 @@ class LifecycleResult:
     data: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class _LaunchOutcome:
+    ok: bool
+    detail: str
+    installed: bool = False
+
+
 def _log_path(settings: OmniSettings) -> Path:
     return settings.paths.logs_dir / "home-service.log"
 
@@ -52,12 +61,22 @@ def _service_env(settings: OmniSettings) -> dict[str, str]:
     ``OMNI_HOME`` binds the unit to this exact data directory (so a custom home
     survives login restarts), and ``PATH`` is carried so sandbox/compute helpers
     the service shells out to remain resolvable outside an interactive shell.
+
+    ``HOME`` is snapshotted at compose time so a delayed ensure thread that
+    outlives a test monkeypatch cannot rewrite LaunchAgent paths under the
+    real user home while still pointing ``OMNI_HOME`` at a throwaway tree.
     """
     import os
+    from pathlib import Path
 
     env = {"OMNI_HOME": str(settings.paths.home)}
     if path := os.environ.get("PATH"):
         env["PATH"] = path
+    home = os.environ.get("HOME") or str(Path.home())
+    if home:
+        env["HOME"] = home
+    if xdg_config_home := os.environ.get("XDG_CONFIG_HOME"):
+        env["XDG_CONFIG_HOME"] = xdg_config_home
     return env
 
 
@@ -72,6 +91,12 @@ def _spec(settings: OmniSettings, *, launcher: list[str] | None = None) -> Super
     )
 
 
+# Control-plane wait after a launch/restore. Channel HTTP (WeChat notify_start,
+# Feishu WS, DingTalk Stream) is *not* part of this budget: STARTING with a live
+# owner is enough for update/restart to succeed; READY is preferred, not required.
+_DEFAULT_READY_WAIT_S = 20.0
+
+
 def _wait_running(settings: OmniSettings, timeout_s: float) -> bool:
     deadline = time.time() + max(0.0, timeout_s)
     while time.time() < deadline:
@@ -79,6 +104,76 @@ def _wait_running(settings: OmniSettings, timeout_s: float) -> bool:
             return True
         time.sleep(0.2)
     return service_state.service_is_ready(settings.paths)
+
+
+def _log_tail(path: Path, *, lines: int = 12) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    body = text.splitlines()[-max(1, lines) :]
+    return "\n".join(body)
+
+
+def _observation_summary(settings: OmniSettings) -> str:
+    observation = service_state.observe_service(settings.paths)
+    runtime = observation.runtime or service_state.read_runtime(settings.paths) or {}
+    pid = observation.pid if observation.pid is not None else runtime.get("pid") or "none"
+    version = runtime.get("version") or "unknown"
+    return (
+        f"phase={observation.phase} pid={pid} version={version} "
+        f"ready={bool(runtime.get('ready'))}"
+    )
+
+
+def _restore_diagnostics(settings: OmniSettings, prefix: str) -> str:
+    parts = [prefix, _observation_summary(settings)]
+    log_path = _log_path(settings)
+    tail = _log_tail(log_path)
+    if tail:
+        parts.append(f"{log_path} last lines:\n{tail}")
+    return "\n".join(parts)
+
+
+def _wait_restore(
+    settings: OmniSettings, timeout_s: float
+) -> tuple[bool, bool, service_state.ServiceObservation]:
+    """Poll until control-plane READY, or until the deadline.
+
+    Returns ``(claimed, ready, last_observation)``. Claimed means the process
+    published ``starting`` or ``ready`` — the gateway has taken ownership.
+    A timeout still-starting is a successful claim, not a launch failure.
+
+    ``down`` before the first claim is "launchd has not spawned yet", not a
+    crash. Failing fast on that race made first launch after install report
+    ``phase=down pid=none`` even when the unit was about to come up.
+    """
+    paths = settings.paths
+    last = service_state.observe_service(paths)
+    seen_claim = last.phase in {"starting", "ready"} or _service_active(settings)
+    if timeout_s <= 0:
+        claimed = seen_claim
+        return claimed, last.phase == "ready", last
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        last = service_state.observe_service(paths)
+        if last.phase == "ready":
+            return True, True, last
+        if last.phase in {"starting", "ready"} or _service_active(settings):
+            seen_claim = True
+        if last.phase in {"down", "stale"} and seen_claim and not _service_active(settings):
+            return False, False, last
+        time.sleep(0.2)
+    last = service_state.observe_service(paths)
+    claimed = last.phase in {"starting", "ready"} or _service_active(settings)
+    return claimed, last.phase == "ready", last
+
+
+def _still_becoming_ready_detail(phase: str, *, verb: str) -> str:
+    return (
+        f"{verb}; still becoming ready (phase={phase}). "
+        "Channels will reconnect. See `omni serve status`."
+    )
 
 
 def _wait_active(settings: OmniSettings, timeout_s: float) -> bool:
@@ -113,6 +208,20 @@ def _supervisor_quiescent(supervisor: Supervisor) -> bool:
         return supervisor.status() != "running"
     except Exception:  # noqa: BLE001 - failure to verify must fail closed.
         return False
+
+
+def _supervisor_status(supervisor: Supervisor) -> str:
+    try:
+        return str(supervisor.status())
+    except Exception:  # noqa: BLE001 - unknown means "do not assume installed".
+        return "unknown"
+
+
+def _definition_status(supervisor: Supervisor) -> DefinitionStatus:
+    try:
+        return supervisor.definition_status()
+    except Exception:  # noqa: BLE001 - probe failure must not imply drift.
+        return DefinitionStatus.UNKNOWN
 
 
 def _wait_stably_quiescent(
@@ -243,25 +352,77 @@ def _activate_locked(
     *,
     supervisor: Supervisor | None = None,
     claim_wait_s: float = 8.0,
-) -> tuple[bool, str]:
+) -> _LaunchOutcome:
+    """Install/register the OS unit and perform one launch-producing action.
+
+    Used for first-time enable, manager migration, and post-update unit refresh.
+    Day-to-day repair must use :func:`_start_locked` so bare ``omni`` does not
+    rewrite LaunchAgents on every launch.
+    """
     _reap_legacy_daemons(settings)
     supervisor = supervisor or make_supervisor(
         _spec(settings, launcher=desired.launcher), desired.manager
     )
     ok, detail = supervisor.activate()
     if not ok:
-        return False, detail
+        return _LaunchOutcome(False, detail)
     if not _wait_active(settings, claim_wait_s):
         _stop_locked(settings, supervisor=supervisor)
-        return False, f"{detail}; service process did not claim singleton ownership"
-    return True, detail
+        return _LaunchOutcome(
+            False,
+            f"{detail}; service process did not claim singleton ownership",
+        )
+    return _LaunchOutcome(True, detail, installed=True)
+
+
+def _start_locked(
+    settings: OmniSettings,
+    desired: ServiceDesiredState,
+    *,
+    supervisor: Supervisor | None = None,
+    claim_wait_s: float = 8.0,
+) -> _LaunchOutcome:
+    """Kick an already-installed unit, installing only when objectively absent."""
+    _reap_legacy_daemons(settings)
+    supervisor = supervisor or make_supervisor(
+        _spec(settings, launcher=desired.launcher), desired.manager
+    )
+    if (
+        _supervisor_status(supervisor) == "not-installed"
+        or _definition_status(supervisor) is DefinitionStatus.MISMATCHED
+    ):
+        return _activate_locked(
+            settings,
+            desired,
+            supervisor=supervisor,
+            claim_wait_s=claim_wait_s,
+        )
+    ok, detail = supervisor.start()
+    if not ok:
+        # The unit may have been removed after the first status probe. Reinstall
+        # only for that concrete race; permission/config failures remain errors.
+        if _supervisor_status(supervisor) == "not-installed":
+            return _activate_locked(
+                settings,
+                desired,
+                supervisor=supervisor,
+                claim_wait_s=claim_wait_s,
+            )
+        return _LaunchOutcome(False, detail)
+    if not _wait_active(settings, claim_wait_s):
+        _stop_locked(settings, supervisor=supervisor)
+        return _LaunchOutcome(
+            False,
+            f"{detail}; service process did not claim singleton ownership",
+        )
+    return _LaunchOutcome(True, detail)
 
 
 def _refresh_desired(paths, desired: ServiceDesiredState) -> ServiceDesiredState:  # noqa: ANN001
     """Pin the next activation to the currently executing CLI installation."""
     desired.launcher = service_state.default_launcher(paths)
     try:
-        desired.version = metadata.version("omniscientist")
+        desired.version = metadata.version(DIST_NAME)
     except metadata.PackageNotFoundError:
         desired.version = __version__
     desired.last_error = ""
@@ -274,9 +435,14 @@ def enable(
     *,
     manager: str = "auto",
     channels: bool = True,
-    wait_s: float = 8.0,
+    wait_s: float = _DEFAULT_READY_WAIT_S,
 ) -> LifecycleResult:
-    """Persist ``enabled=True`` and perform one launch-producing activation."""
+    """Persist ``enabled=True`` and bring the home service up.
+
+    The observed supervisor state — not ``desired.configured`` — decides whether
+    this is an install or a start. Missing or drifted units are installed;
+    matching units are only kicked.
+    """
     del channels  # Channel selection is dynamically reconciled by the home service.
     paths = settings.paths
     paths.service_dir.mkdir(parents=True, exist_ok=True)
@@ -289,28 +455,50 @@ def enable(
         converging = _service_converging(settings)
         old_manager_id = select_supervisor_class(old_manager).id
         manager_changed = desired.configured and old_manager_id != sup_cls.id
+        current_launcher = service_state.default_launcher(paths)
+        supervisor = make_supervisor(
+            _spec(settings, launcher=current_launcher),
+            sup_cls.id,
+        )
+        needs_install = (
+            manager_changed
+            or _supervisor_status(supervisor) == "not-installed"
+            or _definition_status(supervisor) is DefinitionStatus.MISMATCHED
+        )
 
         # A healthy/starting unit under the requested manager is already
         # converged. Rewriting its unit can itself launch or restart it on
         # launchd/systemd, so persist the refreshed intent without touching the
         # host supervisor.
-        if converging and old_manager_id == sup_cls.id:
+        if converging and old_manager_id == sup_cls.id and not needs_install:
             desired.enabled = True
             desired.configured = True
             desired.manager = sup_cls.id
             desired.channel_anchor = desired.channel_anchor or "default"
             _refresh_desired(paths, desired)
-            running = _wait_running(settings, wait_s)
+            claimed, running, observation = _wait_restore(settings, wait_s)
             if _service_active(settings):
                 service_state.clear_start_request(paths)
+            if running:
+                detail = "Home service is already running."
+            elif claimed:
+                detail = _still_becoming_ready_detail(
+                    observation.phase, verb="Home service is already active"
+                )
+            else:
+                detail = _restore_diagnostics(
+                    settings,
+                    "Home service is active but did not become ready.",
+                )
             return LifecycleResult(
-                running,
-                (
-                    "Home service is already running."
-                    if running
-                    else "Home service is active but did not become ready."
-                ),
-                {"manager": sup_cls.id, "running": running, "active": True},
+                claimed or running,
+                detail,
+                {
+                    "manager": sup_cls.id,
+                    "running": running,
+                    "active": _service_active(settings),
+                    "phase": observation.phase,
+                },
             )
 
         if active or manager_changed:
@@ -345,28 +533,40 @@ def enable(
         desired.manager = sup_cls.id
         desired.channel_anchor = desired.channel_anchor or "default"
         _refresh_desired(paths, desired)
-        supervisor = make_supervisor(_spec(settings, launcher=desired.launcher), desired.manager)
-        activated, activation_detail = _activate_locked(
-            settings, desired, supervisor=supervisor
+        if needs_install:
+            outcome = _activate_locked(
+                settings, desired, supervisor=supervisor
+            )
+        else:
+            outcome = _start_locked(
+                settings, desired, supervisor=supervisor
+            )
+        claimed, running, observation = (
+            _wait_restore(settings, wait_s)
+            if outcome.ok
+            else (False, False, service_state.observe_service(paths))
         )
-        running = activated and _wait_running(settings, wait_s)
-        ok = activated and running
+        ok = outcome.ok and claimed
         if not ok:
             desired.last_error = (
-                f"activate={activation_detail}; active={_service_active(settings)}; "
-                f"ready={running}"
+                f"activate={outcome.detail}; {_observation_summary(settings)}"
             )
             service_state.write_desired(paths, desired)
         else:
             service_state.clear_start_request(paths)
-    detail = (
-        f"Home service enabled via {supervisor.id}."
-        if ok
-        else (
-            "Home service configured (enabled) but did not confirm ready: "
-            f"{activation_detail}"
+    if ok and running:
+        detail = f"Home service enabled via {supervisor.id}."
+    elif ok:
+        detail = _still_becoming_ready_detail(
+            observation.phase,
+            verb=f"Home service enabled via {supervisor.id}",
         )
-    )
+    else:
+        detail = _restore_diagnostics(
+            settings,
+            "Home service configured (enabled) but did not confirm ready: "
+            f"{outcome.detail}",
+        )
     return LifecycleResult(
         ok,
         detail,
@@ -374,27 +574,67 @@ def enable(
             "manager": supervisor.id,
             "running": running,
             "active": _service_active(settings),
+            "installed": outcome.installed,
+            "phase": observation.phase,
         },
     )
 
 
 def lazy_enable(settings: OmniSettings, *, reason: str = "", wait_s: float = 6.0) -> LifecycleResult:
-    """Guarantee the always-on home service is up (enable on first need, else repair).
+    """Guarantee the always-on home service is up (install once, else repair).
 
-    This is the single bring-up path for the always-on model. Callers are the acts
-    that must not run without the one background service per ``OMNI_HOME``: a bare
-    ``omni`` launch (``reason="launch"``), logging into a channel with ``--start``,
-    or creating a schedule. An already-enabled service is reconciled (repaired if
-    it drifted down); an unconfigured or transiently-stopped one is enabled and
-    started. Because the service is always-on, a prior ``omni serve stop`` is only
-    a transient pause, so it is brought back here rather than left down.
+    Callers: bare ``omni`` (``reason="launch"``), channel ``--start``, schedule
+    create. Contract:
+
+    * **Ephemeral ``OMNI_HOME``** (pytest/tmp): never register a durable OS unit.
+    * **First need** on a real home (``configured=False``): ``enable`` → install
+      once + start (preserves "first ``omni`` brings home service up").
+    * **Already configured + enabled**: ``ensure`` → kick existing unit only.
+    * **Configured but disabled**: ``enable`` re-enables; same manager does not
+      rewrite the host unit (``start``), matching the always-on model where a
+      prior ``omni serve stop`` is only a transient pause when a feature needs
+      the service again.
     """
+    from omni.runtime.service_supervisors import (
+        allows_ephemeral_host_service,
+        is_ephemeral_omni_home,
+    )
+
     paths = settings.paths
+    # Bare-launch ensure must never mint host units for throwaway homes.
+    # Feature triggers (channel/schedule) still go through enable/ensure so
+    # unit tests can mock them; durable install remains refused at the
+    # supervisor boundary for ephemeral OMNI_HOME.
+    if (
+        reason == "launch"
+        and is_ephemeral_omni_home(paths.home)
+        and not allows_ephemeral_host_service()
+    ):
+        service_state.clear_start_request(paths)
+        return LifecycleResult(
+            True,
+            "skipped durable home-service install for ephemeral OMNI_HOME",
+            {"skipped": True, "ephemeral": True, "reason": reason},
+        )
+
     service_state.request_start(paths)
     desired = service_state.read_desired(paths)
+    if not desired.configured:
+        # First bare omni / first feature trigger on this home: install once.
+        return enable(
+            settings,
+            manager=settings.service.manager,
+            wait_s=wait_s,
+        )
     if desired.enabled:
         return ensure(settings, wait_s=wait_s)
-    return enable(settings, wait_s=wait_s)
+    # Explicit disable or never-enabled-after-configure: bring back via enable
+    # (start path when the manager is unchanged).
+    return enable(
+        settings,
+        manager=desired.manager or settings.service.manager,
+        wait_s=wait_s,
+    )
 
 
 def disable(settings: OmniSettings) -> LifecycleResult:
@@ -421,7 +661,7 @@ def disable(settings: OmniSettings) -> LifecycleResult:
     )
 
 
-def start(settings: OmniSettings, *, wait_s: float = 8.0) -> LifecycleResult:
+def start(settings: OmniSettings, *, wait_s: float = _DEFAULT_READY_WAIT_S) -> LifecycleResult:
     """Start the service now. Requires it to be enabled (idempotent if active)."""
     paths = settings.paths
     desired = service_state.read_desired(paths)
@@ -440,16 +680,27 @@ def start(settings: OmniSettings, *, wait_s: float = 8.0) -> LifecycleResult:
                 {"enabled": False},
             )
         if _service_converging(settings):
-            running = _wait_running(settings, wait_s)
+            claimed, running, observation = _wait_restore(settings, wait_s)
             service_state.clear_start_request(paths)
+            if running:
+                detail = "Home service is already running."
+            elif claimed:
+                detail = _still_becoming_ready_detail(
+                    observation.phase, verb="Home service is already active"
+                )
+            else:
+                detail = _restore_diagnostics(
+                    settings,
+                    "Home service is active but did not become ready.",
+                )
             return LifecycleResult(
-                running,
-                (
-                    "Home service is already running."
-                    if running
-                    else "Home service is active but did not become ready."
-                ),
-                {"running": running, "active": True},
+                claimed or running,
+                detail,
+                {
+                    "running": running,
+                    "active": True,
+                    "phase": observation.phase,
+                },
             )
         _refresh_desired(paths, desired)
         supervisor = make_supervisor(
@@ -465,16 +716,37 @@ def start(settings: OmniSettings, *, wait_s: float = 8.0) -> LifecycleResult:
                     f"Home service could not replace an unhealthy owner: {stop_detail}",
                     {"running": False, "active": True},
                 )
-        activated, activation_detail = _activate_locked(
+        outcome = _start_locked(
             settings, desired, supervisor=supervisor
         )
-        running = activated and _wait_running(settings, wait_s)
-        if activated:
+        claimed, running, observation = (
+            _wait_restore(settings, wait_s)
+            if outcome.ok
+            else (False, False, service_state.observe_service(paths))
+        )
+        if outcome.ok:
             service_state.clear_start_request(paths)
+    ok = outcome.ok and claimed
+    if ok and running:
+        detail = "Home service started."
+    elif ok:
+        detail = _still_becoming_ready_detail(
+            observation.phase, verb="Home service started"
+        )
+    else:
+        detail = _restore_diagnostics(
+            settings,
+            f"Home service did not confirm ready: {outcome.detail}",
+        )
     return LifecycleResult(
-        running,
-        "Home service started." if running else f"Home service did not confirm ready: {activation_detail}",
-        {"running": running, "active": activated},
+        ok,
+        detail,
+        {
+            "running": running,
+            "active": outcome.ok,
+            "installed": outcome.installed,
+            "phase": observation.phase,
+        },
     )
 
 
@@ -492,7 +764,7 @@ def stop(settings: OmniSettings) -> LifecycleResult:
     return LifecycleResult(ok, detail)
 
 
-def restart(settings: OmniSettings, *, wait_s: float = 8.0) -> LifecycleResult:
+def restart(settings: OmniSettings, *, wait_s: float = _DEFAULT_READY_WAIT_S) -> LifecycleResult:
     """Atomically stop current-home owners, then perform one fresh activation."""
     paths = settings.paths
     with lifecycle_lock(paths):
@@ -515,30 +787,47 @@ def restart(settings: OmniSettings, *, wait_s: float = 8.0) -> LifecycleResult:
         start_supervisor = make_supervisor(
             _spec(settings, launcher=desired.launcher), desired.manager
         )
-        activated, activation_detail = _activate_locked(
+        outcome = _activate_locked(
             settings, desired, supervisor=start_supervisor
         )
-        running = activated and _wait_running(settings, wait_s)
-        if activated:
+        claimed, running, observation = (
+            _wait_restore(settings, wait_s)
+            if outcome.ok
+            else (False, False, service_state.observe_service(paths))
+        )
+        if outcome.ok:
             service_state.clear_start_request(paths)
-    ok = stopped and running
+    ok = stopped and outcome.ok and claimed
+    if ok and running:
+        detail = "Home service restarted on current code."
+    elif ok:
+        detail = _still_becoming_ready_detail(
+            observation.phase, verb="Home service restarted"
+        )
+    else:
+        detail = _restore_diagnostics(
+            settings,
+            f"Home service restart did not confirm ready: {outcome.detail}",
+        )
     return LifecycleResult(
         ok,
-        (
-            "Home service restarted on current code."
-            if ok
-            else f"Home service restart did not confirm ready: {activation_detail}"
-        ),
-        {"running": running, "active": activated},
+        detail,
+        {
+            "running": running,
+            "active": outcome.ok,
+            "installed": outcome.installed,
+            "phase": observation.phase,
+        },
     )
 
 
 def ensure(settings: OmniSettings, *, wait_s: float = 0.0) -> LifecycleResult:
-    """Reconcile observed → desired: start an enabled-but-down service.
+    """Reconcile observed → desired: kick an enabled-but-down service.
 
     Bounded and side-effect-light so a bare ``omni`` can call it. Does nothing
     when the service is disabled or already running (the common path), so it adds
-    no latency to normal launches. ``wait_s=0`` returns immediately after
+    no latency to normal launches. Uses ``start`` (not ``activate``/install) so
+    repair cannot mint a new LaunchAgent. ``wait_s=0`` returns immediately after
     kicking the supervisor (fire-and-forget repair).
     """
     paths = settings.paths
@@ -591,24 +880,28 @@ def ensure(settings: OmniSettings, *, wait_s: float = 0.0) -> LifecycleResult:
         supervisor = make_supervisor(
             _spec(settings, launcher=desired.launcher), desired.manager
         )
-        activated, detail = _activate_locked(
+        outcome = _start_locked(
             settings, desired, supervisor=supervisor
         )
         running = (
             _wait_running(settings, wait_s)
-            if activated and wait_s > 0
+            if outcome.ok and wait_s > 0
             else service_state.service_is_ready(paths)
         )
-        if activated:
+        if outcome.ok:
             service_state.clear_start_request(paths)
     return LifecycleResult(
-        activated,
+        outcome.ok,
         (
             "Home service repair started."
-            if activated
-            else f"Home service repair failed: {detail}"
+            if outcome.ok
+            else f"Home service repair failed: {outcome.detail}"
         ),
-        {"running": running, "active": activated},
+        {
+            "running": running,
+            "active": outcome.ok,
+            "installed": outcome.installed,
+        },
     )
 
 
@@ -620,7 +913,7 @@ class ServiceUpdateGuard:
         settings: OmniSettings,
         *,
         restart_serve: bool,
-        ready_wait_s: float = 8.0,
+        ready_wait_s: float = _DEFAULT_READY_WAIT_S,
     ) -> None:
         self.settings = settings
         self.restart_serve = restart_serve
@@ -677,23 +970,36 @@ class ServiceUpdateGuard:
         supervisor = make_supervisor(
             _spec(self.settings, launcher=desired.launcher), desired.manager
         )
-        activated, detail = _activate_locked(
+        outcome = _activate_locked(
             self.settings, desired, supervisor=supervisor
         )
-        if not activated:
+        if not outcome.ok:
             raise RuntimeError(
-                f"Update installed, but the home service could not restart: {detail}"
+                _restore_diagnostics(
+                    self.settings,
+                    "Update installed, but the home service could not restart: "
+                    f"{outcome.detail}",
+                )
             )
-        if not _wait_running(self.settings, self.ready_wait_s):
+        claimed, ready, observation = _wait_restore(
+            self.settings, self.ready_wait_s
+        )
+        if not claimed:
             raise RuntimeError(
-                "Update installed, but the restarted home service did not become ready."
+                _restore_diagnostics(
+                    self.settings,
+                    "Update installed, but the restarted home service did not become ready.",
+                )
             )
         service_state.clear_start_request(paths)
-        return (
-            "restarted on the updated code."
-            if self.was_active
-            else "started on the updated code for the pending bare `omni` launch."
-        )
+        if ready:
+            return (
+                "restarted on the updated code."
+                if self.was_active
+                else "started on the updated code for the pending bare `omni` launch."
+            )
+        verb = "restarted" if self.was_active else "started"
+        return _still_becoming_ready_detail(observation.phase, verb=verb)
 
     def _compensate_failed_enter(
         self, supervisor: Supervisor
@@ -846,7 +1152,7 @@ def update_guard(
     settings: OmniSettings,
     *,
     restart_serve: bool,
-    ready_wait_s: float = 8.0,
+    ready_wait_s: float = _DEFAULT_READY_WAIT_S,
 ) -> ServiceUpdateGuard:
     """Create the service-side transaction used by every update method."""
     return ServiceUpdateGuard(
@@ -895,6 +1201,7 @@ def status(settings: OmniSettings) -> dict[str, Any]:
 def doctor(settings: OmniSettings) -> dict[str, Any]:
     """Diagnostics: status plus drift detection and legacy-daemon findings."""
     from omni.runtime.daemon import list_running_daemons
+    from omni.runtime.service_supervisors import list_orphan_launchd_agents
 
     snap = status(settings)
     findings: list[str] = []
@@ -918,9 +1225,16 @@ def doctor(settings: OmniSettings) -> dict[str, Any]:
         findings.append(
             f"{len(legacy)} legacy per-workspace daemon(s) running; the home service will retire them on start."
         )
+    orphans = list_orphan_launchd_agents()
+    if orphans:
+        findings.append(
+            f"{len(orphans)} orphan LaunchAgent(s) point at missing/ephemeral OMNI_HOME — "
+            "run `omni serve prune --orphans` to boot them out."
+        )
     snap["legacy_daemons"] = [
         {"pid": d.get("pid"), "dir": d.get("project_dir")} for d in legacy
     ]
+    snap["orphan_launchd_agents"] = orphans
     snap["findings"] = findings
     return snap
 

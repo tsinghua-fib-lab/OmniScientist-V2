@@ -16,9 +16,6 @@ from omni.agent.plan_revision import (
     runtime_provider_authority_snapshot,
     workflow_native_authority_kind,
 )
-from omni.agent.provider_quality_binding import (
-    workflow_step_assessment_identity,
-)
 from omni.runtime.notifications import Notifier, TaskNotification
 from omni.skills_runtime.context import SKILL_SOURCE_PARAM
 from omni.skills_runtime.registry import resolve_step_entry, step_skill_source
@@ -81,7 +78,6 @@ def workflow_step_provider_authority(
             consumer_kind="workflow_step",
             consumer_id=step_id,
         )
-    assessment_metadata = _workflow_assessment_metadata(step)
     native_kind = workflow_native_authority_kind(step)
     if native_kind:
         snapshot = (
@@ -99,7 +95,6 @@ def workflow_step_provider_authority(
                 consumer_id=step_id,
                 provider_name=native_kind,
                 provider_source="omni_runtime",
-                **assessment_metadata,
             )
         return snapshot
     skill_name = str(step.get("skill_name") or "")
@@ -112,26 +107,8 @@ def workflow_step_provider_authority(
             consumer_id=step_id,
             provider_name=skill_name,
             provider_source=str(getattr(entry, "source", "") or source),
-            **assessment_metadata,
         )
     return snapshot
-
-
-def _workflow_assessment_metadata(
-    step: dict[str, Any],
-) -> dict[str, Any]:
-    quality = (
-        step.get("quality_contract")
-        if isinstance(step.get("quality_contract"), dict)
-        else {}
-    )
-    if quality.get("assessment_required") is not True:
-        return {}
-    identity = workflow_step_assessment_identity(step)
-    return {
-        "assessment_identity_required": True,
-        **({"assessment_identity": identity} if identity else {}),
-    }
 
 
 async def native_workflow_authority_error(

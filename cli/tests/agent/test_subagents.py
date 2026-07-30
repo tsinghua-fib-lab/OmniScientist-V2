@@ -53,19 +53,24 @@ class RoutingLLM(LLMClient):
         *,
         judge: Callable[[str], str] | None = None,
         delay: float = 0.0,
+        marks: list[tuple[float, float]] | None = None,
     ) -> None:
         self.model = "routing"
         self._responder = responder
         self._judge = judge
         self._delay = delay
+        self._marks = marks
         self.chat_with_tools_calls = 0
 
     async def chat_with_tools(self, messages, tools, **kw: Any) -> ChatWithToolsResult:  # noqa: ANN001
+        started = time.perf_counter()
         self.chat_with_tools_calls += 1
         if self._delay:
             import asyncio
 
             await asyncio.sleep(self._delay)
+        if self._marks is not None:
+            self._marks.append((started, time.perf_counter()))
         return self._responder(_last_user(messages))
 
     async def chat(self, system: str, user: str, **kw: Any) -> str:
@@ -107,19 +112,34 @@ async def test_specialists_are_isolated_and_order_preserved():
     assert all(r.depth == 1 for r in results)
 
 
+def _llm_calls_overlapped(marks: list[tuple[float, float]]) -> bool:
+    """Whether any two specialist LLM sleeps ran at the same time.
+
+    Wall-clock totals lie on Windows CI: ``run_subagent`` does enough sync I/O
+    that three overlapping 0.2s sleeps can still land near 0.45–0.6s.
+    Interval overlap is the property (serial calls never overlap).
+    """
+    for i, left in enumerate(marks):
+        for right in marks[i + 1 :]:
+            if left[0] < right[1] and right[0] < left[1]:
+                return True
+    return False
+
+
 @pytest.mark.asyncio
 async def test_specialists_run_in_parallel():
-    llm = RoutingLLM(lambda user: ChatWithToolsResult(content="ok"), delay=0.2)
+    marks: list[tuple[float, float]] = []
+    llm = RoutingLLM(
+        lambda user: ChatWithToolsResult(content="ok"), delay=0.2, marks=marks
+    )
     ctx = _ctx(llm, concurrency=4)
     specs = [SubagentSpec(goal=f"task {i}") for i in range(3)]
 
-    start = time.perf_counter()
     results = await run_subagents(specs, ctx, depth=0)
-    elapsed = time.perf_counter() - start
 
     assert len(results) == 3
-    # Serial would be ~0.6s; concurrent should be well under that.
-    assert elapsed < 0.45
+    assert len(marks) == 3
+    assert _llm_calls_overlapped(marks)
 
 
 @pytest.mark.asyncio

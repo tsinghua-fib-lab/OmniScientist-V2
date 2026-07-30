@@ -20,9 +20,12 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from omni.agent import OmniAgent
-from omni.agent.schedule_tools import build_schedule_tools
+from omni.agent.schedule_tools import _repair_payload, build_schedule_tools
 from omni.config import load_settings
 from omni.core.action_contracts import ResolverContext
+from omni.core.react_agent import _is_terminal_tool_result
+from omni.runtime.action_checkpoints import ActionCheckpointStore
+from tests.conftest import PlanningLLM
 
 SH = ZoneInfo("Asia/Shanghai")
 REFERENCE = datetime(2026, 7, 30, 9, 49, tzinfo=SH)
@@ -51,6 +54,65 @@ _AMBIGUOUS_WHEN = {
         "clock": {"surface_hour": 7, "minute": 10, "day_period": None, "evidence": "7点10分"},
     },
 }
+
+
+@pytest.mark.asyncio
+async def test_wechat_long_goal_direct_plan_ignores_ungrounded_pm_and_clarifies():
+    """e50e2ae3: bypass a second fragile schedule_task JSON generation."""
+    goal = (
+        "持续跟踪 RAG 系统最新进展，整理关键论文、工程实践、评测结论，"
+        "并形成一份可追溯的中文研究简报"
+    )
+    user_message = f"{goal}，今天7点10分执行"
+    agent = await OmniAgent.create(load_settings())
+    agent.llm = PlanningLLM(
+        {
+            "intent_type": "schedule",
+            "confidence": 0.95,
+            "capability_inputs": {
+                "schedule": {
+                    "task": {
+                        "goal": goal,
+                        "when": {
+                            "raw_expression": "今天7点10分",
+                            "trigger_kind": "once",
+                            "constraints": {
+                                "date": {
+                                    "kind": "relative_day",
+                                    "offset": 0,
+                                    "evidence": "今天",
+                                },
+                                "clock": {
+                                    "surface_hour": 7,
+                                    "minute": 10,
+                                    "day_period": "pm",
+                                    "evidence": "7点10分",
+                                },
+                            },
+                        },
+                    },
+                }
+            },
+        }
+    )
+    try:
+        turn = await agent.handle_turn(
+            user_message,
+            channel="wechat",
+            drain_tasks=False,
+        )
+
+        assert turn.kind == "needs_input"
+        assert "AM or PM" in turn.text
+        assert agent.llm.plan_calls == 1
+        assert agent.llm.calls == 0
+        assert await agent.scheduler.list() == []
+        events = await agent.tasks.list_events(turn.task_id)
+        resolved = [event for event in events if event.event_type == "schedule.resolved"]
+        assert len(resolved) == 1
+        assert resolved[0].status == "needs_input"
+    finally:
+        await agent.aclose()
 
 
 @pytest.mark.asyncio
@@ -132,6 +194,153 @@ async def test_durable_clarification_resume_evening_creates_schedule():
         again = await resume({"checkpoint_id": draft_id, "choice": "pm"})
         assert again["status"] == "ok"
         assert len(await agent.scheduler.list()) == 1
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_clarification_offers_other_time_option():
+    # The AM/PM clarification now offers "enter a different time" alongside the
+    # two readings, run_now, and cancel — so the user is not boxed into the two
+    # computed readings. The option is declarative data the model lays out.
+    agent = await OmniAgent.create(load_settings())
+    try:
+        ctx = _frozen_ctx(agent, "为 RAG 系统综述准备材料，今天7点10分执行")
+        schedule_task = _handler(build_schedule_tools(agent.runtime, ctx), "schedule_task")
+
+        result = await schedule_task({"goal": "为 RAG 系统综述准备材料", "when": _AMBIGUOUS_WHEN})
+
+        assert result["status"] == "needs_input"
+        ids = [c["id"] for c in result["recovery_choices"]]
+        assert "other_time" in ids
+        assert "run_now" in ids and "cancel" in ids
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_resolve_other_time_asks_for_a_time_and_keeps_draft_open():
+    # Picking "other_time" must not dead-end: it asks for a concrete time and
+    # leaves the draft resumable (the user can still pick a listed reading).
+    agent = await OmniAgent.create(load_settings())
+    try:
+        ctx = _frozen_ctx(agent, "为 RAG 系统综述准备材料，今天7点10分执行")
+        tools = build_schedule_tools(agent.runtime, ctx)
+        ask = await _handler(tools, "schedule_task")(
+            {"goal": "为 RAG 系统综述准备材料", "when": _AMBIGUOUS_WHEN}
+        )
+        draft_id = ask["draft_id"]
+        resume = _handler(tools, "resolve_action_checkpoint")
+
+        other = await resume({"checkpoint_id": draft_id, "choice": "other_time"})
+        assert other["status"] == "needs_input"
+        assert other.get("outcome") == "other_time"
+        assert await agent.scheduler.list() == []
+
+        # The draft is still open, so a listed reading still resolves it.
+        created = await resume({"checkpoint_id": draft_id, "choice": "pm"})
+        assert created["status"] == "ok" and created["kind"] == "once"
+        assert len(await agent.scheduler.list()) == 1
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_resolve_unrecognized_choice_invites_a_time_not_a_dead_end():
+    # A reply that is neither a listed reading nor a keyword is treated as "none
+    # of these": it invites a concrete time rather than the old dead-end, and
+    # creates nothing.
+    agent = await OmniAgent.create(load_settings())
+    try:
+        ctx = _frozen_ctx(agent, "为 RAG 系统综述准备材料，今天7点10分执行")
+        tools = build_schedule_tools(agent.runtime, ctx)
+        ask = await _handler(tools, "schedule_task")(
+            {"goal": "为 RAG 系统综述准备材料", "when": _AMBIGUOUS_WHEN}
+        )
+        draft_id = ask["draft_id"]
+        resume = _handler(tools, "resolve_action_checkpoint")
+
+        vague = await resume({"checkpoint_id": draft_id, "choice": "some weekday afternoon"})
+        assert vague["status"] == "needs_input"
+        assert "reschedule" in vague["message"].lower()
+        assert await agent.scheduler.list() == []
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_new_time_reschedule_supersedes_prior_open_draft():
+    # After an ambiguous ask, a fresh turn giving a grounded explicit time
+    # resolves and creates — and supersedes the earlier unanswered draft so it is
+    # not re-surfaced later. (The new turn carries its own grounded message, as a
+    # real reschedule would.)
+    agent = await OmniAgent.create(load_settings())
+    try:
+        ctx = _frozen_ctx(agent, "为 RAG 系统综述准备材料，今天7点10分执行")
+        store = ActionCheckpointStore(ctx.db)
+        ask = await _handler(build_schedule_tools(agent.runtime, ctx), "schedule_task")(
+            {"goal": "为 RAG 系统综述准备材料", "when": _AMBIGUOUS_WHEN}
+        )
+        assert ask["status"] == "needs_input"
+        assert len(await store.list_open()) == 1
+
+        ctx2 = _frozen_ctx(agent, "为 RAG 系统综述准备材料，今天晚上7点10分执行")
+        explicit_pm = {
+            "raw_expression": "今天晚上7点10分",
+            "trigger_kind": "once",
+            "constraints": {
+                "date": {"kind": "relative_day", "offset": 0, "evidence": "今天"},
+                "clock": {
+                    "surface_hour": 7,
+                    "minute": 10,
+                    "day_period": "pm",
+                    "evidence": "晚上7点10分",
+                },
+            },
+        }
+        created = await _handler(build_schedule_tools(agent.runtime, ctx2), "schedule_task")(
+            {"goal": "为 RAG 系统综述准备材料", "when": explicit_pm}
+        )
+
+        assert created["status"] == "ok" and created["kind"] == "once"
+        assert len(await agent.scheduler.list()) == 1
+        # The earlier draft was superseded, so nothing lingers to be re-surfaced.
+        assert await store.list_open() == []
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_new_ambiguous_ask_supersedes_prior_draft_but_keeps_itself():
+    # A *different* ambiguous ask supersedes the earlier draft but keeps the new
+    # one open — the exclude_id guard protects the draft just created. (An
+    # identical ask would instead dedupe onto the same draft.)
+    agent = await OmniAgent.create(load_settings())
+    try:
+        ctx1 = _frozen_ctx(agent, "为 RAG 系统综述准备材料，今天7点10分执行")
+        store = ActionCheckpointStore(ctx1.db)
+        first = await _handler(build_schedule_tools(agent.runtime, ctx1), "schedule_task")(
+            {"goal": "为 RAG 系统综述准备材料", "when": _AMBIGUOUS_WHEN}
+        )
+
+        ctx2 = _frozen_ctx(agent, "为 RAG 系统综述准备材料，今天8点20分执行")
+        when2 = {
+            "raw_expression": "今天8点20分",
+            "trigger_kind": "once",
+            "constraints": {
+                "date": {"kind": "relative_day", "offset": 0, "evidence": "今天"},
+                "clock": {"surface_hour": 8, "minute": 20, "day_period": None, "evidence": "8点20分"},
+            },
+        }
+        second = await _handler(build_schedule_tools(agent.runtime, ctx2), "schedule_task")(
+            {"goal": "为 RAG 系统综述准备材料", "when": when2}
+        )
+        assert first["status"] == "needs_input" and second["status"] == "needs_input"
+
+        open_ids = [rec.id for rec in await store.list_open()]
+        assert second["draft_id"] in open_ids
+        assert first["draft_id"] not in open_ids
+        assert len(open_ids) == 1
     finally:
         await agent.aclose()
 
@@ -264,9 +473,9 @@ async def test_admission_emits_action_audit_trail_without_goal_text():
 
 @pytest.mark.asyncio
 async def test_host_deferred_goal_is_sealed_over_a_drifted_model_goal():
-    # Decision #3: the goal is host-owned. When the planner extracted a distinct
-    # deferred goal, ``schedule_task`` seals *that* — a goal the ReAct model
-    # re-typed (drifted) must not be what gets scheduled.
+    # Decision #3: a host goal grounded in THIS user message still beats a
+    # drifted model rewrite. (An ungrounded host goal from Active target must
+    # not beat an open draft — that is a separate regression.)
     agent = await OmniAgent.create(load_settings())
     try:
         ctx = _frozen_ctx(agent, "为 RAG 系统综述准备材料，2099-01-01T09:00 执行")
@@ -328,6 +537,8 @@ async def test_open_clarification_is_surfaced_at_turn_start():
         assert "resolve_action_checkpoint" in block
         # The original wording is echoed so the model can match the user's reply.
         assert "今天7点10分" in block
+        assert "为 RAG 系统综述准备材料" in block
+        assert "when" in block or "at" in block
 
         # A different requester sees nothing (scoped to the original decider).
         other = _frozen_ctx(agent, "unrelated")
@@ -351,5 +562,171 @@ async def test_exact_machine_at_still_creates_without_a_resolver():
         assert result["status"] == "ok"
         assert result["kind"] == "once"
         assert len(await agent.scheduler.list()) == 1
+    finally:
+        await agent.aclose()
+
+
+# ── who is actually being asked ──────────────────────────────────────────────
+#
+# Both of these used to end the turn with a question. They are not the same
+# thing. "Is 7点 morning or evening?" is a fact only the user has. "You proposed
+# minute 59 for a time nobody wrote" is a defect in the model's own arguments,
+# and Codex returns that entire class to the model (``RespondToModel``) rather
+# than to the human — including its safety rejections. These pin the split.
+
+_HALLUCINATED_MINUTE = {
+    "raw_expression": "今晚21点12分",
+    "trigger_kind": "once",
+    "constraints": {
+        "date": {"kind": "relative_day", "offset": 0, "evidence": "今晚"},
+        "clock": {"surface_hour": 21, "minute": 59, "hour_system": 24, "evidence": "21点"},
+    },
+}
+
+
+@pytest.mark.asyncio
+async def test_a_defect_in_the_models_own_arguments_goes_back_to_the_model():
+    agent = await OmniAgent.create(load_settings())
+    try:
+        ctx = _frozen_ctx(agent, "帮我今晚21点12分开始执行")
+        schedule_task = _handler(build_schedule_tools(agent.runtime, ctx), "schedule_task")
+
+        result = await schedule_task({"goal": "开始执行", "when": _HALLUCINATED_MINUTE})
+
+        # The property that matters is the loop's, not the payload's spelling:
+        # this observation must not suspend the turn.
+        assert _is_terminal_tool_result(result) is False
+        assert result["status"] == "error"
+        assert result["resolution_status"] == "invalid"
+        # It has to say what to do differently, or the retry repeats the mistake.
+        assert "clock.evidence" in result["error"]
+        assert await agent.scheduler.list() == []
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_repair_request_leaves_no_proof_that_a_schedule_exists():
+    """``schedule.resolved`` is what settlement accepts as evidence a schedule was
+    really created (presence alone — it does not read the status). Writing one for
+    a failed attempt would let a later "I scheduled it" pass verification."""
+    agent = await OmniAgent.create(load_settings())
+    try:
+        message = "帮我今晚21点12分开始执行"
+        # The admission trail is only written for a ctx that names a task, so this
+        # one has to be a real row — otherwise every event assertion here is vacuous.
+        task = await agent.tasks.create_task(
+            session_id="s-repair", channel="cli", user_input=message
+        )
+        task_id = task.id
+        ctx = _frozen_ctx(agent, message)
+        ctx.task_id = task_id
+        schedule_task = _handler(build_schedule_tools(agent.runtime, ctx), "schedule_task")
+
+        await schedule_task({"goal": "开始执行", "when": _HALLUCINATED_MINUTE})
+
+        events = await agent.tasks.list_events(task_id)
+        kinds = [event.event_type for event in events]
+        assert "schedule.resolved" not in kinds
+        assert "action.repair_requested" in kinds
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_the_same_defect_twice_stops_asking_the_model_and_asks_the_user():
+    """A model that cannot converge must still reach the user. One repair per
+    unresolved field, per turn — the second attempt suspends as before."""
+    agent = await OmniAgent.create(load_settings())
+    try:
+        ctx = _frozen_ctx(agent, "帮我今晚21点12分开始执行")
+        # One turn = one tool surface, so both calls share the repair budget.
+        schedule_task = _handler(build_schedule_tools(agent.runtime, ctx), "schedule_task")
+
+        first = await schedule_task({"goal": "开始执行", "when": _HALLUCINATED_MINUTE})
+        second = await schedule_task({"goal": "开始执行", "when": _HALLUCINATED_MINUTE})
+
+        assert first["status"] == "error"
+        assert second["status"] == "needs_input"
+        assert _is_terminal_tool_result(second) is True
+        assert await agent.scheduler.list() == []
+    finally:
+        await agent.aclose()
+
+
+def test_repair_payload_cites_the_user_message_not_the_model_quote():
+    from omni.core.action_contracts import ResolutionResult, ResolutionStatus
+
+    result = ResolutionResult(
+        status=ResolutionStatus.INVALID,
+        reason="proposed time '今天17点03分' is not grounded in the user request",
+        unresolved_fields=("raw_expression",),
+    )
+    payload = _repair_payload(
+        result,
+        "今天17点03分",
+        user_message="帮我改成今天17点03开始执行",
+    )
+    assert "帮我改成今天17点03开始执行" in payload["error"]
+    assert "The user wrote:" in payload["error"]
+    assert "clock.evidence" in payload["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_conventional_particle_in_the_quote_creates_the_schedule():
+    """2367d610 at the tool boundary: 分 in the quote, 17点03 in the user text."""
+    agent = await OmniAgent.create(load_settings())
+    try:
+        ctx = agent._make_ctx("", "cli")
+        ctx.resolver_context = ResolverContext(
+            user_message="帮我改成今天17点03开始执行",
+            reference_time=datetime(2026, 8, 14, 16, 49, tzinfo=SH),
+            timezone="Asia/Shanghai",
+            timezone_source="host",
+        )
+        schedule_task = _handler(build_schedule_tools(agent.runtime, ctx), "schedule_task")
+        result = await schedule_task(
+            {
+                "goal": "为 RAG 系统综述准备材料",
+                "when": {
+                    "raw_expression": "今天17点03分",
+                    "trigger_kind": "once",
+                    "constraints": {
+                        "date": {"kind": "relative_day", "offset": 0, "evidence": "今天"},
+                        "clock": {
+                            "surface_hour": 17,
+                            "minute": 3,
+                            "day_period": None,
+                            "hour_system": 24,
+                            "evidence": "17点03分",
+                        },
+                    },
+                },
+            }
+        )
+
+        assert result["status"] == "ok"
+        assert "17:03" in str(result.get("summary") or "")
+        rows = await agent.scheduler.list()
+        assert len(rows) == 1
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_an_ambiguous_time_is_never_handed_to_the_model_to_guess():
+    """The boundary of the change: AM/PM is not a defect the model can repair, and
+    routing it back would invite exactly the silent completion this design exists
+    to prevent (7点10分 quietly becoming 19:10)."""
+    agent = await OmniAgent.create(load_settings())
+    try:
+        ctx = _frozen_ctx(agent, "为 RAG 系统综述准备材料，今天7点10分执行")
+        schedule_task = _handler(build_schedule_tools(agent.runtime, ctx), "schedule_task")
+
+        result = await schedule_task({"goal": "为 RAG 系统综述准备材料", "when": _AMBIGUOUS_WHEN})
+
+        assert result["status"] == "needs_input"
+        assert _is_terminal_tool_result(result) is True
+        assert await agent.scheduler.list() == []
     finally:
         await agent.aclose()

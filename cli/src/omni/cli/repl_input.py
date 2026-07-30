@@ -6,9 +6,16 @@ import os
 import shutil
 import sys
 from collections.abc import Callable, Iterator, Sequence
+from pathlib import Path
 
 from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import CompleteEvent, Completer, Completion
+from prompt_toolkit.completion import (
+    CompleteEvent,
+    Completer,
+    Completion,
+    ThreadedCompleter,
+    merge_completers,
+)
 from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import InMemoryHistory
@@ -16,19 +23,30 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts import print_formatted_text
 from prompt_toolkit.styles import Style
-from prompt_toolkit.utils import get_cwidth
 
+from omni.cli import theme
+from omni.cli.file_search import (
+    DEFAULT_LIMIT,
+    FileCandidate,
+    FileSearcher,
+    deliverable_roots,
+)
 from omni.cli.repl_command_policy import command_contains_sensitive_data
 from omni.cli.repl_commands import CommandCatalog, SlashCommand
 from omni.cli.repl_composer import install_multiline_bindings
+from omni.cli.repl_layout import clip_display as _clip_display
+from omni.cli.repl_layout import compact_number as _compact_number
+from omni.cli.repl_layout import display_width as _display_width
 from omni.cli.terminal_harness import TerminalKeyboardProtocol
+from omni.core.file_mentions import active_mention_token
 
 _STYLE = Style.from_dict(
     {
-        "omni.frame": "#2aa198",
-        "omni.prompt": "bold #00d7af",
-        "omni.mode": "bold #b5bd00",
-        "omni.hint": "#839496",
+        "omni.frame": theme.PTK_ACCENT,
+        "omni.prompt": f"bold {theme.PTK_ACCENT}",
+        "omni.mode": theme.PTK_STRONG,
+        "omni.hint": theme.PTK_MUTED,
+        "omni.key": theme.PTK_ACCENT,
     }
 )
 
@@ -138,6 +156,93 @@ class SlashCommandCompleter(Completer):
         yield from prefix
 
 
+class FileMentionCompleter(Completer):
+    """Completion for the REPL's ``@`` file-mention surface.
+
+    The sibling of :class:`SlashCommandCompleter`: that one owns text starting
+    with ``/``, this one owns the ``@`` token under the cursor anywhere in the
+    buffer, because a mention is normally written mid-sentence ("review
+    @README.md and plot it"). Candidates are gitignore-aware and never include
+    sensitive files.
+
+    Accepting a candidate keeps the ``@`` and replaces only the token, so the
+    marker survives into the submitted text where it acts as the explicit
+    attachment grant. Directories are completed with a trailing ``/`` and an open
+    quote so navigation can continue.
+    """
+
+    def __init__(
+        self,
+        root: Path | None = None,
+        *,
+        searcher: FileSearcher | None = None,
+        limit: int = DEFAULT_LIMIT,
+    ) -> None:
+        self._searcher = searcher or FileSearcher(root)
+        self._limit = max(1, limit)
+
+    def get_completions(
+        self,
+        document: Document,
+        complete_event: CompleteEvent,
+    ) -> Iterator[Completion]:
+        del complete_event
+        active = active_mention_token(document.text_before_cursor)
+        if active is None:
+            return
+        for candidate in self._searcher.search(active.token, limit=self._limit):
+            label = candidate.relative + ("/" if candidate.is_dir else "")
+            yield Completion(
+                _mention_completion_text(candidate, quoted=active.quoted),
+                start_position=-len(active.token),
+                display=label,
+                display_meta="dir" if candidate.is_dir else "file",
+            )
+
+
+def _mention_completion_text(candidate: FileCandidate, *, quoted: bool) -> str:
+    """Text that replaces the typed token, quoting only when required."""
+    path = candidate.relative + ("/" if candidate.is_dir else "")
+    needs_quotes = any(char.isspace() for char in path)
+    if candidate.is_dir:
+        # Leave any quote open: the user is still descending into the tree.
+        if quoted:
+            return path
+        return f'"{path}' if needs_quotes else path
+    if quoted:
+        return f'{path}"'
+    return f'"{path}"' if needs_quotes else path
+
+
+def build_repl_completer(
+    commands: CommandCatalog | Sequence[str] = (),
+    *,
+    root: Path | None = None,
+    output_base: Path | None = None,
+) -> Completer:
+    """The one completer both interactive surfaces use.
+
+    ``ReplInputBox`` and ``ReplTui`` must not drift: a mention that completes in
+    one and not the other is worse than no completion at all. Threading the
+    merged completer keeps typing responsive because building the file index can
+    shell out to ``git ls-files`` or walk a large tree.
+
+    ``output_base`` is where omni writes deliverables (``artifacts.output_dir``);
+    its per-kind subfolders stay mentionable even when gitignored.
+    """
+    base = (root or Path.cwd()).resolve()
+    # ``artifacts.output_dir`` is conventionally relative (default ``"."``);
+    # anchor it to the picker root so indexed paths stay relative to that root.
+    configured = Path(output_base) if output_base is not None else base
+    anchored = configured if configured.is_absolute() else base / configured
+    searcher = FileSearcher(base, always_visible=deliverable_roots(anchored))
+    return ThreadedCompleter(
+        merge_completers(
+            [SlashCommandCompleter(commands), FileMentionCompleter(searcher=searcher)],
+        )
+    )
+
+
 class ReplCommandHistory(InMemoryHistory):
     """In-memory history that never recalls commands containing credentials."""
 
@@ -161,6 +266,7 @@ class ReplInputBox:
         *,
         enabled: bool | None = None,
         commands: CommandCatalog | Sequence[str] = (),
+        output_base: Path | None = None,
     ) -> None:
         self._enabled = _interactive_terminal() if enabled is None else enabled
         self._mode = "auto"
@@ -170,7 +276,7 @@ class ReplInputBox:
         self._context_window = 0
         self._clearable_tokens = 0
         self._last_elapsed_seconds: float | None = None
-        self._completer = SlashCommandCompleter(commands)
+        self._completer = build_repl_completer(commands, output_base=output_base)
         self._key_bindings = self._create_key_bindings()
         self._session: PromptSession[str] | None = None
 
@@ -302,7 +408,9 @@ class ReplInputBox:
             [
                 ("class:omni.frame", prefix),
                 ("class:omni.mode", mode),
-                ("class:omni.hint", detail),
+                *theme.hint_fragments(
+                    detail, key_class="class:omni.key", label_class="class:omni.hint"
+                ),
                 ("class:omni.frame", "─" * max(1, width - used)),
             ]
         )
@@ -326,36 +434,6 @@ def _terminal_width() -> int:
 
 def _fill(char: str) -> str:
     return char * max(1, _terminal_width() - 1)
-
-
-def _display_width(text: str) -> int:
-    return sum(get_cwidth(char) for char in text)
-
-
-def _clip_display(text: str, width: int) -> str:
-    if width <= 0:
-        return ""
-    if _display_width(text) <= width:
-        return text
-    if width == 1:
-        return "…"
-    out: list[str] = []
-    used = 0
-    for char in text:
-        char_width = get_cwidth(char)
-        if used + char_width > width - 1:
-            break
-        out.append(char)
-        used += char_width
-    return "".join(out) + "…"
-
-
-def _compact_number(value: int) -> str:
-    if value >= 1_000_000:
-        return f"{value / 1_000_000:.1f}m"
-    if value >= 1_000:
-        return f"{value / 1_000:.1f}k"
-    return str(value)
 
 
 def _format_elapsed(seconds: float) -> str:

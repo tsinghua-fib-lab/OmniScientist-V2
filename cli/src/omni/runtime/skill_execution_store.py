@@ -7,6 +7,7 @@ from datetime import datetime
 from sqlalchemy import select
 
 from omni.runtime.task_results import _aware_dt, _result_has_artifacts
+from omni.storage.db import retry_while_busy
 from omni.storage.models import ArtifactORM, SubtaskORM, _utcnow
 
 
@@ -25,6 +26,17 @@ class SkillExecutionStore:
         result: dict,
         trace: list[dict],
     ) -> None:
+        await retry_while_busy(
+            lambda: self._write_cancelled(execution_id, result=result, trace=trace)
+        )
+
+    async def _write_cancelled(
+        self,
+        execution_id: str,
+        *,
+        result: dict,
+        trace: list[dict],
+    ) -> None:
         async with self._db.session() as session:
             row = await session.get(SubtaskORM, execution_id)
             if row is None:
@@ -34,6 +46,7 @@ class SkillExecutionStore:
             row.error = ""
             row.trace_log = trace
             row.finished_at = _utcnow()
+            row.owner_pid = 0
             await session.commit()
 
     async def list(

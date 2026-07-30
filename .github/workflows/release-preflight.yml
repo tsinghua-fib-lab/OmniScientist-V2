@@ -1,0 +1,47 @@
+# Manual release preflight. Same OS × Python pytest as CI — no tag, no
+# wheel, no PyPI. CI green on this SHA is the same check; this button
+# re-runs it on demand before you tag v*.
+name: Release preflight
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-preflight-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.11", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - run: uv sync --project cli --all-extras
+      - run: uv run --project cli ruff check cli/src cli/tests
+      - run: uv run --project cli pytest -q -m "not release_gate"
+
+  release-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --project cli --all-extras
+      - name: Run reactive binding release gate
+        run: >-
+          uv run --project cli pytest -q
+          cli/tests/eval/test_reactive_binding_release_gate.py
+          cli/tests/eval/test_objective_provider_quality_offline_corpus.py

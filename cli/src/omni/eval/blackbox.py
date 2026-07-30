@@ -26,6 +26,7 @@ from omni.config.paths import OmniPaths
 from omni.config.settings import OmniSettings
 from omni.research.store import ResearchStore
 from omni.research.verify import verify_session
+from omni.storage.db import dispose_databases_under
 
 AgentFactory = Callable[[OmniSettings], Awaitable[OmniAgent]]
 
@@ -39,7 +40,6 @@ _FORBIDDEN_TURN_KEYS = {
     "planner_output",
     "review",
     "seed_memories",
-    "seed_tasks",
     "tool_calls",
     "tool_results",
 }
@@ -349,8 +349,11 @@ async def _run_attempt(
         except Exception as exc:  # noqa: BLE001 - a crash is benchmark evidence
             attempt.error = f"{type(exc).__name__}: {exc}"
         finally:
-            if agent is not None:
-                await agent.aclose()
+            try:
+                if agent is not None:
+                    await agent.aclose()
+            finally:
+                await dispose_databases_under(root)
     attempt.duration_ms = (time.perf_counter() - started) * 1000
     attempt.passed = not attempt.error and bool(attempt.checks) and all(
         bool(check.get("passed")) for check in attempt.checks
@@ -429,16 +432,9 @@ def _evaluate_turn(  # noqa: PLR0912, PLR0915 - expectation vocabulary stays cen
             values,
             result.terminated_reason not in values,
         )
-    if "verification_status" in expect:
-        actual = next(
-            (
-                str(event.event_type).removeprefix("verification.")
-                for event in reversed(events)
-                if str(event.event_type).startswith("verification.")
-            ),
-            str(result.verification_status or ""),
-        )
-        check("verification_status", actual, expect["verification_status"], actual == expect["verification_status"])
+    if "settlement_status" in expect:
+        actual = str(result.settlement_status or "")
+        check("settlement_status", actual, expect["settlement_status"], actual == expect["settlement_status"])
     if "max_tool_calls" in expect:
         maximum = int(expect["max_tool_calls"])
         check("max_tool_calls", len(tool_starts), maximum, len(tool_starts) <= maximum)

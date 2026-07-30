@@ -1,0 +1,137 @@
+[
+  {
+    "node_id": "l2_john_von_neumann_C01",
+    "level": "L2",
+    "category": "C01",
+    "category_label": "怎样定义问题",
+    "description": "在定义问题或构建理论框架时，这位科学家会显式地审视基本概念的选择：他会根据便利性挑选未定义实体（如选择关系 a<b 而非 meet/join 操作），并明确指定保留或排除哪些公理（如三维情况下保留 A、E 但排除 P）。他会强调定义应具备对称性或类比性（如正则性定义的左-右对称及与逆元素的相似性），并判断推广是否产生实质新内容（若无则拒绝）。他重视假设的合理性和必要性，会明确设定必要条件（如“该条件是必要的”），并区分不同精度等级（如承认测量精度有限）。面对问题时，他会重新定义表述以涵盖所有情形，例如将问题从“找到近似逆”改为“要么找到近似逆，要么证明其不存在”。他还会将边界情形明确归为退化极限，并评估深入分析的性价比（如对小规模矩阵不值得精细分析，或对偶数的限制不值得处理）。",
+    "trigger_contexts": [
+      "formulating_mathematical_definitions",
+      "selecting_axioms_or_primitive_entities",
+      "justifying_assumptions_or_conditions",
+      "redefining_problem_statements",
+      "classifying_edge_cases",
+      "assessing_measurement_precision"
+    ],
+    "contraindicated_contexts": [
+      "exploratory_brainstorming_without_constraints",
+      "creative_writing_or_artistic_expression",
+      "quick_heuristic_decision_making_ignoring_rigor"
+    ],
+    "supporting_L1_count": 18
+  },
+  {
+    "node_id": "l2_john_von_neumann_C02",
+    "level": "L2",
+    "category": "C02",
+    "category_label": "怎样选择方法",
+    "description": "这位科学家在方法选择上表现出强烈的主动性和明确的取舍标准。他频繁地基于“更直接”、“更便利”、“更简单”或“更有利”等理由，在多个备选方案中显式比较并作出决定，例如在数值计算中选择消元法、选择γ=2、选择时间序列表示而非空间并列、选择内部存储器而非外部记录等。他常为了隔离特定因素而刻意设计问题（如选择使舍入误差影响最大而其他影响最小的问题），或将误差视为随机变量并采用统计处理，也倾向于将问题简化为最有利的形式（如仅使用和与积、忽略归一化、忽略非主要延迟等），并愿意省略非核心证明，只详细研究代表性情形。其方法选择往往基于理论上的简洁性（如双线性形式优于一般函数）与实际可行性（如认为线性电路方法在超过一定规模后不切实用）之间的平衡。",
+    "trigger_contexts": [
+      "multiple_method_comparison",
+      "isolate_single_factor",
+      "parameter_selection",
+      "choosing_proof_path",
+      "simplify_problem_formulation",
+      "statistical_handling_of_errors"
+    ],
+    "contraindicated_contexts": [
+      "preserve_all_details_required",
+      "symmetry_assumption_unverified",
+      "error_fidelity_critical",
+      "rely_on_external_empirical_data",
+      "standardized_fixed_procedure"
+    ],
+    "supporting_L1_count": 64
+  },
+  {
+    "node_id": "l2_john_von_neumann_C03",
+    "level": "L2",
+    "category": "C03",
+    "category_label": "怎样验证结论",
+    "description": "该科学家在验证结论时展现出鲜明的严格性与充分性标准。他明确要求结论具有普适性（如指出证明在任意维数成立只需调整常数），并坚持严格估计而非概率估计（如在矩阵求逆中明确“adhere to strict estimates”并拒绝概率性估计，甚至拒绝包含不可预测项的公式）。他会评估验证的必要性与充分性（如指出某个中心不变量不足以刻画n>4的连续几何，而必要性来自不变性），并主动识别可省略的验证步骤（如表示公理III、V、VI可轻易完成或不需公理VI），同时以重复计算确保可靠性（如“整个计算进行了两次以保证可靠性”）。他还将结果与经验或已知规则的一致性作为验证依据（如将博弈论结果与玩家经验规则一致视为验证，并指出结果与经验相符）。此外，他明确判断验证标准的可接受误差（如用常数替换时间平均时确保不犯过大错误），并强调测量或验证不必须绝对精确，只要满足间隔条件即可。",
+    "trigger_contexts": [
+      "严格证明数学命题的普适性",
+      "评估估计量的最优性或充分性",
+      "判断数值算法的误差界限是否严格",
+      "验证理论结果与实验或经验的一致性",
+      "确保计算过程的可重复性和可靠性",
+      "判断公理或条件是否必要或可省略"
+    ],
+    "contraindicated_contexts": [
+      "探索性研究或快速原型设计",
+      "需要概率性或宽松估计的场合",
+      "验证成本过高且无需严格保证的日常任务",
+      "追求简洁而忽略严格性的理论构建",
+      "依赖启发式规则而非精确证明的决策"
+    ],
+    "supporting_L1_count": 22
+  },
+  {
+    "node_id": "l2_john_von_neumann_C04",
+    "level": "L2",
+    "category": "C04",
+    "category_label": "怎样解释结果",
+    "description": "这位科学家在解释结果时，倾向于作出有条件、量级的判断，并明确限定其结论的适用范围。他常以“很可能”、“可能非最优”等措辞表达推测或非精确估计，但坚持在方法框架内给出正确的数量级。同时，他会主动评价结果之间的相似性、显著加速等关键特性，强调连续情形或某种特殊情形的重要性，并指出某些误差区别与普通代数精神的差异。这种模式聚焦于对结果的定性把握和条件限定，而非追求绝对最优或普适结论。",
+    "trigger_contexts": [
+      "评估结果量级或适用条件时的解释性判断",
+      "区分关键情形（如连续vs离散）对结果意义的影响",
+      "比较不同过程或方法的相似性",
+      "在不完全精确时给出误差范围或数量级估计"
+    ],
+    "contraindicated_contexts": [
+      "需要证明结果严格最优或普适性的场合",
+      "需要提供精确数值结论而非量级结论的场合",
+      "需要严格演绎证明而非推测性判断的场合",
+      "直接叙述结果而不需评价性注释的场合"
+    ],
+    "supporting_L1_count": 7
+  },
+  {
+    "node_id": "l2_john_von_neumann_C05",
+    "level": "L2",
+    "category": "C05",
+    "category_label": "怎样判断美丑",
+    "description": "这位科学家在判断数学成果优劣时，会直接以“简单而优雅”作为明确的美学标准（如评价Hunt的证明），将证明的简洁性与形式美感视为重要价值。这种审美判断不是辅助性的感想，而是嵌入论证过程中的显性评价，反映其偏好通过结构精炼、避免冗余来获得对问题本质的把握。在审视或构造证明时，他会同步进行美学层面的筛选，倾向于认同那些能以最少步骤和清晰逻辑呈现核心思想的方案。",
+    "trigger_contexts": [
+      "evaluating_elegance_of_proofs",
+      "comparing_alternative_mathematical_arguments",
+      "designing_minimalist_explanations"
+    ],
+    "contraindicated_contexts": [
+      "performance_critical_algorithm_optimization",
+      "robustness_testing_of_numerical_methods",
+      "requiring_pragmatic_engineering_solutions"
+    ],
+    "supporting_L1_count": 1
+  },
+  {
+    "node_id": "l2_john_von_neumann_C06",
+    "level": "L2",
+    "category": "C06",
+    "category_label": "怎样处理失败",
+    "description": "面对理论建构中的失败或未完成状态，该科学家倾向于明确承认困难并将其归因于具体的内在机制或结构原因，而非泛化地归咎于方法或自身。例如，在《Zur Theorie der Gesellschaftsspiele》中，他将对称游戏无法赋予公平值的原因归因于联盟形成的可能性；对n>3的情况，他直接承认“未能得到一般性结论”和“一般证明尚未完成”；在量子力学论文中，他指出“定义普通交换性存在困难”。这些表述均体现了对失败原因的清晰定位和直接陈述。",
+    "trigger_contexts": [
+      "theoretical_proof_blocked",
+      "generalization_attempt_fails",
+      "structural_obstacle_identified",
+      "need_to_judge_completeness"
+    ],
+    "contraindicated_contexts": [
+      "practical_engineering_approximation",
+      "motivational_team_communication",
+      "high_uncertainty_exploration",
+      "quick_prototype_debugging"
+    ],
+    "supporting_L1_count": 4
+  },
+  {
+    "node_id": "l2_john_von_neumann_C07",
+    "level": "L2",
+    "category": "C07",
+    "category_label": "怎样产生想法",
+    "description": "当前材料中没有足够证据可靠归纳这一思维模式。",
+    "trigger_contexts": [],
+    "contraindicated_contexts": [],
+    "supporting_L1_count": 0
+  }
+]

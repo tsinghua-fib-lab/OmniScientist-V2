@@ -113,9 +113,10 @@ def _prompt_trust(cwd: Path, home: Path | None) -> bool:
             f"[cyan]{target}[/cyan]"
         )
     console.print(
-        "[dim]Trusted: omni writes generated files (figures/reports) here and applies "
-        "this folder's .omni config.\nUntrusted: read-only — outputs stay in ~/.omni and "
-        "repo-local config is ignored.[/dim]"
+        "[dim]Trusted: Codex Auto — workspace-write + on-request. Routine commands and "
+        "in-folder writes run without a prompt; leaving the folder still asks.\n"
+        "Untrusted: read-only. Outputs stay in ~/.omni, repo-local config is ignored, "
+        "and edits or commands require approval or `omni trust`.[/dim]"
     )
     trusted = confirm("Trust this folder and write generated files here?", default=True)
     if trusted:

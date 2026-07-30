@@ -144,7 +144,10 @@ def _render(memories: Sequence[ScoredMemory], *, role: str, budget_chars: int) -
         summary = " ".join(str(entry.summary or "").split())
         if not summary:
             continue
-        tag = f"[{entry.layer}/{entry.memory_type}/{entry.scope}]"
+        scope = entry.scope
+        if scope == "task" and entry.scope_id:
+            scope = f"task {str(entry.scope_id)[:8]}"
+        tag = f"[{entry.layer}/{entry.memory_type}/{scope}]"
         line = f"- {tag} {summary[:220]}"
         if used + len(line) + 1 > budget_chars:
             break

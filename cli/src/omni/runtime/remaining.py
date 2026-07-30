@@ -1,0 +1,424 @@
+"""Named scientific outputs vs artifacts actually on the task.
+
+``plan.outputs`` / ``verification_plan.required_outputs`` name what the turn
+owed the user (a figure, a manuscript, slides). Settlement used to treat those
+names as captions. This module is the fact lookup: given the artifacts the
+record already has, which named outputs are still missing.
+
+It does not grade quality. A PNG is a figure; a Markdown report is a draft.
+Sidecar DOT/JSON files do not count as the deliverable they support.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from omni.agent.capabilities import (
+    CAPABILITY_FIGURE,
+    CONTRACT_DELIVERABLES,
+    WRITING_DELIVERABLES,
+    contract_outputs,
+    contract_outputs_from_capabilities,
+    writing_outputs,
+)
+from omni.runtime.task_results import is_dot_artifact
+
+# A request that names both a figure and a paper is a multi-deliverable contract
+# even when the semantic planner only emitted ``outputs=["answer"]``. Either
+# hint alone is too common in ordinary chat to bind a debt.
+# CJK spellings as unicode escapes so the control-plane source stays English
+# (same pattern as ``scheduling/temporal.py`` day-part words). Runtime values
+# are the ideographs users type: figure/diagram, paper, survey, manuscript.
+_FIGURE_HINTS = ("\u56fe", "figure", "diagram", "flowchart", "schematic")
+# Complete decks, not a single-slide LiveFigure / editable figure.
+_SLIDE_HINTS = (
+    "slides",
+    "slide deck",
+    "pptx",
+    "ppt",
+    "pptx deck",
+    "presentation",
+    "seminar",
+    "thesis defense",
+    "group meeting",
+    "conference talk",
+    "\u7ec4\u4f1a",
+    "\u7b54\u8fa9",
+    "\u5e7b\u706f",
+    "\u8bfe\u4ef6",
+    "\u505appt",
+    "\u751f\u6210ppt",
+    "\u5236\u4f5cppt",
+    "ppt\u6c47\u62a5",
+    "\u505a\u4e00\u4efdppt",
+)
+_SLIDE_NEGATIVE = (
+    "single-slide",
+    "single slide",
+    "one-slide",
+    "one slide",
+    "livefigure",
+    "editable figure",
+    "\u5355\u9875",
+    "\u4e00\u5f20\u56fe",
+)
+_PAPER_HINTS = (
+    "\u8bba\u6587",
+    "\u7efc\u8ff0",
+    "\u624b\u7a3f",
+    "manuscript",
+    "survey paper",
+    "write a paper",
+    "output a paper",
+    " a paper",
+)
+# A survey-class closer binds a manuscript next to a figure. A deck that
+# only names a survey / literature review is slides, not a paper, unless a
+# hard paper word is also present.
+_HARD_PAPER_HINTS = (
+    "\u8bba\u6587",
+    "manuscript",
+    "survey paper",
+    "write a paper",
+    "output a paper",
+    " a paper",
+)
+_SURVEY_CLOSER_HINTS = (
+    "\u8c03\u7814",
+    "\u7efc\u8ff0",
+    "survey",
+    "literature review",
+    "related work",
+)
+# Asking about an earlier task's figure/paper is recall, not a new contract.
+_FIGURE_PAPER_NEGATIVE = (
+    "\u524d\u9762\u95ee\u7684",
+    "\u8fd9\u4e2a\u4efb\u52a1",
+    "\u4ea7\u51fa\u662f\u4ec0\u4e48",
+    "previous task",
+    "that task",
+    "look at the output",
+    "what did that task",
+)
+
+_FIGURE_KINDS = frozenset({"figure"})
+_FIGURE_SUFFIXES = frozenset({"png", "svg", "jpg", "jpeg", "webp", "gif"})
+_FIGURE_MIMES = frozenset(
+    {
+        "image/png",
+        "image/svg+xml",
+        "image/jpeg",
+        "image/webp",
+        "image/gif",
+    }
+)
+_MANUSCRIPT_KINDS = frozenset({"paper", "report", "review", "manuscript"})
+_MANUSCRIPT_SUFFIXES = frozenset({"md", "markdown", "docx", "doc", "tex", "html"})
+_SLIDE_SUFFIXES = frozenset({"pptx", "ppt"})
+_POSTER_SUFFIXES = frozenset({"pdf", "pptx", "png", "svg"})
+# A PDF is ambiguous (paper vs figure vs poster). Kind / title decide first;
+# a kind-less PDF is treated as a manuscript only when the name asks for one.
+_PDF_SUFFIXES = frozenset({"pdf"})
+
+
+def remaining_deliverables(
+    required: list[str],
+    artifacts: list[Any],
+) -> list[str]:
+    """Return contract outputs in ``required`` that no artifact satisfies.
+
+    Order follows ``required``. Non-contract names (``answer``, ``sources``) are
+    dropped: they are not artifact debts.
+    """
+    owed = contract_outputs([str(name) for name in required if str(name)])
+    if not owed:
+        return []
+    delivered: set[str] = set()
+    for artifact in artifacts:
+        if _is_sidecar(artifact):
+            continue
+        delivered.update(_outputs_satisfied_by(artifact))
+    return [name for name in owed if name not in delivered]
+
+
+def remaining_writing(remaining: list[str]) -> list[str]:
+    """Writing debts native ``synthesis.final`` can fill without re-running skills."""
+    return writing_outputs(remaining)
+
+
+def survey_closer_eligible(plan: Any) -> bool:
+    """Whether the host may retrieve-then-write when this turn still lacks evidence.
+
+    The canonical survey pair always qualifies. After a workflow demote drops
+    ``literature.search``, a writing debt plus survey wording still qualifies —
+    that is how a ReAct turn that only looked up memory still gets papers.
+    Figures, slides, and a bare ``draft.section`` without survey wording stay
+    on the live sequence: inventing a literature search there would do the
+    wrong scientific work.
+    """
+    from omni.agent.capabilities import (
+        CAPABILITY_LITERATURE_SEARCH,
+        is_survey_pair,
+    )
+    from omni.agent.plan_runner_utils import plan_capabilities
+
+    text = str(getattr(plan, "user_message", "") or "")
+    folded = text.casefold()
+    if infer_slide_outputs(text) or infer_figure_and_paper_outputs(text):
+        return False
+    caps = list(plan_capabilities(plan))
+    caps.extend(str(key) for key in (getattr(plan, "capability_inputs", None) or {}))
+    names = [str(item) for item in (getattr(plan, "outputs", None) or []) if item]
+    verification = getattr(plan, "verification_plan", None)
+    names.extend(
+        str(item) for item in (getattr(verification, "required_outputs", None) or []) if item
+    )
+    if is_survey_pair(caps, names):
+        return True
+    writing = remaining_writing(contract_outputs(names))
+    extra = set(contract_outputs(names)) - set(WRITING_DELIVERABLES)
+    if extra or not writing:
+        return False
+    if CAPABILITY_LITERATURE_SEARCH in caps:
+        return True
+    if any(hint in text or hint in folded for hint in _FIGURE_HINTS):
+        return False
+    return any(hint in text or hint in folded for hint in _SURVEY_CLOSER_HINTS)
+
+
+def plan_owes_scientific_outputs(plan: Any) -> bool:
+    """Whether settlement can still demand a figure, manuscript, slides, or review.
+
+    Answer-only and task-inspect turns are false: memory and ``get_task`` *are*
+    the work. Recalled files from another task never flip this to false — only
+    names on this plan's contract do.
+    """
+    verification = getattr(plan, "verification_plan", None)
+    required = list(getattr(verification, "required_outputs", None) or [])
+    names = required or list(getattr(plan, "outputs", None) or [])
+    return bool(contract_outputs([str(name) for name in names if name]))
+
+
+def remaining_figure(remaining: list[str]) -> list[str]:
+    """Figure debts the host can fill by running the ``artifact.figure`` provider."""
+    return [name for name in remaining if name == CAPABILITY_FIGURE]
+
+
+def remaining_slides(remaining: list[str]) -> list[str]:
+    """Deck debts the host can fill by running the ``slides.generate`` provider.
+
+    ``artifact.pptx`` is the single-slide editable figure, not a talk deck.
+    """
+    return [name for name in remaining if name == "artifact.slides"]
+
+
+def skip_completed_skills_note(
+    remaining: list[str],
+    artifacts: list[Any],
+) -> str:
+    """Host note for a retry/resume: what exists, what is still owed."""
+    if not remaining and not artifacts:
+        return ""
+    delivered = []
+    for artifact in artifacts:
+        if _is_sidecar(artifact):
+            continue
+        title = str(getattr(artifact, "title", "") or "")
+        kind = str(getattr(artifact, "kind", "") or "")
+        path = _path_of(artifact)
+        label = title or kind or path or "artifact"
+        delivered.append(label)
+    lines = [
+        "Already delivered artifacts on this task (do not rerun the skills that produced them): "
+        + (", ".join(delivered[:8]) if delivered else "none"),
+        "Still required: " + (", ".join(remaining) if remaining else "none"),
+        "Only artifacts owned by this task satisfy required_outputs; files from another task do not.",
+    ]
+    return "\n".join(lines)
+
+
+def bind_contract_outputs(plan: Any, proposal: Any | None = None) -> Any:
+    """Copy named scientific outputs onto verification so settlement can see them.
+
+    ``answer`` stays descriptive. Figure / manuscript / slides are a contract:
+    the durable record either has the artifact or the run is not succeeded.
+
+    The semantic planner often emits ``outputs=["answer"]`` on the ReAct floor
+    even when ``required_capabilities`` / ``workflow_steps`` already named a
+    figure and a paper. Those names are the contract; the ReAct floor is only
+    the execution mode.
+    """
+    from omni.agent.intent_plan import VerificationPlan
+
+    names = list(plan.outputs)
+    if proposal is not None:
+        names.extend(str(item) for item in (getattr(proposal, "outputs", None) or []) if item)
+        caps = [str(item) for item in (getattr(proposal, "required_capabilities", None) or []) if item]
+        for step in getattr(proposal, "workflow_steps", None) or []:
+            if isinstance(step, dict) and step.get("capability"):
+                caps.append(str(step["capability"]))
+        names.extend(contract_outputs_from_capabilities(caps))
+    names.extend(infer_figure_and_paper_outputs(getattr(plan, "user_message", "") or ""))
+    names.extend(infer_slide_outputs(getattr(plan, "user_message", "") or ""))
+    names.extend(_outputs_from_selected_skills(plan))
+    contract = contract_outputs(names)
+    if not contract:
+        return plan
+    plan.outputs = list(dict.fromkeys([*plan.outputs, *contract]))
+    required = list(dict.fromkeys([*plan.verification_plan.required_outputs, *contract]))
+    plan.verification_plan = VerificationPlan(
+        required_outputs=required,
+        required_events=list(plan.verification_plan.required_events),
+    )
+    return plan
+
+
+def infer_figure_and_paper_outputs(user_message: str) -> list[str]:
+    """Bind figure + manuscript only when the request names both."""
+    text = str(user_message or "")
+    if not text:
+        return []
+    folded = text.casefold()
+    if any(hint in text or hint in folded for hint in _FIGURE_PAPER_NEGATIVE):
+        return []
+    wants_figure = any(hint in text or hint in folded for hint in _FIGURE_HINTS)
+    wants_paper = any(hint in text or hint in folded for hint in _PAPER_HINTS)
+    if not (wants_figure and wants_paper):
+        return []
+    hard_paper = any(hint in text or hint in folded for hint in _HARD_PAPER_HINTS)
+    if infer_slide_outputs(text) and not hard_paper:
+        return ["artifact.figure"]
+    return ["artifact.figure", "draft.manuscript"]
+
+
+def infer_slide_outputs(user_message: str) -> list[str]:
+    """Bind a deck debt when the request names slides, not a single-slide figure."""
+    text = str(user_message or "")
+    if not text:
+        return []
+    folded = text.casefold().replace("-", " ")
+    raw = text.replace("-", " ")
+    if any(hint in raw or hint in folded for hint in _SLIDE_NEGATIVE):
+        return []
+    if any(hint in raw or hint in folded for hint in _SLIDE_HINTS):
+        return ["artifact.slides"]
+    return []
+
+
+def _outputs_from_selected_skills(plan: Any) -> list[str]:
+    """Named contract outputs implied by the skills already selected on the plan."""
+    names: list[str] = []
+    for selection in getattr(plan, "selected_skills", None) or []:
+        caps = [str(item) for item in (getattr(selection, "matched_capabilities", None) or []) if item]
+        names.extend(contract_outputs_from_capabilities(caps))
+    return names
+
+
+async def remaining_retry_context(tasks: Any, artifacts: Any, task_id: str) -> str:
+    """On a retry attempt, tell the model what already exists and what is still owed."""
+    if not task_id:
+        return ""
+    try:
+        current = await tasks.get_task(task_id)
+    except Exception:  # noqa: BLE001
+        return ""
+    original_id = str(getattr(current, "retry_of_task_id", "") or "")
+    if not original_id:
+        return ""
+    original = await tasks.get_task(original_id)
+    if original is None:
+        return ""
+    plan = original.plan_json if isinstance(original.plan_json, dict) else {}
+    verification = plan.get("verification_plan") if isinstance(plan.get("verification_plan"), dict) else {}
+    required = list(verification.get("required_outputs") or plan.get("outputs") or [])
+    try:
+        rows = await artifacts.list_by_task(original_id)
+    except Exception:  # noqa: BLE001
+        rows = []
+    remaining = remaining_deliverables(required, rows)
+    note = skip_completed_skills_note(remaining, rows)
+    if not note:
+        return ""
+    return (
+        "[Remaining work] Continue from what already exists on this task. "
+        "Files from another task do not satisfy this task's required_outputs. "
+        "Do not rerun completed scientific skills when their artifacts are present.\n"
+        + note
+    )
+
+
+def _outputs_satisfied_by(artifact: Any) -> set[str]:
+    names: set[str] = set()
+    kind = str(getattr(artifact, "kind", "") or "").lower()
+    suffix = _suffix(artifact)
+    mime = str(getattr(artifact, "mime", "") or "").lower()
+    title = str(getattr(artifact, "title", "") or "").lower()
+    if kind in _FIGURE_KINDS or suffix in _FIGURE_SUFFIXES or mime in _FIGURE_MIMES:
+        names.add("artifact.figure")
+        names.add("artifact")
+    if kind in _MANUSCRIPT_KINDS or suffix in _MANUSCRIPT_SUFFIXES:
+        names.update(WRITING_DELIVERABLES)
+        names.add("review")
+        names.add("artifact")
+    if suffix in _SLIDE_SUFFIXES or kind in {"slides", "pptx"}:
+        names.add("artifact.pptx")
+        names.add("artifact.slides")
+        names.add("artifact")
+    if "poster" in kind or "poster" in title or (
+        suffix in _POSTER_SUFFIXES and "poster" in title
+    ):
+        names.add("artifact.poster")
+        names.add("artifact")
+    if suffix in _PDF_SUFFIXES and kind in _MANUSCRIPT_KINDS:
+        names.update(WRITING_DELIVERABLES)
+        names.add("artifact")
+    if "response" in kind or "response" in title:
+        names.add("response_letter")
+    return names & (CONTRACT_DELIVERABLES | {"artifact"})
+
+
+def _is_sidecar(artifact: Any) -> bool:
+    if is_dot_artifact(artifact):
+        return True
+    suffix = _suffix(artifact)
+    mime = str(getattr(artifact, "mime", "") or "").lower()
+    return suffix in {"dot", "gv", "mmd", "json", "yaml", "yml", "log"} or mime in {
+        "text/vnd.graphviz",
+        "application/json",
+        "application/yaml",
+    }
+
+
+def _suffix(artifact: Any) -> str:
+    fmt = str(getattr(artifact, "format", "") or "").lower().lstrip(".")
+    if fmt:
+        return fmt
+    path = _path_of(artifact)
+    if path and "." in Path(path).name:
+        return Path(path).suffix.lower().lstrip(".")
+    return ""
+
+
+def _path_of(artifact: Any) -> str:
+    return str(
+        getattr(artifact, "path", "")
+        or getattr(artifact, "rel_path", "")
+        or getattr(artifact, "uri", "")
+        or ""
+    )
+
+
+__all__ = [
+    "bind_contract_outputs",
+    "infer_figure_and_paper_outputs",
+    "infer_slide_outputs",
+    "plan_owes_scientific_outputs",
+    "remaining_deliverables",
+    "remaining_figure",
+    "remaining_retry_context",
+    "remaining_slides",
+    "remaining_writing",
+    "skip_completed_skills_note",
+    "survey_closer_eligible",
+]

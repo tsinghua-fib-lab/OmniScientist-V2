@@ -25,6 +25,7 @@ from omni.scheduling.contracts import (
     interval_trigger,
     once_trigger,
 )
+from omni.scheduling.presentation import build_card
 from omni.scheduling.service import ScheduleService
 
 app = typer.Typer(help="Schedule skills by interval, cron expression, or one-time trigger.", no_args_is_help=True)
@@ -174,7 +175,7 @@ def add_cmd(
     result = run_async(_run())
     if result.status == STATUS_CREATED:
         success(f"Created schedule {result.schedule_id[:8]} ({result.spec}).")
-        info(result.summary)
+        info(build_card(result, chat=False))
         _lazy_enable_home_service(state, result)
     elif result.status == STATUS_NEEDS_INPUT:
         error(result.summary or result.error)
@@ -488,15 +489,20 @@ def proposals_cmd(
     rows = run_async(_run())
     data_table(
         "Schedule approval proposals",
-        ["id", "state", "title", "requested-by", "channel", "created"],
+        ["id", "state", "title", "goal", "requested-by", "channel", "created"],
         [
             [
-                r.id[:8], r.state, (r.title or "-")[:28], (r.actor_principal or "-")[:22],
-                r.channel or "-", format_local_time(r.created_at) if r.created_at else "-",
+                r.id[:8],
+                r.state,
+                (r.title or "-")[:22],
+                str(((r.payload_json or {}).get("input") or {}).get("input") or "-")[:36],
+                (r.actor_principal or "-")[:22],
+                r.channel or "-",
+                format_local_time(r.created_at) if r.created_at else "-",
             ]
             for r in rows
         ]
-        or [["(none)", "", "", "", "", ""]],
+        or [["(none)", "", "", "", "", "", ""]],
     )
     if any(r.state == "pending" for r in rows):
         info("Approve with `omni schedule approve <id>` or reject with `omni schedule deny <id>`.")
@@ -574,7 +580,7 @@ def approve_cmd(ctx: typer.Context, proposal: str = typer.Argument(..., help="Pr
     result = run_async(_run())
     if result.status == STATUS_CREATED:
         success(f"Approved proposal {proposal[:8]} → schedule {result.schedule_id[:8]} ({result.spec}).")
-        info(result.summary)
+        info(build_card(result, chat=False))
         # An approved schedule is only useful if something fires it; bring the
         # always-on home service up (same lazy trigger as `schedule add`).
         _lazy_enable_home_service(state, result)

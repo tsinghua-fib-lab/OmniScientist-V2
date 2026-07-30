@@ -34,9 +34,9 @@ cross-tool convention and a valid MCP / function-calling tool name.
 | `openalex-search` | python_engine | Search OpenAlex (Omni also records returned sources in its workspace) |
 | `paper-review` | prompt_only | Produce a venue-aware author-facing pre-submission paper review |
 | `review-response` | prompt_only | Draft or audit point-by-point journal revision correspondence |
-| `scientific-figure` | python_engine | Generate a lightweight provenance-aware Graphviz figure (DOT/SVG/PNG) |
+| `scientific-figure` | python_engine | Fallback Graphviz/matplotlib figure (DOT/SVG/PNG) when VLM is unavailable or the user wants DOT |
 | `scientific-poster` | python_engine | Author, inspect, revise, preview, and approve evidence-grounded HTML scientific posters |
-| `livefigure` | python_engine | Generate one editable scientific figure as a single-slide PPTX |
+| `livefigure` | python_engine | Preferred architecture/system/workflow figure as one editable PPTX (requires VLM) |
 | `research-ideation` | python_engine | Search literature and generate, critique, and refine structured research ideas |
 | `research-pptx` | python_engine | Generate a complete multi-slide scientific deck from papers, text, outlines, or topics |
 
@@ -49,17 +49,20 @@ a dynamic scan.
 
 | User intent | Capability | Provider | Output |
 |---|---|---|---|
-| Ordinary flowchart, architecture diagram, or system diagram | `artifact.figure` | `scientific-figure` | DOT/SVG/PNG |
-| One editable scientific figure in PowerPoint | `figure.editable.pptx` | `livefigure` | Single-slide PPTX |
+| Architecture, system, or workflow diagram (editable PPTX; needs VLM) | `figure.editable.pptx` | `livefigure` | Single-slide PPTX |
+| DOT/SVG/PNG figure, Graphviz revision, or no VLM | `artifact.figure` | `scientific-figure` | DOT/SVG/PNG |
 | Complete group-meeting, defense, seminar, or report deck | `slides.generate` | `research-pptx` | Multi-slide PPTX |
 | Complete scientific or conference poster | `poster.scientific` | `scientific-poster` | HTML poster + preview/approval artifacts |
+| Find and present papers on a topic | `literature.search` | `openalex-search` | Sources |
 | Generate and pressure-test research directions | `research.ideation` | `research-ideation` | Report/answer/sources |
 | Review a paper before submission | `review.paper` | `paper-review` | Venue-aligned Markdown review |
 | Respond to received reviewer comments | `review.response` | `review-response` | Response letter/revision package |
 
-`scientific-figure` remains the lightweight default. LiveFigure is selected only
-for the explicitly editable single-slide PPTX intent; it does not claim
-`artifact.figure`. `research-pptx` owns complete decks.
+`livefigure` is the preferred ReAct provider for architecture, system, and
+workflow diagrams. It requires `omni config vlm` and does not claim
+`artifact.figure`. `scientific-figure` is the Graphviz/PNG fallback when VLM is
+unavailable, the user asked for DOT/SVG/PNG, or an existing graph must be
+revised. `research-pptx` owns complete decks.
 
 ### LiveFigure VLM configuration
 
@@ -95,8 +98,8 @@ use HTTPS; plain HTTP is accepted only for loopback development. Do not put thes
 values in project-local configuration. At actual LiveFigure execution, Omni
 returns one actionable configuration result without loading the skill engine;
 inline calls become `needs_input`, while durable tasks retain the same action in
-their result. Ordinary SVG/PNG figures continue to use
-`scientific-figure` and do not require a VLM.
+their result. DOT/SVG/PNG figures, Graphviz revisions, and runs without a VLM
+continue to use `scientific-figure`.
 
 The normal Omni install includes the active built-in Skills' Python runtimes.
 Installation, `omni init`, and `omni update` prepare research-pptx's
@@ -175,7 +178,7 @@ Skill authors can add Omni-only execution and workflow policy under
 
 ```yaml
 execution:
-  max_iterations: 4
+  max_iterations: 8
   max_tool_calls: 16
   tool_limits:
     search_corpus: 4
@@ -183,6 +186,10 @@ workflow:
   failure_policy: continue_with_partial
   allow_failed_dependencies: true
 ```
+
+Cap acquisition and execution tools only. A quota on a tool that emits the
+deliverable — `write_file`, `cite_source`, `package_artifact` and friends — caps
+the work itself and is ignored at load time; see `skills/docs/authoring.md`.
 
 This is the harness layer that keeps skills powerful but bounded. Prompt-only
 skills that hit a runtime boundary return a partial/degraded result when

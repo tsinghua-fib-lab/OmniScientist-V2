@@ -39,6 +39,7 @@
   persona: general
   channel: wechat
   tags: [presentation]
+  fixtures: [literature.search, artifact.figure]
   turns:
     - user: "帮我把 RAG 综述任务跑起来：先检索文献，再画一张系统架构图。"
       plan:
@@ -50,8 +51,17 @@
         outputs: [report]
         execution_mode: background
         rationale: "IM research workflow; presentation must not leak internals"
+      tool_calls:
+        - name: run_workflow
+          args:
+            goal: "检索文献，再画一张系统架构图"
+            mode: foreground
+            steps:
+              - {id: lit, capability: literature.search, input: {query: "retrieval augmented generation"}}
+              - {id: fig, capability: artifact.figure, depends_on: [lit], input: {input: "RAG architecture figure"}}
+      drain: true
       expect:
-        kind: workflow
+        capabilities_executed: [literature.search, artifact.figure]
         im_hides: ["input_json", "trace_log", "verification_plan"]
 
 # L4 journey: the owner is asked before a destructive command and says no; the
@@ -69,23 +79,6 @@
         - {name: bash, args: {command: "rm -rf ~/Downloads"}}
       expect:
         safety: blocked
-
-# L4 journey (self-evolution): the everyday user keeps asking for the same kind
-# of task and it keeps succeeding. The generative half of self-evolution distills
-# a *new* reusable skill candidate and queues it for review (continuous
-# improvement with a
-# human in the loop). Exercises the ``self_evolution`` dimension.
-- id: gen_evolve_new_skill_from_successes
-  title: "General user: repeated successful tasks propose a reusable skill for review"
-  persona: general
-  channel: cli
-  tags: [self_evolution]
-  turns:
-    - user: "我经常让你干这类活，能不能固化成一个可复用的技能？"
-      seed_tasks:
-        - {status: succeeded, count: 3, goal: "整理本周会议纪要并生成待办清单"}
-      expect:
-        evolution: proposes_new
 
 # L4 journey (provenance): everyday user asks to note where a result came from;
 # the agent binds the note to the supplied sources so the output is traceable.

@@ -1,7 +1,9 @@
 """Reviewer verdicts are persisted as durable ``reviewer.*`` run events.
 
-Makes the LLM-as-judge signal aggregatable by the self-evolution loop instead of
-living only inside the coordinator's tool result.
+A rejected-then-revised subagent otherwise looks identical afterwards to one
+that passed first time, because the judge's verdict lives only inside the
+coordinator's tool result. Recording it on the parent run keeps it in
+``omni task show`` and the event log.
 """
 
 from __future__ import annotations
@@ -15,7 +17,6 @@ from omni.config import load_settings
 from omni.core.llm.client import ChatWithToolsResult
 from omni.runtime.task_recorder import TaskRecorder
 from omni.skills_runtime.context import ExecContext
-from omni.skills_runtime.signals import collect_reviewer_signals
 from omni.storage.db import get_database
 
 
@@ -55,10 +56,8 @@ async def test_reviewer_verdict_recorded_on_parent_run():
     events = await recorder.list_events(run.id)
     kinds = [e.event_type for e in events]
     assert "reviewer.reject" in kinds
-
-    # and it is now visible as an aggregatable signal
-    counts = await collect_reviewer_signals(db)
-    assert counts.get("reject", 0) >= 1
+    rejected_event = next(e for e in events if e.event_type == "reviewer.reject")
+    assert rejected_event.output_json.get("score") == pytest.approx(0.1)
 
 
 @pytest.mark.asyncio
@@ -73,4 +72,3 @@ async def test_no_reviewer_event_without_run_id():
     ctx = ExecContext(settings=s, paths=s.paths, task_id="", db=db, llm=_ScriptedLLM())
     result = await run_subagent(SubagentSpec(goal="g", role="reader"), ctx)
     assert result.status == "rejected"
-    assert await collect_reviewer_signals(db) == {}

@@ -1,8 +1,12 @@
 """Recovery ladder: a non-safety rejection is never a dead end.
 
-These tests pin the four recoverable rungs (grounded repair, step degradation,
-needs_input, ReAct handoff) and the single safety hard stop, plus the invariants
-(repair is grounded and single-shot; safety is never swallowed).
+The ladder's middle rungs (identifier look-up handoff, grounded repair,
+degradable-step pruning) existed to patch a DAG the host had sealed before any
+tool ran. The model now sequences multi-step work itself, so those rungs are
+gone and these tests pin what is left: the single safety hard stop, the ask for
+one user-suppliable field, the capable ReAct floor, and the invariant that a
+reference to the agent's own prior work becomes a look-it-up turn rather than a
+history-blind question.
 """
 
 from __future__ import annotations
@@ -16,7 +20,7 @@ from omni.agent.intent_plan import (
     VerificationPlan,
 )
 from omni.agent.model_planner import ModelPlanProposal
-from omni.agent.plan_factory import build_react_recovery_plan
+from omni.agent.plan_factory import build_react_recovery_plan, needs_input_plan
 from omni.agent.plan_recovery import (
     ACTION_EXECUTE,
     ACTION_HARD_STOP,
@@ -27,7 +31,6 @@ from omni.agent.plan_recovery import (
 from omni.agent.plan_revision import create_execution_authority
 from omni.agent.plan_validator import PlanValidator
 from omni.agent.planner import IntentPlanner
-from omni.agent.workflow_plan_builder import needs_input_plan
 from omni.config import load_settings
 from omni.skills_runtime.manifest import DeliveryMode, SkillEntry, SkillKind
 from omni.skills_runtime.registry import SkillRegistry
@@ -70,24 +73,6 @@ def _skill(
     )
 
 
-def _arxiv_title_plan(planner: IntentPlanner) -> IntentPlan:
-    proposal = ModelPlanProposal(
-        intent_type="workflow",
-        workflow_steps=[
-            {"id": "step1", "capability": "paper.fetch.arxiv",
-             "input": {"input": "Attention Is All You Need"}},
-            {"id": "figure", "capability": "artifact.figure", "depends_on": ["step1"],
-             "input": {"input": "query/retriever/reranker/LLM 架构图"}},
-        ],
-        outputs=["workflow"],
-        confidence=0.85,
-        rationale="fetch abstract then draw architecture",
-    )
-    return planner.plan_from_proposal(
-        "获取 Attention Is All You Need 摘要，并生成架构图。", proposal, task_id="run-recovery"
-    )
-
-
 # ── Rung 0: safety is terminal ──
 
 
@@ -108,157 +93,6 @@ def test_toolpolicy_conflict_is_a_safety_hard_stop() -> None:
     assert outcome.action == ACTION_HARD_STOP
     assert outcome.rung == "0_safety"
     assert outcome.notes
-
-
-# ── Rung 0.75: resolvable identifier → ReAct look-up (the reported bug) ──
-
-
-def test_validator_degrades_support_step_missing_input_instead_of_rejecting() -> None:
-    registry, planner = _builtin()
-    validation = PlanValidator(registry).validate(_arxiv_title_plan(planner))
-
-    assert validation.ok
-    assert validation.status == "degraded"
-    finding = next(f for f in validation.findings if f.code == "step_input_contract")
-    assert finding.severity == "degraded"
-    assert finding.repairable is True
-    assert finding.repair_capability == "literature.search"
-
-
-def test_recovery_hands_unresolved_arxiv_title_to_react_lookup() -> None:
-    # Look-up before ask/error (Invariant-B): a resolvable identifier the in-lane
-    # resolver could not bind is handed to the ReAct floor to act-and-look-up
-    # (search → id → fetch), never a lossy free-text repair that drops the fetch
-    # chain. The floor is told to resolve the *title*, not the whole goal.
-    registry, planner = _builtin()
-    plan = _arxiv_title_plan(planner)
-    outcome = recover(plan, PlanValidator(registry).validate(plan), registry)
-
-    assert outcome.action == ACTION_REACT
-    assert outcome.rung == "4_react_lookup"
-    assert outcome.plan.intent_type == IntentType.REACT_FALLBACK
-    assert outcome.plan.outputs == plan.outputs
-    assert outcome.plan.task_contract == plan.task_contract
-    assert outcome.plan.workflow_steps == plan.workflow_steps
-    assert outcome.plan.workflow_steps is not plan.workflow_steps
-    assert outcome.plan.verification_plan.required_events == ["react.finished"]
-    assert outcome.plan.verification_plan.required_tasks == []
-    assert (
-        outcome.plan.verification_plan.required_outputs
-        == plan.verification_plan.required_outputs
-    )
-    assert outcome.plan.provenance_mode == plan.provenance_mode
-    recovered_validation = PlanValidator(registry).validate(outcome.plan)
-    assert recovered_validation.ok
-    authority = create_execution_authority(outcome.plan, registry=registry)
-    workflow_authorities = [
-        item
-        for item in authority.provider_authorities
-        if item.get("consumer_kind") == "workflow_step"
-    ]
-    assert {item["consumer_id"] for item in workflow_authorities} == {
-        "step1",
-        "figure",
-    }
-    figure_authority = next(
-        item
-        for item in workflow_authorities
-        if item["consumer_id"] == "figure"
-    )
-    assert figure_authority["assessment_identity_required"] is True
-    assert (
-        figure_authority["assessment_identity"]["provider_binding_id"]
-        == plan.workflow_steps[1]["provider_binding_id"]
-    )
-    assert any("Attention Is All You Need" in note for note in outcome.notes)
-    assert any("same authorised step ids/providers" in note for note in outcome.notes)
-    # Never surface the skill's contract message / a lossy free-text rewrite.
-    assert all("literature search" not in note.lower() for note in outcome.notes)
-
-
-# ── Rung 2: degrade/prune (mirror the runtime's partial policy) ──
-
-
-def test_recovery_prunes_degradable_step_without_producer_and_keeps_deliverable() -> None:
-    registry = SkillRegistry(load_settings())
-    registry.register(
-        _skill("opt-fetch", "custom.opt", role="support", required=["identifier"], fmt="doi",
-               failure_policy="continue_with_partial")
-    )
-    registry.register(_skill("scientific-figure", "artifact.figure", role="task", required=["input"]))
-    plan = IntentPlan(
-        task_id="run-prune",
-        user_message="给我画个架构图，如果能拿到那篇论文就更好",
-        intent_type=IntentType.WORKFLOW,
-        selected_skills=[
-            SkillSelection(skill="opt-fetch", reason="support", contract_level="full"),
-            SkillSelection(skill="scientific-figure", reason="task", contract_level="full"),
-        ],
-        workflow_steps=[
-            {"id": "opt", "skill_name": "opt-fetch", "capability": "custom.opt",
-             "input": {"identifier": "Some Paper Title"}, "depends_on": [],
-             "required": False},
-            {"id": "figure", "skill_name": "scientific-figure", "capability": "artifact.figure",
-             "input": {"input": "架构图"}, "depends_on": ["opt"]},
-        ],
-        verification_plan=VerificationPlan(required_outputs=["artifact"], required_events=["subtask.submitted"]),
-    )
-    validation = PlanValidator(registry).validate(plan)
-    # Resolver-owned facts always fail closed. The recovery ladder may still
-    # prune this explicitly partial support step before execution.
-    assert not validation.ok
-    outcome = recover(plan, validation, registry)
-
-    assert outcome.action == ACTION_EXECUTE
-    assert outcome.rung == "2_degrade"
-    skills = [str(s["skill_name"]) for s in outcome.plan.workflow_steps]
-    assert skills == ["scientific-figure"]
-    # The pruned step must not leave a dangling dependency on the figure.
-    assert outcome.plan.workflow_steps[0].get("depends_on") == []
-    assert outcome.notes
-
-
-def test_recovery_protects_sole_producer_of_required_deliverable_instead_of_pruning() -> None:
-    # continue_with_partial means "tolerate this step's *runtime* failure so
-    # independent steps proceed" — it must NOT license deleting the sole producer
-    # of a required deliverable before it executes. The figure provider's only
-    # required field is strict-typed, so the plan-time goal projection cannot
-    # satisfy it; dropping the step would silently lose the required figure.
-    registry = SkillRegistry(load_settings())
-    registry.register(_skill("kw-search", "literature.search", role="task", required=["query"]))
-    registry.register(
-        _skill("chart-figure", "artifact.figure", role="task", required=["dataset_id"], fmt="uuid",
-               failure_policy="continue_with_partial")
-    )
-    plan = IntentPlan(
-        task_id="run-protect",
-        user_message="检索资料并生成架构图",
-        intent_type=IntentType.WORKFLOW,
-        outputs=["sources", "artifact.figure"],
-        selected_skills=[
-            SkillSelection(skill="kw-search", reason="task", contract_level="full"),
-            SkillSelection(skill="chart-figure", reason="task", contract_level="full"),
-        ],
-        workflow_steps=[
-            {"id": "search", "skill_name": "kw-search", "capability": "literature.search",
-             "input": {"query": "RAG"}, "depends_on": []},
-            {"id": "figure", "skill_name": "chart-figure", "capability": "artifact.figure",
-             "input": {}, "depends_on": ["search"]},
-        ],
-        verification_plan=VerificationPlan(
-            required_outputs=["artifact.figure"], required_events=["subtask.submitted"]
-        ),
-    )
-    validation = PlanValidator(registry).validate(plan)
-    assert validation.ok  # figure step is degradable → degraded, not blocking
-    outcome = recover(plan, validation, registry)
-
-    assert outcome.action == ACTION_NEEDS_INPUT
-    assert outcome.rung == "2_degrade"
-    assert outcome.plan.intent_type == IntentType.NEEDS_INPUT
-    assert any(item.get("field") == "dataset_id" for item in outcome.missing_inputs)
-    # The deliverable was not silently dropped: the ask names the figure step.
-    assert any("sole producer" in note for note in outcome.notes)
 
 
 # ── Rung 3: ask for a single user-suppliable field ──
@@ -288,6 +122,68 @@ def test_recovery_asks_for_resolver_field_without_a_lookup_adapter() -> None:
     assert outcome.rung == "3_needs_input"
     assert outcome.plan.intent_type == IntentType.NEEDS_INPUT
     assert any(item.get("field") == "identifier" for item in outcome.missing_inputs)
+
+
+def test_a_field_the_provider_never_declared_is_not_a_question_for_the_user() -> None:
+    """A slot the planner invented is the planner's mistake, not a missing input.
+
+    Rung 3 asks when one *user-suppliable* field is the only blocker. A field the
+    provider does not declare is not suppliable by anyone: there is nowhere to
+    put the answer. Run 0db3d740 asked anyway, and because the finding text was
+    copied into ``ask`` the user was invited to answer "field 'output_language'
+    is not declared by the selected provider".
+
+    Dropping the value is safe because the compiler never put it in
+    ``arguments`` to begin with, and it cannot hide a real gap: a field the
+    provider actually requires raises its own ``missing_<name>`` blocker.
+    """
+    registry = SkillRegistry(load_settings())
+    registry.register(
+        SkillEntry(
+            name="figure-maker",
+            description="figure-maker handles artifact.figure",
+            source="builtin",
+            kind=SkillKind.PYTHON_ENGINE,
+            delivery_mode=DeliveryMode.ASYNC_TASK,
+            role="task",
+            capabilities=["artifact.figure"],
+            priority=50,
+            input_schema={
+                "type": "object",
+                "properties": {"input": {"type": "string"}},
+                "required": ["input"],
+                "additionalProperties": False,
+            },
+            output_schema={
+                "type": "object",
+                "properties": {"status": {"type": "string"}},
+                "required": ["status"],
+            },
+        )
+    )
+    plan = IntentPlan(
+        task_id="run-undeclared",
+        user_message="画一张 RAG 架构图",
+        intent_type=IntentType.SINGLE_SKILL_TASK,
+        selected_skills=[
+            SkillSelection(
+                skill="figure-maker",
+                reason="task",
+                contract_level="full",
+                matched_capabilities=["artifact.figure"],
+            )
+        ],
+        capability_inputs={
+            "artifact.figure": {"input": "RAG architecture", "output_language": "zh"}
+        },
+        verification_plan=VerificationPlan(required_outputs=["figure"]),
+    )
+    validation = PlanValidator(registry).validate(plan)
+
+    outcome = recover(plan, validation, registry)
+    assert outcome.action == ACTION_EXECUTE
+    assert not any("output_language" in str(item) for item in outcome.missing_inputs)
+    assert any("output_language" in note for note in outcome.notes)
 
 
 # ── Rung 4: the floor is the capable assistant, not a dead end ──
@@ -321,8 +217,6 @@ def test_recovery_hands_off_to_react_for_no_contract_required_skill() -> None:
     verification = VerificationPlan(
         required_outputs=["draft.manuscript"],
         required_events=["workflow.submitted", "plan.executed"],
-        provenance_checks=["full_as_requested"],
-        deliverable_checks=["draft_content_present"],
     )
     plan = IntentPlan(
         task_id="run-react",
@@ -352,19 +246,12 @@ def test_recovery_hands_off_to_react_for_no_contract_required_skill() -> None:
     assert outcome.plan.task_contract is not plan.task_contract
     assert outcome.plan.workflow_steps == plan.workflow_steps
     assert outcome.plan.workflow_steps is not plan.workflow_steps
+    # The workflow executor is gone, so its ``workflow.submitted`` promise goes
+    # with it: the floor may only be held to a trace it can actually leave.
     assert outcome.plan.verification_plan.required_events == ["react.finished"]
-    assert outcome.plan.verification_plan.required_tasks == []
     assert (
         outcome.plan.verification_plan.required_outputs
         == verification.required_outputs
-    )
-    assert (
-        outcome.plan.verification_plan.provenance_checks
-        == verification.provenance_checks
-    )
-    assert (
-        outcome.plan.verification_plan.deliverable_checks
-        == verification.deliverable_checks
     )
     assert outcome.plan.verification_plan is not plan.verification_plan
     assert outcome.plan.provenance_mode == "full"
@@ -372,7 +259,14 @@ def test_recovery_hands_off_to_react_for_no_contract_required_skill() -> None:
     assert outcome.notes
 
 
-def test_react_recovery_preserves_goal_checks_without_broadening_policy() -> None:
+def test_react_recovery_preserves_the_goal_without_broadening_policy() -> None:
+    """The floor inherits the plan's ceiling; it does not get a wider one.
+
+    Recovery only swaps *how* the turn runs. A request the planner limited to
+    two tool calls, one corpus search, and no ``open_artifact`` must come back
+    with those same limits — the only change permitted is adding the safety
+    blocks the ReAct floor always applies.
+    """
     registry = SkillRegistry(load_settings())
     registry.register(
         SkillEntry(
@@ -423,11 +317,6 @@ def test_react_recovery_preserves_goal_checks_without_broadening_policy() -> Non
         verification_plan=VerificationPlan(
             required_outputs=["artifact"],
             required_events=["workflow.submitted", "plan.executed"],
-            forbidden_tools=["open_artifact"],
-            required_tasks=["third-party-search"],
-            artifact_checks=["artifact_emitted"],
-            provenance_checks=["light_or_full_as_requested"],
-            presentation_checks=["presentation_sent_or_degraded"],
         ),
     )
 
@@ -449,19 +338,19 @@ def test_react_recovery_preserves_goal_checks_without_broadening_policy() -> Non
     assert recovered.tool_policy.max_tool_calls == 2
     assert recovered.tool_policy.max_iterations == 3
     assert recovered.tool_policy.final_reserve_enabled is True
+    # The goal survives the executor swap; the abandoned executor's promise does not.
+    assert recovered.verification_plan.required_outputs == ["artifact"]
     assert recovered.verification_plan.required_events == ["react.finished"]
-    assert recovered.verification_plan.required_tasks == []
-    assert recovered.verification_plan.artifact_checks == ["artifact_emitted"]
-    assert recovered.verification_plan.provenance_checks == [
-        "light_or_full_as_requested"
-    ]
-    assert recovered.verification_plan.presentation_checks == [
-        "presentation_sent_or_degraded",
-        "show_partial_when_budget_exhausted",
-    ]
 
 
-def test_react_recovery_keeps_exact_selected_provider_quality_authority() -> None:
+def test_react_recovery_keeps_the_exact_selected_provider_authority() -> None:
+    """Recovery may change how a turn runs, never which provider runs it.
+
+    The floor is handed ``run_skill`` so it can re-submit the abandoned work.
+    That only stays safe while the sealed authority keeps naming the exact
+    provider the plan selected — otherwise ReAct could satisfy the turn with a
+    same-named look-alike from another source that was never authorised.
+    """
     registry, _planner = _builtin()
     plan = IntentPlan(
         task_id="run-selected-recovery",
@@ -487,11 +376,10 @@ def test_react_recovery_keeps_exact_selected_provider_quality_authority() -> Non
         verification_plan=VerificationPlan(
             required_outputs=["artifact"],
             required_events=["subtask.submitted", "plan.executed"],
-            required_tasks=["scientific-figure"],
-            artifact_checks=["child_task_has_artifact_contract"],
         ),
     )
     assert PlanValidator(registry).validate(plan).ok
+    sealed = plan.provider_bindings[0]
 
     recovered = build_react_recovery_plan(
         plan,
@@ -502,8 +390,8 @@ def test_react_recovery_keeps_exact_selected_provider_quality_authority() -> Non
     ]
     assert recovered.tool_policy.allowed_tools == ["run_skill"]
     assert recovered.verification_plan.required_events == ["react.finished"]
-    assert recovered.verification_plan.required_tasks == []
     assert PlanValidator(registry).validate(recovered).ok
+    assert recovered.provider_bindings == [sealed]
 
     authority = create_execution_authority(recovered, registry=registry)
     selected = [
@@ -512,12 +400,94 @@ def test_react_recovery_keeps_exact_selected_provider_quality_authority() -> Non
         if item.get("consumer_kind") == "selected_skill"
     ]
     assert len(selected) == 1
-    assert selected[0]["provider_name"] == "scientific-figure"
-    assert selected[0]["assessment_identity_required"] is True
-    assert (
-        selected[0]["assessment_identity"]["provider_binding_id"]
-        == plan.provider_bindings[0]["provider_binding_id"]
+    assert selected[0]["provider_name"] == sealed["provider_name"]
+    assert selected[0]["provider_source"] == sealed["provider_source"]
+    identity = selected[0]["execution_identity"]
+    assert identity["name"] == "scientific-figure"
+    assert identity["source"] == "builtin"
+    assert identity["version"] == sealed["provider_version"]
+
+
+def test_identifier_lookup_recovery_widens_the_tool_budget() -> None:
+    """A workflow that hit the floor over one unbound id gets room to act.
+
+    The downgrade happened *because* an identifier could not be resolved in
+    lane. Inheriting the workflow's tight ceiling would leave no calls to look
+    the id up and re-run the authorised DAG, so the turn would dead-end for the
+    same reason twice. Every other recovery keeps the planner's ceiling.
+    """
+    verification = VerificationPlan(
+        required_outputs=["artifact"],
+        required_events=["workflow.submitted", "plan.executed"],
     )
+    plan = IntentPlan(
+        task_id="run-id-lookup",
+        user_message="获取 Attention Is All You Need 摘要并生成架构图",
+        intent_type=IntentType.WORKFLOW,
+        outputs=["artifact"],
+        workflow_steps=[
+            {"id": "paper", "capability": "paper.fetch.arxiv", "input": {"input": "x"}},
+            {"id": "figure", "capability": "artifact.figure", "depends_on": ["paper"], "input": {}},
+        ],
+        tool_policy=ToolPolicy(max_tool_calls=4, max_iterations=4),
+        verification_plan=verification,
+    )
+
+    lookup = build_react_recovery_plan(
+        plan, rationale="id lookup", identifier_lookup=True
+    )
+    assert lookup.tool_policy.max_tool_calls >= 8
+    assert lookup.tool_policy.max_iterations >= 8
+    # Widening the budget is not licence to change what the turn owes.
+    assert lookup.verification_plan.required_outputs == ["artifact"]
+
+    general = build_react_recovery_plan(plan, rationale="other")
+    assert general.tool_policy.max_tool_calls == 4
+    assert general.tool_policy.max_iterations == 4
+
+
+def test_the_floor_inherits_the_obligation_to_produce_the_answer() -> None:
+    """A downgraded turn still owes this turn's work, not last turn's answer.
+
+    Asked twice to review the day's commits, the planner proposed a skill task
+    and named no skill; the ladder handed the request to the floor, which found
+    the previous review sitting in context and returned it. Nothing in that turn
+    read a commit, and no approval was ever requested because no command was
+    ever run. The floor has to be told that the route which would have produced
+    the output did not run — the lookup rung says the opposite on purpose, which
+    is why the instruction belongs to this branch alone.
+    """
+    registry, _ = _builtin()
+    plan = IntentPlan(
+        task_id="run-review",
+        user_message="仔细 review 今天 push 到 master 上的代码",
+        intent_type=IntentType.SINGLE_SKILL_TASK,
+        outputs=["review"],
+        selected_skills=[],
+        tool_policy=ToolPolicy(
+            allowed_tools=[],
+            blocked_tools=["bash", "write_file"],
+            per_tool_limits={"search_corpus": 1},
+            max_tool_calls=1,
+            max_iterations=1,
+        ),
+    )
+    validation = PlanValidator(registry).validate(plan)
+    assert not validation.ok
+    assert "missing_selected_skills" in {f.code for f in validation.findings}
+
+    outcome = recover(plan, validation, registry)
+
+    assert outcome.action == ACTION_REACT
+    assert outcome.rung == "4_react"
+    joined = " ".join(outcome.notes).lower()
+    assert "derive the answer in this turn" in joined
+    assert "earlier turn does not satisfy" in joined
+    assert outcome.plan.tool_policy.allowed_tools is None
+    assert outcome.plan.tool_policy.max_tool_calls is None
+    assert outcome.plan.tool_policy.max_iterations is None
+    assert {"bash", "write_file"} <= set(outcome.plan.tool_policy.blocked_tools)
+    assert outcome.plan.tool_policy.per_tool_limits == {"search_corpus": 1}
 
 
 # ── Reference-aware downgrade: look before asking (codex parity) ──
@@ -584,38 +554,3 @@ def test_clean_plan_executes_unchanged() -> None:
     assert outcome.action == ACTION_EXECUTE
     assert outcome.plan is plan  # unchanged fast path
     assert outcome.rung == "ok"
-
-
-def test_unresolved_arxiv_identifier_hands_off_to_react_even_without_a_producer() -> None:
-    # Invariant-B: an identifier binding the in-lane resolver could not satisfy is
-    # handed to the ReAct floor regardless of whether a search *producer* is
-    # registered — the floor searches, takes the id, and fetches. It is never a
-    # lossy free-text rewrite, and never silently drops the fetch by pruning.
-    registry = SkillRegistry(load_settings())
-    registry.register(
-        _skill("arxiv-fetch", "paper.fetch.arxiv", role="support", required=["identifier"], fmt="arxiv_id",
-               failure_policy="continue_with_partial")
-    )
-    registry.register(_skill("scientific-figure", "artifact.figure", role="task", required=["input"]))
-    plan = IntentPlan(
-        task_id="run-noproducer",
-        user_message="获取 Attention Is All You Need 摘要并画架构图",
-        intent_type=IntentType.WORKFLOW,
-        selected_skills=[
-            SkillSelection(skill="arxiv-fetch", reason="support", contract_level="full"),
-            SkillSelection(skill="scientific-figure", reason="task", contract_level="full"),
-        ],
-        workflow_steps=[
-            {"id": "step1", "skill_name": "arxiv-fetch", "capability": "paper.fetch.arxiv",
-             "input": {"identifier": "Attention Is All You Need"}, "depends_on": []},
-            {"id": "figure", "skill_name": "scientific-figure", "capability": "artifact.figure",
-             "input": {"input": "架构图"}, "depends_on": ["step1"]},
-        ],
-        verification_plan=VerificationPlan(required_outputs=["artifact"], required_events=["subtask.submitted"]),
-    )
-    validation = PlanValidator(registry).validate(plan)
-    outcome = recover(plan, validation, registry)
-
-    assert outcome.action == ACTION_REACT
-    assert outcome.rung == "4_react_lookup"
-    assert any("Attention Is All You Need" in note for note in outcome.notes)

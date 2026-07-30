@@ -28,6 +28,7 @@ from omni.cli.repl_tui import ReplTui
         ["channel", "help"],
         ["channel", "list"],
         ["channel", "add", "feishu"],
+        ["channel", "pair", "feishu"],
         ["channel", "remove", "feishu"],
         ["channel", "test", "cli"],
         ["init", "--non-interactive"],
@@ -79,6 +80,45 @@ def test_interactive_variants_get_the_required_terminal_mode(
     assert classify_repl_command(tokens).mode.value == expected_mode
 
 
+@pytest.mark.parametrize(
+    "tokens",
+    [
+        ["channel", "login", "feishu", "--app-id", "cli_x", "--app-secret", "s"],
+        ["channel", "login", "feishu", "--app-id=cli_x", "--app-secret=s", "--start"],
+        ["channel", "login", "dingtalk", "--client-id", "d", "--client-secret", "s", "--start"],
+        ["channel", "login", "wechat", "--no-wait"],
+        ["channel", "login", "feishu", "--non-interactive"],
+    ],
+)
+def test_a_login_that_only_prints_a_pairing_code_stays_in_the_transcript(
+    tokens: list[str],
+) -> None:
+    """Feishu and DingTalk return as soon as the code is printed.
+
+    Suspending the TUI for those repaints the code away the instant the child
+    exits, which is exactly the code the user has to type into the bot chat.
+    """
+    from omni.cli.repl_command_policy import ReplCommandMode, classify_repl_command
+
+    assert classify_repl_command(tokens).mode is ReplCommandMode.CAPTURED
+
+
+@pytest.mark.parametrize(
+    "tokens",
+    [
+        ["channel", "login", "wechat", "--start"],
+        ["channel", "login", "feishu", "--app-id", "cli_x"],
+        ["channel", "login", "dingtalk", "--client-id", "d"],
+        ["channel", "login"],
+    ],
+)
+def test_a_login_that_waits_on_the_user_still_owns_the_terminal(tokens: list[str]) -> None:
+    """A QR scan and a hidden secret prompt both read the real TTY."""
+    from omni.cli.repl_command_policy import ReplCommandMode, classify_repl_command
+
+    assert classify_repl_command(tokens).mode is ReplCommandMode.INTERACTIVE_TTY
+
+
 @pytest.mark.asyncio
 async def test_successful_tty_command_publishes_a_redacted_durable_summary(monkeypatch) -> None:
     from omni.cli import main as cli_main
@@ -99,7 +139,7 @@ async def test_successful_tty_command_publishes_a_redacted_durable_summary(monke
     with use_output_sink(tui):
         returncode = await cli_main._run_repl_external_command(
             AppState(),
-            f"/channel login feishu --app-id demo --app-secret {raw_secret}",
+            f"/channel login feishu --app-secret {raw_secret}",
         )
 
     assert returncode == 0
@@ -182,6 +222,123 @@ def test_init_semantic_scholar_key_is_redacted_from_repl_display_and_history() -
 
     assert tui_history.get_strings() == []
     assert classic_history.get_strings() == []
+
+
+def test_model_facade_key_is_redacted_from_repl_display_and_history() -> None:
+    from omni.cli.repl_command_policy import (
+        command_contains_sensitive_data,
+        redact_repl_command,
+    )
+
+    secret = "model-facade-secret-789"
+    raw = f"/model vision --api-key {secret} --model vision-test"
+
+    redacted = redact_repl_command(raw)
+
+    assert secret not in redacted
+    assert "--api-key REDACTED" in redacted
+    assert command_contains_sensitive_data(raw) is True
+
+    tui_history = ReplTui(commands=())._input_buffer.history
+    tui_history.append_string(raw)
+    classic_history = ReplInputBox(enabled=False)._ensure_session().history
+    classic_history.append_string(raw)
+
+    assert tui_history.get_strings() == []
+    assert classic_history.get_strings() == []
+
+
+def test_model_endpoint_credentials_are_redacted_from_display_and_history() -> None:
+    from omni.cli.repl_command_policy import (
+        command_contains_sensitive_data,
+        redact_repl_command,
+    )
+
+    raw = (
+        "/model main --base-url "
+        "https://url-user:url-password@example.test/v1?api_key=query-secret#frag"
+    )
+    redacted = redact_repl_command(raw)
+
+    assert "example.test/v1?REDACTED" in redacted
+    for secret in ("url-user", "url-password", "query-secret", "frag"):
+        assert secret not in redacted
+    assert command_contains_sensitive_data(raw) is True
+
+    tui_history = ReplTui(commands=())._input_buffer.history
+    tui_history.append_string(raw)
+    classic_history = ReplInputBox(enabled=False)._ensure_session().history
+    classic_history.append_string(raw)
+    assert tui_history.get_strings() == []
+    assert classic_history.get_strings() == []
+
+
+@pytest.mark.parametrize("spelling", ["-u", "-u=", "--base-url="])
+def test_model_endpoint_redaction_handles_click_option_spellings(spelling: str) -> None:
+    from omni.cli.repl_command_policy import redact_repl_command
+
+    separator = " " if spelling == "-u" else ""
+    raw = (
+        f"/model main {spelling}{separator}"
+        "https://user:password@example.test/v1?token=secret#fragment"
+    )
+
+    redacted = redact_repl_command(raw)
+
+    assert "example.test/v1?REDACTED" in redacted
+    assert "password" not in redacted
+    assert "secret" not in redacted
+    assert "fragment" not in redacted
+
+
+def test_missing_endpoint_value_does_not_hide_the_following_secret_option() -> None:
+    from omni.cli.repl_command_policy import redact_repl_command
+
+    redacted = redact_repl_command(
+        "/model main --base-url --api-key option-after-missing-value"
+    )
+
+    assert "option-after-missing-value" not in redacted
+    assert "--api-key REDACTED" in redacted
+
+
+@pytest.mark.parametrize(
+    "raw, secret",
+    [
+        ("/model main -k'broken-secret", "broken-secret"),
+        (
+            "/model main -u'https://user:password@example.test?token=query-secret",
+            "query-secret",
+        ),
+        (
+            "/config set model.base_url 'https://user:password@example.test?token=query-secret",
+            "query-secret",
+        ),
+    ],
+)
+def test_unparsed_model_commands_fail_closed(raw: str, secret: str) -> None:
+    from omni.cli.repl_command_policy import redact_repl_command
+
+    redacted = redact_repl_command(raw)
+
+    assert secret not in redacted
+    assert "REDACTED" in redacted
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["model.base_url", "vlm.endpoint", "memory.embedding_base_url"],
+)
+def test_config_set_endpoint_values_are_redacted(key: str) -> None:
+    from omni.cli.repl_command_policy import redact_repl_command
+
+    redacted = redact_repl_command(
+        f"/config set {key} https://user:password@example.test/v1?token=secret"
+    )
+
+    assert "example.test/v1?REDACTED" in redacted
+    assert "password" not in redacted
+    assert "secret" not in redacted
 
 
 def test_tui_and_classic_histories_omit_sensitive_commands() -> None:
@@ -343,11 +500,10 @@ def test_tasks_watch_once_does_not_clear_the_managed_transcript(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
-async def test_real_config_success_is_captured_and_redacted(tmp_path, monkeypatch) -> None:
+async def test_real_config_success_is_captured_and_redacted(omni_home) -> None:
     from omni.cli import main as cli_main
     from omni.cli.state import AppState
 
-    monkeypatch.setenv("OMNI_HOME", str(tmp_path / "omni-home"))
     tui = ReplTui(commands=())
     raw_secret = "integration-secret-token"
 

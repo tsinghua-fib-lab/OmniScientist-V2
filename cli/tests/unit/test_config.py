@@ -96,6 +96,28 @@ def test_project_cannot_override_semantic_scholar_key():
     assert settings.research.semantic_scholar_api_key == ""
 
 
+def test_semantic_scholar_environment_key_is_owner_scoped(monkeypatch):
+    paths = get_paths()
+    monkeypatch.setenv("SEMANTIC_SCHOLAR_API_KEY", "environment-key")
+    _write_toml(
+        paths.project_config,
+        {"research": {"semantic_scholar_api_key": "project-key"}},
+    )
+
+    settings = load_settings()
+
+    assert settings.research.semantic_scholar_api_key == "environment-key"
+
+
+def test_omni_semantic_scholar_environment_name_takes_precedence(monkeypatch):
+    monkeypatch.setenv("SEMANTIC_SCHOLAR_API_KEY", "standard-key")
+    monkeypatch.setenv("OMNI_SEMANTIC_SCHOLAR_API_KEY", "omni-key")
+
+    settings = load_settings()
+
+    assert settings.research.semantic_scholar_api_key == "omni-key"
+
+
 def test_user_can_configure_embeddings_in_toml_and_secrets():
     paths = get_paths()
     _write_toml(paths.config_file, {
@@ -135,6 +157,64 @@ def test_project_cannot_redirect_embedding_credentials():
     assert settings.memory.embedding_base_url == ""
     assert settings.memory.embedding_api_key == ""
     assert settings.memory.embedding_model == "text-embedding-3-small"
+
+
+def test_project_cannot_override_local_specter2_runtime():
+    paths = get_paths()
+    _write_toml(
+        paths.project_config,
+        {
+            "memory": {
+                "embeddings_enabled": True,
+                "embedding_provider": "specter2",
+                "embedding_model": "project-specter",
+                "embedding_dim": 123,
+                "embedding_specter2_python": "/project/python",
+                "embedding_specter2_base_model": "/project/base",
+                "embedding_specter2_adapter": "/project/adapter",
+                "embedding_specter2_device": "cuda:9",
+            }
+        },
+    )
+
+    settings = load_settings()
+
+    assert settings.memory.embeddings_enabled is False
+    assert settings.memory.embedding_provider == ""
+    assert settings.memory.embedding_model == "text-embedding-3-small"
+    assert settings.memory.embedding_dim == 1536
+    assert settings.memory.embedding_specter2_python == ""
+    assert settings.memory.embedding_specter2_base_model == ""
+    assert settings.memory.embedding_specter2_adapter == ""
+    assert settings.memory.embedding_specter2_device == "cpu"
+
+
+def test_user_can_configure_local_specter2_runtime():
+    paths = get_paths()
+    _write_toml(
+        paths.config_file,
+        {
+            "memory": {
+                "embeddings_enabled": True,
+                "embedding_provider": "specter2",
+                "embedding_model": "allenai/specter2-proximity",
+                "embedding_dim": 768,
+                "embedding_specter2_python": "/owner/python",
+                "embedding_specter2_base_model": "/owner/base",
+                "embedding_specter2_adapter": "/owner/adapter",
+                "embedding_specter2_device": "cuda:0",
+            }
+        },
+    )
+
+    settings = load_settings()
+
+    assert settings.memory.embedding_provider == "specter2"
+    assert settings.memory.embedding_dim == 768
+    assert settings.memory.embedding_specter2_python == "/owner/python"
+    assert settings.memory.embedding_specter2_base_model == "/owner/base"
+    assert settings.memory.embedding_specter2_adapter == "/owner/adapter"
+    assert settings.memory.embedding_specter2_device == "cuda:0"
 
 
 def test_unpublished_livefigure_config_is_not_part_of_settings():
@@ -185,16 +265,68 @@ def test_overrides_precedence():
     assert s.react.max_iterations == 3
 
 
-def test_default_global_react_budget_stays_twelve_and_usage_caps_are_opt_in():
+def test_negative_one_is_accepted_as_an_unbounded_owner_alias():
+    settings = load_settings(
+        overrides={
+            "react": {"max_iterations": -1, "max_tool_calls": -1},
+            "cost": {"max_total_tokens": -1},
+        }
+    )
+
+    assert settings.react.max_iterations == -1
+    assert settings.react.max_tool_calls == -1
+    assert settings.cost.max_total_tokens == -1
+
+
+def test_default_react_counters_and_spend_cap_are_opt_in():
     settings = load_settings()
 
-    assert settings.react.max_tool_calls == 12
+    assert settings.react.max_iterations == -1
+    assert settings.react.max_tool_calls == -1
     assert settings.cost.max_total_tokens == 0
     assert settings.cost.max_cost_usd == 0.0
+    assert settings.cost.warn_total_tokens == 200_000
+    assert settings.cost.warn_cost_usd == 0.50
+    assert settings.memory.tool_observation_max_chars == 8000
 
 
 def test_default_trusted_prompt_ceiling_remains_valid_without_prompt_only_builtins():
     settings = load_settings()
 
-    assert settings.react.max_tool_calls <= settings.skills.max_prompt_tool_calls
-    assert settings.react.max_iterations <= settings.skills.max_prompt_iterations
+    assert (
+        settings.skills.default_prompt_tool_calls
+        <= settings.skills.max_prompt_tool_calls
+    )
+    assert (
+        settings.skills.default_prompt_iterations
+        <= settings.skills.max_prompt_iterations
+    )
+    # The wall clock was the one ceiling the invariant never covered, so it sat
+    # below the coordinator's: a delegated sub-agent was capped at less headroom
+    # than the turn that dispatched it.
+    assert settings.react.max_seconds <= settings.skills.max_prompt_seconds
+
+
+def test_a_skill_ceiling_is_never_the_same_number_as_the_fallback():
+    # A ceiling that equals the default silently clamps every manifest back to
+    # the fallback: `execution.max_seconds` could only ever shrink a run, never
+    # lengthen it, which is the whole reason a skill declares one.
+    skills = load_settings().skills
+
+    assert skills.default_prompt_iterations < skills.max_prompt_iterations
+    assert skills.default_prompt_tool_calls < skills.max_prompt_tool_calls
+    assert skills.default_seconds < skills.max_python_seconds
+    assert skills.default_seconds < skills.max_prompt_seconds
+    assert skills.default_seconds < skills.max_cli_seconds
+
+
+def test_a_declared_skill_budget_can_reach_the_workflow_envelope():
+    # Ceilings are aligned with the outer envelope rather than set below it, so
+    # a skill declaring the envelope's worth of time is honoured up to whatever
+    # the live envelope clock still has left.
+    settings = load_settings()
+    envelope = settings.tasks.workflow_max_seconds
+
+    assert settings.skills.max_python_seconds >= envelope
+    assert settings.skills.max_prompt_seconds >= envelope
+    assert settings.skills.max_cli_seconds >= envelope

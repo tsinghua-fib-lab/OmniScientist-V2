@@ -1,6 +1,6 @@
 ---
 name: openalex-search
-description: Search OpenAlex (250M+ scholarly works across all fields) for papers on a topic. Use for broad, cross-disciplinary literature beyond arXiv (biology, medicine, social science, etc.).
+description: Search OpenAlex (250M+ scholarly works across all fields) for papers on a topic. Use for a literature search, related-work sources, or broad cross-disciplinary literature beyond arXiv (biology, medicine, social science, etc.). Do not use for generating novel research ideas.
 license: Apache-2.0
 metadata:
   helixforge:
@@ -49,8 +49,8 @@ metadata:
       failure_policy: continue_with_partial
       failure_types: ["missing_query", "network_error", "empty_results", "rate_limited"]
     trigger:
-      phrases: ["openalex", "cross-disciplinary literature", "search openalex", "scholarly works"]
-      when_to_use: "Use for cross-disciplinary scholarly literature beyond arXiv."
+      phrases: ["openalex", "cross-disciplinary literature", "search openalex", "scholarly works", "literature search", "related work", "survey the literature", "survey papers"]
+      when_to_use: "Use when the user wants papers on a topic, a literature search, or related-work sources. This is retrieval, not ideation."
   openclaw:
     emoji: "🌐"
     requires:
@@ -64,8 +64,11 @@ skill, it also stores the results in the current workspace so native corpus
 search can cite them later; portable hosts receive the search results directly.
 
 Returns a `results` list (`title`, `authors`, `year`, `doi`, `url`, `venue`,
-`summary`). Omni results also report how many new workspace sources were
-indexed. Set a contact email for the polite pool:
+`summary`) and a compact numbered list in `summary` so the owner can see the
+hits. OpenAlex `search=` is keyword retrieval; Omni fetches a wider window,
+keeps the best title/abstract overlap, then indexes those into the workspace
+corpus. The ReAct model still sees the list and can drop leftovers. Set a
+contact email for the polite pool:
 `omni config set research.contact_email you@example.com`. Needs network access;
 offline it returns a clean error.
 

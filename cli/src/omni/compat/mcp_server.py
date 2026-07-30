@@ -8,7 +8,7 @@ Run with ``omni mcp serve`` (stdio transport). Registered tools:
 - ``omni_list_skills`` — introspection.
 
 This is the "our skills → their agents" direction of bi-directional
-compatibility. Requires the ``mcp`` extra (``pip install omniscientist[mcp]``).
+compatibility. Requires the ``mcp`` extra (``pip install OmniScientist-V2[mcp]``).
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ async def serve_stdio(settings: OmniSettings) -> None:
         from mcp.server.stdio import stdio_server
     except ImportError as exc:  # noqa: BLE001
         raise RuntimeError(
-            "MCP support requires the 'mcp' package. Install with: pip install 'omniscientist[mcp]'"
+            "MCP support requires the 'mcp' package. Install with: pip install 'OmniScientist-V2[mcp]'"
         ) from exc
 
     agent = await OmniAgent.create(settings)
@@ -99,6 +99,13 @@ async def _dispatch(agent: OmniAgent, name: str, arguments: dict[str, Any]) -> A
         }
         if turn.drained_results:
             out["task_results"] = turn.drained_results
+        artifacts = [
+            artifact.to_dict()
+            for artifact in (getattr(turn, "artifacts", []) or [])
+            if hasattr(artifact, "to_dict")
+        ]
+        if artifacts:
+            out["artifacts"] = artifacts
         return out
     if name == "omni_list_skills":
         return {

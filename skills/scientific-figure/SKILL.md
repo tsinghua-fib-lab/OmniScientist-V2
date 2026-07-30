@@ -1,17 +1,17 @@
 ---
 name: scientific-figure
-description: Generate a publication-style scientific figure (system/architecture/workflow schematic) from a natural-language requirement, rendered to PNG/SVG via matplotlib or graphviz. Use as the default "draw me a figure" skill.
+description: Fallback Graphviz or matplotlib figure (DOT/SVG/PNG). Prefer livefigure for architecture, system, and workflow diagrams. Use this skill when VLM is unavailable, the user asked for DOT/SVG/PNG, or an existing graph must be rendered or revised via source_artifact_dot. Do not bash `dot`.
 license: Apache-2.0
 metadata:
   helixforge:
-    version: "1.0"
+    version: "1.3"
     dependencies: ["python>=3.11", "matplotlib (optional)", "graphviz (optional, `dot`)"]
     allowed_tools: [write_file, bash, read_file, cite_source, record_claim, add_evidence, log_run]
     tier: research
     role: task
     research_contract: portable_provenance_v1
     status: stable
-    priority: 100
+    priority: 80
     capabilities:
       - artifact.figure
       - figure.scientific
@@ -25,22 +25,15 @@ metadata:
       - artifact.figure
     default_for:
       - scientific figure
-      - architecture diagram
-      - system diagram
+      - graphviz diagram
+      - SVG diagram
+      - PNG diagram
     delivery_mode: async_task
     kind: python_engine
     workflow:
       failure_policy: continue_with_partial
       allow_failed_dependencies: true
       failure_types: ["missing_input", "renderer_unavailable", "render_failed", "artifact_write_failed"]
-    quality_contract:
-      checks: [figure_matches_instruction]
-      assessment_required: true
-      assessment_schema: "omni.deliverable-assessment/v1"
-      retry:
-        max_attempts: 1
-        provider_replay_safe_required: true
-        side_effect_policy: idempotency_key_required
     # Provider-owned component vocabulary mirrored by the engine's creation
     # quality gate. The host preserves it for provenance but does not infer or
     # override figure semantics from it.
@@ -84,6 +77,15 @@ metadata:
             binding_owner: model
             expectation:
               kind: template_signature
+        source_artifact_dot:
+          type: string
+          description: "Graphviz DOT to render as the figure. Without revision_mode this graph is the figure (not a template stamp or an append-only revision)."
+        source_artifact_path:
+          type: string
+          description: "Path to a .dot file with the same meaning as source_artifact_dot."
+        revision_mode:
+          type: string
+          description: "When set (e.g. major), treat source DOT as a revision base and append engineering detail. Omit it to render the source graph as-is."
       required: ["input"]
     output_schema:
       type: object
@@ -142,8 +144,17 @@ metadata:
       required: ["status"]
     migrated_from: "omniscientist-helixforge/skills/research/scientific_figure"
     trigger:
-      phrases: ["scientific figure", "architecture diagram", "system diagram", "workflow schematic", "flowchart", "SVG diagram", "PNG diagram"]
-      when_to_use: "Use as the default provider for publication-quality scientific schematics, architecture diagrams, and workflows."
+      phrases:
+        - scientific figure
+        - graphviz diagram
+        - SVG diagram
+        - PNG diagram
+        - DOT diagram
+        - as SVG
+        - as PNG
+        - as DOT
+        - source_artifact_dot
+      when_to_use: "Fallback only. Prefer livefigure for architecture, system, and workflow diagrams. Use this skill for DOT/SVG/PNG, Graphviz revision via source_artifact_dot, or when livefigure cannot run because VLM is not configured."
     notification:
       display_label: "Scientific figure"
       title_field: "title"
@@ -155,6 +166,14 @@ metadata:
 ---
 
 # scientific-figure
+
+Fallback provider for Graphviz or matplotlib figures (DOT/SVG/PNG). Prefer
+`livefigure` for architecture, system, and workflow diagrams. Use this skill
+when the owner has not configured a VLM, the user asked for DOT/SVG/PNG, or an
+existing graph must be rendered or revised with `source_artifact_dot`. A closed
+perceive/act/reflect (or other non-template) topology is synthesized as a weaker
+Graphviz schematic (`status=partial`); the engine does not stamp a linear
+placeholder or require the caller to author DOT.
 
 Produce a clean, publication-quality figure from a description.
 
@@ -178,6 +197,19 @@ OmniScientist execution contract:
 - Return structured `artifacts` entries (`title`, `format`, `uri`, `path`, `mime`).
 - For canonical scientific concepts, cite or record sources, claims, evidence,
   and a rendering run so the figure is auditable and reproducible.
+- When the python_engine has already produced PNG/SVG, do not re-render with
+  `bash` `dot`. The engine already calls Graphviz in-process.
+- First-time creation takes natural-language `input` only. The engine generates
+  DOT and renders SVG/PNG. Do not write a `.dot` and then shell out to
+  `dot -Tpng`. Do not require `source_artifact_dot` for a new figure.
+- Built-in templates are only `generic`, `rag`, and `transformer`. A closed
+  perceive/act/reflect (or other non-template) topology is synthesized from the
+  named stages (`status=partial`, `outcome.code=instruction_graph`): the engine
+  does not stamp a linear RAG/generic placeholder or claim a full architecture.
+- To render an exact Graphviz graph, pass `source_artifact_dot` or
+  `source_artifact_path` **without** `revision_mode`.
+- `revision_mode` is only for appending engineering detail onto an existing
+  graph. It will not replace a linear RAG stamp with a closed agent loop.
 
 ## External agent portability
 

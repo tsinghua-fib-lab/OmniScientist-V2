@@ -82,7 +82,9 @@ async def test_transient_failure_auto_retries_then_exhausts():
 async def test_transient_failure_self_heals_when_it_later_succeeds(tmp_path):
     """A blip that clears on retry ends up succeeded — the flake is invisible."""
     rt, _s = await _runtime(healer=_HEAL)
-    counter = str(tmp_path / "count.txt")
+    io_dir = tmp_path / "io"
+    io_dir.mkdir()
+    counter = str(io_dir / "count.txt")
     tid = await rt.enqueue("healer", {"counter": counter}, "cli")
     await rt.drain()
     task = await rt.get_subtask(tid)

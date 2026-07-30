@@ -1,4 +1,4 @@
 interface:
   display_name: "Scientist KG Distiller"
-  short_description: "从科学家姓名自动收集语料并构建可追溯学术人格知识图谱"
-  default_prompt: "Use $scientist-kg-distiller to collect materials for a named scientist and build a validated personality KG."
+  short_description: "构建、校验并原子安装可追溯的科学家学术人格知识图谱"
+  default_prompt: "Use $scientist-kg-distiller to build a validated scientist persona KG and atomically install it into SoulAgent's active scanner root."

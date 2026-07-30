@@ -74,7 +74,7 @@
         capabilities_include: [literature.search, qa.grounded, artifact.figure, synthesis.final]
         min_submitted_tasks: 1
         min_artifacts: 1
-        verification_status: passed
+        settlement_status: succeeded
         no_absolute_paths: true
 
 - id: arxiv_ideation_workflow
@@ -89,7 +89,7 @@
       expect:
         task_status: succeeded
         capabilities_include: [paper.fetch.arxiv, research.ideation]
-        verification_status: passed
+        settlement_status: succeeded
         no_absolute_paths: true
 
 - id: multi_database_literature_search
@@ -106,7 +106,7 @@
         capabilities_include: [literature.search]
         terminated_reason_exclude: [no_progress, max_tool_calls, max_iterations]
         max_tool_calls: 12
-        verification_status: passed
+        settlement_status: succeeded
         no_absolute_paths: true
 
 - id: artifact_revision_followup
@@ -140,7 +140,7 @@
         task_status: succeeded
         capabilities_include: [literature.search, artifact.figure]
         min_artifacts: 1
-        verification_status: passed
+        settlement_status: succeeded
     - user: "我想了解我前面问的 RAG 系统综述 & Transformer 架构图，看看这个任务的产出是什么"
       expect:
         task_status: succeeded

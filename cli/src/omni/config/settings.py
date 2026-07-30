@@ -19,12 +19,15 @@ from __future__ import annotations
 
 import os
 import tomllib
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 from omni.config.paths import OmniPaths, get_paths
+from omni.core.model_catalog import max_input_tokens_for, max_output_tokens_for
 
 # Keys that a project-local config.toml is not allowed to set.
 _PROJECT_FORBIDDEN_PREFIXES = (
@@ -35,7 +38,11 @@ _PROJECT_FORBIDDEN_PREFIXES = (
     "memory.embedding_base_url",
     "memory.embedding_api_key",
     "memory.embedding_model",
-    "research.semantic_scholar_api_key",
+    "memory.embedding_dim",
+    "memory.embedding_specter2_python",
+    "memory.embedding_specter2_base_model",
+    "memory.embedding_specter2_adapter",
+    "memory.embedding_specter2_device",
     "channels.",
     "hooks.",
     # Semantic validation and model-repair policy are owner decisions. A cloned
@@ -46,6 +53,10 @@ _PROJECT_FORBIDDEN_PREFIXES = (
     "subagents.default_model",
     "subagents.default_compute_profile",
     "subagents.default_isolation",
+    # Literature credentials are owner-controlled.  A cloned project may
+    # choose which connectors to use, but it must never be able to replace the
+    # owner's Semantic Scholar token.
+    "research.semantic_scholar_api_key",
     # Vision endpoints and credentials are owner-controlled.  Strip the whole
     # namespace so a cloned project cannot redirect image data or pair an owner
     # token with a project-selected provider/model.
@@ -70,7 +81,9 @@ class ModelCfg(BaseModel):
     base_url: str = ""
     api_key: str = ""
     model: str = "omni-mock"
-    max_tokens: int = 4096
+    # 0 → size the response cap from the model catalog. A pinned value wins, so
+    # an existing config that says 4096 still gets 4096.
+    max_tokens: int = 0
     temperature: float = 0.3
     request_timeout_s: float = 120.0
     # optional fallback
@@ -92,18 +105,64 @@ class VlmCfg(BaseModel):
 
 
 class ReactCfg(BaseModel):
-    max_iterations: int = 6
-    # Hard execution limit. Overflow calls receive structured rejected results
-    # so the provider transcript remains valid without executing extra tools.
-    max_tool_calls: int = 12
-    max_seconds: float = 120.0
+    # Coordinator counters are opt-in. -1 means unbounded, matching Codex's
+    # progress-driven turn loop; 0 remains an exact zero-work policy for
+    # backward compatibility and fail-closed owner configuration. Positive
+    # values are hard ceilings. Plan/Skill limits remain independently scoped.
+    max_iterations: int = -1
+    max_tool_calls: int = -1
+    # ── Three-layer wall-clock model (Codex / Claude Code / OpenClaw parity) ──
+    # None of the reference agents kill a whole turn at a low fixed wall clock;
+    # they bound *stalls* and *resources* and let a productive turn run on, then
+    # always deliver a best-effort answer. Omni mirrors that with three layers,
+    # all of which funnel into the *same* forced final synthesis (never a bare
+    # "execution timed out" failure that discards completed tool results):
+    #
+    #   1. ``stall_timeout_s``  — idle watchdog. A single model call that
+    #      goes *quiet* (no SSE / delta / tool-call fragment) trips this; it
+    #      resets on every observable event, so a long streaming draft is never
+    #      clipped. This is the *primary* "something is stuck" guard. Default
+    #      matches Codex's stream idle (5 minutes).
+    #   2. ``max_seconds``      — overall hard ceiling (runaway backstop, not the
+    #      primary bound). Interactive turns use this; scheduled/research turns
+    #      use the larger ``scheduled_max_seconds`` (threaded per run).
+    #   3. ``foreground_soft_seconds`` — soft threshold. Past it the turn is a
+    #      long-running task: the loop emits a one-time "still working" notice
+    #      (so the UI keeps showing the task id) but does NOT stop or fail.
+    #
+    # Sized so a legitimately long research turn completes; clipping a productive
+    # turn here would reintroduce the very "couldn't finish in N steps" failure
+    # this control model removes. Finalization owns a *separate* reserve below.
+    max_seconds: float = 1800.0
+    # Overall ceiling for headless scheduled / long-running research turns
+    # (``origin="schedule"``). Threaded into the loop per run so an autonomous
+    # multi-stage job is not clipped at the interactive ceiling.
+    scheduled_max_seconds: float = 7200.0
+    # Idle watchdog: the longest a *single* model call may go quiet (no SSE
+    # activity) before the loop forces a graceful final synthesis (reason
+    # ``stalled``). 0 disables it. Aligns with Codex ``DEFAULT_STREAM_IDLE_TIMEOUT_MS``.
+    stall_timeout_s: float = 300.0
+    # Extra attempts after the first on idle/transport errors (Codex stream
+    # reconnects). The CLI shows ``Reconnecting n/N``; IM stays silent until
+    # these are exhausted.
+    stream_max_retries: int = 5
+    # Soft foreground threshold. When a turn passes this the loop emits one
+    # ``notice`` event (kind ``soft_timeout``) so the surface can reaffirm the
+    # task id and long-running status. It never stops or fails the turn. 0
+    # disables the notice.
+    foreground_soft_seconds: float = 240.0
     # Independent reserve for the final tool-free answer after exploration ends.
-    finalization_timeout_s: float = 30.0
-    # When tool calls stop making progress (repeated errors / empty results /
-    # identical calls), force one final tool-free synthesis turn so the user
-    # gets a real answer instead of a "reached iteration limit" stub.
-    no_progress_synthesis: bool = True
-    # Consecutive unproductive tool observations that trigger that synthesis.
+    # A bounded stop (iteration/tool/token/cost) must still deliver a real
+    # best-effort answer, never a "reached the iteration limit" stub — so this
+    # reserve is generous and retried once when the provider is transiently slow.
+    finalization_timeout_s: float = 45.0
+    # How many times to attempt the final tool-free synthesis before falling back
+    # to a salvage stub. >1 means a timed-out/transient synthesis is retried so a
+    # slow provider does not turn a bounded stop into a non-answer.
+    finalization_attempts: int = 2
+    # Consecutive unproductive tool observations (identical repeats, or calls
+    # that returned nothing usable) after which the loop stops spending and
+    # writes its final answer from what it already has.
     no_progress_threshold: int = 2
     # In-execution self-review (P1 research depth): after the main ReAct loop
     # produces a final answer, an LLM-as-judge scores it against the user's goal
@@ -131,6 +190,10 @@ class DisplayCfg(BaseModel):
     # quiet: no live events; normal: plan/tool/step lines with result previews;
     # verbose: expanded arguments/results, skill stages, context and budgets.
     verbosity: str = "normal"
+    # Reveal the L4 diagnostic layer (raw args/results, protocol labels, budget
+    # and transcript internals) without widening the whole verbosity band. The
+    # global --debug flag sets this for a run; verbose implies it as well.
+    debug: bool = False
     # Transient bottom status line (spinner · stage · elapsed · tool count).
     status_line: bool = True
     # auto: inline dock (normal buffer, native scrollback, no mouse capture) on a
@@ -148,6 +211,11 @@ class PlannerCfg(BaseModel):
     model_repair_capabilities: list[str] = Field(
         default_factory=lambda: ["artifact.figure"]
     )
+    # How long a finished identical request is worth mentioning. The turn always
+    # runs again (Codex / Claude Code). Within the window the user is told the
+    # earlier task id so they can open it; beyond it there is no hint. Zero
+    # disables the hint. Repeating a request is never a question.
+    retrieval_window_minutes: int = 30
 
 
 class InteractionCfg(BaseModel):
@@ -249,11 +317,18 @@ class MemoryCfg(BaseModel):
     # values and recall stays keyword-based without a capability probe.
     embeddings_enabled: bool = False
     vector_backend: str = "auto"  # auto | sqlite_vec | none
-    embedding_provider: str = ""  # "" → reuse model provider; or openai_compatible
+    embedding_provider: str = ""  # openai_compatible | specter2
     embedding_base_url: str = ""
     embedding_api_key: str = ""
     embedding_model: str = "text-embedding-3-small"
     embedding_dim: int = 1536
+    # Owner-scoped local SPECTER2 runtime. The dedicated Python environment
+    # carries torch/transformers/adapters, keeping those heavyweight packages
+    # out of Omni's base installation. Project config cannot replace any path.
+    embedding_specter2_python: str = ""
+    embedding_specter2_base_model: str = ""
+    embedding_specter2_adapter: str = ""
+    embedding_specter2_device: str = "cpu"
     recall_limit: int = 6
     # Hard bound on how many candidate rows recall pulls into Python to score on
     # any single call. Recall reads the top pinned/important/recent rows up to this
@@ -286,17 +361,30 @@ class MemoryCfg(BaseModel):
     graph_spread_hops: int = 1  # neighbour hops recall spreads over the top hits
     graph_spread_decay: float = 0.5  # per-hop boost decay; boost = weight * decay^hop
     # ── Model-aware context compaction (P2) ──────────────────────────────
-    # Fold older turns into a bridge summary once the visible transcript grows
-    # past this fraction of the model's context window (Claude/Codex-style, but
-    # tied to the *actual* window rather than a fixed char budget).
-    autocompact_pct: float = 0.70
-    # Pin the window explicitly; 0 → infer from ``model.model`` (see
-    # ``infer_context_window_tokens``). Set this for models we don't recognise.
+    # Two tiers, deliberately staggered. Trimming old tool observations is cheap
+    # and loses little; folding the transcript into a bridge summary costs a
+    # model call and discards the detail a long research run is built on. Both
+    # are fractions of the same ceiling — the lower of the model's actual
+    # context window and the transcript the run's token budget can sustain
+    # re-sending (``transcript_ceiling_tokens``) — Claude/Codex-style rather
+    # than a fixed char budget. Driving both from one number made the expensive
+    # tier fire at the same moment as the cheap one, summarising while a third
+    # of the window still sat unused; Codex compacts at ~90%.
+    autocompact_pct: float = 0.90  # expensive tier: fold the transcript
+    microcompact_pct: float = 0.70  # cheap tier: shrink old tool observations
+    # Pin the largest prompt to build; 0 → infer from ``model.model`` (see
+    # ``infer_max_input_tokens``). Set this for models we don't recognise. The key
+    # keeps its original name: it is written in configuration files that exist.
     context_window_tokens: int = 0
     # Microcompact (the cheap first tier): before folding the conversation,
     # shrink the content of older tool observations inside a long single ReAct
     # turn, keeping the most recent N intact. 0 disables it.
     microcompact_keep_tool_results: int = 4
+    # Bound the *latest* tool observation before it re-enters the transcript.
+    # Microcompact only trims older results; a single huge skill dump still
+    # burns tokens on every later iteration. 0 keeps the historic unbounded
+    # dump. The full result stays on the task event.
+    tool_observation_max_chars: int = 8000
 
 
 class SkillsCfg(BaseModel):
@@ -326,16 +414,29 @@ class SkillsCfg(BaseModel):
     export_targets: list[str] = Field(
         default_factory=lambda: ["claude", "codex", "openclaw"],
     )
-    # Skill manifests may request smaller budgets, but cannot raise these
-    # owner/project-trusted ceilings. Coordinator ReAct remains independently
-    # bounded by ``react.*``. Forty calls covers the current highest-budget
-    # built-in research recipe (systematic review) without granting manifests
-    # an unbounded override.
-    max_prompt_iterations: int = 8
-    max_prompt_tool_calls: int = 40
-    max_prompt_seconds: float = 600.0
-    max_python_seconds: float = 600.0
-    max_cli_seconds: float = 600.0
+    # Delegated-skill ceilings: the most a manifest's ``execution`` block may
+    # request. They bound the independent prompt defaults below; an unbounded
+    # coordinator sentinel must never be reused as a delegated skill budget.
+    max_prompt_iterations: int = 32
+    max_prompt_tool_calls: int = 80
+    # Prompt-skill defaults are independent from both the unbounded coordinator
+    # sentinel and the trusted ceilings. A manifest may request more than these
+    # defaults, but never more than the corresponding max_prompt_* value.
+    default_prompt_iterations: int = 20
+    default_prompt_tool_calls: int = 40
+    # A ceiling is not a default. Keeping the two the same silently clamps every
+    # manifest back to the fallback, so a declared budget could only ever shrink
+    # the run — never lengthen it. These bound a declaration at the outer turn /
+    # workflow envelope (``react.max_seconds``, ``tasks.workflow_max_seconds``),
+    # which the live envelope clock then enforces for real.
+    max_prompt_seconds: float = 1800.0
+    max_python_seconds: float = 1800.0
+    max_cli_seconds: float = 1800.0
+    # Wall clock for a skill whose manifest declares no ``execution.max_seconds``.
+    # Deliberately well under the ceilings: an undeclared skill that hangs should
+    # free the workflow envelope for its siblings rather than consume all of it.
+    # A skill that genuinely needs longer says so in its own SKILL.md.
+    default_seconds: float = 600.0
 
 
 class WebFetchCfg(BaseModel):
@@ -364,6 +465,38 @@ class WebFetchCfg(BaseModel):
     allow_private_hosts: bool = False
 
 
+class WebSearchCfg(BaseModel):
+    """Pluggable web-search backends for the ``web_search`` tool and funnel rung.
+
+    Keyless by default: the Exa and Parallel public MCP endpoints require no
+    credential to start, so the capability works out of the box. Keys are an
+    optional upgrade (higher limits / keyed providers), never a requirement, and
+    the tool degrades to a clear ``needs a key or retry`` message rather than
+    raising when nothing can serve a query.
+    """
+
+    enabled: bool = True
+    # Preference order. Keyless public MCP first (zero setup); keyed REST
+    # providers are only attempted when their key is configured. Reorder or add
+    # providers by config, never by code.
+    backend_order: list[str] = Field(
+        default_factory=lambda: ["exa", "parallel", "tavily", "brave", "serper"]
+    )
+    max_results: int = 5
+    timeout_s: float = 20.0
+    # Public MCP endpoints for the keyless default (a key only raises limits).
+    exa_mcp_url: str = "https://mcp.exa.ai/mcp"
+    parallel_mcp_url: str = "https://search.parallel.ai/mcp"
+    # Keyed REST endpoint used when an Exa key is configured.
+    exa_search_url: str = "https://api.exa.ai/search"
+    # Optional API keys — never required; when set they authenticate/select a backend.
+    exa_api_key: str = ""
+    parallel_api_key: str = ""
+    tavily_api_key: str = ""
+    brave_api_key: str = ""
+    serper_api_key: str = ""
+
+
 class ResearchCfg(BaseModel):
     """Research-subsystem knobs (literature corpus + reproducible retrieval).
 
@@ -384,7 +517,9 @@ class ResearchCfg(BaseModel):
     rrf_k: int = 60
     # Contact email some connectors (Unpaywall, Crossref/PubMed polite pool) want.
     contact_email: str = ""
-    # Optional Semantic Scholar API key (higher rate limit; works without it).
+    # Owner-controlled Semantic Scholar API key.  The generic connector can
+    # still make anonymous requests, while evidence-critical workflows such as
+    # paper-review may require the configured key for a complete run.
     semantic_scholar_api_key: str = ""
     # Curated, trusted literature connectors enabled for routing/use.
     connectors: list[str] = Field(
@@ -431,17 +566,21 @@ class SecurityCfg(BaseModel):
     require_approval: bool = True
     # How the approval gate behaves when armed (require_approval=True):
     #   never       → auto-approve everything (equivalent to require_approval off)
-    #   untrusted   → ask only for sensitive (mutating/executing) tools [default]
-    #   on-request  → alias of untrusted (sensitive-only)
+    #   untrusted   → Codex UnlessTrusted: ask for every non-known-safe exec
+    #   on-request  → Codex OnRequest: workspace-write auto-allows non-destructive
+    #                 bash; destructive and sandbox-escape still ask
     #   always      → ask before every tool call
+    # Factory default is UnlessTrusted so library/test loads stay conservative.
+    # A trusted CLI workspace upgrades the unset policy to on-request (Codex Auto).
     approval_policy: str = "untrusted"
     # Skip the prompt for these entries: a bare tool name ("read_file"),
     # "*" (all), or "<tool>:<prefix>" matched against the call's command/path
     # (e.g. "bash:git status", "bash:pytest"). Owner-curated fast path.
     approval_allowlist: list[str] = Field(default_factory=list)
     # OS-level sandbox for local exec (P2-F): auto | off | sandbox-exec | bwrap |
-    # firejail. "auto" uses a backend only after a functional probe and otherwise
-    # falls back to the coarse guard. Explicit backends fail closed.
+    # firejail. "auto" uses a backend after a functional probe. With no backend
+    # it falls back to the coarse guard and warns once (stock Linux has none).
+    # Explicit backends fail closed. Set "off" (or bash_sandbox=full) to opt out.
     os_sandbox: str = "auto"
     # Network policy *inside* the OS sandbox: allow | deny. Default ``allow``
     # keeps historical behaviour (research tools often need the network); ``deny``
@@ -488,19 +627,32 @@ class CostCfg(BaseModel):
 
     On by default: every turn that reaches the ReAct loop records a ``cost.usage``
     run event (tokens + an estimated USD cost) so spend is visible after the fact.
-    Pricing comes from a small built-in table keyed on the model name; override it
-    for your deployment with ``input_per_mtok`` / ``output_per_mtok`` (USD per 1M
-    tokens, 0 → use the table). Recording is best-effort and never blocks a turn.
+    Python-engine skills are metered the same way: the host wraps ``ctx.llm`` and
+    writes ``component=engine:<skill>``. Pricing comes from a small built-in table
+    keyed on the model name; override it for your deployment with
+    ``input_per_mtok`` / ``output_per_mtok`` (USD per 1M tokens, 0 → use the
+    table). Recording is best-effort and never blocks a turn.
     """
 
     enabled: bool = True
     currency: str = "USD"
     input_per_mtok: float = 0.0   # 0 → use built-in price table
     output_per_mtok: float = 0.0  # 0 → use built-in price table
-    # Optional hard-stop boundaries evaluated after each provider response.
-    # Zero keeps enforcement disabled while retaining usage accounting.
+    # Hard-stop boundaries evaluated after each provider response, per run —
+    # the coordinator turn, a delegated prompt skill, and a subagent each carry
+    # their own. Zero disables enforcement while keeping accounting.
+    #
+    # Cumulative token ceilings are owner policy, not a default task-completion
+    # mechanism. 0/-1 keeps accounting but does not stop a productive task.
+    # Context-window pressure is handled separately by compaction/continuation.
     max_total_tokens: int = 0
+    # Cost is left opt-in: it depends on a price table that reads 0 for local
+    # and self-hosted models, where it would silently never fire.
     max_cost_usd: float = 0.0
+    # Soft notices (Codex-style status, not a stop). 0 disables the warning.
+    # Long-horizon research stays owner-capped via the hard knobs above.
+    warn_total_tokens: int = 200_000
+    warn_cost_usd: float = 0.50
 
 
 class TasksCfg(BaseModel):
@@ -531,11 +683,12 @@ class TasksCfg(BaseModel):
     # degraded tasks are provenance and are never auto-deleted. 0 keeps
     # everything forever.
     retention_days: int = 0
-    # Reclassify a terminal-succeeded turn that produced no durable work (no
-    # skill/subtask/workflow/artifact/schedule) to ``kind="chat"`` so pure
-    # conversational/inspection answers drop out of the default ``/task`` view
-    # (they stay in the transcript and under ``/task list --kind chat``). Set to
-    # False to keep the legacy "one task per request" behaviour.
+    # Reclassify a terminal-succeeded turn that answered without reaching for
+    # anything -- no tool call, no delegated child task, and no
+    # skill/subtask/workflow/artifact/schedule -- to ``kind="chat"``, so pure
+    # conversational answers drop out of the default ``/task`` view (they stay
+    # in the transcript and under ``/task list --kind chat``). Set to False to
+    # keep the legacy "one task per request" behaviour.
     classify_conversational: bool = True
     # Maximum number of dependency-ready, concurrency-safe workflow steps run
     # in one DAG wave. Unsafe or unspecified steps remain serial.
@@ -718,6 +871,7 @@ class OmniSettings(BaseModel):
     memory: MemoryCfg = Field(default_factory=MemoryCfg)
     skills: SkillsCfg = Field(default_factory=SkillsCfg)
     web_fetch: WebFetchCfg = Field(default_factory=WebFetchCfg)
+    web_search: WebSearchCfg = Field(default_factory=WebSearchCfg)
     research: ResearchCfg = Field(default_factory=ResearchCfg)
     security: SecurityCfg = Field(default_factory=SecurityCfg)
     compute: ComputeCfg = Field(default_factory=ComputeCfg)
@@ -754,16 +908,6 @@ def _read_toml(path: Path) -> dict[str, Any]:
         return read_toml_file(path)
     except OSError:
         return {}
-
-
-def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
-    out = dict(base)
-    for key, value in overlay.items():
-        if isinstance(value, dict) and isinstance(out.get(key), dict):
-            out[key] = _deep_merge(out[key], value)
-        else:
-            out[key] = value
-    return out
 
 
 def _strip_forbidden(layer: dict[str, Any]) -> dict[str, Any]:
@@ -819,20 +963,101 @@ def _env_layer() -> dict[str, Any]:
     if vlm:
         vlm["enabled"] = True
         layer["vlm"] = vlm
+    research: dict[str, Any] = {}
+    if (v := pick("OMNI_SEMANTIC_SCHOLAR_API_KEY", "SEMANTIC_SCHOLAR_API_KEY")):
+        research["semantic_scholar_api_key"] = v
+    if research:
+        layer["research"] = research
     if (v := pick("OMNI_UI", "OMNI_UI_MODE")):
         layer["display"] = {"ui_mode": v}
     return layer
 
 
-def load_settings(
+ConfigSourceKind = Literal[
+    "default",
+    "environment",
+    "user",
+    "profile",
+    "project",
+    "secrets",
+    "override",
+]
+
+
+@dataclass(frozen=True)
+class ConfigSource:
+    """The authoritative layer for one effective dotted configuration field."""
+
+    kind: ConfigSourceKind
+    detail: str
+
+    @property
+    def label(self) -> str:
+        """Compact human-readable source used by status/explain commands."""
+        return f"{self.kind} ({self.detail})" if self.detail else self.kind
+
+
+@dataclass(frozen=True)
+class SettingsResolution:
+    """Effective settings plus field-level provenance for their existing layers."""
+
+    settings: OmniSettings
+    sources: Mapping[str, ConfigSource]
+
+    def source_for(self, dotted_path: str) -> ConfigSource:
+        """Return the winning source, treating absent fields as built-in defaults."""
+        return self.sources.get(
+            dotted_path,
+            ConfigSource("default", "built-in defaults"),
+        )
+
+
+def _merge_layer_with_sources(
+    base: dict[str, Any],
+    overlay: dict[str, Any],
+    sources: dict[str, ConfigSource],
+    source: ConfigSource,
+    *,
+    prefix: str = "",
+) -> dict[str, Any]:
+    """Deep-merge one layer while recording the winner for every leaf field."""
+    out = dict(base)
+
+    def clear(path: str) -> None:
+        for existing in tuple(sources):
+            if existing == path or existing.startswith(f"{path}."):
+                sources.pop(existing, None)
+
+    for key, value in overlay.items():
+        path = f"{prefix}.{key}" if prefix else str(key)
+        current = out.get(key)
+        if isinstance(value, dict):
+            if not isinstance(current, dict):
+                clear(path)
+                current = {}
+            out[key] = _merge_layer_with_sources(
+                current,
+                value,
+                sources,
+                source,
+                prefix=path,
+            )
+        else:
+            clear(path)
+            out[key] = value
+            sources[path] = source
+    return out
+
+
+def resolve_settings(
     *,
     project: str | None = None,
     profile: str | None = None,
     cwd: Path | None = None,
     overrides: dict[str, Any] | None = None,
     trusted: bool | None = None,
-) -> OmniSettings:
-    """Resolve effective settings for the active project/profile.
+) -> SettingsResolution:
+    """Resolve settings and field sources without changing layer precedence.
 
     ``trusted`` carries the workspace-trust decision (resolved by the CLI):
     ``False`` skips the repo-local project config layer and never mirrors
@@ -842,19 +1067,33 @@ def load_settings(
     layer applied, mirroring off.
     """
     paths = get_paths(project=project, cwd=cwd)
+    sources: dict[str, ConfigSource] = {}
 
     # 6. defaults handled by pydantic; start empty and layer up.
     merged: dict[str, Any] = {}
+
+    def apply(layer: dict[str, Any], kind: ConfigSourceKind, detail: str) -> None:
+        nonlocal merged
+        merged = _merge_layer_with_sources(
+            merged,
+            layer,
+            sources,
+            ConfigSource(kind, detail),
+        )
+
     # 5. env
-    merged = _deep_merge(merged, _env_layer())
+    apply(_env_layer(), "environment", "process environment")
     # 4. user config
-    merged = _deep_merge(merged, _read_toml(paths.config_file))
+    apply(_read_toml(paths.config_file), "user", str(paths.config_file))
 
     # 3. profile
     chosen_profile = profile or merged.get("default_profile") or ""
     if chosen_profile:
-        merged = _deep_merge(
-            merged, _read_toml(paths.home / f"{chosen_profile}.config.toml")
+        profile_path = paths.home / f"{chosen_profile}.config.toml"
+        apply(
+            _read_toml(profile_path),
+            "profile",
+            f"{chosen_profile}: {profile_path}",
         )
 
     # 2. project (with forbidden-key protection). An untrusted launch directory
@@ -868,16 +1107,16 @@ def load_settings(
         wrapped = raw_project_layer.get("omni")
         project_payload = wrapped if isinstance(wrapped, dict) else raw_project_layer
         project_layer = _strip_forbidden(project_payload)
-        merged = _deep_merge(merged, project_layer)
+        apply(project_layer, "project", str(paths.project_config))
 
     # secrets (merged into model + channels; not project-overridable)
     secrets = _read_toml(paths.secrets_file)
     if secrets:
-        merged = _deep_merge(merged, _project_safe_secrets(secrets))
+        apply(_project_safe_secrets(secrets), "secrets", str(paths.secrets_file))
 
     # 1. explicit overrides
     if overrides:
-        merged = _deep_merge(merged, overrides)
+        apply(overrides, "override", "explicit CLI or caller override")
 
     settings = OmniSettings(**merged)
     settings.paths = paths
@@ -892,7 +1131,28 @@ def load_settings(
     if isinstance(artifacts_layer, dict) and "mirror_outputs" in artifacts_layer:
         pref = bool(artifacts_layer["mirror_outputs"])
     settings.artifacts.mirror_outputs = pref and (trusted is True)
-    return settings
+    from omni.config.security_preset import apply_codex_security_preset
+
+    apply_codex_security_preset(settings, sources, trusted)
+    return SettingsResolution(settings=settings, sources=dict(sources))
+
+
+def load_settings(
+    *,
+    project: str | None = None,
+    profile: str | None = None,
+    cwd: Path | None = None,
+    overrides: dict[str, Any] | None = None,
+    trusted: bool | None = None,
+) -> OmniSettings:
+    """Return effective settings using the established layered resolution."""
+    return resolve_settings(
+        project=project,
+        profile=profile,
+        cwd=cwd,
+        overrides=overrides,
+        trusted=trusted,
+    ).settings
 
 
 def _project_safe_secrets(secrets: dict[str, Any]) -> dict[str, Any]:
@@ -900,55 +1160,125 @@ def _project_safe_secrets(secrets: dict[str, Any]) -> dict[str, Any]:
     return secrets
 
 
-# Context-window sizes (tokens) by model-name substring, most specific first.
-# Only a guardrail for compaction — approximate values are fine.
-_WINDOW_BY_KEYWORD: tuple[tuple[str, int], ...] = (
-    ("gpt-4.1", 1_000_000),
-    ("gpt-4o", 128_000),
-    ("gpt-4-turbo", 128_000),
-    ("gpt-4", 8_192),
-    ("gpt-3.5", 16_385),
-    ("o1", 200_000),
-    ("o3", 200_000),
-    ("o4", 200_000),
-    ("claude-3-5", 200_000),
-    ("claude-3.5", 200_000),
-    ("claude-3-7", 200_000),
-    ("claude-3.7", 200_000),
-    ("claude", 200_000),
-    ("sonnet", 200_000),
-    ("opus", 200_000),
-    ("haiku", 200_000),
-    ("deepseek", 65_536),
-    ("qwen2.5", 131_072),
-    ("qwen-long", 1_000_000),
-    ("qwen", 32_768),
-    ("gemini-1.5", 1_000_000),
-    ("gemini-2", 1_000_000),
-    ("gemini", 1_000_000),
-    ("glm", 128_000),
-    ("moonshot", 128_000),
-    ("kimi", 128_000),
-    ("llama-3", 128_000),
-    ("llama", 8_192),
-    ("mixtral", 32_768),
-    ("mistral", 32_768),
-)
-_DEFAULT_WINDOW_TOKENS = 32_768
+def infer_max_input_tokens(model: ModelCfg | None) -> int:
+    """Best-effort largest acceptable prompt (tokens), inferred from the model name."""
+    return max_input_tokens_for(model.model if model else "")
 
 
-def infer_context_window_tokens(model: ModelCfg | None) -> int:
-    """Best-effort context-window size (tokens) inferred from the model name."""
-    name = (model.model if model else "" or "").strip().lower()
-    for needle, tokens in _WINDOW_BY_KEYWORD:
-        if needle in name:
-            return tokens
-    return _DEFAULT_WINDOW_TOKENS
+# Neither the prompt nor the reply may claim more than this share of a shared
+# context window. Only models whose output cap approaches their whole window are
+# affected — gpt-4 and the moonshot line may spend all of theirs on either side —
+# and for those no single-sided rule works: reserving the full reply leaves no
+# room for a prompt, reserving none leaves no room for the reply, and the
+# provider refuses the request either way. Splitting the window is the only
+# division that keeps both sides usable, and an even split is the one that needs
+# no justification per model.
+_MAX_WINDOW_SHARE = 0.5
 
 
-def resolve_context_window_tokens(settings: OmniSettings) -> int:
-    """Effective window: explicit ``memory.context_window_tokens`` or inferred."""
+def _reply_reservation_tokens(requested_output: int, window: int) -> int:
+    """Prompt tokens to leave unspent so the reply we ask for still fits beside it."""
+    if window <= 0 or requested_output <= 0:
+        return 0
+    return min(requested_output, int(window * _MAX_WINDOW_SHARE))
+
+
+def resolve_max_output_tokens(model: ModelCfg | None) -> int:
+    """Output tokens to request per response: explicit config, else the catalog.
+
+    ``ModelCfg.max_tokens`` used to default to a flat 4096 for every model, which
+    silently truncated any response longer than that — including a tool call
+    carrying a document, whose arguments then arrived unparseable. Zero means
+    "ask the catalog", so an owner who never set the value follows their model
+    while one who pinned a number keeps exactly the number they pinned.
+
+    A pinned number is still bounded by what the model can give back beside a
+    prompt. On a model whose output cap is its entire window, asking for that cap
+    is asking for a request with no prompt in it; the provider does not clamp
+    such a call, it refuses it. Truncating a long reply costs a second call,
+    where a refused one costs the turn, so the request yields.
+    """
+    explicit = int(getattr(model, "max_tokens", 0) or 0) if model else 0
+    name = model.model if model else ""
+    requested = explicit if explicit > 0 else max_output_tokens_for(name)
+    capped = _reply_reservation_tokens(requested, max_input_tokens_for(name))
+    return capped if capped > 0 else requested
+
+
+def resolve_max_input_tokens(settings: OmniSettings) -> int:
+    """Largest prompt to build: the owner's pinned figure, else the catalog's.
+
+    The setting it reads keeps the name ``memory.context_window_tokens``, because
+    that one is a written configuration key and renaming it would break the files
+    people already have. An owner pinning it is telling us what to accept as
+    input, which is what this returns.
+    """
     pinned = int(getattr(settings.memory, "context_window_tokens", 0) or 0)
     if pinned > 0:
         return pinned
-    return infer_context_window_tokens(settings.model)
+    return infer_max_input_tokens(settings.model)
+
+
+def _tier_fraction(settings: OmniSettings, attribute: str, default: float) -> float:
+    """Where a tier sits inside the transcript ceiling, clamped to a usable band.
+
+    Neither extreme is usable: near 0 a tier fires continuously and frees
+    nothing, and at 1 it only fires once an *estimated* token count has already
+    overrun the ceiling it was supposed to protect.
+    """
+    pct = float(getattr(settings.memory, attribute, default) or default)
+    return min(max(pct, 0.1), 0.95)
+
+
+def transcript_ceiling_tokens(settings: OmniSettings) -> int:
+    """Prompt capacity available before context compaction/continuation.
+
+    This is intentionally independent from a run's cumulative token quota. A
+    context window bounds one provider request; ``max_total_tokens`` is an
+    optional owner policy across the whole task. Coupling them made a large,
+    productive task compact early and then fail solely because it needed more
+    turns. Both compaction tiers now follow the real per-request constraint.
+
+    The window has the reply taken out of it first. Where a window is shared, it
+    bounds the request as a whole, so a transcript sized to fill it leaves the
+    response nowhere to go: ``o3`` summarised at 180k of prompt and asked for
+    32,768 tokens back, presenting 212,768 against a hard 200,000 limit, and the
+    provider rejects that before compaction can help. The subtraction is the
+    window's alone. The budget-derived ceiling is our own cumulative accounting
+    across a whole run, not a limit anyone enforces on one request, and the
+    replies it pays for are already counted against it.
+    """
+    window = resolve_max_input_tokens(settings)
+    window -= _reply_reservation_tokens(
+        resolve_max_output_tokens(settings.model), window
+    )
+    return max(0, window)
+
+
+def _tier_threshold(settings: OmniSettings, attribute: str, default: float) -> int:
+    """A compaction threshold in tokens: one fraction of the shared ceiling."""
+    ceiling = transcript_ceiling_tokens(settings)
+    if ceiling <= 0:
+        return 0
+    return int(ceiling * _tier_fraction(settings, attribute, default))
+
+
+def session_compact_token_budget(settings: OmniSettings) -> int:
+    """Transcript size that triggers the expensive tier (fold into a summary)."""
+    return _tier_threshold(settings, "autocompact_pct", 0.90)
+
+
+def microcompact_token_budget(settings: OmniSettings) -> int:
+    """Transcript size that triggers the cheap tier (shrink old observations).
+
+    The cheap tier is defined by standing below the expensive one — trim old
+    observations first, pay for a summary only when trimming was not enough — so
+    a configuration that would order them the other way round, or a ceiling
+    small enough for rounding to collapse the gap, is corrected here rather than
+    allowed to summarise on first contact.
+    """
+    session = session_compact_token_budget(settings)
+    micro = _tier_threshold(settings, "microcompact_pct", 0.70)
+    if 0 < session <= micro:
+        return session - 1
+    return micro

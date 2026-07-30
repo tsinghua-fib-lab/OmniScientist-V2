@@ -35,7 +35,20 @@ secrets.toml
 *.swp
 .agents/
 .codex/
+# Skill runs write deliverables and scratch into the launch directory, which is
+# this repo whenever omni is exercised from a checkout.
 artifacts/
 figures/
 reports/
-scripts/
+presentation/
+/scripts/
+/references/
+/reviews/
+/review-sections/
+/s2_results.json
+.soulagent/
+role.md
+*.sqlite3.init.lock
+outputs/
+papers/
+presentations/

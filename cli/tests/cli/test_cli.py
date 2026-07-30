@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import re
+import sys
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,8 +14,19 @@ import pytest
 from typer.testing import CliRunner
 
 from omni.cli.main import app
+from tests.conftest import cli_text
 
 runner = CliRunner()
+
+
+def _shown_path(text: str) -> str:
+    """A path as printed, normalised so the comparison is about the path.
+
+    Newlines go because a long path is folded to the terminal width; the
+    backslash pass is for Windows, where the separator is also the escape
+    character every serialiser doubles on the way out.
+    """
+    return text.replace("\n", "").replace("\\\\", "\\").replace("\\", "/")
 
 
 def test_task_human_view_collapses_only_consecutive_duplicate_events():
@@ -88,6 +102,54 @@ def test_task_human_view_exposes_transport_and_structured_command_outcome():
 
     assert _event_status(event) == "succeeded · command=failed"
     assert _event_note(event) == "exit=1 · Command exited with code 1"
+
+
+def test_task_human_view_shows_the_process_error_for_a_failed_command():
+    from omni.cli.commands.tasks_cmd import _event_note
+    from omni.storage.models import TaskEventORM
+
+    event = TaskEventORM(
+        task_id="task",
+        event_type="react.tool.done",
+        status="succeeded",
+        tool_name="bash",
+        output_json={
+            "result_schema": "omni.command-result.v1",
+            "command_status": "failed",
+            "reason": "nonzero_exit",
+            "exit_code": 128,
+            "output": "致命错误：不是 Git 仓库（或者任何父目录）：.git\n",
+            "summary": "Command exited with code 128",
+        },
+        summary="Command exited with code 128",
+    )
+
+    assert _event_note(event) == (
+        "exit=128 · 致命错误：不是 Git 仓库（或者任何父目录）：.git"
+    )
+
+
+def test_task_human_view_skips_progress_and_glosses_126():
+    from omni.cli.commands.tasks_cmd import _event_note
+    from omni.storage.models import TaskEventORM
+
+    event = TaskEventORM(
+        task_id="task",
+        event_type="react.tool.done",
+        status="succeeded",
+        tool_name="bash",
+        output_json={
+            "result_schema": "omni.command-result.v1",
+            "command_status": "failed",
+            "reason": "nonzero_exit",
+            "exit_code": 126,
+            "output": "[ 36%]\n",
+            "summary": "Command exited with code 126: [ 36%]",
+        },
+        summary="Command exited with code 126: [ 36%]",
+    )
+
+    assert _event_note(event) == "exit=126 · cannot execute"
 
 
 def test_task_human_view_keeps_successful_command_output_visible():
@@ -578,17 +640,68 @@ def test_parent_config_redaction_keeps_token_limits_visible():
     assert '"max_total_tokens": 0' in " ".join(result.stdout.split())
 
 
-def test_repl_banner_text_uses_plain_labels_not_markup():
+def test_repl_banner_keeps_its_colour_through_the_transcript():
+    """Markup, not a pre-styled ``Text``.
+
+    Only ``str``/``Text`` payloads reach the TUI transcript, and a ``Text`` gets
+    there with its spans flattened, which is how the startup box ended up in the
+    dock with every colour stripped.
+    """
+    from rich.text import Text
+
     from omni.cli.main import _repl_banner_text
     from omni.config import load_settings
 
     settings = load_settings(overrides={"model": {"provider": "openai", "model": "deepseek-v4-pro"}})
-    text = _repl_banner_text("default", settings)
+    markup = _repl_banner_text("default", settings)
+    rendered = Text.from_markup(markup)
 
-    assert "[bold]" not in text.plain
-    assert "default" in text.plain
-    assert "openai/deepseek-v4-pro" in text.plain
-    assert text.spans
+    assert isinstance(markup, str)
+    assert "default" in rendered.plain
+    assert "openai/deepseek-v4-pro" in rendered.plain
+    # Styling survives parsing and no markup leaks into the visible characters.
+    assert rendered.spans
+    assert "[bold" not in rendered.plain and "[dim]" not in rendered.plain
+
+
+def test_repl_banner_values_are_never_dimmer_than_their_labels():
+    """The regression this palette exists to prevent.
+
+    Dimming the workspace path and the whole guide line left the box's own
+    border as the most legible thing inside it.
+    """
+    from rich.text import Text
+
+    from omni.cli.main import _repl_banner_text
+    from omni.config import load_settings
+
+    settings = load_settings(overrides={"model": {"provider": "openai", "model": "deepseek-v4-pro"}})
+    rendered = Text.from_markup(_repl_banner_text("default", settings))
+    runs = [(rendered.plain[s.start : s.end], str(s.style)) for s in rendered.spans]
+    dimmed = {text for text, style in runs if "dim" in style}
+    accented = {text for text, style in runs if "cyan" in style}
+
+    assert "workspace" in dimmed  # the label is the quiet part
+    # The value carries no span at all: full-strength default foreground.
+    assert str(settings.paths.project_dir) not in dimmed
+    # Actionable commands are what the eye should land on.
+    assert {"/help", "/exit", "@"} <= accented
+
+
+def test_repl_banner_points_at_the_one_wechat_command():
+    """The quickstart table folds away on a short terminal, so the banner itself
+    has to carry the messaging entry point."""
+    from rich.text import Text
+
+    from omni.cli.main import _repl_banner_text
+    from omni.config import load_settings
+
+    settings = load_settings(overrides={"model": {"provider": "openai", "model": "deepseek-v4-pro"}})
+    banner = " ".join(Text.from_markup(_repl_banner_text("default", settings)).plain.split())
+
+    assert "/channel login wechat --start" in banner
+    for platform in ("WeChat", "Feishu", "DingTalk"):
+        assert platform in banner
 
 
 def test_repl_detects_incomplete_real_model_config():
@@ -601,8 +714,8 @@ def test_repl_detects_incomplete_real_model_config():
     rows = _model_setup_commands(settings.model)
     commands = [row[0] for row in rows]
     assert commands == [
-        "config set model.base_url https://api.deepseek.com",
-        "config set model.api_key sk-xxx",
+        "/model main -u https://api.deepseek.com/v1",
+        "/model main -k sk-xxx",
     ]
 
 
@@ -616,10 +729,12 @@ def test_repl_quickstart_rows_are_concise_with_examples():
     # Quickstart columns are (command, subcommand, purpose/details, key example): one row per command.
     # with its consolidated subcommand list (help last) and a runnable example.
     for command, example in (
+        ("/model", "/model"),
         ("/config", "config model -p openai -u <BASE_URL> -m <MODEL> -k <API_KEY>"),
         ("/skills", "/skills examples"),
+        ("/soul", "/soul list"),
         ("/task", "/task show <id>"),
-        ("/channel", "/channel help"),
+        ("/channel", "/channel login wechat --start"),
         ("/serve", "/serve status"),
         ("/memory", "/memory search retrieval augmented generation"),
         ("/resume", "/resume --last"),
@@ -646,6 +761,7 @@ def test_repl_quickstart_rows_are_concise_with_examples():
         config_cmd,
         memory_cmd,
         skills_cmd,
+        soul_cmd,
         tasks_cmd,
     )
 
@@ -653,6 +769,7 @@ def test_repl_quickstart_rows_are_concise_with_examples():
     for command, command_app in {
         "/config": config_cmd.app,
         "/skills": skills_cmd.app,
+        "/soul": soul_cmd.app,
         "/task": tasks_cmd.app,
         "/channel": channel_cmd.app,
         "/memory": memory_cmd.app,
@@ -671,7 +788,7 @@ def test_repl_quickstart_rows_are_concise_with_examples():
     assert "session / all" in tasks_row[1]
     # Command groups that support a `help` subcommand list it LAST.
     subs = {r[0]: r[1] for r in quickstart}
-    for cmd in ("/config", "/skills", "/task", "/serve", "/channel"):
+    for cmd in ("/config", "/skills", "/soul", "/task", "/serve", "/channel"):
         assert subs[cmd].split(" / ")[-1] == "help"
 
 
@@ -706,15 +823,16 @@ def test_repl_quickstart_order_highlight_and_accurate_init():
     from omni.cli.main import _quickstart_row_style, _repl_quickstart_rows
 
     rows = _repl_quickstart_rows()
-    # New order: just-ask first, then the setup wizard, then model config.
-    assert [r[0] for r in rows[:3]] == ["Ask directly", "/init", "/config"]
+    # New order: just-ask first, setup, the model facade, then advanced config.
+    assert [r[0] for r in rows[:4]] == ["Ask directly", "/init", "/model", "/config"]
     # The rest keep their relative order (spot-check a couple that follow /config).
-    assert [r[0] for r in rows[3:5]] == ["/skills", "/status"]
+    assert [r[0] for r in rows[4:7]] == ["/skills", "/soul", "/status"]
 
     # The three first-touch rows share one highlight (bold cyan) as key commands;
     # others use the default row colour.
     assert _quickstart_row_style("Ask directly") == "bold cyan"
     assert _quickstart_row_style("/init") == "bold cyan"
+    assert _quickstart_row_style("/model") == "bold cyan"
     assert _quickstart_row_style("/config") == "bold cyan"
     assert _quickstart_row_style("/skills") is None
 
@@ -744,8 +862,8 @@ def test_init_config_map_covers_all_items_with_adjust_commands():
         "Messaging channels",
     ]
     adjust = {r[0]: r[2] for r in rows}
-    assert "config model" in adjust["Model"]
-    assert "config embeddings" in adjust["Embedding recall"]
+    assert "model" in adjust["Model"]
+    assert "model embedding" in adjust["Embedding recall"]
     assert (
         "config set research.semantic_scholar_api_key"
         in adjust["Semantic Scholar"]
@@ -847,8 +965,27 @@ def test_channel_help_includes_safe_placeholders_not_real_credentials():
     assert "/channel login feishu" in normalized
     assert "<FEISHU_APP_ID>" in res.stdout
     assert "<FEISHU_APP_SECRET>" in res.stdout
-    assert "--credential-store" in normalized
-    assert "file" in normalized
+    # Where a secret is kept is worth stating; which flag to pass is not, since
+    # every platform is handled without one.
+    assert "secrets.toml" in normalized
+    assert "--credential-store" not in normalized
+
+
+def test_channel_help_advertises_exactly_one_way_to_connect_wechat():
+    # WeChat has a single advertised path: scan the official ClawBot QR. The
+    # gateway/wecom modes still work for existing deployments but must not show
+    # up here — listing three options is what sent users to the two that need a
+    # self-hosted gateway on :8088.
+    res = runner.invoke(app, ["channel", "help"])
+    normalized = " ".join(res.stdout.split())
+
+    assert res.exit_code == 0
+    assert "/channel login wechat --start" in normalized
+    for alternative in ("--method", "--gateway-url", "8088", "wecom", "ilink"):
+        assert alternative not in normalized.lower()
+    # WeChat binds on scan; only Feishu and DingTalk need a pairing code.
+    assert "no local gateway, port, or" in normalized
+    assert "/pair <code>" in normalized
     assert "--start" in normalized
     assert "list" in res.stdout
     assert "add <name>" in res.stdout
@@ -859,7 +996,7 @@ def test_channel_help_includes_safe_placeholders_not_real_credentials():
 
 def test_command_help_subcommands_are_available():
     cases = [
-        (["task", "help"], ["Available subcommands", "show <id>", "attach <id>", "archive <id>", "rm <id>", "prune"]),
+        (["task", "help"], ["Available subcommands", "show <id>", "attach <id>", "archive <id>", "rm/delete <id...>", "prune"]),
         (["memory", "help"], ["Available subcommands", "rm/delete/remove", "edit", "detail <id>", "path"]),
         (["config", "help"], ["Available subcommands", "model", "unset <key>"]),
         (["serve", "help"], ["Available subcommands", "start", "restart", "status"]),
@@ -882,10 +1019,22 @@ def test_command_help_subcommands_are_available():
             assert text in res.stdout, (args, text)
 
 
+def test_task_help_scopes_destructive_id_commands_to_current_workspace():
+    result = runner.invoke(app, ["task", "help"])
+
+    assert result.exit_code == 0
+    output = cli_text(result.stdout)
+    assert "rm/delete <id...>" in output
+    assert "Delete task trees in the current workspace" in output
+
+
 def test_command_consistency_aliases_and_preview_exit_codes():
     assert runner.invoke(app, ["task", "delete", "--help"]).exit_code == 0
-    assert runner.invoke(app, ["memory", "pin", "--help"]).exit_code == 0
-    assert "--on" in runner.invoke(app, ["memory", "pin", "--help"]).stdout
+    pin_help = runner.invoke(app, ["memory", "pin", "--help"])
+    assert pin_help.exit_code == 0
+    # Match the flag even when Rich wraps/ANSI-styles the help panel.
+    pin_text = (pin_help.stdout or "") + (pin_help.output or "")
+    assert "--on" in pin_text or "Pin the memory" in pin_text
 
     preview = runner.invoke(app, ["task", "clear", "--status", "failed"])
     assert preview.exit_code == 0
@@ -999,6 +1148,7 @@ def test_terminal_input_guard_restores_canonical_backspace(monkeypatch):
     assert captured[-1] == original
 
 
+@pytest.mark.skipif(os.name == "nt", reason="PTY editing requires POSIX pty")
 def test_repl_input_pty_handles_backspace_and_ctrl_u():
     import os
     import pty
@@ -1090,12 +1240,16 @@ def test_repl_input_pty_handles_backspace_and_ctrl_u():
             pass
         os.close(fd)
 
+    rendered = buf.decode("utf-8", "replace")
     assert b"^?" not in buf
-    assert "BACKGROUND-NOTICE" in buf.decode("utf-8", "replace")
-    assert "review mode" in buf.decode("utf-8", "replace")
-    assert "RESULT:ok-done" in buf.decode("utf-8", "replace")
+    assert "BACKGROUND-NOTICE" in rendered
+    # This PTY test owns line-editing behavior. The mode toolbar is tested
+    # deterministically in test_repl_input_box_frame_and_toolbar_reflect_mode;
+    # asserting it here races prompt_toolkit's first paint against the notice.
+    assert "RESULT:ok-done" in rendered
 
 
+@pytest.mark.skipif(os.name == "nt", reason="PTY editing requires POSIX pty")
 def test_repl_input_pty_ignores_blank_enter_before_accepting_text():
     import os
     import pty
@@ -1166,6 +1320,15 @@ def test_repl_input_pty_ignores_blank_enter_before_accepting_text():
     assert "RESULT:accepted" in output
 
 
+_ANSI_SEQUENCE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
+
+
+def _strip_ansi(text: str) -> str:
+    """Read a PTY stream as what it displays rather than as what it emits."""
+    return _ANSI_SEQUENCE.sub("", text)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="PTY rendering requires POSIX pty")
 def test_repl_tui_pty_stays_in_normal_buffer_without_mouse_capture():
     """IK3MN1 regression: the inline dock never enters the alternate screen and
     never enables mouse reporting, so drag-select/copy and native scrollback keep
@@ -1228,7 +1391,10 @@ def test_repl_tui_pty_stays_in_normal_buffer_without_mouse_capture():
             if not chunk:
                 break
             buf += chunk
-            if not sent and b"Enter send" in buf:
+            # Match the footer on its text, not its bytes: the hint strip styles
+            # the key separately from its label, so "Enter" and " send" arrive
+            # with a style change between them.
+            if not sent and "Enter send" in _strip_ansi(buf.decode("utf-8", "replace")):
                 # A terminal Return key sends CR; LF represents Ctrl+J in the
                 # input parser and should not be used to emulate Enter. Blank/
                 # whitespace-only Enters must be ignored before "accepted".
@@ -1248,14 +1414,15 @@ def test_repl_tui_pty_stays_in_normal_buffer_without_mouse_capture():
         os.close(fd)
 
     output = buf.decode("utf-8", "replace")
-    assert "RESULT:accepted" in output
-    assert "EXTERNAL-CONTROL" in output
-    assert "auto mode" in output
-    assert "Enter send" in output
+    plain = _strip_ansi(output)
+    assert "RESULT:accepted" in plain
+    assert "EXTERNAL-CONTROL" in plain
+    assert "auto mode" in plain
+    assert "Enter send" in plain
     # Committed history reaches the normal buffer (native, selectable scrollback)
     # and is still present in the emitted stream after the app exits.
-    assert "PERSISTENT-HISTORY-LINE" in output
-    assert "NEW-OUTPUT" in output
+    assert "PERSISTENT-HISTORY-LINE" in plain
+    assert "NEW-OUTPUT" in plain
     # IK3MN1 root cause must not regress: no alternate-screen switch and no mouse
     # tracking enable sequences are ever emitted.
     assert "\x1b[?1049h" not in output  # alternate screen buffer
@@ -1265,6 +1432,7 @@ def test_repl_tui_pty_stays_in_normal_buffer_without_mouse_capture():
     assert "\x1b[?1006h" not in output  # SGR extended mouse mode
 
 
+@pytest.mark.skipif(os.name == "nt", reason="PTY resize requires POSIX pty/fcntl")
 def test_repl_tui_pty_reflows_and_does_not_duplicate_dock_on_width_resize():
     """Regression for the tmux resize artifacts: a *width* change clears the
     screen + scrollback (``ESC[3J``) and re-emits committed history at the new
@@ -1356,6 +1524,7 @@ def test_repl_tui_pty_reflows_and_does_not_duplicate_dock_on_width_resize():
     assert "\x1b[?1000h" not in output
 
 
+@pytest.mark.skipif(os.name == "nt", reason="PTY idle checks require POSIX pty/fcntl")
 def test_repl_tui_pty_is_idle_quiescent_after_output_settles():
     """Phase 1a: once output settles the idle dock writes nothing (no periodic
     refresh), so the terminal keeps a native selection highlighted for Cmd+C.
@@ -1446,6 +1615,7 @@ def test_repl_tui_pty_is_idle_quiescent_after_output_settles():
     assert idle_bytes == 0  # a quiescent dock emits nothing while idle
 
 
+@pytest.mark.skipif(os.name == "nt", reason="PTY folding requires POSIX pty/fcntl")
 def test_repl_tui_pty_default_fold_expands_inline_without_alternate_screen():
     """Default-collapsed help expands in the normal buffer without a nested app."""
     import fcntl
@@ -1634,6 +1804,52 @@ def test_render_tasks_shows_artifacts_and_next_actions():
     assert "runabcde" in out
 
 
+def test_canonical_outputs_do_not_remove_small_report_preview(tmp_path):
+    from types import SimpleNamespace
+
+    from omni.cli.render import console
+    from omni.cli.runner import render_tasks
+    from omni.runtime.presentation import ArtifactRef
+
+    report = tmp_path / "review.md"
+    report.write_text("# Review body\n\nGrounded conclusion.", encoding="utf-8")
+    artifact = ArtifactRef(
+        title="Review",
+        format="md",
+        uri="artifact://review",
+        path=str(report),
+        mime="text/markdown",
+    )
+    turn = SimpleNamespace(
+        task_id="task123456789",
+        session_id="sess123456789",
+        submitted_workflow_ids=[],
+        submitted_subtask_ids=["execution123456789"],
+        artifacts=[artifact],
+        drained_results=[
+            {
+                "subtask_id": "execution123456789",
+                "task_id": "task123456789",
+                "skill": "paper-review",
+                "status": "succeeded",
+                "result": {
+                    "summary": "Review complete.",
+                    "artifacts": [artifact.to_dict()],
+                },
+                "trace": [],
+            }
+        ],
+    )
+
+    with console.capture() as capture:
+        render_tasks(turn, shell_commands=True, artifacts_dir=tmp_path)
+
+    out = capture.get()
+    assert "Review body" in out
+    assert "Grounded conclusion" in out
+    assert str(report) not in out  # the top-level Outputs inventory owns the path
+
+
 def test_render_tasks_uses_task_id_for_workflow_completion_actions():
     from omni.cli.render import console
     from omni.cli.runner import render_tasks
@@ -1657,7 +1873,7 @@ def test_render_tasks_uses_task_id_for_workflow_completion_actions():
         terminated_reason="workflow",
         plan_summary="",
         degraded_warnings=[],
-        verification_status="passed",
+        settlement_status="passed",
     )
 
     with console.capture() as capture:
@@ -1687,7 +1903,7 @@ def test_render_tasks_labels_pending_workflow_and_uses_canonical_task_actions():
         terminated_reason="workflow",
         plan_summary="",
         degraded_warnings=[],
-        verification_status="pending_child_task",
+        settlement_status="pending_child_task",
     )
 
     with console.capture() as capture:
@@ -1730,11 +1946,16 @@ def test_tasks_show_artifact_list_hides_dot_sources():
     assert "figure.dot" not in out
 
 
-def test_render_inbox_uses_canonical_task_id_and_keeps_object_reference(tmp_path):
-    from omni.cli.commands.tasks_cmd import render_inbox
-    from omni.cli.render import console
+def test_render_inbox_uses_canonical_task_id_and_keeps_object_reference(tmp_path, monkeypatch):
+    from omni.cli.commands import tasks_cmd
     from omni.config.paths import OmniPaths
 
+    rendered: dict[str, object] = {}
+
+    def capture_table(title, columns, rows, **kwargs):  # noqa: ANN001
+        rendered.update(title=title, columns=columns, rows=rows, options=kwargs)
+
+    monkeypatch.setattr(tasks_cmd, "data_table", capture_table)
     task_id = "05571218b61b4f1aab86fd83a660c75e"
     workflow_id = "f4902f1686924dd9a74efa920bbc6626"
     paths = OmniPaths(
@@ -1753,17 +1974,34 @@ def test_render_inbox_uses_canonical_task_id_and_keeps_object_reference(tmp_path
         "created_at": "2026-07-29T10:00:00+00:00",
     }
 
-    with console.capture() as capture:
-        render_inbox(paths, notes=[note], statuses={task_id: "succeeded"})
+    tasks_cmd.render_inbox(paths, notes=[note], statuses={task_id: "succeeded"})
 
-    output = " ".join(capture.get().split())
-    compact = "".join(output.split())
-    assert "task" in output
-    assert "object" in output
-    assert task_id[:8] in compact
-    assert workflow_id[:8] in compact
-    assert "workflow" in compact
-    assert "succeeded" in output
+    assert rendered["title"] == "Notification inbox"
+    assert "task" in rendered["columns"]
+    assert "object" in rendered["columns"]
+    row = rendered["rows"][0]
+    assert task_id[:8] in row
+    assert f"workflow:{workflow_id[:8]}" in row
+    assert "succeeded" in row
+
+
+def test_status_glyph_falls_back_for_cp1252_stream():
+    import io
+
+    from rich.console import Console
+
+    from omni.cli.render import _status_glyph
+    from omni.cli.repl_output import RoutedTextIO
+
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="cp1252")
+    target = Console(file=stream)
+    assert _status_glyph(target, "✓", "+") == "+"
+    assert _status_glyph(target, "✗", "X") == "X"
+    routed = RoutedTextIO(lambda: stream)
+    assert routed.write("✓ 中文") == len("✓ 中文")
+    routed.flush()
+    assert raw.getvalue().decode("cp1252") == "? ??"
 
 
 def test_render_subtask_detail_defaults_to_workflow_view_and_json_is_explicit():
@@ -1950,6 +2188,23 @@ async def _task_and_subtask_exist(project: str, task_id: str) -> tuple[bool, boo
             task = await s.get(TaskORM, task_id)
             sub = await s.get(SubtaskORM, f"sub-{task_id}"[:40])
             return task is not None, sub is not None
+    finally:
+        await agent.aclose()
+
+
+async def _existing_task_ids(project: str, task_ids: list[str]) -> set[str]:
+    """Return the exact task ids still present in one test workspace."""
+    from omni.cli.state import AppState, make_agent
+    from omni.storage.models import TaskORM
+
+    agent = await make_agent(AppState(project=project))
+    try:
+        async with agent.db.session() as s:
+            return {
+                task_id
+                for task_id in task_ids
+                if await s.get(TaskORM, task_id) is not None
+            }
     finally:
         await agent.aclose()
 
@@ -2362,14 +2617,298 @@ def test_tasks_rm_cascades_to_subtasks_and_protects_provenance():
     assert forced.exit_code == 0
 
 
-def test_tasks_rm_blocks_running_without_force():
+def test_tasks_delete_alias_keeps_single_id_immediate_compatibility():
+    from omni.cli.state import run_async
+
+    project = "tasks-delete-single"
+    task_id = "singledelete111"
+    _seed_task_rows(project, [{
+        "id": task_id,
+        "status": "failed",
+        "title": "single compatible delete",
+    }], with_children=True)
+
+    result = runner.invoke(app, ["--project", project, "task", "delete", task_id])
+
+    assert result.exit_code == 0
+    assert "Deleted task" in result.stdout
+    task_exists, sub_exists = run_async(_task_and_subtask_exist(project, task_id))
+    assert task_exists is False
+    assert sub_exists is False
+
+
+def test_tasks_rm_blocks_running_even_with_force():
+    from omni.cli.state import run_async
+
     project = "tasks-rm-running"
     _seed_task_rows(project, [{"id": "runningaa", "status": "running", "title": "in flight"}])
     guarded = runner.invoke(app, ["--project", project, "task", "rm", "runningaa"])
     assert guarded.exit_code == 1
     assert "wait for it to settle" in guarded.stdout
     forced = runner.invoke(app, ["--project", project, "task", "rm", "runningaa", "--force"])
+    assert forced.exit_code == 1
+    assert "wait for it to settle" in forced.stdout
+    assert run_async(_existing_task_ids(project, ["runningaa"])) == {"runningaa"}
+
+
+@pytest.mark.parametrize("command", ["rm", "delete"])
+def test_tasks_delete_multiple_ids_previews_deduplicated_prefixes_then_confirms(command):
+    from omni.cli.state import run_async
+
+    project = f"tasks-{command}-batch"
+    alpha = "batchalphaaaa1111"
+    beta = "batchbetabbbb2222"
+    _seed_task_rows(project, [
+        {"id": alpha, "status": "failed", "title": "alpha"},
+        {"id": beta, "status": "cancelled", "title": "beta"},
+    ], with_children=True)
+    ids = ["batchalpha", alpha, "batchbeta"]
+
+    preview = runner.invoke(app, ["--project", project, "task", command, *ids])
+
+    assert preview.exit_code == 0
+    assert "Would delete 2 tasks" in preview.stdout
+    assert "--yes" in preview.stdout
+    assert run_async(_existing_task_ids(project, [alpha, beta])) == {alpha, beta}
+
+    confirmed = runner.invoke(app, [
+        "--project", project, "task", command, *ids, "--yes",
+    ])
+
+    assert confirmed.exit_code == 0
+    assert "Deleted 2 tasks" in confirmed.stdout
+    assert run_async(_existing_task_ids(project, [alpha, beta])) == set()
+    for task_id in (alpha, beta):
+        task_exists, sub_exists = run_async(_task_and_subtask_exist(project, task_id))
+        assert task_exists is False
+        assert sub_exists is False
+
+
+def test_tasks_rm_multiple_ids_preview_lists_the_complete_descendant_closure():
+    from omni.cli.state import run_async
+
+    project = "tasks-rm-batch-preview-closure"
+    root = "previewroot11111"
+    child = "previewchild2222"
+    independent = "previewother3333"
+    _seed_task_rows(project, [
+        {"id": root, "status": "failed", "title": "selected root"},
+        {"id": independent, "status": "cancelled", "title": "selected independent"},
+    ])
+    _seed_task_rows(project, [{
+        "id": child,
+        "status": "interrupted",
+        "title": "implicit descendant",
+        "parent_task_id": root,
+    }])
+
+    preview = runner.invoke(app, [
+        "--project", project, "task", "rm", root, independent,
+    ])
+
+    assert preview.exit_code == 0
+    output = cli_text(preview.stdout.replace("│", " "))
+    assert f"{root[:8]} failed selected root" in output
+    assert f"{child[:8]} interrupted implicit descendant" in output
+    assert f"{independent[:8]} cancelled selected independent" in output
+    assert "Would delete 3 tasks across 2 selected Task reference(s)" in output
+    assert run_async(_existing_task_ids(project, [root, child, independent])) == {
+        root, child, independent,
+    }
+
+
+def test_tasks_rm_preview_uses_workspace_unique_task_prefixes():
+    """Displayed ids remain copyable when selected and unselected rows share 8 chars."""
+    project = "tasks-rm-unique-preview-prefix"
+    selected = "deadbeefaaaa1111"
+    unselected = "deadbeefabbb2222"
+    independent = "independent3333"
+    _seed_task_rows(project, [
+        {"id": selected, "status": "failed", "title": "selected collision"},
+        {"id": unselected, "status": "failed", "title": "hidden collision"},
+        {"id": independent, "status": "cancelled", "title": "other selected"},
+    ])
+
+    preview = runner.invoke(app, [
+        "--project", project, "task", "rm", selected, independent,
+    ])
+
+    assert preview.exit_code == 0
+    output = cli_text(preview.stdout.replace("│", " "))
+    assert "deadbeefaa failed selected collision" in output
+    assert "independ cancelled other selected" in output
+
+
+def test_tasks_rm_rejects_an_empty_reference():
+    project = "tasks-rm-empty-reference"
+    _seed_task_rows(project, [{
+        "id": "emptykeep1111",
+        "status": "failed",
+        "title": "must remain",
+    }])
+
+    result = runner.invoke(app, [
+        "--project", project, "task", "rm", "emptykeep1111", "", "--yes",
+    ])
+
+    assert result.exit_code == 1
+    assert "cannot be empty" in result.output
+
+
+def test_tasks_rm_active_execution_names_its_owning_task_and_object():
+    from omni.cli.state import AppState, make_agent, run_async
+    from omni.storage.models import SubtaskORM, TaskORM
+
+    project = "tasks-rm-active-execution-owner"
+    task_id = "executionowner111"
+    execution_id = "liveexecution222"
+
+    async def _seed():
+        agent = await make_agent(AppState(project=project))
+        try:
+            async with agent.db.session() as session:
+                session.add(TaskORM(
+                    id=task_id,
+                    project=project,
+                    channel="cli",
+                    status="failed",
+                    title="terminal projection",
+                ))
+                await session.flush()
+                session.add(SubtaskORM(
+                    id=execution_id,
+                    task_id=task_id,
+                    skill_name="x",
+                    status="running",
+                ))
+                await session.commit()
+        finally:
+            await agent.aclose()
+
+    run_async(_seed())
+    result = runner.invoke(app, [
+        "--project", project, "task", "rm", task_id,
+    ])
+
+    assert result.exit_code == 1
+    output = cli_text(result.stdout)
+    assert task_id[:8] in output
+    assert f"skill_execution {execution_id}" in output
+    assert "running" in output
+
+
+def test_tasks_rm_multiple_ids_missing_reference_fails_closed():
+    from omni.cli.state import run_async
+
+    project = "tasks-rm-batch-missing"
+    first = "missingfirst111"
+    second = "missingsecond22"
+    _seed_task_rows(project, [
+        {"id": first, "status": "failed", "title": "first"},
+        {"id": second, "status": "failed", "title": "second"},
+    ])
+
+    result = runner.invoke(app, [
+        "--project", project, "task", "rm", first, "does-not-exist", second, "--yes",
+    ])
+
+    assert result.exit_code == 1
+    assert "does-not-exist" in result.output
+    assert "not found" in result.output.lower()
+    assert run_async(_existing_task_ids(project, [first, second])) == {first, second}
+
+
+def test_tasks_rm_multiple_ids_ambiguous_prefix_fails_closed():
+    from omni.cli.state import run_async
+
+    project = "tasks-rm-batch-ambiguous"
+    valid = "validbatch111111"
+    ambiguous_a = "collisionaaaa111"
+    ambiguous_b = "collisionbbbb222"
+    all_ids = [valid, ambiguous_a, ambiguous_b]
+    _seed_task_rows(project, [
+        {"id": task_id, "status": "failed", "title": task_id}
+        for task_id in all_ids
+    ])
+
+    result = runner.invoke(app, [
+        "--project", project, "task", "rm", valid, "collision", "--yes",
+    ])
+
+    assert result.exit_code == 1
+    assert "collision" in result.output
+    assert "ambiguous" in result.output.lower()
+    assert ambiguous_a in result.output
+    assert ambiguous_b in result.output
+    assert run_async(_existing_task_ids(project, all_ids)) == set(all_ids)
+
+
+def test_tasks_rm_multiple_ids_blocks_active_descendant_atomically_even_with_force():
+    from omni.cli.state import run_async
+
+    project = "tasks-rm-batch-active-descendant"
+    root = "activeroot111111"
+    child = "activechild22222"
+    independent = "activeother33333"
+    _seed_task_rows(project, [
+        {"id": root, "status": "failed", "title": "root"},
+        {"id": independent, "status": "failed", "title": "independent"},
+    ])
+    _seed_task_rows(project, [{
+        "id": child,
+        "status": "running",
+        "title": "active descendant",
+        "parent_task_id": root,
+    }])
+
+    result = runner.invoke(app, [
+        "--project", project, "task", "rm", root, independent, "--yes", "--force",
+    ])
+
+    assert result.exit_code == 1
+    assert child[:8] in result.stdout
+    assert "running" in result.stdout
+    assert run_async(_existing_task_ids(project, [root, child, independent])) == {
+        root, child, independent,
+    }
+
+
+def test_tasks_rm_multiple_ids_requires_force_for_protected_descendant_atomically():
+    from omni.cli.state import run_async
+
+    project = "tasks-rm-batch-protected-descendant"
+    root = "protectedroot11"
+    child = "protectedchild2"
+    independent = "protectedother3"
+    _seed_task_rows(project, [
+        {"id": root, "status": "failed", "title": "root"},
+        {"id": independent, "status": "failed", "title": "independent"},
+    ])
+    _seed_task_rows(project, [{
+        "id": child,
+        "status": "succeeded",
+        "title": "protected descendant",
+        "parent_task_id": root,
+    }])
+
+    guarded = runner.invoke(app, [
+        "--project", project, "task", "rm", root, independent, "--yes",
+    ])
+
+    assert guarded.exit_code == 1
+    assert child[:8] in guarded.stdout
+    assert "--force" in guarded.stdout
+    assert run_async(_existing_task_ids(project, [root, child, independent])) == {
+        root, child, independent,
+    }
+
+    forced = runner.invoke(app, [
+        "--project", project, "task", "rm", root, independent, "--yes", "--force",
+    ])
+
     assert forced.exit_code == 0
+    assert "Deleted 3 tasks" in forced.stdout
+    assert run_async(_existing_task_ids(project, [root, child, independent])) == set()
 
 
 def test_tasks_clear_preview_breakdown_and_cascade():
@@ -2633,6 +3172,29 @@ def test_successful_drained_task_suppresses_iteration_limit_text():
     )
 
     assert should_suppress_assistant_text(turn) is True
+
+
+def test_degraded_iteration_limit_is_reported_with_task_hint():
+    from types import SimpleNamespace
+
+    from omni.cli.render import console
+    from omni.cli.runner import render_turn_diagnostics
+
+    turn = SimpleNamespace(
+        kind="partial",
+        text="",
+        task_id="task-review-12345678",
+        terminated_reason="max_iterations",
+        tool_trace=[],
+        drained_results=[{"status": "degraded"}],
+    )
+
+    with console.capture() as capture:
+        render_turn_diagnostics(turn)
+
+    output = capture.get()
+    assert "iteration limit reached" in output
+    assert "/task show task-rev" in output
 
 
 def test_authentication_failure_renders_once_with_recovery_actions():
@@ -3255,6 +3817,79 @@ def test_config_embeddings_enable_requires_explicit_endpoint():
     assert "/embeddings" in result.stderr
 
 
+def test_config_embeddings_can_enable_local_specter2(tmp_path: Path):
+    base = tmp_path / "specter2-base"
+    adapter = tmp_path / "specter2-adapter"
+    python_launcher = tmp_path / "specter2-python"
+    base.mkdir()
+    adapter.mkdir()
+    python_launcher.symlink_to(sys.executable)
+
+    result = runner.invoke(
+        app,
+        [
+            "config",
+            "embeddings",
+            "--enable",
+            "--provider",
+            "specter2",
+            "--python",
+            str(python_launcher),
+            "--base-model",
+            str(base),
+            "--adapter",
+            str(adapter),
+            "--device",
+            "cuda:0",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "local SPECTER2" in result.stdout
+    assert "768 dimensions" in " ".join(result.stdout.split())
+    assert "specter2" in runner.invoke(
+        app, ["config", "get", "memory.embedding_provider"]
+    ).stdout
+    assert "allenai/specter2-proximity" in runner.invoke(
+        app, ["config", "get", "memory.embedding_model"]
+    ).stdout
+    assert "768" in runner.invoke(
+        app, ["config", "get", "memory.embedding_dim"]
+    ).stdout
+    python_result = runner.invoke(
+        app, ["config", "get", "memory.embedding_specter2_python"]
+    )
+    assert python_launcher.absolute().as_posix() in _shown_path(python_result.stdout)
+    base_result = runner.invoke(
+        app, ["config", "get", "memory.embedding_specter2_base_model"]
+    )
+    assert base.resolve().as_posix() in _shown_path(base_result.stdout)
+
+
+def test_config_specter2_rejects_missing_path_without_echoing_it(tmp_path: Path):
+    private_missing = tmp_path / "secret-model-location"
+    result = runner.invoke(
+        app,
+        [
+            "config",
+            "embeddings",
+            "--enable",
+            "--provider",
+            "specter2",
+            "--python",
+            sys.executable,
+            "--base-model",
+            str(private_missing),
+            "--adapter",
+            str(private_missing),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "local path does not exist" in result.stderr
+    assert str(private_missing) not in result.output
+
+
 def test_config_help_documents_all_embedding_configuration_paths():
     result = runner.invoke(app, ["config", "help"])
     assert result.exit_code == 0
@@ -3269,6 +3904,29 @@ def test_doctor():
     res = runner.invoke(app, ["doctor"])
     assert res.exit_code == 0
     assert "Doctor" in res.stdout
+
+
+def test_doctor_separates_node_from_npm(monkeypatch):
+    """A Node-only PATH must not look like a missing Node.js install."""
+    import omni.cli.commands.doctor_cmd as dc
+    import omni.skills_runtime.runtime_setup as runtime_setup
+
+    def fake_which(name: str) -> str | None:
+        if name in {"node", "node.exe"}:
+            return "/usr/bin/node"
+        return None
+
+    monkeypatch.setattr(dc.shutil, "which", fake_which)
+    monkeypatch.setattr(runtime_setup, "research_pptx_runtime_ready", lambda _paths: False)
+
+    result = runner.invoke(app, ["doctor"], env={"COLUMNS": "240"})
+    assert result.exit_code == 0, result.output
+    assert "bin: node" in result.stdout
+    assert "/usr/bin/node" in result.stdout
+    assert "bin: npm" in result.stdout
+    assert "Node is installed, but npm is not on PATH" in result.stdout
+    assert "research-pptx runtime" in result.stdout
+    assert "omni skills setup research-pptx" in result.stdout
 
 
 def test_doctor_reports_active_owner_path_order_and_conflicting_copies(
@@ -3378,7 +4036,7 @@ def test_update_plan_uses_uv_tool_owner_for_a_published_uv_install(monkeypatch):
     monkeypatch.setattr(update_check, "is_source_build_version", lambda _v: False)
     monkeypatch.setattr(uc, "_installed_source_spec", lambda _dist: uc.DIST)
     monkeypatch.setattr(uc.sys, "executable", "/isolated/omni/bin/python")
-    monkeypatch.setattr(uc.sys, "prefix", "/isolated/uv/tools/omniscientist")
+    monkeypatch.setattr(uc.sys, "prefix", "/isolated/uv/tools/omniscientist-v2")
     monkeypatch.setattr(uc.shutil, "which", lambda name: "/usr/local/bin/uv" if name == "uv" else None)
 
     kind, argv, label = uc._plan()
@@ -3388,7 +4046,7 @@ def test_update_plan_uses_uv_tool_owner_for_a_published_uv_install(monkeypatch):
         "/usr/local/bin/uv",
         "tool",
         "upgrade",
-        "omniscientist",
+        "OmniScientist-V2",
         "--compile-bytecode",
     ]
     assert "current interpreter" in label
@@ -3415,7 +4073,7 @@ def test_update_plan_uses_current_python_pip_for_an_env_without_uv(monkeypatch):
         "pip",
         "install",
         "--upgrade",
-        "omniscientist",
+        "OmniScientist-V2",
     ]
 
 
@@ -3426,7 +4084,7 @@ def test_update_to_uses_current_python_when_uv_is_unavailable(monkeypatch):
     monkeypatch.setattr(uc.sys, "executable", "/owned/omni/bin/python")
     res = runner.invoke(
         app,
-        ["update", "--to", "omniscientist==2.0.0", "--check"],
+        ["update", "--to", "OmniScientist-V2==2.0.0", "--check"],
     )
     assert res.exit_code == 0, res.output
     assert "/owned/omni/bin/python -m pip install" in res.output
@@ -3560,6 +4218,33 @@ def test_exec_writes_output(tmp_path):
     res = runner.invoke(app, ["exec", "-f", str(task), "-q", "-o", str(out)])
     assert res.exit_code == 0
     assert out.is_file() and out.read_text(encoding="utf-8").strip()
+    assert "Answer written" in res.output
+
+
+def test_exec_rate_limit_writes_error_report_not_answer(tmp_path, monkeypatch):
+    """UX-09 / 于恒彬: a 429 must not be sold as the requested blueprint."""
+    from omni.agent.turn_execution import TurnResult
+
+    async def fake_run(*_args, **_kwargs):
+        return TurnResult(
+            text="Request received: task_id=abc12345; planning...\nHTTP 429 rate limited.",
+            session_id="s",
+            task_id="abc12345deadbeef",
+            kind="error",
+            terminated_reason="llm_rate_limited",
+            settlement_status="failed",
+        )
+
+    monkeypatch.setattr("omni.cli.commands.exec_cmd.run_one_shot", fake_run)
+    out = tmp_path / "research_blueprint_v1.md"
+    res = runner.invoke(app, ["exec", "write a research blueprint", "-q", "-o", str(out)])
+
+    assert res.exit_code == 1
+    assert "Answer written" not in res.output
+    assert "Error report written" in res.output
+    body = out.read_text(encoding="utf-8")
+    assert "not a completed answer" in body
+    assert "429" in body
 
 
 def test_exec_requires_input():
@@ -3638,6 +4323,81 @@ def test_channel_login_feishu_manual_stores_secret_and_pairing():
     assert "Allowlist enabled" in test.stdout
 
 
+def test_channel_add_wechat_points_at_the_single_login_command():
+    res = runner.invoke(app, ["channel", "add", "wechat"])
+
+    assert res.exit_code == 0
+    assert "omni channel login wechat --start" in " ".join(res.stdout.split())
+
+
+def test_channel_login_fails_closed_when_the_named_keychain_is_unavailable(monkeypatch):
+    # `--credential-store keychain` names a store this machine cannot provide,
+    # so it must fail rather than quietly downgrade to a plaintext file. Only
+    # the `auto` default is allowed to fall back.
+    import omni.channels.credentials as creds
+
+    monkeypatch.setattr(creds, "_has_macos_keychain", lambda: False)
+    res = runner.invoke(app, [
+        "channel", "login", "feishu",
+        "--method", "manual",
+        "--app-id", "cli_test_app",
+        "--app-secret", "fs-secret-123",
+        "--credential-store", "keychain",
+        "--no-qr",
+    ])
+
+    assert res.exit_code == 2
+
+
+def test_default_login_never_asks_the_user_to_choose_a_credential_store(monkeypatch):
+    """On Linux and Windows, secrets.toml is where a credential belongs.
+
+    Reporting the platform's normal outcome as a fault, in a message naming
+    `--credential-store file`, is what taught users to paste that flag into
+    every login. The default has to be a plain statement of what happened.
+    """
+    import omni.channels.credentials as creds
+
+    monkeypatch.setattr(creds, "_has_macos_keychain", lambda: False)
+    res = runner.invoke(app, [
+        "channel", "login", "feishu",
+        "--app-id", "cli_test_app",
+        "--app-secret", "fs-secret-123",
+        "--no-qr",
+    ], env={"COLUMNS": "200"})  # the store path is one long word; 80 folds it mid-name
+
+    assert res.exit_code == 0
+    out = cli_text(res.stdout, res.stderr)
+    assert "secrets.toml with mode 0600" in out
+    assert "credential-store" not in out
+    assert "Fell back" not in out
+    assert "no encrypted credential store" not in out
+
+
+def test_a_keychain_that_refuses_a_write_still_warns(monkeypatch):
+    """A locked Keychain is a real anomaly: the secret lands in a weaker store
+    than this machine can offer, so it must not read like the normal path."""
+    import omni.channels.credentials as creds
+
+    monkeypatch.setattr(creds, "_has_macos_keychain", lambda: True)
+
+    def _refuse(channel: str, key: str, value: str) -> None:
+        raise creds.CredentialStoreError("User interaction is not allowed.")
+
+    monkeypatch.setattr(creds, "_store_macos_keychain", _refuse)
+    res = runner.invoke(app, [
+        "channel", "login", "feishu",
+        "--app-id", "cli_test_app",
+        "--app-secret", "fs-secret-123",
+        "--no-qr",
+    ])
+
+    assert res.exit_code == 0
+    out = " ".join((res.stdout + res.stderr).split())
+    assert "Could not write to the system keychain" in out
+    assert "unlock-keychain" in out
+
+
 def test_channel_login_start_lazy_enables_home_service(monkeypatch):
     from omni.runtime import service_control
 
@@ -3710,17 +4470,21 @@ def test_channel_login_wechat_ilink_no_wait_writes_template():
     assert not cfg.get("bot_token")
 
 
-def test_channel_login_wechat_default_uses_operator_gateway():
+def test_channel_login_wechat_defaults_to_official_ilink_without_a_gateway():
+    # `channel login wechat` with no --method must land on Tencent's official
+    # ClawBot API, so the one advertised command needs no self-hosted gateway
+    # and behaves identically on Linux, macOS, and Windows.
     from omni.config.paths import get_paths
 
-    res = runner.invoke(app, ["channel", "login", "wechat", "--yes", "--no-wait"])
+    res = runner.invoke(app, ["channel", "login", "wechat", "--no-wait"])
 
     assert res.exit_code == 0
     cfg = tomllib.loads(
         (get_paths().channels_dir / "wechat.toml").read_text(encoding="utf-8")
     )
-    assert cfg["mode"] == "gateway"
-    assert cfg["gateway_url"].startswith("http://127.0.0.1")
+    assert cfg["mode"] == "ilink"
+    assert cfg["base_url"].startswith("https://")
+    assert "gateway_url" not in cfg
 
 
 def test_channel_login_wechat_gateway_no_wait_creates_pairing_code():
@@ -3737,6 +4501,74 @@ def test_channel_login_wechat_gateway_no_wait_creates_pairing_code():
     assert cfg["mode"] == "gateway"
     assert cfg["allowlist_enabled"] is True
     assert cfg["pairing_code_hash"]
+
+
+def test_channel_login_feishu_prints_the_pairing_code_and_applink():
+    res = runner.invoke(
+        app,
+        ["channel", "login", "feishu", "--app-id", "cli_demo", "--app-secret", "s3cret",
+         "--credential-store", "file", "--no-qr"],
+    )
+
+    assert res.exit_code == 0
+    out = " ".join(res.stdout.split())
+    assert "/pair " in out
+    assert "applink.feishu.cn" in out
+    assert "s3cret" not in out
+
+
+def test_channel_login_dingtalk_does_not_offer_a_qr_of_the_developer_guide():
+    """DingTalk has no deep link to a bot chat, so the only URL is documentation.
+
+    Rendering that as a QR wastes twenty lines and invites the user to scan
+    their way into a developer page instead of the bot.
+    """
+    res = runner.invoke(
+        app,
+        ["channel", "login", "dingtalk", "--client-id", "ding_demo",
+         "--client-secret", "s3cret", "--credential-store", "file"],
+    )
+
+    assert res.exit_code == 0
+    out = " ".join(res.stdout.split())
+    assert "/pair " in out
+    assert "open.dingtalk.com" in out
+    assert "█" not in out and "▀" not in out
+
+
+def test_channel_pair_reissues_a_code_after_the_first_one_expires():
+    """A pairing code is single-use and lives 10 minutes, so it must be re-issuable."""
+    from omni.config.paths import get_paths
+
+    runner.invoke(
+        app,
+        ["channel", "login", "feishu", "--app-id", "cli_demo", "--app-secret", "s3cret",
+         "--credential-store", "file", "--no-qr"],
+    )
+    cfg_path = get_paths().channels_dir / "feishu.toml"
+    first = tomllib.loads(cfg_path.read_text(encoding="utf-8"))["pairing_code_hash"]
+
+    res = runner.invoke(app, ["channel", "pair", "feishu", "--no-qr"])
+
+    assert res.exit_code == 0
+    assert "/pair " in res.stdout
+    reissued = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
+    assert reissued["pairing_code_hash"] != first
+    assert reissued["app_id"] == "cli_demo"
+
+
+def test_channel_pair_before_login_says_what_to_run_first():
+    res = runner.invoke(app, ["channel", "pair", "dingtalk"])
+
+    assert res.exit_code == 2
+    assert "omni channel login dingtalk" in " ".join((res.stdout + res.stderr).split())
+
+
+def test_channel_pair_rejects_wechat_which_binds_the_scanning_account():
+    res = runner.invoke(app, ["channel", "pair", "wechat"])
+
+    assert res.exit_code == 2
+    assert "feishu" in res.stdout + res.stderr
 
 
 # ── cite ─────────────────────────────────────────────────────────────────

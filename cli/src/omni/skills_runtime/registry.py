@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -170,6 +171,12 @@ def _name_variants(name: str) -> set[str]:
     """kebab/underscore-insensitive candidates for a skill name."""
     base = (name or "").strip().lower()
     return {base, base.replace("-", "_"), base.replace("_", "-")}
+
+
+def _normalize_module_token(name: str) -> str:
+    """Canonical form for comparing a package/module token across the
+    distribution/import spelling gap (``Python-PPTX`` → ``python_pptx``)."""
+    return (name or "").strip().lower().replace("-", "_")
 
 
 def scope_sources(scope: str) -> tuple[str, ...] | None:
@@ -376,6 +383,51 @@ class SkillRegistry:
         ordered by source priority (highest first)."""
         found = [e for (src, nm), e in self._by_source_name.items() if nm == name]
         return sorted(found, key=lambda e: _SOURCE_RANK.get(e.source, 0), reverse=True)
+
+    def find_reader(self, suffix: str = "", mime: str = "") -> SkillEntry | None:
+        """Return the highest-priority skill that *declares* it can read this
+        content type (SKILL.md ``runtime_requirements.reads``), matched by file
+        extension and/or MIME.
+
+        Declaration-driven on purpose: ``open_artifact`` routes a binary artifact
+        to the owning capability by looking it up here, so a new readable format
+        is added by declaring ``reads`` on a skill — never by editing host code.
+        Returns ``None`` when no skill claims the type (the caller then reports an
+        honest "no reader registered" instead of pushing the model to shell).
+        """
+        suffix = (suffix or "").strip().lower()
+        mime = (mime or "").strip().lower()
+        if not suffix and not mime:
+            return None
+        best: SkillEntry | None = None
+        for entry in self._entries.values():
+            exts = {str(e).strip().lower() for e in entry.reads_extensions}
+            mimes = {str(m).strip().lower() for m in entry.reads_mime}
+            if (suffix and suffix in exts) or (mime and mime in mimes):
+                if best is None or entry.priority > best.priority:
+                    best = entry
+        return best
+
+    def find_python_module_provider(self, names: Iterable[str]) -> SkillEntry | None:
+        """Highest-priority skill that *declares* it owns one of ``names`` as a
+        runtime Python module (SKILL.md ``runtime_requirements.python_modules``).
+
+        Lets the shell guard answer "a capability already provides this package —
+        route to it / use its setup command" instead of running an ad-hoc
+        cross-interpreter ``pip install``. Matching is hyphen/underscore- and
+        case-insensitive so a distribution token (``python-pptx``) still resolves
+        to a declared import module (``pptx``) when they normalize alike.
+        """
+        wanted = {_normalize_module_token(n) for n in names if str(n).strip()}
+        if not wanted:
+            return None
+        best: SkillEntry | None = None
+        for entry in self._entries.values():
+            declared = {_normalize_module_token(m) for m in entry.requires_python_modules}
+            if declared & wanted:
+                if best is None or entry.priority > best.priority:
+                    best = entry
+        return best
 
     def shadowed_entries(self) -> list[SkillEntry]:
         """Entries excluded from automatic selection because a higher-priority

@@ -38,3 +38,45 @@ def test_verbose_display_keeps_resolved_finding_auditable() -> None:
 
     assert "objective_schema_repair" in output
     assert "provider_schema_invalid" in output
+
+
+def _render_downgrade(verbosity: str) -> str:
+    display = TurnDisplay(verbosity=verbosity, status_line=False)
+    event = {
+        "event_type": "plan.recovery",
+        "name": "react",
+        "summary": "recovery react (4_react)",
+        "payload": {
+            "action": "react",
+            "rung": "4_react",
+            "notes": [
+                "plan (missing_selected_skills) cannot run deterministically: "
+                "single_skill_task requires selected_skills"
+            ],
+        },
+    }
+    with console.capture() as captured:
+        display.tool_event("plan", event)
+    return captured.get()
+
+
+def test_normal_display_reports_the_change_of_route_not_the_validator() -> None:
+    """The owner is told what happened, in words about their request.
+
+    A downgrade printed its validator text verbatim, so a turn that had merely
+    changed route read as a crash: an internal code and the phrase "cannot run
+    deterministically", addressed to nobody in the room.
+    """
+    output = _render_downgrade("normal")
+
+    assert "could not run" in output
+    assert "continuing with tools" in output
+    assert "missing_selected_skills" not in output
+    assert "deterministically" not in output
+
+
+def test_verbose_display_keeps_the_downgrade_findings_auditable() -> None:
+    output = _render_downgrade("verbose")
+
+    assert "4_react" in output
+    assert "missing_selected_skills" in output

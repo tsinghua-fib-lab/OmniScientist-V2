@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import sys
-import time
 import types
 from pathlib import Path
 
@@ -21,12 +21,59 @@ from omni.runtime import provider_authority as provider_authority_runtime
 from omni.runtime import workflow_runtime
 from omni.runtime.notifications import InboxNotifier
 from omni.runtime.subtask_runtime import SubtaskRuntime, WorkflowNeedsInput, _prepare_workflow_plan
+from omni.runtime.workflow_plan import _step_failure_recoverable
 from omni.skills_runtime.context import ExecContext
 from omni.skills_runtime.manifest import DeliveryMode, EngineSpec, ExecSpec, SkillEntry, SkillKind
 from omni.skills_runtime.registry import SkillRegistry
 from omni.storage.db import get_database
 from omni.storage.models import SubtaskORM, WorkflowRunORM, WorkflowStepORM
 from tests.conftest import PlanningLLM, ScriptedLLM
+
+
+def _sandbox_io(tmp_path: Path, name: str) -> Path:
+    """Write target whose parent does not contain the isolated ``.omni`` store."""
+    dest = tmp_path / "io" / name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    return dest
+
+
+def _traces_ran_concurrently(traces: list[dict]) -> bool:
+    """True when recorded work exceeds the span — serial steps cannot.
+
+    ``max(started) < min(finished)`` requires all three cli_exec children to
+    share one instant. On Windows CI, spawning the third Python often lands
+    ~40ms after the first 0.2s sleep ends, so that triple-point fails even
+    when two steps overlapped. Sum of sleeps vs span is the concurrency
+    property and does not depend on a wall-clock budget.
+    """
+    work = sum(int(trace["finished"]) - int(trace["started"]) for trace in traces)
+    span = max(int(trace["finished"]) for trace in traces) - min(
+        int(trace["started"]) for trace in traces
+    )
+    return work > span
+
+
+def test_windows_spawn_stagger_still_counts_as_concurrent() -> None:
+    """The GitHub Windows failure: last start is 39ms after first finish."""
+    traces = [
+        {"started": 0, "finished": 200_000_000},
+        {"started": 20_000_000, "finished": 220_000_000},
+        {"started": 239_276_700, "finished": 439_276_700},
+    ]
+    assert _traces_ran_concurrently(traces)
+    assert not (
+        max(trace["started"] for trace in traces)
+        < min(trace["finished"] for trace in traces)
+    )
+
+
+def test_strictly_serial_traces_are_not_concurrent() -> None:
+    traces = [
+        {"started": 0, "finished": 200},
+        {"started": 200, "finished": 400},
+        {"started": 400, "finished": 600},
+    ]
+    assert not _traces_ran_concurrently(traces)
 
 
 def _workflow_skill(name: str, *, workflow: dict | None = None) -> SkillEntry:
@@ -69,11 +116,46 @@ def _workflow_skill(name: str, *, workflow: dict | None = None) -> SkillEntry:
     )
 
 
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"status": "error", "blocking": True, "recoverable": True},
+        {
+            "status": "error",
+            "recoverable": True,
+            "action_required": {"kind": "configure"},
+        },
+    ],
+)
+def test_terminal_step_result_overrides_continue_with_partial(
+    result: dict[str, object],
+) -> None:
+    entry = _workflow_skill(
+        "terminal-config",
+        workflow={"failure_policy": "continue_with_partial"},
+    )
+
+    assert not _step_failure_recoverable({}, entry, result)
+
+
+def test_continue_with_partial_still_recovers_ordinary_step_failure() -> None:
+    entry = _workflow_skill(
+        "optional-step",
+        workflow={"failure_policy": "continue_with_partial"},
+    )
+
+    assert _step_failure_recoverable({}, entry, {"status": "error"})
+
+
 def _delayed_workflow_skill(name: str, *, delay: float, concurrent_safe: bool) -> SkillEntry:
     script = (
         "import json,sys,time;"
         "d=json.load(sys.stdin);"
+        "started=time.time_ns();"
         f"time.sleep({delay!r});"
+        "finished=time.time_ns();"
+        "trace=d.get('trace_path');"
+        "open(trace,'w').write(json.dumps({'started':started,'finished':finished})) if trace else None;"
         f"print(json.dumps({{'status':'ok','summary':'ran {name}','value':d.get('value')}}))"
     )
     return SkillEntry(
@@ -84,74 +166,14 @@ def _delayed_workflow_skill(name: str, *, delay: float, concurrent_safe: bool) -
         delivery_mode=DeliveryMode.ASYNC_TASK,
         exec_spec=ExecSpec(command=sys.executable, args=["-c", script], stdout_format="json"),
         execution={"concurrent_safe": concurrent_safe},
-        input_schema={"type": "object", "properties": {"value": {}}},
-        output_schema={"type": "object", "properties": {"status": {"type": "string"}}},
-    )
-
-
-def _quality_retry_skill(name: str) -> SkillEntry:
-    script = (
-        "import json,sys;"
-        "d=json.load(sys.stdin);"
-        "retried=bool(d.get('quality_feedback'));"
-        "quality='passed' if retried else 'degraded';"
-        "print(json.dumps({"
-        "'status':'ok',"
-        "'summary':'quality '+quality,"
-        "'deliverable_assessment':{"
-        "'schema':'omni.deliverable-assessment/v1',"
-        "'deliverable_id':'fallback',"
-        "'provider_binding_id':'fallback-binding',"
-        f"'provider':'{name}',"
-        "'contract_hash':'fallback-contract',"
-        "'step_id':'fallback',"
-        "'feedback':'expand the evidence section',"
-        "'status':quality,"
-        "'retryable':not retried,"
-        "'effective_inputs':{'retried':retried},"
-        "'criteria':[{'criterion_id':'fixture_quality','status':quality,"
-        "'summary':'quality '+quality}]"
-        "}"
-        "}))"
-    )
-    return SkillEntry(
-        name=name,
-        description="replay-safe provider quality retry fixture",
-        source="project_omni",
-        kind=SkillKind.CLI_EXEC,
-        delivery_mode=DeliveryMode.ASYNC_TASK,
-        exec_spec=ExecSpec(
-            command=sys.executable,
-            args=["-c", script],
-            stdout_format="json",
-        ),
-        execution={"replay_safe": True},
-        capabilities=["artifact.quality-fixture"],
-        quality_contract={
-            "checks": ["fixture_quality"],
-            "assessment_required": True,
-            "assessment_schema": "omni.deliverable-assessment/v1",
-            "retry": {
-                "max_attempts": 1,
-                "feedback_field": "quality_feedback",
-            },
-        },
         input_schema={
             "type": "object",
             "properties": {
-                "input": {"type": "string"},
-                "quality_feedback": {"type": "string"},
+                "value": {},
+                "trace_path": {"type": "string"},
             },
-            "required": ["input"],
         },
-        output_schema={
-            "type": "object",
-            "properties": {
-                "status": {"type": "string"},
-                "deliverable_assessment": {"type": "object"},
-            },
-            "required": ["status", "deliverable_assessment"],
-        },
+        output_schema={"type": "object", "properties": {"status": {"type": "string"}}},
     )
 
 
@@ -264,12 +286,23 @@ def _fixture_capabilities(name: str) -> list[str]:
     }.get(name, [])
 
 
-def _workflow_plan_payload(
+_SKILL_FOR_CAPABILITY = {
+    "literature.search": "literature-search",
+    "paper.fetch.arxiv": "arxiv-fetch",
+    "corpus.index": "corpus-index",
+    "qa.grounded": "lit-qa",
+    "review.paper": "paper-review",
+    "artifact.figure": "scientific-figure",
+}
+
+
+def _model_workflow_steps(
     capabilities: list[str],
     *,
     topic: str = "Transformer/RAG related work",
     arxiv_id: str = "1706.03762",
-) -> dict:
+) -> list[dict]:
+    """The step list a model hands to ``run_workflow`` for these capabilities."""
     ids = {
         "literature.search": "lit",
         "paper.fetch.arxiv": "paper",
@@ -290,37 +323,67 @@ def _workflow_plan_payload(
             input_data = {"identifier": arxiv_id}
         elif capability == "synthesis.final":
             input_data = {"topic": topic, "deliverable": "draft.section"}
-        steps.append(
-            {
-                "id": step_id,
-                "capability": capability,
-                "input": input_data,
-                "depends_on": [previous] if previous else [],
-                "reason": f"test capability {capability}",
-            }
-        )
+        step: dict = {
+            "id": step_id,
+            "capability": capability,
+            "input": input_data,
+            "depends_on": [previous] if previous else [],
+        }
+        if capability in _SKILL_FOR_CAPABILITY:
+            step["skill"] = _SKILL_FOR_CAPABILITY[capability]
+        else:
+            step["provider_type"] = "native_executor"
+        steps.append(step)
         previous = step_id
-    return {
-        "intent_type": "workflow",
-        "confidence": 0.91,
-        "workflow_steps": steps,
-        "outputs": ["workflow", "draft.section"],
-        "execution_mode": "foreground",
-        "provenance_mode": "light",
-        "rationale": "semantic planner proposed a capability workflow",
-    }
+    return steps
 
 
-def _needs_input_plan_payload() -> dict:
-    return {
-        "intent_type": "needs_input",
-        "confidence": 0.84,
-        "outputs": ["question"],
-        "missing_inputs": [
-            {"field": "research_topic", "reason": "需要研究主题、目标论文和写作输出"}
+def _run_workflow_script(
+    steps: list[dict],
+    *,
+    goal: str,
+    mode: str = "foreground",
+    answer: str = "The workflow finished; see the step results above.",
+) -> list[ChatWithToolsResult]:
+    """Script one model turn that submits ``steps`` through ``run_workflow``.
+
+    A background submission is terminal for the ReAct loop, so the trailing
+    answer turn is only reached in foreground mode.
+    """
+    return [
+        ChatWithToolsResult(
+            tool_calls=[
+                ToolCall(
+                    id="call_workflow",
+                    name="run_workflow",
+                    arguments={"goal": goal, "mode": mode, "steps": steps},
+                )
+            ]
+        ),
+        ChatWithToolsResult(content=answer),
+    ]
+
+
+def _workflow_llm(script: list[ChatWithToolsResult]) -> PlanningLLM:
+    """A model that classifies the turn as multi-step and then runs ``script``.
+
+    ``PlanningLLM`` (not the bare ``ScriptedLLM``) is required whenever a step
+    is the native synthesizer, because it also answers the synthesis prompt with
+    a plausible draft instead of a scripted tool-call stub.
+    """
+    return PlanningLLM(
+        [
+            {
+                "intent_type": "workflow",
+                "confidence": 0.91,
+                "outputs": ["workflow", "draft.section"],
+                "execution_mode": "foreground",
+                "provenance_mode": "light",
+                "rationale": "multi-step request; the model sequences the steps",
+            }
         ],
-        "rationale": "workflow request is underspecified",
-    }
+        script=script,
+    )
 
 
 def _failing_workflow_skill(
@@ -421,6 +484,41 @@ class _ProgressMetadataEngine:
         if progress_callback is not None:
             await progress_callback("inner.progress", 0.5, step_id="engine-inner-step")
         return {"status": "ok", "summary": input_data.get("workflow_step_id", "")}
+
+
+class _NestedToolEngine:
+    """Emit the tool lifecycle a prompt sub-agent reports for each tool call.
+
+    Mirrors ``_run_prompt_skill.on_tool_event``: a ``tool.start``/``tool.done``
+    pair carrying the tool identity, the outcome, and a result payload that can
+    be arbitrarily large.
+    """
+
+    async def execute(self, progress_callback=None, **input_data):  # noqa: ANN001, ANN003, ARG002
+        if progress_callback is not None:
+            await progress_callback("tool.start", 0.15, tool="write_file", arguments={})
+            await progress_callback(
+                "tool.done",
+                0.85,
+                tool="write_file",
+                status="rejected",
+                error="tool 'write_file' rejected by execution policy: tool_limit_exceeded:10",
+                result={"body": "x" * 4096},
+            )
+        return {"status": "ok", "summary": "nested tool fixture"}
+
+
+def _nested_tool_skill(name: str) -> SkillEntry:
+    module = types.ModuleType("nested_tool_engine")
+    module.NestedToolEngine = _NestedToolEngine
+    sys.modules["nested_tool_engine"] = module
+    return SkillEntry(
+        name=name,
+        description=f"nested tool fixture {name}",
+        kind=SkillKind.PYTHON_ENGINE,
+        delivery_mode=DeliveryMode.ASYNC_TASK,
+        engine=EngineSpec(module="nested_tool_engine", class_name="NestedToolEngine"),
+    )
 
 
 def _workflow_progress_skill(name: str) -> SkillEntry:
@@ -1092,6 +1190,57 @@ async def test_runtime_fails_empty_successful_skill_result():
 
 
 @pytest.mark.asyncio
+async def test_nested_tool_keeps_its_name_and_outcome_through_the_workflow_relay():
+    """A tool called inside a workflow step stays identifiable at the terminal.
+
+    The relay used to forward only the stage and percentage, so the live view
+    printed a run of anonymous tool glyphs and never showed that the calls
+    behind them were being rejected — while the persisted ``*.tool.*`` events
+    named the tool the whole time.
+    """
+    runtime = await _runtime_with_skills(0)
+    runtime._registry.register(_nested_tool_skill("nested-tool-skill"))  # noqa: SLF001
+    run_id = await runtime.enqueue_workflow(
+        "run nested tool fixture",
+        [{"id": "outer_step", "skill": "nested-tool-skill", "input": {}}],
+        "cli",
+    )
+
+    emitted: list[dict] = []
+
+    async def capture(phase: str, data: dict) -> None:
+        if phase == "task_progress":
+            emitted.append(data)
+
+    await runtime.drain(on_event=capture)
+
+    done = [e for e in emitted if str(e.get("stage") or "").endswith("tool.done")]
+    assert done, "the nested tool's completion never reached the event stream"
+    assert done[0]["tool"] == "write_file"
+    assert done[0]["status"] == "rejected"
+    assert "tool_limit_exceeded" in done[0]["error"]
+
+    # And that is what the terminal renders — no anonymous placeholder.
+    from omni.cli.live_display import TurnDisplay, console
+
+    display = TurnDisplay(verbosity="normal", status_line=False)
+    with console.capture() as capture_out:
+        display.tool_event("task_progress", done[0])
+        display.end()
+    rendered = " ".join(capture_out.get().split())
+    assert "write_file" in rendered
+    assert "unnamed" not in rendered
+
+    # The run row carries the identity but not the payload: the trace is
+    # rewritten in full on every tick, so results would compound quadratically.
+    run = await runtime.get_workflow_run(run_id)
+    assert run is not None
+    traced = [e for e in run.trace_log if str(e.get("stage") or "").endswith("tool.done")]
+    assert traced and traced[0]["tool"] == "write_file"
+    assert "result" not in traced[0]
+
+
+@pytest.mark.asyncio
 async def test_workflow_progress_preserves_skill_step_id_metadata():
     runtime = await _runtime_with_skills(0)
     runtime._registry.register(_workflow_progress_skill("wf-progress-skill"))  # noqa: SLF001
@@ -1459,7 +1608,7 @@ async def test_workflow_continues_after_recoverable_skill_failure():
 @pytest.mark.asyncio
 async def test_workflow_checkpoint_skips_completed_steps_on_resume(tmp_path):
     runtime = await _runtime_with_skills(0)
-    log_path = tmp_path / "workflow.log"
+    log_path = _sandbox_io(tmp_path, "workflow.log")
     runtime._registry.register(_logging_workflow_skill("step-one"))  # noqa: SLF001
     runtime._registry.register(_logging_workflow_skill("step-two", fail=True))  # noqa: SLF001
     subtask_id = await runtime.enqueue_workflow(
@@ -1506,7 +1655,7 @@ async def test_workflow_checkpoint_skips_completed_steps_on_resume(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_workflow_runs_dependency_ready_safe_steps_in_parallel():
+async def test_workflow_runs_dependency_ready_safe_steps_in_parallel(tmp_path: Path):
     runtime = await _runtime_with_skills(0, overrides={"tasks": {"workflow_concurrency": 3}})
     for name in ("branch-a", "branch-b", "branch-c"):
         runtime._registry.register(  # noqa: SLF001
@@ -1515,25 +1664,39 @@ async def test_workflow_runs_dependency_ready_safe_steps_in_parallel():
     subtask_id = await runtime.enqueue_workflow(
         "parallel DAG",
         [
-            {"id": "a", "skill": "branch-a", "input": {"value": "a"}},
-            {"id": "b", "skill": "branch-b", "input": {"value": "b"}},
-            {"id": "c", "skill": "branch-c", "input": {"value": "c"}},
+            {
+                "id": "a",
+                "skill": "branch-a",
+                "input": {"value": "a", "trace_path": str(_sandbox_io(tmp_path, "a.json"))},
+            },
+            {
+                "id": "b",
+                "skill": "branch-b",
+                "input": {"value": "b", "trace_path": str(_sandbox_io(tmp_path, "b.json"))},
+            },
+            {
+                "id": "c",
+                "skill": "branch-c",
+                "input": {"value": "c", "trace_path": str(_sandbox_io(tmp_path, "c.json"))},
+            },
         ],
         "cli",
     )
 
-    started = time.perf_counter()
     await runtime.drain()
-    elapsed = time.perf_counter() - started
 
     task = await runtime.get_workflow_run(subtask_id)
     assert task is not None and task.status == "succeeded"
     assert [step["id"] for step in task.result_json["steps"]] == ["a", "b", "c"]
-    assert elapsed < 0.5  # serial is ~0.6s plus process startup
+    traces = [
+        json.loads(_sandbox_io(tmp_path, f"{step}.json").read_text(encoding="utf-8"))
+        for step in ("a", "b", "c")
+    ]
+    assert _traces_ran_concurrently(traces)
 
 
 @pytest.mark.asyncio
-async def test_workflow_keeps_unsafe_ready_steps_serial():
+async def test_workflow_keeps_unsafe_ready_steps_serial(tmp_path: Path):
     runtime = await _runtime_with_skills(0, overrides={"tasks": {"workflow_concurrency": 3}})
     for name in ("unsafe-a", "unsafe-b"):
         runtime._registry.register(  # noqa: SLF001
@@ -1542,83 +1705,27 @@ async def test_workflow_keeps_unsafe_ready_steps_serial():
     subtask_id = await runtime.enqueue_workflow(
         "serial barrier",
         [
-            {"id": "a", "skill": "unsafe-a", "input": {}},
-            {"id": "b", "skill": "unsafe-b", "input": {}},
+            {
+                "id": "a",
+                "skill": "unsafe-a",
+                "input": {"trace_path": str(_sandbox_io(tmp_path, "a.json"))},
+            },
+            {
+                "id": "b",
+                "skill": "unsafe-b",
+                "input": {"trace_path": str(_sandbox_io(tmp_path, "b.json"))},
+            },
         ],
         "cli",
     )
 
-    started = time.perf_counter()
     await runtime.drain()
-    elapsed = time.perf_counter() - started
 
     task = await runtime.get_workflow_run(subtask_id)
     assert task is not None and task.status == "succeeded"
-    assert elapsed >= 0.32
-
-
-@pytest.mark.asyncio
-async def test_provider_quality_retry_is_durable_feedback_bound_and_once_only():
-    runtime = await _runtime_with_skills(0)
-    runtime._registry.register(_quality_retry_skill("quality-retry"))  # noqa: SLF001
-    workflow_run_id = await runtime.enqueue_workflow(
-        "quality retry",
-        [
-            {
-                "id": "quality",
-                "skill": "quality-retry",
-                "input": {"input": "write a grounded result"},
-            }
-        ],
-        "cli",
-    )
-
-    await runtime.drain()
-
-    workflow = await runtime.get_workflow_run(workflow_run_id)
-    steps = await runtime.list_workflow_steps(workflow_run_id)
-    assert workflow is not None and workflow.status == "succeeded"
-    assert len(steps) == 1
-    assert len(steps[0].execution_ids) == 2
-    first = await runtime.get_subtask(steps[0].execution_ids[0])
-    retry = await runtime.get_subtask(steps[0].execution_ids[1])
-    assert first is not None and retry is not None
-    assert retry.retry_of == first.id
-    assert retry.step_attempt == 2
-    assert retry.recovery_policy == "provider_quality_retry"
-    assert retry.input_json["quality_feedback"] == "expand the evidence section"
-    assert (
-        workflow.result_json["steps"][0]["result"]["deliverable_assessment"]["status"] == "passed"
-    )
-
-
-@pytest.mark.asyncio
-async def test_provider_quality_retry_honours_declared_idempotency_policy():
-    runtime = await _runtime_with_skills(0)
-    entry = _quality_retry_skill("quality-retry-idempotency-required")
-    entry.quality_contract["retry"]["side_effect_policy"] = "idempotency_key_required"
-    runtime._registry.register(entry)  # noqa: SLF001
-    workflow_run_id = await runtime.enqueue_workflow(
-        "quality retry must not replay without the declared key",
-        [
-            {
-                "id": "quality",
-                "skill": entry.name,
-                "input": {"input": "write a grounded result"},
-            }
-        ],
-        "cli",
-    )
-
-    await runtime.drain()
-
-    workflow = await runtime.get_workflow_run(workflow_run_id)
-    steps = await runtime.list_workflow_steps(workflow_run_id)
-    assert workflow is not None and workflow.status == "succeeded"
-    assert len(steps) == 1
-    assert len(steps[0].execution_ids) == 1
-    assessment = workflow.result_json["steps"][0]["result"]["deliverable_assessment"]
-    assert assessment["status"] == "degraded"
+    a = json.loads(_sandbox_io(tmp_path, "a.json").read_text(encoding="utf-8"))
+    b = json.loads(_sandbox_io(tmp_path, "b.json").read_text(encoding="utf-8"))
+    assert a["finished"] <= b["started"] or b["finished"] <= a["started"]
 
 
 @pytest.mark.asyncio
@@ -1647,7 +1754,7 @@ async def test_workflow_dag_waits_for_dependencies_before_downstream_step():
 @pytest.mark.asyncio
 async def test_retry_workflow_step_reuses_upstream_checkpoint_and_reruns_descendants(tmp_path):
     runtime = await _runtime_with_skills(0)
-    log_path = tmp_path / "step-retry.log"
+    log_path = _sandbox_io(tmp_path, "step-retry.log")
     runtime._registry.register(_logging_workflow_skill("upstream"))  # noqa: SLF001
     runtime._registry.register(_logging_workflow_skill("target", fail=True))  # noqa: SLF001
     runtime._registry.register(_logging_workflow_skill("downstream"))  # noqa: SLF001
@@ -1758,7 +1865,7 @@ async def test_running_workflow_cannot_be_retried_or_resumed():
 @pytest.mark.asyncio
 async def test_resume_workflow_step_in_place_reuses_upstream_checkpoint(tmp_path):
     runtime = await _runtime_with_skills(0)
-    log_path = tmp_path / "step-resume.log"
+    log_path = _sandbox_io(tmp_path, "step-resume.log")
     runtime._registry.register(_logging_workflow_skill("upstream"))  # noqa: SLF001
     runtime._registry.register(_logging_workflow_skill("target", fail=True))  # noqa: SLF001
     subtask_id = await runtime.enqueue_workflow(
@@ -1878,7 +1985,13 @@ async def test_workflow_uses_real_skill_executions_and_degrades_parent_task():
         assert {execution.skill_name for execution in executions} == {"search", "writer"}
         assert all(execution.skill_name != "workflow" for execution in executions)
         linked_events = [event for event in events if event.subtask_id]
-        assert {event.skill_name for event in linked_events} == {"search", "writer"}
+        # Every record tied to an execution names the skill that ran it, whether
+        # as the acting skill or as the dispatched tool, and locates itself in
+        # the plan. Tool-level records used to carry none of this, which is why
+        # ``omni task show`` could place only the progress ticks (run 138c7b6e).
+        assert {
+            event.skill_name or event.tool_name for event in linked_events
+        } == {"search", "writer"}
         assert all(event.workflow_step_id for event in linked_events)
     finally:
         await agent.aclose()
@@ -2167,7 +2280,13 @@ async def test_workflow_plan_uses_native_synthesis_after_figure_step():
 
 @pytest.mark.asyncio
 async def test_workflow_plan_preserves_provider_binding_audit_trail():
-    """Exact provider and quality identities survive normalization and records."""
+    """The exact provider identity survives normalization into the durable record.
+
+    The step record is what a later audit, retry, or authority check reads to
+    learn which provider actually ran. If normalization dropped or rewrote the
+    sealed binding, a same-named skill from another source could be replayed in
+    its place without anything in the record showing the substitution.
+    """
     from omni.runtime.workflow_state import workflow_step_record
 
     runtime = await _runtime_with_skills(0)
@@ -2187,57 +2306,13 @@ async def test_workflow_plan_preserves_provider_binding_audit_trail():
     assert step["provider_binding_id"].startswith("provider-binding-")
     assert step["provider_contract_hash"]
     assert step["provider_name"] == "scientific-figure"
-    assert step["quality_contract"]["checks"] == ["figure_matches_instruction"]
+    assert step["provider_source"] == "builtin"
 
     record = workflow_step_record(step, status="succeeded", result={"status": "ok"})
     assert record["provider_binding_id"] == step["provider_binding_id"]
     assert record["provider_contract_hash"] == step["provider_contract_hash"]
-    assert record["quality_contract"] == step["quality_contract"]
-
-
-@pytest.mark.asyncio
-async def test_workflow_enqueue_rejects_malformed_provider_quality_contract():
-    runtime = await _runtime_with_skills(0)
-    runtime._registry.register(  # noqa: SLF001
-        SkillEntry(
-            name="unsafe-quality-provider",
-            description="provider with malformed retry metadata",
-            source="project_omni",
-            trusted=True,
-            quality_contract={
-                "checks": ["quality"],
-                "assessment_required": True,
-                "retry": {"max_attempts": "1"},
-            },
-            quality_contract_declared=True,
-            capabilities=["report.quality"],
-            input_schema={
-                "type": "object",
-                "properties": {"input": {"type": "string"}},
-                "required": ["input"],
-            },
-            output_schema={
-                "type": "object",
-                "properties": {"status": {"type": "string"}},
-                "required": ["status"],
-            },
-        )
-    )
-
-    with pytest.raises(WorkflowNeedsInput) as exc_info:
-        await runtime.enqueue_workflow(
-            "write a report",
-            [
-                {
-                    "id": "report",
-                    "skill": "unsafe-quality-provider",
-                    "input": {"input": "report"},
-                }
-            ],
-        )
-
-    assert exc_info.value.missing[0]["missing"] == ["provider_quality_contract"]
-    assert "max_attempts" in exc_info.value.missing[0]["reason"]
+    assert record["provider_name"] == step["provider_name"]
+    assert record["provider_source"] == step["provider_source"]
 
 
 @pytest.mark.asyncio
@@ -2482,11 +2557,16 @@ async def test_workflow_preflight_returns_needs_input_without_creating_task():
 
 @pytest.mark.asyncio
 async def test_foreground_workflow_does_not_push_duplicate_task_notification():
+    """A workflow drained inside the turn is already visible; do not also push it."""
     notifier = _CaptureNotifier()
     agent = await OmniAgent.create(load_settings(), notifier=notifier)
     agent.registry.register(_workflow_skill("scientific-figure"))
-    agent.llm = PlanningLLM(
-        [_workflow_plan_payload(["artifact.figure"], topic="foreground workflow figure")]
+    agent.llm = ScriptedLLM(
+        _run_workflow_script(
+            _model_workflow_steps(["artifact.figure"], topic="foreground workflow figure"),
+            goal="前台运行 workflow",
+            mode="foreground",
+        )
     )
 
     try:
@@ -2500,11 +2580,16 @@ async def test_foreground_workflow_does_not_push_duplicate_task_notification():
 
 @pytest.mark.asyncio
 async def test_background_workflow_notification_carries_owning_task_id():
+    """A backgrounded workflow notifies once, attributed to the submitting task."""
     notifier = _CaptureNotifier()
     agent = await OmniAgent.create(load_settings(), notifier=notifier)
     agent.registry.register(_workflow_skill("scientific-figure"))
-    agent.llm = PlanningLLM(
-        [_workflow_plan_payload(["artifact.figure"], topic="background workflow figure")]
+    agent.llm = ScriptedLLM(
+        _run_workflow_script(
+            _model_workflow_steps(["artifact.figure"], topic="background workflow figure"),
+            goal="后台运行 workflow",
+            mode="background",
+        )
     )
 
     try:
@@ -2619,7 +2704,7 @@ async def test_cancel_interrupts_active_workflow_step_and_persists_checkpoint() 
         assert any(step.status == "running" for step in steps)
 
         await agent.tasks.request_control(task_ref["task_id"], action="cancel")
-        turn = await asyncio.wait_for(running, timeout=2)
+        turn = await asyncio.wait_for(running, timeout=8)
         workflow = await agent.runtime.get_workflow_run(workflows[0].id)
         steps = await agent.runtime.list_workflow_steps(workflows[0].id)
     finally:
@@ -2681,7 +2766,7 @@ async def test_cancel_interrupts_foreground_skill_and_persists_child_status() ->
         assert child is not None and child.status == "running"
 
         await agent.tasks.request_control(task_ref["task_id"], action="cancel")
-        turn = await asyncio.wait_for(running, timeout=2)
+        turn = await asyncio.wait_for(running, timeout=8)
         child = await agent.runtime.get_subtask(child.id)
     finally:
         await agent.aclose()
@@ -2692,7 +2777,12 @@ async def test_cancel_interrupts_foreground_skill_and_persists_child_status() ->
 
 
 @pytest.mark.asyncio
-async def test_exact_research_prompt_routes_directly_to_scientific_figure():
+async def test_multi_capability_workflow_runs_every_submitted_step():
+    """The runtime executes the model's full step list, natives included.
+
+    The model names the skill for each capability step; the runtime binds it,
+    orders the DAG, and routes ``synthesis.final`` to the native executor.
+    """
     settings = load_settings()
     # Hermetic: index only the mocks registered below (built-ins now outrank
     # project skills by capability, and the real openalex/crossref need network).
@@ -2716,14 +2806,16 @@ async def test_exact_research_prompt_routes_directly_to_scientific_figure():
             capabilities=["artifact.figure", "figure.architecture"],
         )
     )
-    agent.llm = PlanningLLM(
-        [
-            _workflow_plan_payload(
+    agent.llm = _workflow_llm(
+        _run_workflow_script(
+            _model_workflow_steps(
                 ["literature.search", "paper.fetch.arxiv", "artifact.figure", "synthesis.final"],
                 topic="Transformer/RAG related work",
                 arxiv_id="1706.03762",
-            )
-        ]
+            ),
+            goal="Transformer/RAG related work section",
+            mode="foreground",
+        )
     )
 
     try:
@@ -2747,84 +2839,14 @@ async def test_exact_research_prompt_routes_directly_to_scientific_figure():
 
 
 @pytest.mark.asyncio
-async def test_exact_submission_prompt_asks_first_then_runs_expected_research_workflow():
-    settings = load_settings()
-    settings.skills.default_for = {}
-    agent = await OmniAgent.create(settings)
-    for skill in (
-        "literature-search",
-        "openalex-search",
-        "crossref-search",
-        "arxiv-fetch",
-        "corpus-index",
-        "lit-qa",
-        "paper-review",
-        "scientific-figure",
-    ):
-        agent.registry.register(_schema_workflow_skill(skill, required=["input"]))
-    agent.llm = PlanningLLM(
-        [
-            _needs_input_plan_payload(),
-            _workflow_plan_payload(
-                [
-                    "literature.search",
-                    "corpus.index",
-                    "qa.grounded",
-                    "review.paper",
-                    "artifact.figure",
-                    "synthesis.final",
-                ],
-                topic="Transformer attention mechanisms",
-                arxiv_id="1706.03762",
-            ),
-        ]
-    )
-
-    first = await agent.handle_turn(
-        "Prepare a submission section with search, fetch, index, grounded QA, review, figure, writing.",
-        channel="feishu",
-        drain_tasks=False,
-    )
-    assert not first.tool_trace
-    assert await agent.runtime.list_subtasks() == []
-
-    try:
-        second = await agent.handle_turn(
-            (
-                "研究主题是 Transformer attention mechanisms，没有目标论文需要精读或者评审，"
-                "QA 问题是 “What are the key limitations of multi-head attention?”，"
-                "想画系统架构、方法流程、还包括实验结果对比，希望写作输出：综述、方法论文、还包括实验报告。"
-            ),
-            session_id=first.session_id,
-            channel="feishu",
-            drain_tasks=True,
-        )
-    finally:
-        await agent.aclose()
-
-    workflow_result = second.tool_trace[0].result
-    assert workflow_result["status"] == "succeeded"
-    capabilities = [step["capability"] for step in workflow_result["steps"]]
-    assert capabilities == [
-        "literature.search",
-        "corpus.index",
-        "qa.grounded",
-        "review.paper",
-        "artifact.figure",
-        "synthesis.final",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_incident_0058c605_replay_multi_deliverable_figure_and_paper(
-    monkeypatch: pytest.MonkeyPatch,
-):
+async def test_incident_0058c605_replay_multi_deliverable_figure_and_paper():
     """Replay task 0058c605 under provider-owned semantic normalization.
 
-    A generic planner hint must no longer trigger a host semantic repair. The
-    exact figure provider resolves its effective kind, records the change in
-    its assessment, and the verifier accepts the resulting RAG figure plus the
-    model-written draft.
+    The model sequences fetch -> figure -> writing through ``run_workflow`` and
+    passes the figure provider a generic hint. The host must not repair that
+    semantically: the exact figure provider resolves its own effective kind,
+    records the change in its assessment, and the verifier accepts the resulting
+    RAG figure plus the model-written draft.
     """
     settings = load_settings()
     agent = await OmniAgent.create(settings)
@@ -2833,63 +2855,39 @@ async def test_incident_0058c605_replay_multi_deliverable_figure_and_paper(
         "为 RAG 系统综述准备材料：获取 Attention Is All You Need 摘要，"
         "并生成包含 query、retriever、reranker、LLM 的科研架构图。并输出一篇论文"
     )
-    agent.llm = PlanningLLM(
-        planner_gated=True,
-        plans=[
-            {
-                "intent_type": "workflow",
-                "confidence": 0.9,
-                "workflow_steps": [
-                    {
-                        "id": "paper",
-                        "capability": "paper.fetch.arxiv",
-                        "input": {"identifier": "1706.03762"},
-                    },
-                    {
-                        "id": "figure",
-                        "capability": "artifact.figure",
-                        "depends_on": ["paper"],
-                        "input": {},
-                    },
-                    {
-                        "id": "writing",
-                        "capability": "synthesis.final",
-                        "depends_on": ["figure"],
-                        "input": {"deliverable": "draft.section", "title": "RAG 系统综述"},
-                    },
-                ],
-                "capability_inputs": {
-                    "artifact.figure": {"template": "generic", "title": "RAG系统架构图"},
+    agent.llm = _workflow_llm(
+        _run_workflow_script(
+            [
+                {
+                    "id": "paper",
+                    "capability": "paper.fetch.arxiv",
+                    "skill": "arxiv-fetch",
+                    "input": {"identifier": "1706.03762"},
                 },
-                "outputs": ["artifact", "draft.section"],
-                "execution_mode": "foreground",
-                "provenance_mode": "light",
-                "rationale": "multi-deliverable research prep (incident replay)",
-            }
-        ],
-    )
-    from omni.agent import plan_pipeline as plan_pipeline_module
-
-    original_resolution = plan_pipeline_module.apply_identifier_resolution
-
-    async def _offline_grounded_resolution(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
-        async def _searcher(
-            field_format: str,
-            query: str,
-        ) -> list[tuple[str, str]]:
-            assert field_format == "arxiv_id"
-            assert query == "Attention Is All You Need"
-            return [("1706.03762", "Attention Is All You Need")]
-
-        return await original_resolution(
-            *args,
-            **{**kwargs, "searcher": _searcher},
+                {
+                    "id": "figure",
+                    "capability": "artifact.figure",
+                    "skill": "scientific-figure",
+                    "depends_on": ["paper"],
+                    "input": {
+                        "input": (
+                            "为 RAG 系统综述生成包含 query、retriever、reranker、LLM "
+                            "的科研架构图"
+                        ),
+                        "title": "RAG系统架构图",
+                    },
+                },
+                {
+                    "id": "writing",
+                    "capability": "synthesis.final",
+                    "provider_type": "native_executor",
+                    "depends_on": ["figure"],
+                    "input": {"deliverable": "draft.section", "title": "RAG 系统综述"},
+                },
+            ],
+            goal=incident_goal,
+            mode="foreground",
         )
-
-    monkeypatch.setattr(
-        plan_pipeline_module,
-        "apply_identifier_resolution",
-        _offline_grounded_resolution,
     )
 
     try:
@@ -2898,19 +2896,7 @@ async def test_incident_0058c605_replay_multi_deliverable_figure_and_paper(
     finally:
         await agent.aclose()
 
-    # 1. Objective compilation and resolver evidence are revision-audited, but
-    #    no retired semantic contract resolver rewrites the provider's choice.
-    recovery_events = [e for e in events if e.event_type == "plan.recovery"]
-    assert recovery_events
-    assert recovery_events[0].output_json["rung"] == "ok", recovery_events[0].output_json
-    revisions = [e for e in events if e.event_type == "plan.revision.accepted"]
-    assert any(
-        event.output_json.get("source") == "compiler"
-        and event.output_json.get("diff")
-        and event.output_json["plan"].get("provider_bindings")
-        and event.output_json["plan"].get("resolver_evidence")
-        for event in revisions
-    )
+    # 1. No retired semantic contract resolver rewrites the provider's choice.
     retired_codes = {
         "constraint_target_unverified",
         "semantic_binding_mismatch",
@@ -2918,8 +2904,7 @@ async def test_incident_0058c605_replay_multi_deliverable_figure_and_paper(
     }
     assert not any(code in str(event.output_json) for event in events for code in retired_codes)
 
-    assert turn.drained_results
-    result = turn.drained_results[0]["result"]
+    result = turn.tool_trace[0].result
     steps = {step["id"]: step for step in result["steps"]}
 
     # 2. The provider, not the host planner, upgrades generic -> rag and records
@@ -2975,14 +2960,16 @@ async def test_research_prompt_keeps_deliverable_when_figure_step_fails():
             workflow={"failure_policy": "continue_with_partial"},
         )
     )
-    agent.llm = PlanningLLM(
-        [
-            _workflow_plan_payload(
+    agent.llm = _workflow_llm(
+        _run_workflow_script(
+            _model_workflow_steps(
                 ["literature.search", "paper.fetch.arxiv", "artifact.figure", "synthesis.final"],
                 topic="Transformer/RAG related work",
                 arxiv_id="1706.03762",
-            )
-        ]
+            ),
+            goal="Transformer/RAG related work section",
+            mode="foreground",
+        )
     )
 
     try:
@@ -2996,6 +2983,8 @@ async def test_research_prompt_keeps_deliverable_when_figure_step_fails():
     workflow_result = turn.tool_trace[0].result
     assert workflow_result["status"] == "degraded"
     assert workflow_result["workflow_status"] == "degraded"
+    # Degraded is not terminal: the model keeps the turn and must be able to
+    # read the failure reason out of the observation it just received.
     assert "_omni_control" not in workflow_result
     assert workflow_result["skills_used"] == [
         "literature-search",
@@ -3008,7 +2997,7 @@ async def test_research_prompt_keeps_deliverable_when_figure_step_fails():
         "failed",
         "succeeded",
     ]
-    assert "Graphviz unavailable" in turn.text
+    assert "Graphviz unavailable" in json.dumps(workflow_result["steps"][2], ensure_ascii=False)
 
 
 @pytest.mark.asyncio

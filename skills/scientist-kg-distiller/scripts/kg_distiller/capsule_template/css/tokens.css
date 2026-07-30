@@ -1,0 +1,24 @@
+:root {
+  color-scheme: dark;
+  --space: #03050d;
+  --space-raised: #070a18;
+  --panel: rgba(9, 13, 31, 0.92);
+  --panel-soft: rgba(12, 17, 42, 0.72);
+  --ink: #f5f7ff;
+  --ink-soft: #dce2ff;
+  --muted: #8e98bd;
+  --line: rgba(129, 151, 225, 0.18);
+  --line-strong: rgba(132, 158, 244, 0.32);
+  --violet: #9b7cff;
+  --violet-bright: #c5b8ff;
+  --violet-soft: rgba(126, 92, 255, 0.16);
+  --blue: #5f8cff;
+  --blue-soft: rgba(65, 116, 255, 0.14);
+  --cyan: #55d9ff;
+  --cyan-soft: rgba(36, 203, 255, 0.13);
+  --pink: #d983ff;
+  --shadow: 0 26px 80px rgba(0, 0, 0, 0.46);
+  --inner-light: inset 0 1px rgba(255, 255, 255, 0.045);
+  --radius-lg: 24px;
+  --radius-md: 16px;
+}

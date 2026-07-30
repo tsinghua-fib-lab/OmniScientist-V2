@@ -189,7 +189,9 @@ async def build_figure_bundle(
         "run_ids": _dedup(run_ids),
     }
     stored = await artifacts.put_bytes(
-        json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"),
+        json.dumps(manifest, ensure_ascii=False, indent=2).encode(
+            "utf-8", errors="backslashreplace"
+        ),
         kind="bundle",
         title=title,
         ext="figure-bundle.json",
@@ -199,6 +201,7 @@ async def build_figure_bundle(
         subtask_id=subtask_id,
         meta={
             "schema": FIGURE_BUNDLE_SCHEMA,
+            "presentation_role": "support",
             "figure_uri": figure_uri,
             "code_uri": code_uri,
             "data_uris": list(data_uris),
@@ -228,7 +231,7 @@ async def build_figure_bundle(
 
 async def verify_figure_bundle(*, artifacts: Any, manifest: dict[str, Any]) -> dict[str, Any]:
     """Re-hash the managed artifacts and evaluate figure/code/data consistency."""
-    from omni.eval.research_quality import evaluate_figure_consistency
+    from omni.research.quality import evaluate_figure_consistency
 
     actual_hashes: dict[str, str] = {}
     entries = [manifest.get("figure"), manifest.get("code"), *(manifest.get("data") or [])]

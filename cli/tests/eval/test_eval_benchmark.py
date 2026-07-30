@@ -269,7 +269,7 @@ def test_routing_and_execution_expectations_use_different_evidence():
     result = SimpleNamespace(
         kind="needs_input",
         terminated_reason="",
-        verification_status="",
+        settlement_status="",
         text="Configure the VLM first.",
         drained_results=[
             {
@@ -318,7 +318,7 @@ def test_skills_exclude_remains_a_routing_guardrail() -> None:
     result = SimpleNamespace(
         kind="needs_input",
         terminated_reason="vlm_not_configured",
-        verification_status="needs_input",
+        settlement_status="needs_input",
         text="Configure the VLM first.",
     )
 

@@ -40,11 +40,6 @@ class ScenarioTurn:
     # wired, i.e. non-interactive/remote → fail closed).
     tool_calls: tuple[dict[str, Any], ...] = ()
     approve: Any = None
-    # L4 journey extension (self-evolution): skill-task history to seed into the
-    # agent DB before the turn (each ``{skill, status, goal, error, count}``), so
-    # the evolution loop has real success/failure signal to mine. Paired with
-    # ``expect.evolution`` ("improves:<skill>" | "proposes_new" | "none").
-    seed_tasks: tuple[dict[str, Any], ...] = ()
     # L4 journey extension (self-review): scripted reviewer verdicts the in-loop
     # judge returns in order (each ``{verdict, score, notes}``). Paired with
     # ``expect.self_review`` ("revised" | "passed" | "bounded" | "none").
@@ -126,7 +121,6 @@ def _coerce_turn(raw: dict[str, Any]) -> ScenarioTurn:
         expect=dict(raw.get("expect") or {}),
         tool_calls=tuple(dict(c) for c in (raw.get("tool_calls") or ())),
         approve=raw.get("approve"),
-        seed_tasks=tuple(dict(c) for c in (raw.get("seed_tasks") or ())),
         review=tuple(dict(c) for c in (raw.get("review") or ())),
         seed_memories=int(raw.get("seed_memories") or 0),
         submit_task=dict(raw["submit_task"]) if isinstance(raw.get("submit_task"), dict) else None,

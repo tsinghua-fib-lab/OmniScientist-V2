@@ -1,9 +1,17 @@
 # Capability-selection scenarios keep two questions separate: provider choices
 # come from the validated plan, while execution checks come only from submitted
 # or drained work. Explicit fixtures make the execution cases offline.
+#
+# Multi-step scenarios are model-driven: the semantic planner classifies the
+# request as multi-step and hands the turn to the capable assistant, and the
+# *model* sequences the work by calling ``run_workflow`` (``tool_calls``). The
+# plan block still carries the steps the model proposed — it is what routes the
+# turn — but the capability evidence now comes from the workflow run the tool
+# created, so these scenarios assert ``capabilities_executed`` rather than the
+# plan-time ``capabilities_include`` a pre-computed DAG used to supply.
 
 - id: ideation_livefigure_workflow
-  title: "Search, ideation, and editable one-slide figure resolve active capabilities"
+  title: "Search, ideation, and editable one-slide figure run as one workflow"
   channel: cli
   tags: [capability_selection]
   fixtures: [literature.search, research.ideation, figure.editable.pptx]
@@ -19,9 +27,18 @@
         outputs: [artifact.pptx]
         execution_mode: background
         rationale: "search, ideate, then render an editable scientific figure"
+      tool_calls:
+        - name: run_workflow
+          args:
+            goal: "检索 RAG 幻觉文献、提出研究方向、渲染单页可编辑科研图"
+            mode: foreground
+            steps:
+              - {id: lit, capability: literature.search, input: {query: "RAG hallucination"}}
+              - {id: idea, capability: research.ideation, depends_on: [lit], input: {input: "RAG hallucination research directions"}}
+              - {id: figure, capability: figure.editable.pptx, depends_on: [idea], input: {input: "one-slide editable RAG research figure"}}
+      drain: true
       expect:
-        kind: workflow
-        capabilities_include: [literature.search, research.ideation, figure.editable.pptx]
+        capabilities_executed: [literature.search, research.ideation, figure.editable.pptx]
 
 - id: complete_research_deck_routing
   title: "A complete research talk resolves the multi-slide deck capability"
@@ -65,7 +82,12 @@
   channel: cli
   tags: [routing, capability_selection]
   turns:
-    - user: "Review this paper for NeurIPS before submission and identify likely reject reasons."
+    # The paper is named in the request: this scenario asks whether "review my
+    # paper" resolves to the right provider, not whether the planner may invent
+    # a file to review. A request that supplies no source is a different
+    # scenario with a different right answer — see run 138c7b6e, where the
+    # planner made one up and the review came out of the model's memory.
+    - user: "Review paper.pdf for NeurIPS before submission and identify likely reject reasons."
       plan:
         intent_type: single_skill_task
         required_capabilities: [review.paper]
@@ -136,6 +158,24 @@
         skill_selected: arxiv-fetch
         capabilities_include: [paper.fetch.arxiv]
 
+- id: soulagent_explicit_routing
+  title: "An explicit scientist-persona request resolves SoulAgent"
+  channel: cli
+  tags: [routing, capability_selection]
+  turns:
+    - user: '$soulagent input="show the current scientist persona" action=status'
+      expect:
+        skill_selected: soulagent
+
+- id: scientist_kg_distiller_explicit_routing
+  title: "An explicit scientist-KG request resolves the distiller"
+  channel: cli
+  tags: [routing, capability_selection]
+  turns:
+    - user: '$scientist-kg-distiller input="audit the supplied scientist corpus" scientist="Ada Lovelace"'
+      expect:
+        skill_selected: scientist-kg-distiller
+
 - id: livefigure_missing_vlm_configuration
   title: "Editable LiveFigure execution returns one missing-VLM action"
   channel: cli
@@ -176,11 +216,19 @@
         execution_mode: background
         provenance_mode: light
         rationale: "end-to-end offline drain"
+      tool_calls:
+        - name: run_workflow
+          args:
+            goal: "检索文献、取一篇 arXiv 论文、画架构图，最后写成研究段落"
+            mode: foreground
+            steps:
+              - {id: lit, capability: literature.search, input: {query: "retrieval augmented generation"}}
+              - {id: paper, capability: paper.fetch.arxiv, depends_on: [lit], input: {identifier: "1706.03762"}}
+              - {id: fig, capability: artifact.figure, depends_on: [paper], input: {input: "RAG architecture figure"}}
+              - {id: final, capability: synthesis.final, depends_on: [fig], deliverable: draft.section, input: {}}
       drain: true
       expect:
-        kind: workflow
-        capabilities_include: [synthesis.final]
-        capabilities_executed: [synthesis.final]
+        capabilities_executed: [literature.search, paper.fetch.arxiv, artifact.figure, synthesis.final]
 
 # Prompt-only skills carry no capability slot, so the deterministic explicit
 # ``$name`` boundary (not the capability arbitrator) is their routing path. These

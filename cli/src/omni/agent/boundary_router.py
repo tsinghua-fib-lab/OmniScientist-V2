@@ -9,9 +9,13 @@ by their dedicated parsers.
 
 from __future__ import annotations
 
+import json
 import re
+import shlex
 from dataclasses import dataclass
+from typing import Any
 
+from omni.core.field_contract import instruction_field
 from omni.skills_runtime.registry import SkillRegistry, scope_sources
 
 
@@ -58,13 +62,18 @@ class BoundaryRouter:
         )
 
 
-def _explicit_token(text: str) -> str:
-    """The raw ``$name`` / ``$<scope>:<name>`` token the user typed, or ``""``."""
+def _explicit_skill_match(text: str) -> re.Match[str] | None:
     for pattern in _EXPLICIT_SKILL_PATTERNS:
         match = pattern.search(text or "")
         if match:
-            return match.group("name")
-    return ""
+            return match
+    return None
+
+
+def _explicit_token(text: str) -> str:
+    """The raw ``$name`` / ``$<scope>:<name>`` token the user typed, or ``""``."""
+    match = _explicit_skill_match(text)
+    return match.group("name") if match is not None else ""
 
 
 def explicit_skill_ref(text: str, registry: SkillRegistry) -> tuple[str, str]:
@@ -90,3 +99,66 @@ def explicit_skill_ref(text: str, registry: SkillRegistry) -> tuple[str, str]:
 def explicit_skill_name(text: str, registry: SkillRegistry) -> str:
     """Backwards-compatible helper returning only the canonical skill name."""
     return explicit_skill_ref(text, registry)[0]
+
+
+def explicit_skill_arguments(text: str, registry: SkillRegistry) -> dict[str, Any]:
+    """Parse optional JSON or shell-style ``key=value`` after an explicit skill.
+
+    This keeps protocol invocations deterministic while letting paths containing
+    spaces reach typed skill contracts, for example::
+
+        $paper-review input="paper draft.pdf" venue="ACL 2025" mode=strict
+
+    A plain remainder binds to the provider's contract-declared instruction
+    field, preserving the long-standing ``$skill natural-language instruction``
+    form without inventing an undeclared ``input`` field. Scoped invocations
+    such as ``$user:paper-review`` use the same argument parsing.
+    """
+
+    match = _explicit_skill_match(text)
+    entry = registry.resolve_explicit(match.group("name")) if match is not None else None
+    if match is None or entry is None:
+        return {}
+    instruction_slot = instruction_field(entry.input_schema)
+    remainder = str(text or "")[match.end() :].strip()
+    if not remainder:
+        return {}
+    if remainder.startswith("{"):
+        try:
+            payload = json.loads(remainder)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            return {str(key): value for key, value in payload.items()}
+
+    try:
+        tokens = shlex.split(remainder)
+    except ValueError:
+        return {instruction_slot: remainder} if instruction_slot else {}
+    arguments: dict[str, Any] = {}
+    bare: list[str] = []
+    for token in tokens:
+        key, separator, value = token.partition("=")
+        if separator and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", key):
+            arguments[key.replace("-", "_")] = _coerce_protocol_value(value)
+        else:
+            bare.append(token)
+    if not arguments:
+        return {instruction_slot: remainder} if instruction_slot else {}
+    if bare and instruction_slot and instruction_slot not in arguments:
+        arguments[instruction_slot] = " ".join(bare)
+    return arguments
+
+
+def _coerce_protocol_value(value: str) -> Any:
+    lowered = value.casefold()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    if lowered == "null":
+        return None
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value

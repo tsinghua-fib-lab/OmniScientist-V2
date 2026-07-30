@@ -2,40 +2,46 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import re
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Mapping, Sequence
 from html.parser import HTMLParser
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
-from xml.etree import ElementTree
 
+import poster_assets
 from css_safety import offline_css_issues
 
 ACTION_DRAFT = "draft"
+ACTION_ESTIMATE = "estimate"
 ACTION_REVISE = "revise"
 ACTION_INSPECT = "inspect"
 ACTION_APPROVE = "approve"
 ACTION_PREVIEW = "preview"
-MAX_EMBEDDED_ASSET_BYTES = 8 * 1024 * 1024
+ACTION_EXPORT_PPTX = "export-pptx"
+ACTION_PREPARE_VISUAL_REVIEW = "prepare-visual-review"
+ACTION_SUBMIT_VISUAL_REVIEW = "submit-visual-review"
 MAX_HTML_BYTES = 32 * 1024 * 1024
+POSTER_ROOT_SELECTOR = (
+    "body > main[data-poster-id], body > article[data-poster-id], "
+    "body > div[data-poster-id]"
+)
 
 PUBLIC_ACTIONS = frozenset(
     {
         ACTION_DRAFT,
+        ACTION_ESTIMATE,
         ACTION_REVISE,
         ACTION_INSPECT,
         ACTION_APPROVE,
         ACTION_PREVIEW,
+        ACTION_EXPORT_PPTX,
+        ACTION_PREPARE_VISUAL_REVIEW,
+        ACTION_SUBMIT_VISUAL_REVIEW,
         "validate",
-        "query-resource",
-        "propose-resource",
-        "promote-resource",
-        "rollback-resource",
     }
 )
 
@@ -79,6 +85,9 @@ OUTCOME_CONTRACTS = MappingProxyType(
         "llm_unavailable": _outcome("error", False, True),
         "llm_error": _outcome("error", False, True),
         "host_agent_required": _outcome("partial", False, True),
+        "estimate_complete": _outcome("ok", False, False),
+        "invalid_content_budget": _outcome("error", False, True),
+        "invalid_page": _outcome("error", False, True),
         "candidate_validation_failed": _outcome("error", False, True),
         "source_not_found": _outcome("error", False, True),
         "source_read_failed": _outcome("error", True, False),
@@ -90,6 +99,8 @@ OUTCOME_CONTRACTS = MappingProxyType(
         "poster_filename_required": _outcome("error", False, True),
         "poster_valid": _outcome("ok", False, False),
         "poster_invalid": _outcome("error", False, True),
+        "pptx_export_complete": _outcome("ok", False, False),
+        "pptx_export_failed": _outcome("error", True, True),
         "inspection_complete": _outcome("ok", False, False),
         "inspection_unavailable": _outcome("partial", True, True),
         "invalid_inspection_options": _outcome("error", True, True),
@@ -100,6 +111,11 @@ OUTCOME_CONTRACTS = MappingProxyType(
         "screenshot_failed": _outcome("error", True, True),
         "inspection_blocked": _outcome("error", True, True),
         "inspection_failed": _outcome("error", True, True),
+        "visual_review_unavailable": _outcome("partial", False, True),
+        "visual_revision_required": _outcome("partial", False, True),
+        "visual_review_passed": _outcome("ok", False, False),
+        "visual_review_failed": _outcome("error", True, False),
+        "visual_review_invalid": _outcome("error", False, True),
         "missing_capability": _outcome("partial", True, True),
         "capabilities_ready": _outcome("ok", False, False),
         "capability_probe_failed": _outcome("error", True, True),
@@ -107,44 +123,16 @@ OUTCOME_CONTRACTS = MappingProxyType(
         "poster_approval_recorded": _outcome("ok", False, False),
         "approval_receipt_untrusted": _outcome("error", True, True),
         "approval_source_mismatch": _outcome("error", True, True),
-        "resource_query_complete": _outcome("ok", False, False),
-        "resource_candidate_created": _outcome("ok", False, False),
-        "resource_promoted": _outcome("ok", False, False),
-        "resource_rollback_complete": _outcome("ok", False, False),
-        "resource_conflict": _outcome("error", True, True),
-        "resource_candidate_required": _outcome("partial", False, True),
-        "promotion_approval_required": _outcome("error", False, True),
-        "resource_identity_changed": _outcome("error", True, True),
-        "rollback_target_missing": _outcome("error", False, True),
     }
 )
 
-_REQUIRED_REGIONS = ("hero", "method", "evidence", "limitations", "provenance")
-_ACTIVE_TAGS = {
-    "animate",
-    "animatemotion",
-    "animatetransform",
-    "audio",
-    "base",
-    "button",
-    "details",
-    "discard",
-    "dialog",
-    "embed",
-    "foreignobject",
-    "form",
-    "iframe",
-    "input",
-    "link",
-    "marquee",
-    "object",
-    "script",
-    "select",
-    "set",
-    "summary",
-    "textarea",
-    "video",
-}
+SEMANTIC_ROLES = frozenset(
+    {"claim", "context", "method", "evidence", "limitation", "provenance"}
+)
+MODULE_PRIORITIES = frozenset({"focal", "primary", "supporting", "footer"})
+ORGANIZATION_MODES = frozenset(
+    {"scan-first", "figure-led", "method-led", "result-led", "narrative"}
+)
 _INTERACTIVE_ATTRIBUTES = {
     "autofocus",
     "contenteditable",
@@ -195,44 +183,61 @@ _SVG_PRESENTATION_ATTRIBUTES = {
     "stroke",
 }
 _PLACEHOLDER_RE = re.compile(
-    r"\b(?:lorem ipsum|placeholder|todo|tbd|replace this|insert (?:text|figure|image))\b",
+    r"(?:\blorem ipsum\b|\breplace this\b|\binsert (?:text|figure|image)(?: here)?\b|"
+    r"\[(?:todo|tbd|placeholder)\]|\{\{[^{}]+\}\})",
     re.IGNORECASE,
 )
-_NUMBER_RE = re.compile(
-    r"(?<![\w.])[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
-    r"(?:[eE][+-]?\d+)?(?:%(?!\w)|(?![\w.]))"
-)
-_SOURCE_NUMBER_RE = re.compile(
-    r"(?<![\d.])[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
-    r"(?:[eE][+-]?\d+)?(?:%(?!\w)|(?![\d.]))"
+_RIGHTS_CLAIM_PATTERNS = (
+    re.compile(r"\ball\s+rights\s+reserved\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:reproduced|reprinted|republished|adapted|used|included|provided)"
+        r"\s+(?:with|by|under)\s+(?:the\s+)?(?:[\w-]+\s+){0,3}permission\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bpermission\s+(?:(?:was|is|has\s+been)\s+)?"
+        r"(?:granted|obtained)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"(?:©|\bcopyright(?:ed)?\b)", re.IGNORECASE),
 )
 _SOURCE_LOCATOR_RE = re.compile(
-    r"(?:\b(?:abstract|references|title\s+page|grounded\s+brief)\b|"
-    r"\b(?:figure|fig\.?|table|page|p\.?)\s*\d+\b|"
-    r"§\s*\d+|\b(?:doi|arxiv)\s*:)",
+    r"(?:\b(?:abstract|bibliography|references|title\s+page|grounded\s+brief)\b|"
+    r"\b(?:figures?|figs?\.?|tables?|pages?|pp?\.?)\s*\d+\b|"
+    r"\b(?:equations?|eqs?\.?)\s*\(?\d+(?:\.\d+)*\)?(?![\d.])|"
+    r"(?:§{1,2}|\b(?:sections?|secs?\.?))\s*\d+(?:\.\d+)*\b|"
+    r"\b(?:doi|arxiv)\s*:)",
     re.IGNORECASE,
 )
 _SOURCE_PAGE_MARKER_RE = re.compile(r"(?m)^\[Page\s+(\d+)\]\s*$", re.IGNORECASE)
-_LABEL_PAGE_RE = re.compile(r"\b(?:page|p\.?)\s*(\d+)\b", re.IGNORECASE)
-_LABEL_FIGURE_RE = re.compile(r"\b(?:figure|fig\.?)\s*(\d+)\b", re.IGNORECASE)
-_LABEL_TABLE_RE = re.compile(r"\btable\s*(\d+)\b", re.IGNORECASE)
-_LABEL_SECTION_RE = re.compile(r"§\s*(\d+(?:\.\d+)*)", re.IGNORECASE)
+_LABEL_PAGE_RE = re.compile(r"\b(?:pages?|pp?\.?)\s*(\d+)\b", re.IGNORECASE)
+_LABEL_FIGURE_RE = re.compile(r"\b(?:figures?|figs?\.?)\s*(\d+)\b", re.IGNORECASE)
+_LABEL_TABLE_RE = re.compile(r"\btables?\s*(\d+)\b", re.IGNORECASE)
+_LABEL_EQUATION_RE = re.compile(
+    r"\b(?:equations?|eqs?\.?)\s*\(?(\d+(?:\.\d+)*)\)?",
+    re.IGNORECASE,
+)
+_LABEL_SECTION_RE = re.compile(
+    r"(?:§{1,2}|\b(?:sections?|secs?\.?))\s*(\d+(?:\.\d+)*)",
+    re.IGNORECASE,
+)
 _PAGE_SIZE_RE = re.compile(
     r"@page\s*(?:[^\{]*)\{[^{}]*?\bsize\s*:\s*"
     r"([0-9]+(?:\.[0-9]+)?)mm\s+([0-9]+(?:\.[0-9]+)?)mm\s*;?",
     re.IGNORECASE | re.DOTALL,
 )
-_REMOTE_RE = re.compile(r"^(?:https?:)?//|^file:|^javascript:|^vbscript:", re.IGNORECASE)
-COMPONENT_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
-POSTER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$")
-COMPONENT_VERSION_RE = re.compile(
-    r"^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$"
+_MATH_LAYOUT_OVERRIDE_RE = re.compile(
+    r"(?:\bmath\b|\[\s*data-content-role\s*=\s*['\"]?equation['\"]?\s*\]"
+    r"|\[\s*data-latex(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\]\s]+))?\s*\])"
+    r"[^{}]*\{[^{}]*\bdisplay\s*:\s*(?:block|flex|grid|inline-block)\s*(?:;|})",
+    re.IGNORECASE | re.DOTALL,
 )
-REGION_RE = re.compile(r"^[a-z][a-z0-9-]{0,127}$")
-_DATA_IMAGE_RE = re.compile(
-    r"^data:image/(?:png|jpeg|gif|webp|svg\+xml);base64,([A-Za-z0-9+/=]+)$",
+_UNESCAPED_MATH_LESS_THAN_RE = re.compile(
+    r"<(?:mi|mn|mo|mtext|ms)\b[^>]*>\s*<\s*</",
     re.IGNORECASE,
 )
+POSTER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$")
+POSTER_MODULE_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 
 
 def normalize_action(value: Any, *, default: str = ACTION_DRAFT) -> str:
@@ -303,7 +308,11 @@ def normalize_outcome_result(
     source = value if isinstance(value, dict) else {}
     raw_outcome = source.get("outcome")
     raw_code = raw_outcome.get("code") if isinstance(raw_outcome, dict) else None
-    code = raw_code if isinstance(raw_code, str) and raw_code in OUTCOME_CONTRACTS else fallback_code
+    code = (
+        raw_code
+        if isinstance(raw_code, str) and raw_code in OUTCOME_CONTRACTS
+        else fallback_code
+    )
     raw_summary = source.get("summary")
     summary = raw_summary.strip() if isinstance(raw_summary, str) else ""
     details = {
@@ -314,97 +323,7 @@ def normalize_outcome_result(
     return outcome_result(code, summary=summary or fallback_summary, **details)
 
 
-def prepare_asset_manifest(
-    values: Any,
-    *,
-    resolve: Callable[[str], Path | None],
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """Resolve supplied image assets into bounded, inert data URI records."""
-
-    if values is None:
-        items: list[Any] = []
-    elif isinstance(values, (str, Path, dict)):
-        items = [values]
-    else:
-        try:
-            items = list(values)
-        except TypeError:
-            items = [values]
-    manifest: list[dict[str, Any]] = []
-    warnings: list[str] = []
-    for index, value in enumerate(items, start=1):
-        source, description = _asset_source_and_description(value)
-        token = f"asset://{index}"
-        if not source:
-            warnings.append(f"{token}: asset source is missing.")
-            continue
-        try:
-            resolved = resolve(source)
-        except (OSError, RuntimeError, ValueError) as exc:
-            warnings.append(f"{token}: asset could not be resolved: {exc}")
-            continue
-        path = Path(resolved) if resolved is not None else None
-        if path is None or not path.is_file() or path.is_symlink():
-            warnings.append(f"{token}: regular asset file not found: {source}")
-            continue
-        try:
-            content = path.read_bytes()
-        except OSError as exc:
-            warnings.append(f"{token}: asset could not be read: {exc}")
-            continue
-        if len(content) > MAX_EMBEDDED_ASSET_BYTES:
-            warnings.append(f"{token}: asset exceeds the embedded-image byte limit.")
-            continue
-        mime = _detect_image_mime(content)
-        if mime is None:
-            warnings.append(f"{token}: unsupported image type: {path.name}")
-            continue
-        if mime == "image/svg+xml" and not _svg_is_safe(content):
-            warnings.append(f"{token}: SVG contains active or external content.")
-            continue
-        content_sha256 = hashlib.sha256(content).hexdigest()
-        source_kind = (
-            str(value.get("source_kind") or "user_asset")
-            if isinstance(value, dict)
-            else "user_asset"
-        )
-        if source_kind not in {"pdf_figure", "user_asset"}:
-            warnings.append(f"{token}: unsupported asset provenance: {source_kind}")
-            continue
-        claimed_sha256 = (
-            str(value.get("content_sha256") or "")
-            if isinstance(value, dict)
-            else ""
-        )
-        if claimed_sha256 and claimed_sha256 != content_sha256:
-            warnings.append(f"{token}: source image hash changed before embedding.")
-            continue
-        manifest.append(
-            {
-                "token": token,
-                "source": source,
-                "filename": path.name,
-                "mime": mime,
-                "description": description,
-                "bytes": len(content),
-                "content_sha256": content_sha256,
-                "source_kind": source_kind,
-                "data_uri": f"data:{mime};base64,{base64.b64encode(content).decode('ascii')}",
-                **(
-                    {
-                        "figure_number": value.get("figure_number"),
-                        "page": value.get("page"),
-                        "crop_bbox": value.get("crop_bbox"),
-                    }
-                    if isinstance(value, dict) and source_kind == "pdf_figure"
-                    else {}
-                ),
-            }
-        )
-    return manifest, warnings
-
-
-class _PosterParser(HTMLParser):
+class ParsedPosterHtml(HTMLParser):
     """Collect semantic, safety, and grounding facts from one HTML document."""
 
     def __init__(self) -> None:
@@ -413,16 +332,24 @@ class _PosterParser(HTMLParser):
         self.html_count = 0
         self.body_count = 0
         self.poster_roots = 0
+        self.title_bands = 0
+        self.title_bands_inside_root = 0
         self.poster_ids: list[str] = []
-        self.regions: Counter[str] = Counter()
-        self.region_text: dict[str, list[str]] = {name: [] for name in _REQUIRED_REGIONS}
+        self.modules: Counter[str] = Counter()
+        self.module_order: list[str] = []
+        self.module_text: dict[str, list[str]] = {}
+        self.module_visible_media: set[str] = set()
+        self.module_roles: dict[str, tuple[str, ...]] = {}
+        self.module_priorities: dict[str, str] = {}
+        self.semantic_roles: set[str] = set()
         self.styles: list[str] = []
         self.visible_text: list[str] = []
-        self.integrity_attributes: list[tuple[str, ...]] = []
         self.source_labels: list[str] = []
         self.visible_source_figure_sha256s: set[str] = set()
         self.issues: list[dict[str, str]] = []
+        self.parse_error: str | None = None
         self._stack: list[tuple[str, str | None, bool]] = []
+        self._open_poster_root_depth: int | None = None
         self._style_depth = 0
 
     def handle_decl(self, decl: str) -> None:
@@ -443,36 +370,42 @@ class _PosterParser(HTMLParser):
     ) -> None:
         names = [name.lower() for name, _ in attrs]
         if len(names) != len(set(names)):
-            self.issues.append(_issue("duplicate_attribute", f"<{tag}> repeats an attribute."))
+            self.issues.append(
+                _issue("duplicate_attribute", f"<{tag}> repeats an attribute.")
+            )
         attr = {name.lower(): str(value or "") for name, value in attrs}
-        protected = (
-            tag,
-            attr.get("data-poster-id", "").strip(),
-            attr.get("data-poster-region", "").strip(),
-            attr.get("data-source-label", "").strip(),
-            attr.get("data-component-id", "").strip(),
-            attr.get("data-component-version", "").strip(),
-            attr.get("alt", "").strip(),
-        )
-        if any(protected[1:]):
-            self.integrity_attributes.append(protected)
         if tag == "html":
             self.html_count += 1
         elif tag == "body":
             self.body_count += 1
-        if tag in _ACTIVE_TAGS:
-            self.issues.append(_issue("active_html", f"Active element <{tag}> is forbidden."))
-        if tag == "meta" and not (
-            names == ["charset"] and attr.get("charset", "").strip().lower() == "utf-8"
-        ):
+        if tag in poster_assets.ACTIVE_CONTENT_TAGS:
             self.issues.append(
-                _issue("active_html", "Only <meta charset=\"utf-8\"> is allowed.")
+                _issue("active_html", f"Active element <{tag}> is forbidden.")
+            )
+        charset_meta = names == ["charset"] and (
+            attr.get("charset", "").strip().lower() == "utf-8"
+        )
+        viewport_meta = (
+            len(names) == 2
+            and set(names) == {"name", "content"}
+            and (attr.get("name", "").strip().lower() == "viewport")
+        )
+        if tag == "meta" and not (charset_meta or viewport_meta):
+            self.issues.append(
+                _issue(
+                    "active_html",
+                    "Only UTF-8 charset and inert viewport metadata are allowed.",
+                )
             )
         if any(name.startswith("on") for name in attr):
-            self.issues.append(_issue("event_handler", f"<{tag}> contains an event handler."))
+            self.issues.append(
+                _issue("event_handler", f"<{tag}> contains an event handler.")
+            )
         if any(name in _INTERACTIVE_ATTRIBUTES for name in attr):
             self.issues.append(
-                _issue("interactive_html", f"<{tag}> contains an interactive attribute.")
+                _issue(
+                    "interactive_html", f"<{tag}> contains an interactive attribute."
+                )
             )
         hidden = "display:none" in attr.get("style", "").replace(" ", "").lower() or (
             "visibility:hidden" in attr.get("style", "").replace(" ", "").lower()
@@ -487,68 +420,110 @@ class _PosterParser(HTMLParser):
                         "data-poster-id must use 1-200 stable ASCII identifier characters.",
                     )
                 )
-        region = attr.get("data-poster-region", "").strip()
-        if (
+        module_id = attr.get("data-poster-module", "").strip()
+        is_poster_root = (
             tag in {"main", "article", "div"}
             and poster_id
-            and not region
+            and not module_id
             and self._stack
             and self._stack[-1][0] == "body"
-        ):
+        )
+        if is_poster_root:
             self.poster_roots += 1
-        if region:
-            self.regions[region] += 1
+            self._open_poster_root_depth = None if self_closing else len(self._stack)
+        if "data-poster-title-band" in attr:
+            self.title_bands += 1
+            if (
+                self._open_poster_root_depth is not None
+                and len(self._stack) > self._open_poster_root_depth
+                and not is_poster_root
+            ):
+                self.title_bands_inside_root += 1
+        raw_roles = attr.get("data-semantic-roles", "").strip()
+        priority = attr.get("data-module-priority", "").strip()
+        if module_id:
+            self.modules[module_id] += 1
+            self.module_order.append(module_id)
+            self.module_text.setdefault(module_id, [])
+            if POSTER_MODULE_RE.fullmatch(module_id) is None:
+                self.issues.append(
+                    _issue(
+                        "module_id",
+                        "data-poster-module must use a stable kebab-case identifier.",
+                    )
+                )
             if not poster_id:
                 self.issues.append(
-                    _issue("region_id", f"Region {region!r} needs a stable data-poster-id.")
+                    _issue(
+                        "module_id",
+                        f"Module {module_id!r} needs a stable data-poster-id.",
+                    )
                 )
+            roles = tuple(raw_roles.split())
+            audit_roles = tuple(
+                dict.fromkeys(role for role in roles if role in SEMANTIC_ROLES)
+            )
+            if audit_roles:
+                self.module_roles[module_id] = audit_roles
+                self.semantic_roles.update(audit_roles)
+            if priority in MODULE_PRIORITIES:
+                self.module_priorities[module_id] = priority
             source_label = attr.get("data-source-label", "").strip()
             if not source_label:
                 self.issues.append(
-                    _issue("source_label", f"Region {region!r} needs data-source-label.")
+                    _issue(
+                        "source_label",
+                        f"Module {module_id!r} needs data-source-label.",
+                    )
                 )
             elif _SOURCE_LOCATOR_RE.search(source_label) is None:
                 self.issues.append(
                     _issue(
                         "source_locator",
-                        f"Region {region!r} needs a page, section, figure, table, or bibliography locator.",
+                        f"Module {module_id!r} needs a page, section, equation, "
+                        "figure, table, bibliography, or grounded-brief locator.",
                     )
                 )
             else:
                 self.source_labels.append(source_label)
-        component_id = attr.get("data-component-id", "").strip()
-        component_version = attr.get("data-component-version", "").strip()
-        if bool(component_id) != bool(component_version):
-            self.issues.append(
-                _issue(
-                    "component_identity",
-                    "Optional data-component-id and data-component-version must appear together.",
-                )
-            )
-        elif component_id and (
-            COMPONENT_ID_RE.fullmatch(component_id) is None
-            or COMPONENT_VERSION_RE.fullmatch(component_version) is None
+        inherited_module = next(
+            (item[1] for item in reversed(self._stack) if item[1]), None
+        )
+        active_module = module_id or inherited_module
+        if (
+            active_module
+            and tag in {"img", "math"}
+            and not hidden
+            and not any(item[2] for item in self._stack)
         ):
-            self.issues.append(
-                _issue(
-                    "component_identity",
-                    "Component ids must use kebab-case and semantic versions.",
-                )
-            )
+            self.module_visible_media.add(active_module)
         for name, value in attr.items():
-            if name in _RESOURCE_ATTRIBUTES and not _safe_embedded_reference(value):
+            if (
+                name in _RESOURCE_ATTRIBUTES
+                and not poster_assets.safe_embedded_reference(value)
+            ):
                 self.issues.append(
-                    _issue("external_resource", f"<{tag}> {name} is not an inert embedded reference.")
+                    _issue(
+                        "external_resource",
+                        f"<{tag}> {name} is not an inert embedded reference.",
+                    )
                 )
-            if name in _SVG_PRESENTATION_ATTRIBUTES and not _safe_svg_css(value):
+            if name in _SVG_PRESENTATION_ATTRIBUTES and not poster_assets.safe_svg_css(
+                value
+            ):
                 self.issues.append(
-                    _issue("external_css", f"<{tag}> {name} contains an unsafe CSS reference.")
+                    _issue(
+                        "external_css",
+                        f"<{tag}> {name} contains an unsafe CSS reference.",
+                    )
                 )
         if tag == "img" and not attr.get("alt", "").strip():
-            self.issues.append(_issue("image_alt", "Every poster image needs meaningful alt text."))
+            self.issues.append(
+                _issue("image_alt", "Every poster image needs meaningful alt text.")
+            )
         if tag == "img" and attr.get("data-source-figure-sha256"):
             claimed_figure_sha256 = attr["data-source-figure-sha256"].strip()
-            actual_figure_sha256 = data_image_sha256(attr.get("src", ""))
+            actual_figure_sha256 = poster_assets.data_image_sha256(attr.get("src", ""))
             if (
                 re.fullmatch(r"[0-9a-f]{64}", claimed_figure_sha256) is None
                 or actual_figure_sha256 != claimed_figure_sha256
@@ -566,19 +541,23 @@ class _PosterParser(HTMLParser):
         if tag == "style":
             self._style_depth += 1
         if not self_closing:
-            inherited = next((item[1] for item in reversed(self._stack) if item[1]), None)
-            self._stack.append((tag, region or inherited, hidden))
+            self._stack.append((tag, module_id or inherited_module, hidden))
 
     def handle_endtag(self, tag: str) -> None:
         lowered = tag.lower()
         if not self._stack:
-            self.issues.append(_issue("malformed_html", f"Unexpected closing tag </{tag}>."))
+            self.issues.append(
+                _issue("malformed_html", f"Unexpected closing tag </{tag}>.")
+            )
             return
+        closing_depth = len(self._stack) - 1
         open_tag, _, _ = self._stack.pop()
         if open_tag != lowered:
             self.issues.append(
                 _issue("malformed_html", f"Expected </{open_tag}> before </{lowered}>.")
             )
+        if closing_depth == self._open_poster_root_depth:
+            self._open_poster_root_depth = None
         if lowered == "style" and self._style_depth:
             self._style_depth -= 1
 
@@ -591,18 +570,26 @@ class _PosterParser(HTMLParser):
         if not text or any(hidden for _, _, hidden in self._stack):
             return
         self.visible_text.append(text)
-        region = next((item[1] for item in reversed(self._stack) if item[1]), None)
-        if region in self.region_text:
-            self.region_text[region].append(text)
+        module_id = next((item[1] for item in reversed(self._stack) if item[1]), None)
+        if module_id in self.module_text:
+            self.module_text[module_id].append(text)
 
     def _check_css(self, css: str) -> None:
-        issues = offline_css_issues(css, safe_reference=_safe_embedded_reference)
+        issues = offline_css_issues(
+            css,
+            safe_reference=poster_assets.safe_embedded_reference,
+        )
         if "unsafe_syntax" in issues:
             self.issues.append(
                 _issue("unsafe_css", "CSS escapes and ambiguous syntax are forbidden.")
             )
         if "active_construct" in issues:
-            self.issues.append(_issue("active_css", "CSS imports, animation, and transitions are forbidden."))
+            self.issues.append(
+                _issue(
+                    "active_css",
+                    "CSS imports, animation, and transitions are forbidden.",
+                )
+            )
         if "unsafe_reference" in issues:
             self.issues.append(
                 _issue(
@@ -610,9 +597,35 @@ class _PosterParser(HTMLParser):
                     "CSS references must use supported inert embedded images.",
                 )
             )
+        if _MATH_LAYOUT_OVERRIDE_RE.search(css):
+            self.issues.append(
+                _issue(
+                    "math_layout_override",
+                    "Do not set MathML to ordinary block, flex, or grid display; use "
+                    'the native <math display="block"> layout so fractions and '
+                    "scripts remain typeset.",
+                )
+            )
 
 
-def validate_poster_html(html_text: str, *, source_text: str = "") -> dict[str, Any]:
+def parse_poster_html(html_text: str) -> ParsedPosterHtml:
+    """Parse static-validation facts once for reuse by related hard gates."""
+
+    parser = ParsedPosterHtml()
+    try:
+        parser.feed(html_text)
+        parser.close()
+    except Exception as exc:  # noqa: BLE001 - represented as a contract issue
+        parser.parse_error = str(exc)
+    return parser
+
+
+def validate_poster_html(
+    html_text: str,
+    *,
+    source_text: str = "",
+    facts: ParsedPosterHtml | None = None,
+) -> dict[str, Any]:
     """Validate one complete, offline, semantically selectable poster document."""
 
     issues: list[dict[str, str]] = []
@@ -620,98 +633,247 @@ def validate_poster_html(html_text: str, *, source_text: str = "") -> dict[str, 
     if len(raw) > MAX_HTML_BYTES:
         issues.append(_issue("document_size", "Poster HTML exceeds the byte limit."))
     if not html_text.lower().startswith("<!doctype html>"):
-        issues.append(_issue("doctype", "Poster must begin exactly with <!doctype html>."))
+        issues.append(
+            _issue("doctype", "Poster must begin exactly with <!doctype html>.")
+        )
     if "asset://" in html_text:
-        issues.append(_issue("asset_token", "Poster contains an unresolved asset token."))
-    parser = _PosterParser()
-    try:
-        parser.feed(html_text)
-        parser.close()
-    except Exception as exc:  # noqa: BLE001 - parser errors become contract issues
-        issues.append(_issue("malformed_html", f"HTML parser failed: {exc}"))
-    if parser._stack:
-        unclosed = ", ".join(tag for tag, _, _ in parser._stack[-5:])
-        issues.append(_issue("malformed_html", f"Poster has unclosed element(s): {unclosed}."))
-    issues.extend(parser.issues)
-    if parser.doctypes != ["doctype html"]:
+        issues.append(
+            _issue("asset_token", "Poster contains an unresolved asset token.")
+        )
+    if _UNESCAPED_MATH_LESS_THAN_RE.search(html_text):
+        issues.append(
+            _issue(
+                "malformed_mathml_operator",
+                "Escape a MathML less-than operator as &lt;; a literal < inside a "
+                "math token corrupts the equation structure.",
+            )
+        )
+    parsed = facts or parse_poster_html(html_text)
+    if parsed.parse_error:
+        issues.append(
+            _issue("malformed_html", f"HTML parser failed: {parsed.parse_error}")
+        )
+    if parsed._stack:
+        unclosed = ", ".join(tag for tag, _, _ in parsed._stack[-5:])
+        issues.append(
+            _issue("malformed_html", f"Poster has unclosed element(s): {unclosed}.")
+        )
+    issues.extend(parsed.issues)
+    if parsed.doctypes != ["doctype html"]:
         issues.append(_issue("doctype", "Poster needs exactly one HTML5 doctype."))
-    if parser.html_count != 1 or parser.body_count != 1:
-        issues.append(_issue("document_root", "Poster needs exactly one html and one body element."))
-    if parser.poster_roots != 1:
+    if parsed.html_count != 1 or parsed.body_count != 1:
+        issues.append(
+            _issue(
+                "document_root", "Poster needs exactly one html and one body element."
+            )
+        )
+    if parsed.poster_roots != 1:
         issues.append(
             _issue(
                 "poster_root",
                 "Poster needs exactly one body-level main, article, or div with "
-                f"data-poster-id; found {parser.poster_roots}.",
+                f"data-poster-id; found {parsed.poster_roots}.",
             )
         )
-    duplicates = sorted(name for name, count in Counter(parser.poster_ids).items() if count > 1)
+    if parsed.title_bands != 1 or parsed.title_bands_inside_root != 1:
+        issues.append(
+            _issue(
+                "title_band_structure",
+                "Poster needs exactly one data-poster-title-band nested inside the "
+                "body-level poster root.",
+            )
+        )
+    duplicates = sorted(
+        name for name, count in Counter(parsed.poster_ids).items() if count > 1
+    )
     if duplicates:
-        issues.append(_issue("duplicate_poster_id", "Duplicate data-poster-id: " + ", ".join(duplicates)))
-    for region in _REQUIRED_REGIONS:
-        if parser.regions[region] != 1:
+        issues.append(
+            _issue(
+                "duplicate_poster_id",
+                "Duplicate data-poster-id: " + ", ".join(duplicates),
+            )
+        )
+    duplicate_modules = sorted(
+        name for name, count in parsed.modules.items() if count > 1
+    )
+    if duplicate_modules:
+        issues.append(
+            _issue(
+                "duplicate_module",
+                "Duplicate data-poster-module: " + ", ".join(duplicate_modules),
+            )
+        )
+    for module_id in sorted(parsed.modules):
+        if (
+            not " ".join(parsed.module_text.get(module_id, ())).strip()
+            and module_id not in parsed.module_visible_media
+        ):
             issues.append(
                 _issue(
-                    "semantic_region",
-                    f"Poster needs exactly one visible {region!r} region; "
-                    f"found {parser.regions[region]}.",
+                    "empty_module", f"Poster module {module_id!r} has no visible text."
                 )
             )
-        elif not " ".join(parser.region_text[region]).strip():
-            issues.append(_issue("empty_region", f"Poster region {region!r} has no visible text."))
-    unknown_regions = sorted(set(parser.regions) - set(_REQUIRED_REGIONS))
-    if unknown_regions:
-        issues.append(
-            _issue("semantic_region", "Unknown data-poster-region: " + ", ".join(unknown_regions))
-        )
-    css = "\n".join(parser.styles)
+        if "provenance" not in parsed.module_roles.get(module_id, ()) and any(
+            re.match(r"^\s*source\s*[:：]", item, re.IGNORECASE)
+            for item in parsed.module_text.get(module_id, ())
+        ):
+            issues.append(
+                _issue(
+                    "visible_source_locator",
+                    f"Module {module_id!r} prints a paper locator as poster copy. Keep "
+                    "source labels in metadata and explain what the evidence shows; "
+                    "render locators only in the provenance/references module.",
+                )
+            )
+    css = "\n".join(parsed.styles)
     page_match = _PAGE_SIZE_RE.search(css)
     page: dict[str, float] | None = None
     if page_match is None:
-        issues.append(_issue("physical_page", "Inline CSS must declare @page size in millimetres."))
+        issues.append(
+            _issue(
+                "physical_page", "Inline CSS must declare @page size in millimetres."
+            )
+        )
     else:
         width = float(page_match.group(1))
         height = float(page_match.group(2))
         if not (200 <= width <= 2000 and 200 <= height <= 2000):
-            issues.append(_issue("physical_page", "Poster page dimensions are outside safe bounds."))
-        else:
-            page = {"width_mm": width, "height_mm": height}
-    visible = " ".join(parser.visible_text)
-    if _PLACEHOLDER_RE.search(visible):
-        issues.append(_issue("placeholder_copy", "Poster contains placeholder copy."))
-    if source_text:
-        issues.extend(_source_locator_issues(parser.source_labels, source_text))
-        source_numbers = {_number_key(value) for value in _SOURCE_NUMBER_RE.findall(source_text)}
-        poster_numbers = {_number_key(value) for value in _NUMBER_RE.findall(visible)}
-        ungrounded = sorted(poster_numbers - source_numbers)
-        if ungrounded:
-            issues.append(
-                _issue("ungrounded_number", "Visible numbers absent from source: " + ", ".join(ungrounded))
-            )
-        visible_lower = visible.lower()
-        source_lower = source_text.lower()
-        unsupported_rights = [
-            phrase
-            for phrase in ("reproduced with permission", "all rights reserved")
-            if phrase in visible_lower and phrase not in source_lower
-        ]
-        if "©" in visible and "©" not in source_text:
-            unsupported_rights.append("copyright symbol")
-        if unsupported_rights:
             issues.append(
                 _issue(
-                    "ungrounded_rights_claim",
-                    "Rights or permission language is absent from the source: "
-                    + ", ".join(unsupported_rights),
+                    "physical_page", "Poster page dimensions are outside safe bounds."
                 )
             )
+        else:
+            page = {"width_mm": width, "height_mm": height}
+    visible = " ".join(parsed.visible_text)
+    if _PLACEHOLDER_RE.search(visible):
+        issues.append(_issue("placeholder_copy", "Poster contains placeholder copy."))
+    unsupported_rights = _unsupported_rights_claims(visible, source_text)
+    if unsupported_rights:
+        issues.append(
+            _issue(
+                "ungrounded_rights_claim",
+                "Rights or permission language is not supported by the source: "
+                + ", ".join(unsupported_rights),
+            )
+        )
+    if source_text:
+        issues.extend(_source_locator_issues(parsed.source_labels, source_text))
     return {
         "status": "error" if issues else "ok",
         "issues": issues,
         "page": page,
-        "poster_ids": sorted(parser.poster_ids),
-        "regions": {name: parser.regions[name] for name in _REQUIRED_REGIONS},
+        "poster_ids": sorted(parsed.poster_ids),
+        "modules": {
+            name: {
+                "count": parsed.modules[name],
+                "semantic_roles": list(parsed.module_roles.get(name, ())),
+                "priority": parsed.module_priorities.get(name),
+            }
+            for name in sorted(parsed.modules)
+        },
+        "module_order": parsed.module_order,
+        "semantic_roles": sorted(parsed.semantic_roles),
     }
+
+
+def validate_grounded_fragments(
+    fragments: Sequence[Mapping[str, Any]],
+    *,
+    source_text: str = "",
+) -> dict[str, Any]:
+    """Validate fragment locators and reject unsupported legal assertions."""
+
+    issues: list[dict[str, Any]] = []
+    source_labels: list[str] = []
+    fragment_text: list[str] = []
+    for index, fragment in enumerate(fragments):
+        source_label = str(fragment.get("source_label") or "").strip()
+        if not source_label or _SOURCE_LOCATOR_RE.search(source_label) is None:
+            shown_label = source_label or "<missing>"
+            issues.append(
+                _issue(
+                    "source_locator",
+                    f"Grounded fragment {index + 1} has source_label "
+                    f"{shown_label!r}; use a page, section, equation, figure, "
+                    "table, bibliography, or grounded-brief locator.",
+                )
+            )
+        else:
+            source_labels.append(source_label)
+        fragment_text.append(str(fragment.get("text") or ""))
+        detail_points = fragment.get("detail_points")
+        if isinstance(detail_points, Sequence) and not isinstance(
+            detail_points, (str, bytes)
+        ):
+            fragment_text.extend(str(item) for item in detail_points)
+    unsupported_rights = _unsupported_rights_claims(
+        " ".join(fragment_text),
+        source_text,
+    )
+    if unsupported_rights:
+        issues.append(
+            _issue(
+                "ungrounded_rights_claim",
+                "Rights or permission language is not supported by the source: "
+                + ", ".join(unsupported_rights),
+            )
+        )
+    if source_text:
+        issues.extend(_source_locator_issues(source_labels, source_text))
+    return {"status": "error" if issues else "ok", "issues": issues}
+
+
+def _unsupported_rights_claims(
+    candidate_text: str,
+    source_text: str,
+) -> list[str]:
+    """Return legal assertions that are not present verbatim in the source."""
+
+    candidate = " ".join(candidate_text.split())
+    source = " ".join(source_text.split()).casefold()
+    unsupported: list[str] = []
+    for pattern in _RIGHTS_CLAIM_PATTERNS:
+        for match in pattern.finditer(candidate):
+            phrase = " ".join(match.group(0).split())
+            if phrase.casefold() not in source and phrase not in unsupported:
+                unsupported.append(phrase)
+    return unsupported
+
+
+def remove_unsupported_rights_claims(
+    candidate_text: str,
+    source_text: str,
+) -> str:
+    """Remove generated legal boilerplate while preserving source-supported wording."""
+
+    source = " ".join(source_text.split()).casefold()
+    has_unaffected_sentence = any(
+        segment.strip() and not _unsupported_rights_claims(segment, source_text)
+        for segment in re.split(r"(?<=[.!?])\s+", candidate_text)
+    )
+    removed = False
+    cleaned = candidate_text
+    for pattern in _RIGHTS_CLAIM_PATTERNS:
+
+        def replace(match: re.Match[str]) -> str:
+            nonlocal removed
+            phrase = " ".join(match.group(0).split())
+            if phrase.casefold() in source:
+                return match.group(0)
+            removed = True
+            return ""
+
+        cleaned = pattern.sub(replace, cleaned)
+    if not removed:
+        return candidate_text
+    cleaned = re.sub(r"\s+([,.;:!?])", r"\1", cleaned)
+    cleaned = re.sub(r"[,;:]\s*([.!?])", r"\1", cleaned)
+    cleaned = re.sub(r"([.!?])(?:\s*[.!?])+", r"\1", cleaned)
+    cleaned = " ".join(cleaned.split()).strip(" ,;:-")
+    if len(re.findall(r"\b[\w'-]+\b", cleaned)) <= 4 and not has_unaffected_sentence:
+        return ""
+    return cleaned
 
 
 def _source_locator_issues(
@@ -728,64 +890,95 @@ def _source_locator_issues(
             if pages and int(value) not in pages:
                 invalid.add(f"p.{value}")
         for value in _LABEL_FIGURE_RE.findall(label):
-            if re.search(rf"\b(?:figure|fig\.?)\s*{re.escape(value)}\b", source_text, re.IGNORECASE) is None:
+            if (
+                re.search(
+                    rf"\b(?:figure|fig\.?)\s*{re.escape(value)}\b",
+                    source_text,
+                    re.IGNORECASE,
+                )
+                is None
+            ):
                 invalid.add(f"Figure {value}")
         for value in _LABEL_TABLE_RE.findall(label):
-            if re.search(rf"\btable\s*{re.escape(value)}\b", source_text, re.IGNORECASE) is None:
+            if (
+                re.search(
+                    rf"\btable\s*{re.escape(value)}\b", source_text, re.IGNORECASE
+                )
+                is None
+            ):
                 invalid.add(f"Table {value}")
-        for value in _LABEL_SECTION_RE.findall(label):
-            heading = re.compile(
-                rf"(?m)^\s*{re.escape(value)}(?:\s|\.)",
+        for value in _LABEL_EQUATION_RE.findall(label):
+            escaped = re.escape(value)
+            explicit_equation = re.search(
+                rf"\b(?:equation|eq\.?)\s*\(?{escaped}\)?(?![\d.])",
+                source_text,
                 re.IGNORECASE,
             )
-            if pages and heading.search(source_text) is None:
+            numbered_display = re.search(
+                rf"(?<![\d.])\(\s*{escaped}\s*\)(?![\d.])",
+                source_text,
+            )
+            if explicit_equation is None and numbered_display is None:
+                invalid.add(f"Equation {value}")
+        for value in _LABEL_SECTION_RE.findall(label):
+            escaped = re.escape(value)
+            heading = re.compile(
+                rf"(?m)(?:^|[ \t]{{2,}}){escaped}(?:\.\s+|[ \t]+)",
+                re.IGNORECASE,
+            )
+            explicit = re.compile(
+                rf"(?:\b(?:section|sec\.?)\s*|§\s*){escaped}(?![\d.])",
+                re.IGNORECASE,
+            )
+            if (
+                pages
+                and heading.search(source_text) is None
+                and explicit.search(source_text) is None
+            ):
                 invalid.add(f"§{value}")
         if "abstract" in label.lower() and pages and "abstract" not in source_lower:
             invalid.add("Abstract")
         if "references" in label.lower() and pages and "references" not in source_lower:
             invalid.add("References")
+        if (
+            "bibliography" in label.lower()
+            and pages
+            and "bibliography" not in source_lower
+            and "references" not in source_lower
+        ):
+            invalid.add("Bibliography")
     if not invalid:
         return []
     return [
         _issue(
             "source_locator_mismatch",
-            "Source locator(s) are absent from the supplied paper: " + ", ".join(sorted(invalid)),
+            "Source locator(s) are absent from the supplied paper: "
+            + ", ".join(sorted(invalid)),
         )
     ]
 
 
-def poster_content_fingerprint(html_text: str) -> tuple[tuple[str, ...], ...]:
-    """Freeze scientific copy and semantic identities across CSS-only repair calls."""
+def prune_invalid_source_locator_parts(source_label: str, source_text: str) -> str:
+    """Drop invalid semicolon-delimited locators when another locator remains valid."""
 
-    parser = _PosterParser()
-    parser.feed(html_text)
-    parser.close()
-    asset_tokens = tuple(re.findall(r"asset://[0-9]+", html_text))
-    return (
-        tuple(parser.visible_text),
-        tuple("\x1f".join(values) for values in parser.integrity_attributes),
-        asset_tokens,
-    )
-
-
-def data_image_sha256(value: str) -> str | None:
-    """Hash one bounded embedded image URI, or return ``None`` when invalid."""
-
-    match = _DATA_IMAGE_RE.fullmatch(value.strip())
-    if match is None:
-        return None
-    try:
-        content = base64.b64decode(match.group(1), validate=True)
-    except (ValueError, TypeError):
-        return None
-    if len(content) > MAX_EMBEDDED_ASSET_BYTES or _detect_image_mime(content) is None:
-        return None
-    return hashlib.sha256(content).hexdigest()
+    original = str(source_label).strip()
+    parts = [part.strip() for part in original.split(";") if part.strip()]
+    if len(parts) < 2:
+        return original
+    valid = [
+        part
+        for part in parts
+        if _SOURCE_LOCATOR_RE.search(part) is not None
+        and not _source_locator_issues([part], source_text)
+    ]
+    return "; ".join(valid) if valid else original
 
 
 def source_figure_usage_issues(
     html_text: str,
     expected_sha256s: set[str] | tuple[str, ...] | list[str],
+    *,
+    facts: ParsedPosterHtml | None = None,
 ) -> list[dict[str, str]]:
     """Require one statically visible, byte-matched figure from a prepared PDF."""
 
@@ -793,14 +986,15 @@ def source_figure_usage_issues(
     if not expected:
         return []
     if any(re.fullmatch(r"[0-9a-f]{64}", value) is None for value in expected):
-        return [_issue("source_figure_identity", "Expected source-figure hashes are invalid.")]
-    parser = _PosterParser()
-    try:
-        parser.feed(html_text)
-        parser.close()
-    except Exception as exc:  # noqa: BLE001 - caller merges parser failure into issues
-        return [_issue("malformed_html", f"HTML parser failed: {exc}")]
-    if expected.isdisjoint(parser.visible_source_figure_sha256s):
+        return [
+            _issue(
+                "source_figure_identity", "Expected source-figure hashes are invalid."
+            )
+        ]
+    parsed = facts or parse_poster_html(html_text)
+    if parsed.parse_error:
+        return [_issue("malformed_html", f"HTML parser failed: {parsed.parse_error}")]
+    if expected.isdisjoint(parsed.visible_source_figure_sha256s):
         return [
             _issue(
                 "missing_source_figure",
@@ -811,11 +1005,11 @@ def source_figure_usage_issues(
 
 
 class _PosterIdentityParser(HTMLParser):
-    """Index stable ids with inherited semantic and component identity."""
+    """Index stable ids with inherited module identity."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.stack: list[tuple[str, str, tuple[str, str] | None]] = []
+        self.stack: list[tuple[str, str, str, str]] = []
         self.elements: dict[str, dict[str, str]] = {}
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -832,26 +1026,28 @@ class _PosterIdentityParser(HTMLParser):
         self_closing: bool,
     ) -> None:
         attributes = {name.lower(): str(value or "") for name, value in attrs}
-        inherited_region = self.stack[-1][1] if self.stack else ""
-        inherited_component = self.stack[-1][2] if self.stack else None
-        region = attributes.get("data-poster-region", "").strip() or inherited_region
-        component_id = attributes.get("data-component-id", "").strip()
-        component_version = attributes.get("data-component-version", "").strip()
-        component = (
-            (component_id, component_version)
-            if component_id and component_version
-            else inherited_component
+        inherited_module = self.stack[-1][1] if self.stack else ""
+        inherited_roles = self.stack[-1][2] if self.stack else ""
+        inherited_priority = self.stack[-1][3] if self.stack else ""
+        module_id = attributes.get("data-poster-module", "").strip() or inherited_module
+        semantic_roles = (
+            attributes.get("data-semantic-roles", "").strip() or inherited_roles
+        )
+        priority = (
+            attributes.get("data-module-priority", "").strip() or inherited_priority
         )
         poster_id = attributes.get("data-poster-id", "").strip()
         if poster_id:
             if poster_id in self.elements:
                 raise ValueError(f"poster_id is not unique in source HTML: {poster_id}")
-            identity = {"semantic_region": region}
-            if component is not None:
-                identity["component_id"], identity["component_version"] = component
+            identity = {
+                "poster_module": module_id,
+                "semantic_roles": semantic_roles,
+                "module_priority": priority,
+            }
             self.elements[poster_id] = identity
         if not self_closing:
-            self.stack.append((tag, region, component))
+            self.stack.append((tag, module_id, semantic_roles, priority))
 
     def handle_endtag(self, tag: str) -> None:
         del tag
@@ -868,83 +1064,7 @@ def poster_identity_map(html_text: str) -> dict[str, dict[str, str]]:
     return parser.elements
 
 
-def _asset_source_and_description(value: Any) -> tuple[str, str]:
-    if isinstance(value, dict):
-        source = next(
-            (value.get(key) for key in ("uri", "path", "source", "file") if value.get(key)),
-            "",
-        )
-        return str(source).strip(), str(value.get("description") or value.get("alt") or "").strip()
-    return str(value or "").strip(), ""
-
-
-def _detect_image_mime(content: bytes) -> str | None:
-    if content.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if content.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if content.startswith((b"GIF87a", b"GIF89a")):
-        return "image/gif"
-    if len(content) >= 12 and content.startswith(b"RIFF") and content[8:12] == b"WEBP":
-        return "image/webp"
-    try:
-        root = ElementTree.fromstring(content.decode("utf-8-sig"))
-    except (ElementTree.ParseError, UnicodeDecodeError):
-        return None
-    return "image/svg+xml" if root.tag.rsplit("}", 1)[-1].lower() == "svg" else None
-
-
-def _svg_is_safe(content: bytes) -> bool:
-    try:
-        text = content.decode("utf-8-sig")
-        root = ElementTree.fromstring(text)
-    except (ElementTree.ParseError, UnicodeDecodeError):
-        return False
-    if "<!doctype" in text.lower() or "<?xml-stylesheet" in text.lower():
-        return False
-    for element in root.iter():
-        tag = element.tag.rsplit("}", 1)[-1].lower()
-        if tag in _ACTIVE_TAGS:
-            return False
-        for raw_name, raw_value in element.attrib.items():
-            name = raw_name.rsplit("}", 1)[-1].lower()
-            value = str(raw_value or "").strip()
-            if name.startswith("on") or not _safe_svg_css(value):
-                return False
-            if name in {"href", "src"} and not _safe_embedded_reference(value):
-                return False
-        if tag == "style" and not _safe_svg_css(element.text or ""):
-            return False
-    return True
-
-
-def _safe_svg_css(css: str) -> bool:
-    return not offline_css_issues(css, safe_reference=_safe_embedded_reference)
-
-
-def _safe_embedded_reference(value: str) -> bool:
-    candidate = value.strip()
-    if not candidate or candidate.startswith("#"):
-        return True
-    if _REMOTE_RE.search(candidate):
-        return False
-    match = _DATA_IMAGE_RE.fullmatch(candidate)
-    if match is None:
-        return False
-    try:
-        decoded = base64.b64decode(match.group(1), validate=True)
-    except ValueError:
-        return False
-    if len(decoded) > MAX_EMBEDDED_ASSET_BYTES:
-        return False
-    if candidate.lower().startswith("data:image/svg+xml"):
-        return _svg_is_safe(decoded)
-    return _detect_image_mime(decoded) is not None
-
-
-def _number_key(value: str) -> str:
-    return value.replace(",", "").lower()
-
-
-def _issue(code: str, message: str) -> dict[str, str]:
-    return {"code": code, "message": message, "severity": "error"}
+def _issue(code: str, message: str, **details: Any) -> dict[str, Any]:
+    issue: dict[str, Any] = {"code": code, "message": message, "severity": "error"}
+    issue.update(details)
+    return issue

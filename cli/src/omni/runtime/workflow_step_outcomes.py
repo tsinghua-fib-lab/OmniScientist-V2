@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
-from omni.runtime.deliverable_assessment import (
-    bind_deliverable_assessment_identity,
-)
 from omni.runtime.task_results import (
     _result_error_message,
     _result_warning_message,
@@ -15,6 +13,8 @@ from omni.runtime.workflow_plan import _step_failure_recoverable
 from omni.runtime.workflow_state import workflow_step_record
 from omni.skills_runtime.context import ExecContext
 from omni.skills_runtime.registry import resolve_step_entry
+
+logger = logging.getLogger(__name__)
 
 
 async def classify_workflow_outcome(
@@ -33,7 +33,6 @@ async def classify_workflow_outcome(
     result = outcome.get("result")
     if not isinstance(result, dict):
         result = {"result": result}
-    bind_deliverable_assessment_identity(result, step)
     execution_id = str(outcome.get("execution_id") or "")
     child_task_id = str(outcome.get("child_task_id") or "")
     attempt = int(outcome.get("attempt") or 0)
@@ -163,4 +162,39 @@ async def execute_child_task(
     }
 
 
-__all__ = ["classify_workflow_outcome", "execute_child_task"]
+def annotate_identifier_title_check(
+    step: dict[str, Any],
+    goal: str,
+    outcome: dict[str, Any],
+) -> None:
+    """Attach a non-blocking advisory if a fetched id's title mismatches the request.
+
+    Layer 2 verify-by-fetch guard: planning trusts a well-formed identifier and the
+    provider proves it by fetching; here we compare the fetched title against the
+    requested entity and *surface* a gross mismatch. It never changes the step
+    verdict — a valid-but-wrong id is flagged (in the result and downstream
+    synthesis), never silently swapped, and a paraphrased request never fails.
+    """
+    try:
+        if not isinstance(outcome, dict):
+            return
+        result = outcome.get("result")
+        if not isinstance(result, dict):
+            return
+        from omni.agent.input_resolution import fetched_identifier_title_warning
+
+        warning = fetched_identifier_title_warning(step, goal, result)
+        if not warning:
+            return
+        result["identifier_title_check"] = {"match": False, "warning": warning}
+        existing = str(result.get("warning") or "").strip()
+        result["warning"] = f"{existing}; {warning}" if existing else warning
+    except Exception:  # noqa: BLE001 — an advisory must never break execution
+        logger.debug("identifier title check failed", exc_info=True)
+
+
+__all__ = [
+    "annotate_identifier_title_check",
+    "classify_workflow_outcome",
+    "execute_child_task",
+]

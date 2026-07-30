@@ -37,6 +37,21 @@ def _assert_serialized_within_budget(event_output: dict) -> None:
     assert len(encoded.encode("utf-8")) <= 7_000
 
 
+async def test_spawn_user_shell_runs_through_the_posix_executable(monkeypatch):
+    captured: dict[str, tuple[str, ...]] = {}
+
+    async def fake_exec(*argv: str, **_kwargs: object):
+        captured["argv"] = argv
+        return AsyncMock()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(shell, "posix_shell_executable", lambda: "/bin/sh")
+
+    await shell.spawn_user_shell("echo hi", prefix=(), spawn={})
+
+    assert captured["argv"] == ("/bin/sh", "-c", "echo hi")
+
+
 async def test_bash_success_preserves_observation_and_emits_command_result(tmp_path):
     bash = _bash_handler(tmp_path)
 
@@ -77,8 +92,50 @@ async def test_bash_nonzero_exit_is_a_structured_command_failure(tmp_path):
         "exit_code": 7,
         "output": "failed",
         "output_truncated": False,
-        "summary": "Command exited with code 7",
+        "summary": "Command exited with code 7: failed",
     }
+
+
+async def test_bash_nonzero_exit_summary_keeps_the_process_error(tmp_path):
+    bash = _bash_handler(tmp_path)
+
+    result = await bash(
+        {
+            "command": python_shell_command(
+                "import os, sys; "
+                "os.write(2, '致命错误：不是 Git 仓库（或者任何父目录）：.git\\n'.encode()); "
+                "raise SystemExit(128)"
+            )
+        }
+    )
+
+    assert result.event_output["exit_code"] == 128
+    assert result.event_output["stderr"] == "致命错误：不是 Git 仓库（或者任何父目录）：.git\n"
+    assert result.event_output["summary"] == (
+        "Command exited with code 128: 致命错误：不是 Git 仓库（或者任何父目录）：.git"
+    )
+
+
+async def test_bash_nonzero_exit_prefers_stderr_over_progress(tmp_path):
+    bash = _bash_handler(tmp_path)
+
+    result = await bash(
+        {
+            "command": python_shell_command(
+                "import os, sys; "
+                "os.write(1, b'[ 36%]\\n'); "
+                "os.write(2, b'./nope: Permission denied\\n'); "
+                "raise SystemExit(126)"
+            )
+        }
+    )
+
+    assert result.event_output["exit_code"] == 126
+    assert result.event_output["stderr"] == "./nope: Permission denied\n"
+    assert result.event_output["output"] == "[ 36%]\n./nope: Permission denied\n"
+    assert result.event_output["summary"] == (
+        "Command exited with code 126: ./nope: Permission denied"
+    )
 
 
 async def test_bash_combines_stdout_and_stderr_in_observation_and_event_output(tmp_path):
@@ -95,6 +152,7 @@ async def test_bash_combines_stdout_and_stderr_in_observation_and_event_output(t
 
     assert result.observation == "[exit=3]\nstdoutstderr"
     assert result.event_output["output"] == "stdoutstderr"
+    assert result.event_output["stderr"] == "stderr"
     assert result.event_output["exit_code"] == 3
     assert result.event_output["command_status"] == "failed"
 
@@ -149,7 +207,7 @@ async def test_bash_unavailable_sandbox_is_structured(tmp_path, monkeypatch):
     def unavailable(*_args, **_kwargs):
         raise SandboxUnavailableError("missing")
 
-    monkeypatch.setattr(shell, "sandbox_prefix", unavailable)
+    monkeypatch.setattr("omni.skills_runtime.exec_io.confined_exec_prefix", unavailable)
     bash = _bash_handler(tmp_path)
 
     result = await bash({"command": "printf never-runs"})
@@ -181,7 +239,7 @@ async def test_bash_spawn_oserror_still_propagates(tmp_path, monkeypatch):
     async def raise_oserror(*_args, **_kwargs):
         raise OSError("spawn failed")
 
-    monkeypatch.setattr(asyncio, "create_subprocess_shell", raise_oserror)
+    monkeypatch.setattr(shell, "spawn_user_shell", raise_oserror)
     bash = _bash_handler(tmp_path, mode="full")
 
     with pytest.raises(OSError, match="spawn failed"):
@@ -198,7 +256,7 @@ async def test_bash_cancellation_stops_process_and_propagates(tmp_path, monkeypa
         awaitable.close()
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(asyncio, "create_subprocess_shell", AsyncMock(return_value=proc))
+    monkeypatch.setattr(shell, "spawn_user_shell", AsyncMock(return_value=proc))
     monkeypatch.setattr(asyncio, "wait_for", cancel_wait_for)
     monkeypatch.setattr(shell, "stop_process_tree", stop)
     bash = _bash_handler(tmp_path, mode="full")
@@ -225,7 +283,7 @@ async def test_bash_event_output_budget_handles_json_escaping_and_unicode(
     proc = AsyncMock()
     proc.communicate = AsyncMock(return_value=(raw_output, None))
     proc.returncode = 0
-    monkeypatch.setattr(asyncio, "create_subprocess_shell", AsyncMock(return_value=proc))
+    monkeypatch.setattr(shell, "spawn_user_shell", AsyncMock(return_value=proc))
     bash = _bash_handler(tmp_path, mode="full")
 
     result = await bash({"command": "printf synthetic"})
@@ -245,11 +303,32 @@ async def test_bash_observation_keeps_existing_hundred_thousand_character_cap(
     proc = AsyncMock()
     proc.communicate = AsyncMock(return_value=(raw_output, None))
     proc.returncode = 0
-    monkeypatch.setattr(asyncio, "create_subprocess_shell", AsyncMock(return_value=proc))
+    monkeypatch.setattr(shell, "spawn_user_shell", AsyncMock(return_value=proc))
     bash = _bash_handler(tmp_path, mode="full")
 
     result = await bash({"command": "printf synthetic"})
 
     assert result.observation == f"[exit=0]\n{'x' * 100_000}"
     assert result.event_output["output_truncated"] is True
+    _assert_serialized_within_budget(result.event_output)
+
+
+async def test_bash_failed_event_output_keeps_the_tail(tmp_path, monkeypatch):
+    stdout = ("[  1%]\n" * 4_000).encode()
+    stderr = b"./nope: Permission denied\n"
+    proc = AsyncMock()
+    proc.communicate = AsyncMock(return_value=(stdout, stderr))
+    proc.returncode = 126
+    monkeypatch.setattr(shell, "spawn_user_shell", AsyncMock(return_value=proc))
+    bash = _bash_handler(tmp_path, mode="full")
+
+    result = await bash({"command": "printf synthetic"})
+
+    assert result.event_output["command_status"] == "failed"
+    assert result.event_output["exit_code"] == 126
+    assert result.event_output["output_truncated"] is True
+    assert result.event_output["summary"] == (
+        "Command exited with code 126: ./nope: Permission denied"
+    )
+    assert "Permission denied" in str(result.event_output.get("stderr") or "")
     _assert_serialized_within_budget(result.event_output)

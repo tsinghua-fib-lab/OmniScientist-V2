@@ -70,6 +70,9 @@ def _row_values(
         "external_key": task.external_key or "",
         "session_id": task.session_id or "",
         "parent_task_id": task.parent_task_id or "",
+        "retry_of_task_id": getattr(task, "retry_of_task_id", "") or "",
+        "root_task_id": getattr(task, "root_task_id", "") or "",
+        "attempt": int(getattr(task, "attempt", 1) or 1),
         "schedule_id": task.schedule_id or "",
         "kind": task.kind or "turn",
         "status": task.status or "",
@@ -165,13 +168,20 @@ class TaskIndex:
             logger.debug("task index: batch record failed", exc_info=True)
 
     async def remove(self, task_ids: list[str]) -> None:
-        ids = [str(t) for t in task_ids if t]
+        ids = list(dict.fromkeys(str(t) for t in task_ids if t))
         if not ids:
             return
         try:
             store = await self._store()
             async with store.session() as s:
-                await s.execute(delete(TaskIndexORM).where(TaskIndexORM.task_id.in_(ids)))
+                # Some supported SQLite builds retain the historical 999 bind
+                # variable limit. A large delegated Task tree must still lose
+                # every control-index row when its workspace closure is deleted.
+                for offset in range(0, len(ids), 500):
+                    batch = ids[offset : offset + 500]
+                    await s.execute(
+                        delete(TaskIndexORM).where(TaskIndexORM.task_id.in_(batch))
+                    )
                 await s.commit()
         except Exception:  # noqa: BLE001
             logger.debug("task index: remove failed", exc_info=True)

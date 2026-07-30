@@ -89,6 +89,82 @@ async def test_status_transition_and_delete_keep_index_in_sync():
 
 
 @pytest.mark.asyncio
+async def test_delete_parent_removes_the_complete_task_tree_from_index():
+    """DB cascade and the machine-global index must delete the same closure."""
+    s, db = await _workspace("alpha")
+    rec = TaskRecorder(
+        db,
+        project=s.paths.project_name,
+        index=TaskIndex.for_workspace(s.paths),
+        classify_conversational=False,
+    )
+    parent = await rec.create_task(
+        session_id="s",
+        channel="cli",
+        user_input="parent",
+        external_key="parent-key",
+    )
+    child = await rec.create_task(
+        session_id="s",
+        channel="cli",
+        user_input="child",
+        external_key="child-key",
+        parent_task_id=parent.id,
+        kind="subagent",
+        depth=1,
+    )
+    await rec.finish_task(child.id, status="failed", error="expected test failure")
+    await rec.finish_task(parent.id, status="failed", error="expected test failure")
+    assert {row.task_id for row in await _index_rows(s.paths.control_db)} == {
+        parent.id,
+        child.id,
+    }
+
+    assert await rec.delete_task(parent.id) is True
+
+    async with db.session() as session:
+        assert await session.get(TaskORM, parent.id) is None
+        assert await session.get(TaskORM, child.id) is None
+    assert await _index_rows(s.paths.control_db) == []
+
+
+@pytest.mark.asyncio
+async def test_delete_large_task_tree_removes_every_index_row():
+    """>1000 descendants exercises closure collection and batched index cleanup."""
+    settings, db = await _workspace("large-tree")
+    root_id = "large-root"
+    child_ids = [f"large-child-{i:04d}" for i in range(1001)]
+    async with db.session() as session:
+        session.add(
+            TaskORM(id=root_id, status="failed", title="large root", kind="turn")
+        )
+        session.add_all(
+            TaskORM(
+                id=task_id,
+                parent_task_id=root_id,
+                status="failed",
+                title=task_id,
+                kind="subagent",
+            )
+            for task_id in child_ids
+        )
+        await session.commit()
+    async with db.session() as session:
+        tree = list((await session.execute(select(TaskORM))).scalars().all())
+
+    index = TaskIndex.for_workspace(settings.paths)
+    await index.record_many(tree)
+    assert len(await _index_rows(settings.paths.control_db)) == 1002
+    recorder = TaskRecorder(db, project=settings.paths.project_name, index=index)
+
+    assert await recorder.delete_task(root_id) is True
+
+    async with db.session() as session:
+        assert (await session.execute(select(TaskORM))).scalars().all() == []
+    assert await _index_rows(settings.paths.control_db) == []
+
+
+@pytest.mark.asyncio
 async def test_resolve_routes_a_task_id_to_its_owning_workspace():
     alpha, adb = await _workspace("alpha")
     beta, _bdb = await _workspace("beta")  # the CLI's current (wrong) workspace

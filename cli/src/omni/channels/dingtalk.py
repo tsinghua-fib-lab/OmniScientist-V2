@@ -16,7 +16,7 @@ from typing import Any
 
 from omni.channels.base import Channel
 from omni.channels.config import load_channel_config
-from omni.channels.outbound import DingTalkClient, send_presentation, uploadable_roots
+from omni.channels.outbound import DingTalkClient, send_presentation
 from omni.channels.security import claim_inbound_message
 from omni.runtime.notifications import TaskNotification
 from omni.runtime.presentation import TaskPresentation, TurnPresentation
@@ -70,7 +70,6 @@ class DingTalkChannel(Channel):
             self.settings,
             self.name,
             msg["target"],
-            msg["text"],
             message_id=msg.get("message_id", ""),
             event_id=msg.get("event_id", ""),
         ):
@@ -82,7 +81,7 @@ class DingTalkChannel(Channel):
             self._client,
             external_key,
             presentation,
-            allowed_roots=uploadable_roots(self.settings, artifacts=getattr(self.agent, "artifacts", None)),
+            allowed_roots=self.uploadable_roots(),
         )
 
     async def notify(self, note: TaskNotification) -> None:

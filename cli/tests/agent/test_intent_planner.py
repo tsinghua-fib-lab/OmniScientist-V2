@@ -6,15 +6,16 @@ import pytest
 
 from omni.agent.intent_plan import IntentPlan, IntentType, SkillSelection, VerificationPlan
 from omni.agent.model_planner import (
+    _PLANNER_CONTRACT_SHORTLIST_LIMIT,
     _PLANNER_INDEX_PROSE_LIMIT,
     ModelPlanProposal,
+    _compose_step_input,
     _planner_relevant_contracts,
     _planner_skill_index,
     _planner_system_prompt,
 )
 from omni.agent.plan_validator import PlanValidator
 from omni.agent.planner import IntentPlanner
-from omni.agent.workflow_plan_builder import _compose_step_input
 from omni.config import load_settings
 from omni.skills_runtime.manifest import DeliveryMode, SkillEntry, SkillKind
 from omni.skills_runtime.registry import SkillRegistry
@@ -277,9 +278,16 @@ def test_planner_index_caps_provider_prose_without_clipping_identity() -> None:
 
 
 def test_non_shortlisted_provider_stays_discoverable_without_schema_bloat() -> None:
+    """A provider past the cut keeps its index row and costs no schema.
+
+    The registry is sized from the cut rather than from a number written here:
+    with a fixed nine providers the test stopped exercising a cut at all the
+    moment the shortlist was widened to cover the shipped catalogue, and went on
+    passing while proving nothing.
+    """
     registry = SkillRegistry(load_settings(), sources=())
     ranked_names: list[str] = []
-    for index in range(9):
+    for index in range(_PLANNER_CONTRACT_SHORTLIST_LIMIT + 1):
         name = f"ranked-provider-{index:02d}"
         ranked_names.append(name)
         registry.register(
@@ -318,7 +326,9 @@ def test_non_shortlisted_provider_stays_discoverable_without_schema_bloat() -> N
 
     prompt = _planner_system_prompt(
         registry,
-        user_message=" ".join(ranked_names[:8]),
+        # Name enough providers to claim every slot, so the late one is cut for
+        # being irrelevant rather than for losing a tie-break.
+        user_message=" ".join(ranked_names[:_PLANNER_CONTRACT_SHORTLIST_LIMIT]),
     )
     full_contracts = prompt.split(
         "Relevant provider input contracts (exact field names):\n",
@@ -358,6 +368,19 @@ def test_model_proposal_ignores_retired_constraint_payload() -> None:
         {"requested_constraints": constraints}
     )
     assert "requested_constraints" not in proposal.to_dict()
+
+
+def test_model_proposal_cannot_choose_concrete_runtime_tools() -> None:
+    proposal = ModelPlanProposal.from_payload(
+        {
+            "intent_type": "react_fallback",
+            "required_capabilities": ["task.inspect"],
+            "required_tools": ["get_task", "bash"],
+        }
+    )
+
+    assert proposal.required_capabilities == ["task.inspect"]
+    assert "required_tools" not in proposal.to_dict()
 
 
 def test_real_research_pptx_late_provider_field_reaches_exact_schema_prompt() -> None:
@@ -407,7 +430,11 @@ def test_rag_qa_plus_artifact_plan_explains_scientific_figure_selection():
     assert plan.tool_policy.per_tool_limits["search_corpus"] == 1
     assert "glob" in plan.tool_policy.blocked_tools
     assert "record_claim" in plan.tool_policy.blocked_tools
-    assert plan.verification_plan.required_outputs == ["answer", "artifact"]
+    assert plan.verification_plan.required_outputs == [
+        "answer",
+        "artifact",
+        "artifact.figure",
+    ]
     assert "subtask.submitted" in plan.verification_plan.required_events
 
 
@@ -427,7 +454,6 @@ def _assert_capable_assistant(plan: IntentPlan) -> None:
     for allowed in ("search_corpus", "read_file", "glob", "open_artifact", "run_skill", "run_workflow"):
         assert plan.tool_policy.allows(allowed) is True
     assert plan.context_policy.include_skill_catalog is True
-    assert plan.verification_plan.forbidden_tools == []
 
 
 def test_plain_prompt_without_clear_route_uses_capable_assistant():
@@ -513,7 +539,10 @@ def test_model_proposal_is_resolved_by_registry_contracts_not_skill_name_guessin
     assert "glob" in plan.tool_policy.blocked_tools
 
 
-def test_model_direct_answer_proposal_runs_without_tools():
+def test_model_direct_answer_proposal_keeps_capable_read_only_floor():
+    # direct_answer is a capability-preserving turn with an eager-answer bias, not
+    # a zero-tool turn: stripping the catalog while the system prompt still asks
+    # for docs_search is exactly what made a self-knowledge question dead-end.
     planner = IntentPlanner(SkillRegistry(load_settings()))
 
     proposal = ModelPlanProposal(
@@ -526,45 +555,105 @@ def test_model_direct_answer_proposal_runs_without_tools():
 
     assert plan.intent_type == IntentType.DIRECT_ANSWER
     assert plan.execution_mode == "direct"
-    assert plan.tool_policy.allowed_tools == []
-    assert plan.tool_policy.max_tool_calls == 0
+    assert plan.tool_policy.allowed_tools is None
+    assert plan.tool_policy.final_reserve_enabled is True
+    for allowed in ("docs_search", "read_file", "search_corpus", "run_skill"):
+        assert plan.tool_policy.allows(allowed) is True
+    for blocked in ("write_file", "edit_file", "bash", "run_compute"):
+        assert plan.tool_policy.allows(blocked) is False
 
 
-def test_model_workflow_proposal_builds_dag_through_capability_registry():
-    registry = SkillRegistry(load_settings())
-    registry.register(_capability_skill("core-lit", "literature.search", source="builtin", priority=100))
-    registry.register(_capability_skill("core-qa", "qa.grounded", source="builtin", priority=100))
-    registry.register(_figure_skill())
-    planner = IntentPlanner(registry)
+def test_model_direct_answer_proposal_for_toolful_request_still_has_read_tools():
+    # Even when the model misroutes a read/query request to direct_answer, the
+    # turn keeps the read-only tool floor, so the whole class of "no tool for a
+    # tool-needing request" dead-ends is gone — not just the docs_search symptom.
+    planner = IntentPlanner(SkillRegistry(load_settings()))
 
     proposal = ModelPlanProposal(
-        intent_type="workflow",
-        workflow_steps=[
-            {"id": "lit", "capability": "literature.search", "input": {"input": "RAG hallucination"}},
-            {
-                "id": "qa",
-                "capability": "qa.grounded",
-                "depends_on": ["lit"],
-                "input": {"input": "Explain mitigation mechanisms"},
-            },
-            {
-                "id": "fig",
-                "capability": "artifact.figure",
-                "depends_on": ["qa"],
-                "input": {"input": "Draw the architecture"},
-            },
-        ],
-        outputs=["workflow"],
-        confidence=0.88,
-        rationale="model identified a three-step research workflow",
+        intent_type="direct_answer",
+        outputs=["answer"],
+        confidence=0.8,
+        rationale="model misjudged a file read as a short answer",
     )
-    plan = planner.plan_from_proposal("Research RAG and produce a blueprint", proposal, task_id="run-wf-model")
+    plan = planner.plan_from_proposal(
+        "读一下 cli/src/omni/agent/planner.py 看看怎么设计的",
+        proposal,
+        task_id="run-direct-read",
+    )
 
-    assert plan.intent_type == IntentType.WORKFLOW
-    assert [step["skill_name"] for step in plan.workflow_steps] == ["core-lit", "core-qa", "scientific-figure"]
-    assert plan.workflow_steps[1]["depends_on"] == ["lit"]
-    assert plan.workflow_steps[2]["depends_on"] == ["qa"]
-    assert plan.tool_policy.max_tool_calls == 4
+    assert plan.intent_type == IntentType.DIRECT_ANSWER
+    assert plan.tool_policy.allows("read_file") is True
+    assert plan.tool_policy.allows("glob") is True
+    assert plan.tool_policy.allows("write_file") is False
+
+
+def test_task_inspect_capability_requires_authoritative_get_task_lookup() -> None:
+    registry = SkillRegistry(load_settings())
+    planner = IntentPlanner(registry)
+    proposal = ModelPlanProposal.from_payload(
+        {
+            "intent_type": "react_fallback",
+            "required_capabilities": ["task.inspect"],
+            "outputs": ["answer"],
+            "confidence": 0.95,
+            "rationale": "read the active task status before answering",
+        }
+    )
+
+    plan = planner.plan_from_proposal(
+        "刚才的审稿成功了吗？结果在哪里？",
+        proposal,
+        task_id="run-status-followup",
+    )
+
+    # The model names a native information capability; only the host maps it to
+    # the concrete, read-only tool surface.
+    assert proposal.required_capabilities == ["task.inspect"]
+    assert plan.tool_policy.allowed_tools == ["get_task"]
+    assert plan.tool_policy.require_opening_tool is True
+    assert plan.tool_policy.max_tool_calls is None
+    assert plan.tool_policy.max_iterations is None
+    assert plan.tool_policy.allows("get_task") is True
+    assert plan.tool_policy.allows("open_artifact") is False
+    assert plan.context_policy.include_recent_activity is True
+    assert "react.tool.done" in plan.verification_plan.required_events
+    assert PlanValidator(registry).validate(plan).status == "validated"
+
+
+def test_task_review_capability_maps_to_enumerative_recall_surface() -> None:
+    registry = SkillRegistry(load_settings())
+    planner = IntentPlanner(registry)
+    proposal = ModelPlanProposal.from_payload(
+        {
+            "intent_type": "react_fallback",
+            "required_capabilities": ["task.review"],
+            "outputs": ["answer"],
+            "confidence": 0.9,
+            "rationale": "review the last few days of tasks across projects",
+        }
+    )
+
+    plan = planner.plan_from_proposal(
+        "过去四天我们都做了些什么？哪些没做好？",
+        proposal,
+        task_id="run-review",
+    )
+
+    # A retrospective is enumerative: the host grants the cross-workspace recall
+    # tools, not the single-task get_task surface.
+    assert "task.review" in plan.capability_inputs
+    assert plan.tool_policy.allows("list_recent_tasks") is True
+    assert plan.tool_policy.allows("search_tasks") is True
+    assert plan.tool_policy.max_tool_calls is None
+    assert plan.tool_policy.max_iterations is None
+    assert plan.tool_policy.allows("get_task") is True
+    assert plan.tool_policy.allows("write_file") is False
+    # No hard per-turn call ceiling that would refuse legitimate enumeration
+    # (the count cap is exactly what broke the original incident).
+    assert plan.tool_policy.per_tool_limits.get("get_task") is None
+    assert plan.tool_policy.require_opening_tool is True
+    assert plan.context_policy.include_recent_activity is True
+    assert PlanValidator(registry).validate(plan).status == "validated"
 
 
 def _builtin_planner() -> IntentPlanner:
@@ -618,64 +707,6 @@ def test_non_gate_prompts_go_to_capable_assistant(prompt: str) -> None:
     _assert_capable_assistant(plan)
 
 
-def test_multi_skill_workflow_plan_contains_explicit_dag():
-    registry = SkillRegistry(load_settings())
-    registry.register(_figure_skill())
-    registry.register(_capability_skill("literature-search", "literature.search"))
-    registry.register(_capability_skill("corpus-index", "corpus.index"))
-    registry.register(_capability_skill("lit-qa", "qa.grounded"))
-    planner = IntentPlanner(registry)
-
-    proposal = ModelPlanProposal(
-        intent_type="workflow",
-        workflow_steps=[
-            {"id": "literature", "capability": "literature.search", "input": {"query": "RAG"}},
-            {"id": "corpus", "capability": "corpus.index", "depends_on": ["literature"], "input": {"query": "RAG"}},
-            {
-                "id": "grounded_qa",
-                "capability": "qa.grounded",
-                "depends_on": ["literature", "corpus"],
-                "input": {"question": "RAG evidence-grounded answer"},
-            },
-            {"id": "figure", "capability": "artifact.figure", "depends_on": ["grounded_qa"], "input": {"input": "RAG architecture"}},
-            {"id": "final_synthesis", "capability": "synthesis.final", "depends_on": ["figure"], "input": {"deliverable": "draft.section"}},
-        ],
-        outputs=["draft.section"],
-        confidence=0.9,
-        rationale="model proposed a multi-step research workflow",
-    )
-    plan = planner.plan_from_proposal(
-        "围绕 RAG 做文献检索、语料索引、接地问答、绘图和论文写作 workflow",
-        proposal,
-        task_id="run-wf",
-    )
-
-    assert plan.intent_type == IntentType.WORKFLOW
-    assert [step["id"] for step in plan.workflow_steps] == [
-        "literature",
-        "corpus",
-        "grounded_qa",
-        "figure",
-        "final_synthesis",
-    ]
-    assert plan.workflow_steps[2]["depends_on"] == ["literature", "corpus"]
-    assert plan.workflow_steps[-1]["capability"] == "synthesis.final"
-    assert plan.workflow_steps[-1]["provider_type"] == "native_executor"
-    assert "draft.section" in plan.outputs
-    assert plan.verification_plan.required_tasks == [
-        "literature-search",
-        "corpus-index",
-        "lit-qa",
-        "scientific-figure",
-    ]
-    # Scientific deliverables auto-attach verification: the figure step must render
-    # an artifact, provenance is checked to the requested level, and IM delivery
-    # must be sent/degraded.
-    assert plan.verification_plan.artifact_checks == ["artifact_emitted"]
-    assert "light_or_full_as_requested" in plan.verification_plan.provenance_checks
-    assert "presentation_sent_or_degraded" in plan.verification_plan.presentation_checks
-
-
 @pytest.mark.parametrize(
     ("prompt", "expected_skill"),
     [
@@ -694,32 +725,81 @@ def test_explicit_skill_selection_has_highest_priority(prompt: str, expected_ski
     assert "explicit skill invocation" in plan.rationale
 
 
-def test_scientific_draft_request_routes_to_native_synthesis() -> None:
-    planner = _builtin_planner()
+def test_explicit_skill_key_value_arguments_compile_against_contract(
+    tmp_path,
+) -> None:
+    registry = SkillRegistry(load_settings())
+    registry.build_index()
+    planner = IntentPlanner(registry)
+    pdf = tmp_path / "paper draft.pdf"
+    pdf.write_bytes(b"%PDF-test")
+    prompt = (
+        f'$paper-review input="{pdf}" '
+        'venue="ACL 2025 Main Conference — Long Papers" '
+        "mode=strict max_visuals=8 skip_visual=false "
+        'mineru_command="/opt/mineru-venv/bin/mineru" '
+        "mineru_backend=pipeline mineru_timeout_s=600 mineru_device=cuda:3 "
+        "review_rag=on preference_rag=on "
+        'preference_rag_index="indexes/review-arena-faiss" '
+        'preference_rag_data="data/review_arena_clean" preference_rag_top_k=3'
+    )
 
+    plan = planner.plan(prompt, task_id="run-explicit-paper-review")
+    validation = PlanValidator(registry).validate(plan)
+
+    assert validation.status == "validated"
+    assert plan.provider_inputs["paper-review"] == {
+        "input": str(pdf),
+        "venue": "ACL 2025 Main Conference — Long Papers",
+        "mode": "strict",
+        "max_visuals": 8,
+        "skip_visual": False,
+        "mineru_command": "/opt/mineru-venv/bin/mineru",
+        "mineru_backend": "pipeline",
+        "mineru_timeout_s": 600,
+        "mineru_device": "cuda:3",
+        "review_rag": "on",
+        "preference_rag": "on",
+        "preference_rag_index": "indexes/review-arena-faiss",
+        "preference_rag_data": "data/review_arena_clean",
+        "preference_rag_top_k": 3,
+    }
+
+
+def test_review_capability_cleans_at_attachment_with_spaces(tmp_path) -> None:
+    registry = SkillRegistry(load_settings())
+    registry.build_index()
+    planner = IntentPlanner(registry)
+    pdf = tmp_path / "Worldlines in the Mean Field Real Town.pdf"
+    pdf.write_bytes(b"%PDF-test")
+    prompt = f"@{pdf} 请审稿"
     proposal = ModelPlanProposal(
-        intent_type="workflow",
-        workflow_steps=[
-            {
-                "id": "final_synthesis",
-                "capability": "synthesis.final",
-                "input": {"input": "围绕 RAG 去幻觉撰写论文摘要、方法和实验章节", "deliverable": "draft.section"},
-            }
-        ],
-        outputs=["draft.section"],
-        confidence=0.88,
-        rationale="model mapped a writing goal to synthesis.final",
-    )
-    plan = planner.plan_from_proposal(
-        "围绕 RAG 去幻觉撰写论文摘要、方法和实验章节。",
-        proposal,
-        task_id="run-writing",
+        intent_type="single_skill_task",
+        required_capabilities=["review.paper"],
+        capability_inputs={"review.paper": {}},
+        confidence=0.95,
+        execution_mode="foreground",
+        rationale="the user supplied a paper and requested peer review",
     )
 
-    assert plan.intent_type == IntentType.WORKFLOW
-    assert plan.workflow_steps[-1]["skill_name"] == "synthesis.final"
-    assert plan.workflow_steps[-1]["provider_type"] == "native_executor"
-    assert "draft.section" in plan.outputs
+    plan = planner.plan_from_proposal(prompt, proposal, task_id="run-at-paper-review")
+    validation = PlanValidator(registry).validate(plan)
+
+    assert validation.status == "validated"
+    assert plan.intent_type == IntentType.SINGLE_SKILL_TASK
+    assert [selection.skill for selection in plan.selected_skills] == ["paper-review"]
+    assert plan.provider_inputs["paper-review"]["input"] == str(pdf.resolve())
+
+
+def test_planner_prompt_distinguishes_scientific_file_input_from_file_management() -> None:
+    registry = SkillRegistry(load_settings())
+    registry.build_index()
+    prompt = _planner_system_prompt(registry)
+
+    assert "scientific capability is not filesystem management" in prompt
+    assert "@-prefixed local file as one attachment" in prompt
+    assert "status, success/failure, cause, or artifact location" in prompt
+    assert 'required_capabilities=["task.inspect"]' in prompt
 
 
 def test_arxiv_id_does_not_steal_explicit_research_pptx_route() -> None:
@@ -733,72 +813,7 @@ def test_arxiv_id_does_not_steal_explicit_research_pptx_route() -> None:
     assert plan.selected_skills[0].selection_source == "explicit"
 
 
-def test_scientific_draft_prompt_is_not_routed_to_review_because_of_draft_word() -> None:
-    planner = _builtin_planner()
-
-    proposal = ModelPlanProposal(
-        intent_type="workflow",
-        workflow_steps=[
-            {
-                "id": "final_synthesis",
-                "capability": "synthesis.final",
-                "input": {"input": "撰写论文摘要、方法和实验章节草稿", "deliverable": "draft.section"},
-            }
-        ],
-        outputs=["draft.section"],
-        confidence=0.86,
-        rationale="model mapped writing to final synthesis deliverable",
-    )
-    plan = planner.plan_from_proposal("撰写论文摘要、方法和实验章节草稿", proposal, task_id="run-writing")
-
-    assert plan.intent_type == IntentType.WORKFLOW
-    assert len(plan.workflow_steps) == 1
-    step = plan.workflow_steps[0]
-    assert step["capability"] == "synthesis.final"
-    assert step["provider_type"] == "native_executor"
-    assert step["deliverable"] == "draft.section"
-    assert step["skill_name"] == "synthesis.final"
-
-
-def test_workflow_resolves_steps_from_capabilities_not_hardcoded_skill_names():
-    registry = SkillRegistry(load_settings())
-    registry.register(_capability_skill("project-literature-engine", "literature.search", priority=200))
-    registry.register(_capability_skill("project-grounded-answer", "qa.grounded", priority=200))
-    registry.register(_capability_skill("project-figure-engine", "artifact.figure", priority=200))
-    planner = IntentPlanner(registry)
-
-    proposal = ModelPlanProposal(
-        intent_type="workflow",
-        workflow_steps=[
-            {"id": "literature", "capability": "literature.search", "input": {"query": "RAG"}},
-            {"id": "answer", "capability": "qa.grounded", "depends_on": ["literature"], "input": {"question": "RAG"}},
-            {"id": "figure", "capability": "artifact.figure", "depends_on": ["answer"], "input": {"input": "RAG method flow"}},
-        ],
-        outputs=["answer", "artifact.figure"],
-        confidence=0.9,
-        rationale="model proposed capability workflow",
-    )
-    plan = planner.plan_from_proposal(
-        "围绕 RAG 做科研 workflow：先文献检索，再基于证据回答，最后生成方法流程图。",
-        proposal,
-        task_id="run-capability",
-    )
-
-    assert plan.intent_type == IntentType.WORKFLOW
-    assert [step["skill_name"] for step in plan.workflow_steps] == [
-        "project-literature-engine",
-        "project-grounded-answer",
-        "project-figure-engine",
-    ]
-    assert [step["capability"] for step in plan.workflow_steps] == [
-        "literature.search",
-        "qa.grounded",
-        "artifact.figure",
-    ]
-    assert [selection.selection_source for selection in plan.selected_skills] == ["capability", "capability", "capability"]
-
-
-def test_automatic_workflow_skips_none_contract_third_party_capability_candidate():
+def test_automatic_capability_skips_none_contract_third_party_candidate():
     registry = SkillRegistry(load_settings())
     registry.register(SkillEntry(
         name="unsafe-third-party-lit",
@@ -815,64 +830,57 @@ def test_automatic_workflow_skips_none_contract_third_party_capability_candidate
     planner = IntentPlanner(registry)
 
     proposal = ModelPlanProposal(
-        intent_type="workflow",
-        workflow_steps=[{"id": "literature", "capability": "literature.search", "input": {"query": "RAG"}}],
+        intent_type="single_skill_task",
+        required_capabilities=["literature.search"],
         outputs=["sources"],
         confidence=0.84,
         rationale="model proposed literature search capability",
     )
-    plan = planner.plan_from_proposal("围绕 RAG 做科研 workflow：先文献检索，再输出综述报告。", proposal, task_id="run-contract")
+    plan = planner.plan_from_proposal("围绕 RAG 检索文献并输出综述报告。", proposal, task_id="run-contract")
 
-    assert plan.intent_type == IntentType.WORKFLOW
-    literature = next(step for step in plan.workflow_steps if step["capability"] == "literature.search")
-    assert literature["skill_name"] == "safe-literature-search"
     selected = next(selection for selection in plan.selected_skills if selection.skill == "safe-literature-search")
     assert any(item.skill == "unsafe-third-party-lit" and "contract is none" in item.reason for item in selected.rejected_candidates)
 
 
-def test_automatic_workflow_prefers_core_full_over_high_priority_partial_third_party():
+def test_automatic_capability_prefers_core_full_over_high_priority_partial_third_party():
     registry = SkillRegistry(load_settings())
     registry.register(_capability_skill("core-literature-engine", "literature.search", source="builtin", priority=1))
     registry.register(_capability_skill("codex-lit-supersearch", "literature.search", source="user_codex", priority=999))
     planner = IntentPlanner(registry)
 
     proposal = ModelPlanProposal(
-        intent_type="workflow",
-        workflow_steps=[{"id": "literature", "capability": "literature.search", "input": {"query": "RAG"}}],
+        intent_type="single_skill_task",
+        required_capabilities=["literature.search"],
         outputs=["sources"],
         confidence=0.84,
         rationale="model proposed literature search capability",
     )
-    plan = planner.plan_from_proposal("围绕 RAG 做科研 workflow：先文献检索，再输出综述报告。", proposal, task_id="run-core-first")
+    plan = planner.plan_from_proposal("围绕 RAG 检索文献并输出综述报告。", proposal, task_id="run-core-first")
 
-    assert plan.intent_type == IntentType.WORKFLOW
-    literature = next(step for step in plan.workflow_steps if step["capability"] == "literature.search")
-    assert literature["skill_name"] == "core-literature-engine"
-    selected = next(selection for selection in plan.selected_skills if selection.skill == "core-literature-engine")
+    assert [selection.skill for selection in plan.selected_skills] == ["core-literature-engine"]
+    selected = plan.selected_skills[0]
     assert any(
         item.skill == "codex-lit-supersearch" and "core full-contract" in item.reason
         for item in selected.rejected_candidates
     )
 
 
-def test_automatic_workflow_can_fallback_to_partial_third_party_when_no_core_skill_exists():
+def test_automatic_capability_can_fallback_to_partial_third_party_when_no_core_skill_exists():
     registry = SkillRegistry(load_settings())
     registry.register(_capability_skill("codex-lit-supersearch", "literature.search", source="user_codex", priority=999))
     planner = IntentPlanner(registry)
 
     proposal = ModelPlanProposal(
-        intent_type="workflow",
-        workflow_steps=[{"id": "literature", "capability": "literature.search", "input": {"query": "RAG"}}],
+        intent_type="single_skill_task",
+        required_capabilities=["literature.search"],
         outputs=["sources"],
         confidence=0.84,
         rationale="model proposed literature search capability",
     )
-    plan = planner.plan_from_proposal("围绕 RAG 做科研 workflow：先文献检索，再输出综述报告。", proposal, task_id="run-third-party-fallback")
+    plan = planner.plan_from_proposal("围绕 RAG 检索文献并输出综述报告。", proposal, task_id="run-third-party-fallback")
     validation = PlanValidator(registry).validate(plan)
 
-    assert plan.intent_type == IntentType.WORKFLOW
-    literature = next(step for step in plan.workflow_steps if step["capability"] == "literature.search")
-    assert literature["skill_name"] == "codex-lit-supersearch"
+    assert [selection.skill for selection in plan.selected_skills] == ["codex-lit-supersearch"]
     assert validation.ok
     assert validation.status == "degraded"
     assert any("contract is partial" in warning for warning in validation.degraded_warnings)
@@ -891,72 +899,15 @@ def test_builtin_capability_skill_hard_overrides_same_named_user_and_project():
     planner = IntentPlanner(registry)
 
     proposal = ModelPlanProposal(
-        intent_type="workflow",
-        workflow_steps=[{"id": "literature", "capability": "literature.search", "input": {"query": "RAG"}}],
+        intent_type="single_skill_task",
+        required_capabilities=["literature.search"],
         outputs=["sources"],
         confidence=0.84,
         rationale="model proposed literature search capability",
     )
-    plan = planner.plan_from_proposal("围绕 RAG 做科研 workflow：先文献检索，再输出综述报告。", proposal, task_id="run-builtin-first")
+    plan = planner.plan_from_proposal("围绕 RAG 检索文献并输出综述报告。", proposal, task_id="run-builtin-first")
 
-    assert plan.intent_type == IntentType.WORKFLOW
-    literature = next(step for step in plan.workflow_steps if step["capability"] == "literature.search")
-    assert literature["skill_name"] == "literature-search"
-
-
-@pytest.mark.parametrize(
-    ("prompt", "workflow_steps", "expected_skills"),
-    [
-        (
-            "围绕 RAG hallucination 做一轮科研 workflow：先检索并收录文献，最后生成架构图。",
-            [
-                {"id": "literature", "capability": "literature.search", "input": {"query": "RAG hallucination"}},
-                {"id": "figure", "capability": "artifact.figure", "depends_on": ["literature"], "input": {"input": "auditable architecture figure"}},
-            ],
-            ["openalex-search", "scientific-figure"],
-        ),
-        (
-            "给我一个 Transformer 研究小节 workflow：获取 arXiv 1706.03762，"
-            "画方法流程图，并撰写 related work 小节。",
-            [
-                {"id": "paper", "capability": "paper.fetch.arxiv", "input": {"identifier": "1706.03762"}},
-                {"id": "figure", "capability": "artifact.figure", "depends_on": ["paper"], "input": {"input": "method flow figure"}},
-                {"id": "final_synthesis", "capability": "synthesis.final", "depends_on": ["figure"], "input": {"deliverable": "draft.section"}},
-            ],
-            ["arxiv-fetch", "scientific-figure", "synthesis.final"],
-        ),
-        (
-            "围绕 RAG reranker 的事实一致性提出研究方向，并制作完整组会幻灯片。",
-            [
-                {"id": "idea", "capability": "research.ideation", "input": {"input": "RAG reranker factual consistency"}},
-                {"id": "slides", "capability": "slides.generate", "depends_on": ["idea"], "input": {"topic": "RAG reranker group meeting"}},
-            ],
-            ["research-ideation", "research-pptx"],
-        ),
-    ],
-)
-def test_real_user_multi_builtin_skill_workflow_scenarios(
-    prompt: str,
-    workflow_steps: list[dict[str, object]],
-    expected_skills: list[str],
-) -> None:
-    planner = _builtin_planner()
-
-    proposal = ModelPlanProposal(
-        intent_type="workflow",
-        workflow_steps=workflow_steps,
-        outputs=["workflow"],
-        confidence=0.9,
-        rationale="model proposed a real research workflow in capability terms",
-    )
-    plan = planner.plan_from_proposal(prompt, proposal, task_id="run-real-workflow")
-
-    assert plan.intent_type == IntentType.WORKFLOW
-    skill_names = [str(step["skill_name"]) for step in plan.workflow_steps]
-    for skill in expected_skills:
-        assert skill in skill_names
-    assert plan.intent_type != IntentType.REACT_FALLBACK
-    assert plan.tool_policy.max_tool_calls <= 4
+    assert [selection.skill for selection in plan.selected_skills] == ["literature-search"]
 
 
 def test_automatic_workflow_rejects_required_no_contract_third_party_skill():

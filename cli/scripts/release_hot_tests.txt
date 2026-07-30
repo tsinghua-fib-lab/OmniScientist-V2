@@ -1,0 +1,12 @@
+# Paths relative to the repository root. These are the cells that recently
+# failed only on GitHub release runners (Windows/Linux SQLite lock).
+# Keep this list short: the self-check must stay a minutes-long gate.
+cli/tests/runtime/test_cancel_persist.py
+cli/tests/runtime/test_subtask_trace_persist.py
+cli/tests/runtime/test_event_seq_contention.py
+cli/tests/runtime/test_service_control.py::test_update_restore_fails_when_starting_process_dies
+cli/tests/agent/test_cancel_vs_interrupt.py
+cli/tests/agent/test_conversation_store.py::test_persist_message_swallows_sqlite_busy
+cli/tests/agent/test_workflow_runtime.py::test_cancel_interrupts_active_workflow_step_and_persists_checkpoint
+cli/tests/agent/test_workflow_runtime.py::test_cancel_interrupts_foreground_skill_and_persists_child_status
+cli/tests/agent/test_workflow_runtime.py::test_workflow_dag_waits_for_dependencies_before_downstream_step

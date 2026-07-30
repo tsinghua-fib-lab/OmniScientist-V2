@@ -10,14 +10,18 @@ the turn logic never reaches into SQLAlchemy directly.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 
 from omni.agent.session_ops import copy_session_branch
 from omni.memory.service import principal_of as _principal_of
-from omni.storage.db import Database
+from omni.storage.db import Database, retry_while_busy, sqlite_busy
 from omni.storage.models import ConversationMessageORM, SessionORM, _utcnow
+
+logger = logging.getLogger(__name__)
 
 # Owner / CLI identity for memory isolation (see MemoryService.PRINCIPAL_OWNER).
 _PRINCIPAL_OWNER = "local"
@@ -102,13 +106,22 @@ class ConversationStore:
 
     async def history(self, session_id: str, limit: int = 12) -> list[dict[str, Any]]:
         """Compaction-aware prompt history: latest bridge + last ``limit`` turns
-        (``compacted`` rows are hidden — kept for replay, already in the bridge)."""
+        (``compacted`` rows are hidden — kept for replay, already in the bridge).
+
+        The bridge is handed over as the user's, the way Codex does it. Spoken in
+        the assistant's voice it reads as something the model itself concluded,
+        and a model holds to its own prior claims: one session's bridge said the
+        research was finished and both reports were stored, and that was still
+        being restated turns later on a request that had produced neither. As
+        material it is evidence to be used; as its own words it is a position to
+        defend.
+        """
         rows = await self.recent_rows(session_id)
         comps = [r for r in rows if not (r.meta or {}).get("compacted")
                  and (r.content_type or "") == "compaction"]
         out: list[dict[str, Any]] = []
         if comps:
-            out.append({"role": "assistant", "content": comps[-1].content})
+            out.append({"role": "user", "content": comps[-1].content})
         out += [{"role": r.role, "content": r.content}
                 for r in self.normal_rows(rows)[-limit:]]
         return out
@@ -136,12 +149,35 @@ class ConversationStore:
         ]
 
     async def persist_message(self, session_id: str, role: str, content: str, **meta: Any) -> None:
-        async with self._db.session() as s:
-            s.add(ConversationMessageORM(session_id=session_id, role=role, content=content, meta=meta or {}))
-            row = (await s.execute(select(SessionORM).where(SessionORM.id == session_id))).scalar_one_or_none()
-            if row:
-                row.updated_at = _utcnow()
-            await s.commit()
+        """Write one transcript row. A locked store must not fail the turn.
+
+        Cancel already drops advisory events when the aiosqlite worker still
+        holds the file lock. The assistant row is the same class of write:
+        three short retries, then drop — the turn result is already in memory.
+        """
+
+        async def write() -> None:
+            async with self._db.session() as s:
+                # Read the session before adding the message so a SELECT cannot
+                # autoflush a pending INSERT into a locked writer.
+                row = await s.get(SessionORM, session_id)
+                s.add(ConversationMessageORM(
+                    session_id=session_id, role=role, content=content, meta=meta or {},
+                ))
+                if row is not None:
+                    row.updated_at = _utcnow()
+                await s.commit()
+
+        try:
+            await retry_while_busy(write, attempts=3)
+        except OperationalError as exc:
+            if not sqlite_busy(exc):
+                raise
+            logger.warning(
+                "conversation.message.busy session=%s role=%s dropped",
+                session_id[:8],
+                role,
+            )
 
     async def write_compaction_bridge(
         self, session_id: str, bridge: str, covered: list[str]
@@ -150,10 +186,11 @@ class ConversationStore:
 
         The covered rows are kept for replay (``compacted=True``) rather than
         deleted; the bridge summary stands in for them in the prompt history.
+        Stored under the role it is replayed under — see :meth:`history`.
         """
         async with self._db.session() as s:
             s.add(ConversationMessageORM(
-                session_id=session_id, role="assistant", content_type="compaction",
+                session_id=session_id, role="user", content_type="compaction",
                 content=bridge,
                 meta={"kind": "compaction", "covered": covered, "count": len(covered)},
             ))

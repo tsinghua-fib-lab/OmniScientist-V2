@@ -2,37 +2,26 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import mimetypes
+import re
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
-from omni.core.termination import base_termination_reason, is_bounded_termination
+from omni.core.termination import (
+    TERMINATION_LABELS,
+    is_bounded_termination,
+    termination_reason_label,
+)
 from omni.runtime.notifications import TaskNotification
 from omni.runtime.task_results import action_required_presentation, is_dot_artifact
+from omni.runtime.turn_outcome import display_warnings
 
-_TERMINATION_LABELS = {
-    "max_iterations": "iteration limit reached",
-    "max_tool_calls": "tool budget reached",
-    "max_total_tokens": "token budget reached",
-    "max_cost": "cost budget reached",
-    "timeout": "execution timed out",
-    "no_progress": "tool calls made no further progress",
-    "llm_error": "model call failed",
-    "llm_transcript_invalid": "model service rejected the tool transcript",
-    "llm_auth_error": "model authentication failed",
-    "llm_configuration_error": "model configuration is unavailable",
-    "llm_rate_limited": "model service rate limited the request",
-    "llm_unavailable": "model service is temporarily unavailable",
-    "llm_invalid_request": "model service rejected the request",
-    "llm_timeout": "model call timed out",
-    "artifact_contract_failed": "artifact rendering or validation failed",
-    "artifact_revision_failed": "artifact revision failed",
-}
-
-
-def termination_reason_label(reason: str) -> str:
-    """Return one channel-neutral, user-safe label for a terminal reason."""
-    canonical = base_termination_reason(reason)
-    return _TERMINATION_LABELS.get(canonical, canonical or "unknown")
+# ``omni.core.termination`` is the single owner of the terminal vocabulary.
+# These aliases keep the existing presentation-layer import path working.
+_TERMINATION_LABELS = TERMINATION_LABELS
+MAX_PRESENTED_ARTIFACTS = 12
 
 
 @dataclass(frozen=True)
@@ -47,6 +36,9 @@ class ArtifactRef:
     # which stay link-only). Populated by ``omni.runtime.artifact_preview``.
     preview: str = ""
     preview_truncated: bool = False
+    # ``primary`` is a user deliverable; ``support`` is provenance, an input
+    # snapshot, a bundle manifest, or another machine-facing sidecar.
+    presentation_role: str = "primary"
 
     @property
     def target(self) -> str:
@@ -58,7 +50,14 @@ class ArtifactRef:
 
     @property
     def is_markdown(self) -> bool:
-        return self.mime == "text/markdown" or self.format.lower() in {"md", "markdown", "report"}
+        """Whether the body is a document to render rather than text to quote.
+
+        Reads through ``display_format`` so a report stored with an empty
+        ``format`` still counts on the strength of its ``.md`` path; producers
+        that write the file and let the extension speak were otherwise having
+        their deliverable fenced as if it were command output.
+        """
+        return self.mime == "text/markdown" or self.display_format in {"md", "markdown", "report"}
 
     @property
     def display_format(self) -> str:
@@ -69,6 +68,22 @@ class ArtifactRef:
         if source and "." in source.rsplit("/", 1)[-1]:
             return source.rsplit(".", 1)[-1].lower()
         return ""
+
+    @property
+    def is_primary(self) -> bool:
+        return self.presentation_role != "support"
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the channel-neutral, JSON-safe artifact projection."""
+        return {
+            "title": self.title,
+            "format": self.format,
+            "uri": self.uri,
+            "path": self.path,
+            "mime": self.mime,
+            "size_bytes": self.size_bytes,
+            "presentation_role": self.presentation_role,
+        }
 
 
 # Process/source files that back a rendered deliverable (diagram sources,
@@ -81,6 +96,109 @@ _SIDECAR_MIMES = {"text/vnd.graphviz", "application/json", "application/yaml"}
 def is_sidecar_artifact(ref: ArtifactRef) -> bool:
     """True for process/source artifacts that support a rendered deliverable."""
     return ref.display_format in _SIDECAR_FORMATS or ref.mime.lower() in _SIDECAR_MIMES
+
+
+def presentable_artifacts(artifacts: list[ArtifactRef]) -> list[ArtifactRef]:
+    """Return declared primary deliverables that belong in user-facing output."""
+    return [
+        artifact
+        for artifact in artifacts
+        if artifact.is_primary and not is_dot_artifact(artifact)
+    ]
+
+
+def _collect_output_artifacts(presentation: object) -> list[ArtifactRef]:
+    """Primary deliverables this card would list, uncapped.
+
+    A turn that already named its outputs lists those and only those — the same
+    list the CLI Outputs table prints. A turn that named none still has files on
+    nested task cards (``/task`` summaries, ``everything from today``); those
+    cards are the inventory, matching how ``to_markdown`` keeps their artifacts
+    when the turn itself listed nothing.
+    """
+    primary = presentable_artifacts(list(getattr(presentation, "artifacts", None) or []))
+    tasks = getattr(presentation, "tasks", None)
+    if primary or not tasks:
+        return primary
+    collected: list[ArtifactRef] = []
+    seen: set[str] = set()
+    for task in tasks:
+        for artifact in presentable_artifacts(list(getattr(task, "artifacts", None) or [])):
+            key = artifact.path or artifact.uri
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            collected.append(artifact)
+    return collected
+
+
+def output_inventory(presentation: object) -> list[ArtifactRef]:
+    """The files CLI Outputs and IM attachments both ship, in that order."""
+    return _collect_output_artifacts(presentation)[:MAX_PRESENTED_ARTIFACTS]
+
+
+def artifact_attachment_keys(artifact: ArtifactRef) -> set[str]:
+    """Stable identities used to decide whether a file was already uploaded."""
+    return {key for key in (artifact.uri, artifact.path) if key}
+
+
+def inventory_attachment_keys(presentation: object) -> set[str]:
+    """Union of uri/path keys the reader would receive from this card."""
+    keys: set[str] = set()
+    for artifact in output_inventory(presentation):
+        keys.update(artifact_attachment_keys(artifact))
+    return keys
+
+
+def drop_delivered_attachments(
+    presentation: object, delivered: set[str]
+) -> object:
+    """Keep only files this channel has not already uploaded."""
+    if not delivered:
+        return presentation
+    artifacts = list(getattr(presentation, "artifacts", None) or [])
+    kept = [
+        artifact
+        for artifact in artifacts
+        if not (artifact_attachment_keys(artifact) & delivered)
+    ]
+    if kept == artifacts:
+        return presentation
+    return replace(presentation, artifacts=kept)
+
+
+def turn_covers_deliverables(presentation: object) -> bool:
+    """Whether this card attached any files.
+
+    A later skill notice uses the recorded uri/path set, not this boolean, to
+    decide what is still owed. The boolean only answers "did this send hand
+    the reader a file" — a pending-child IM turn withholds on purpose so the
+    completion notice can carry the full inventory once.
+    """
+    return bool(output_inventory(presentation))
+
+
+def promises_later_deliverables(text: str) -> bool:
+    """True when the answer tells the reader a file is still coming.
+
+    Settlement must match that copy: if a child is actually running, IM
+    withholds the files that are already ready so the completion notice can
+    hand the full inventory over once.
+    """
+    raw = str(text or "")
+    if not raw:
+        return False
+    lowered = raw.casefold()
+    needles = (
+        "files will be sent",
+        "remaining deliverables are still running",
+        "\u53ef\u4ee5\u901a\u8fc7\u5b50\u4efb\u52a1",
+        "\u751f\u6210\u5b8c\u6210\u540e",
+        "\u53d6\u56de .pptx",
+        "\u53d6\u56de.pptx",
+    )
+    return any(needle in raw or needle in lowered for needle in needles)
 
 
 def _human_size(size_bytes: int) -> str:
@@ -120,7 +238,7 @@ class TaskPresentation:
     trace: list[dict[str, Any]] = field(default_factory=list)
     error: str = ""
     contract_level: str = ""
-    verification_status: str = ""
+    settlement_status: str = ""
     task_id: str = ""
     object_kind: str = "skill_execution"
     object_id: str = ""
@@ -162,7 +280,12 @@ class TaskPresentation:
         lists artifacts as ``name (format, size)`` — the file itself arrives as
         a native upload — while the CLI keeps full paths and URIs.
         """
-        mark = "✅" if self.status == "succeeded" else "❌" if self.status == "failed" else "◷"
+        mark = (
+            "✅" if self.status == "succeeded"
+            else "❌" if self.status == "failed"
+            else "!" if self.status == "degraded"
+            else "◷"
+        )
         identity = "".join(f" `{token}`" for token in self.identity_tokens)
         lines = [f"{mark} **{self.skill}** ({self.status}){identity}"]
         if self.summary:
@@ -171,25 +294,26 @@ class TaskPresentation:
             lines += ["", "**Result summary**", *[f"- {item}" for item in self.details]]
         if self.error:
             lines += ["", f"Error: {self.error}"]
-        if self.contract_level or self.verification_status:
+        if self.contract_level or self.settlement_status:
             lines += ["", "**Execution contract**"]
             if self.contract_level:
                 lines.append(f"- contract: {self.contract_level}")
-            if self.verification_status:
-                lines.append(f"- verification: {self.verification_status}")
-        visible_artifacts = [art for art in self.artifacts if not is_dot_artifact(art)]
+            if self.settlement_status:
+                lines.append(f"- verification: {self.settlement_status}")
+        all_visible_artifacts = _collect_output_artifacts(self)
+        visible_artifacts = output_inventory(self)
         if visible_artifacts:
             lines += ["", "**Artifacts**"]
             for art in visible_artifacts:
                 if include_local_paths:
-                    suffix = f" `{art.uri}`" if art.path and art.uri else ""
-                    lines.append(f"- {art.title}: {art.target}{suffix}")
+                    lines.append(f"- **{artifact_display_label(art.title)}**: `{art.target}`")
                 else:
-                    lines.append(f"- {_im_artifact_label(art)}")
+                    lines.append(f"- {_chat_artifact_line(art)}")
             for art in visible_artifacts:
                 if not art.preview:
                     continue
-                heading = f"{art.title} (preview)" if art.preview_truncated else art.title
+                title = artifact_display_label(art.title)
+                heading = f"{title} (preview)" if art.preview_truncated else title
                 lines += ["", f"**{heading}**"]
                 if art.is_markdown:
                     lines += ["", art.preview]
@@ -207,7 +331,23 @@ class TaskPresentation:
                         )
                     )
                     lines += ["", hint]
-        if self.research.has_any:
+            remaining = len(all_visible_artifacts) - len(visible_artifacts)
+            if remaining > 0:
+                suffix = (
+                    f"; inspect `/task show {self.task_id[:8]}`"
+                    if self.task_id
+                    else ""
+                )
+                lines.append(
+                    f"- {remaining} additional artifact(s){suffix}."
+                )
+        elif self.status in {"failed", "degraded", "partial", "needs_input"}:
+            lines += ["", "**Artifacts**", "- No saved artifact was produced."]
+        # Ledger ids are for the reader who can look them up. A chat reader
+        # cannot: the run id names a row in a store on someone else's machine,
+        # and it arrived under a heading of its own beneath the deliverable
+        # they had actually asked for.
+        if self.research.has_any and include_local_paths:
             lines += ["", "**Research record**"]
             if self.research.run_id:
                 lines.append(f"- run: `{self.research.run_id[:8]}`")
@@ -230,9 +370,57 @@ class TaskPresentation:
         return _strip_markdown(self.to_markdown())
 
 
+# Acronyms a ``.capitalize()`` would ruin. Everything else title-cases.
+_LABEL_WORDS = {
+    "pptx": "PPTX", "ppt": "PPT", "pdf": "PDF", "svg": "SVG", "png": "PNG",
+    "jpg": "JPG", "jpeg": "JPEG", "docx": "DOCX", "csv": "CSV", "json": "JSON",
+    "html": "HTML", "dot": "DOT", "md": "Markdown", "id": "ID",
+    # A key names the field, not the deliverable: ``pptx_uri`` is a PPTX.
+    "uri": "", "uris": "", "url": "", "path": "", "file": "",
+}
+
+
+def artifact_display_label(raw: str) -> str:
+    """Humanise an artifact label so a raw result key never reaches the reader.
+
+    ``pptx_uri`` reached the artifact list verbatim because that producer
+    attached its deliverable as a bare ``artifact://`` string field rather than
+    an artifact record, leaving the reader to infer the output type from a
+    Python identifier. Anything carrying capitals or spaces was written by a
+    human ("Scientific Figure SVG") and is passed through untouched.
+    """
+    text = str(raw or "").strip()
+    if not text or text != text.lower() or " " in text:
+        return text or "artifact"
+    if text in {"artifact", "artifacts"}:
+        return text  # our own placeholder for an unlabelled output
+    words = [_LABEL_WORDS.get(word, word.capitalize()) for word in re.split(r"[_\-.]+", text)]
+    return " ".join(word for word in words if word) or "artifact"
+
+
+def _chat_artifact_line(art: ArtifactRef) -> str:
+    """Name one deliverable and say where it is, on one line.
+
+    This was two blocks: an inventory of names and sizes, then a second list
+    repeating the same names against their paths. A reader on a phone had to
+    scroll between them and match by title to learn where the file they had
+    just been handed lives, and a reply carrying three outputs said each of
+    their names twice before saying anything about any of them.
+
+    The path is for the owner of the machine that ran the work, who has
+    somewhere to paste it; it is collected here rather than left in the prose,
+    where a path mid-sentence is unreadable and the attachment beside the
+    message is what the recipient acts on. The terminal prints its locations
+    inline and never reaches this.
+    """
+    label = _im_artifact_label(art)
+    return f"{label}: `{art.path}`" if art.path else label
+
+
 def _im_artifact_label(art: ArtifactRef) -> str:
     meta = ", ".join(part for part in (art.display_format, _human_size(art.size_bytes)) if part)
-    label = art.title if not meta else f"{art.title} ({meta})"
+    title = artifact_display_label(art.title)
+    label = title if not meta else f"{title} ({meta})"
     if is_sidecar_artifact(art):
         label += " — process file"
     return label
@@ -248,8 +436,10 @@ class TurnPresentation:
     submitted_workflow_ids: list[str] = field(default_factory=list)
     submitted_subtask_ids: list[str] = field(default_factory=list)
     tasks: list[TaskPresentation] = field(default_factory=list)
+    artifacts: list[ArtifactRef] = field(default_factory=list)
     degraded_warnings: list[str] = field(default_factory=list)
-    verification_status: str = ""
+    user_notices: list[str] = field(default_factory=list)
+    settlement_status: str = ""
     next_actions: list[str] = field(default_factory=list)
 
     def to_markdown(self, *, include_local_paths: bool = True) -> str:
@@ -262,24 +452,53 @@ class TurnPresentation:
             lines += ["", self.plan_summary] if lines else [self.plan_summary]
         duplicate_submission_summary = (
             bool(self.tasks)
-            and self.tasks[0].status in {"submitted", "pending", "running"}
             and self.assistant_text.strip()
             and self.assistant_text.strip() == self.tasks[0].summary.strip()
         )
         if self.assistant_text and not duplicate_submission_summary:
             lines.append(self.assistant_text)
-        if self.submitted_workflow_ids and not self.tasks:
-            ids = ", ".join(value[:8] for value in self.submitted_workflow_ids)
-            lines += ["", f"Submitted workflow run(s): `{ids}`"]
-        if self.submitted_subtask_ids and not any(task.status in {"submitted", "pending", "running"} for task in self.tasks):
-            ids = ", ".join(t[:8] for t in self.submitted_subtask_ids)
-            lines += ["", f"Submitted skill execution(s): `{ids}`"]
+        all_visible_outputs = _collect_output_artifacts(self)
+        visible_outputs = output_inventory(self)
+        if visible_outputs:
+            lines += ["", "**Outputs**"]
+            for artifact in visible_outputs:
+                if include_local_paths:
+                    location = artifact.path or "saved output (inspect the task for its local path)"
+                    lines.append(
+                        f"- **{artifact_display_label(artifact.title)}**: `{location}`"
+                    )
+                else:
+                    lines.append(f"- {_chat_artifact_line(artifact)}")
+            remaining = len(all_visible_outputs) - len(visible_outputs)
+            if remaining > 0:
+                suffix = (
+                    f"; inspect `/task show {self.task_id[:8]}`"
+                    if self.task_id
+                    else ""
+                )
+                lines.append(f"- {remaining} additional artifact(s){suffix}.")
+        # A second identifier for the same request, under a heading of its own.
+        # The terminal reader can look an execution up; in a thread the task is
+        # what this work is referred to by, and the reply has already named it —
+        # the one that prompted this quoted both ids before saying anything.
+        if include_local_paths:
+            if self.submitted_workflow_ids and not self.tasks:
+                ids = ", ".join(value[:8] for value in self.submitted_workflow_ids)
+                lines += ["", f"Submitted workflow run(s): `{ids}`"]
+            if self.submitted_subtask_ids and not any(
+                task.status in {"submitted", "pending", "running"} for task in self.tasks
+            ):
+                ids = ", ".join(t[:8] for t in self.submitted_subtask_ids)
+                lines += ["", f"Submitted skill execution(s): `{ids}`"]
         for task in self.tasks:
-            lines += ["", task.to_markdown(include_local_paths=include_local_paths)]
+            rendered_task = replace(task, artifacts=[]) if visible_outputs else task
+            lines += ["", rendered_task.to_markdown(include_local_paths=include_local_paths)]
+        if self.user_notices:
+            lines += ["", *self.user_notices]
         if self.degraded_warnings:
             lines += ["", "**Degraded execution**", *[f"- {item}" for item in self.degraded_warnings]]
-        if self.verification_status:
-            lines += ["", f"verification: `{self.verification_status}`"]
+        if self.settlement_status:
+            lines += ["", f"verification: `{self.settlement_status}`"]
         actions = self.next_actions
         if actions:
             lines += ["", "**Next actions**", *[f"- {a}" for a in actions]]
@@ -302,21 +521,55 @@ def artifact_refs(result: dict[str, Any]) -> list[ArtifactRef]:
                 return
             if key:
                 seen.add(key)
+            role = str(value.get("presentation_role") or "").strip().lower()
+            if role not in {"primary", "support"}:
+                label = str(value.get("title") or title or "").strip().lower()
+                source = path.replace("\\", "/").lower()
+                role = (
+                    "support"
+                    if label in {"manifest_uri", "provenance_uri", "input_uri"}
+                    or source.endswith((".provenance.json", ".figure-bundle.json"))
+                    else "primary"
+                )
             out.append(
                 ArtifactRef(
-                    title=str(value.get("title") or title or value.get("name") or fmt or "artifact"),
+                    # ``kind`` before ``format``: a producer that named neither a
+                    # title nor a key still said what the thing is ("report"),
+                    # which reads better than its file extension.
+                    title=str(
+                        value.get("title")
+                        or title
+                        or value.get("name")
+                        or value.get("kind")
+                        or fmt
+                        or "artifact"
+                    ),
                     format=str(value.get("format") or fmt or ""),
                     uri=uri,
                     path=path,
                     mime=str(value.get("mime") or ""),
                     size_bytes=_coerce_size(value.get("size_bytes")),
+                    presentation_role=role,
                 )
             )
         elif isinstance(value, str):
             if value in seen:
                 return
             seen.add(value)
-            out.append(ArtifactRef(title=title or fmt or "artifact", format=fmt, uri=value))
+            normalized_title = str(title or "").strip().lower()
+            role = (
+                "support"
+                if normalized_title in {"manifest_uri", "provenance_uri", "input_uri"}
+                else "primary"
+            )
+            out.append(
+                ArtifactRef(
+                    title=title or fmt or "artifact",
+                    format=fmt,
+                    uri=value,
+                    presentation_role=role,
+                )
+            )
 
     def visit(payload: Any) -> None:
         if not isinstance(payload, dict):
@@ -415,8 +668,21 @@ def task_presentation_from_result(
         if status == "failed":
             status = "needs_input"
             error = ""
+    raw_actions = result.get("next_actions")
+    declared_actions = (
+        [str(item).strip() for item in raw_actions if str(item).strip()]
+        if isinstance(raw_actions, list)
+        else []
+    )
+    setup_command = str(result.get("setup_command") or "").strip()
+    if setup_command:
+        declared_actions = [
+            setup_command,
+            *[item for item in declared_actions if item != setup_command],
+        ]
     actions = [
         *required_actions,
+        *declared_actions,
         *default_task_actions(
             owner_task_id,
             object_kind=object_kind,
@@ -440,13 +706,22 @@ def task_presentation_from_result(
     )
 
 
-def task_presentation_from_notification(note: TaskNotification) -> TaskPresentation:
+def task_presentation_from_notification(
+    note: TaskNotification, *, channel: str = "cli"
+) -> TaskPresentation:
+    """Render a finished task for the channel that will carry the news.
+
+    A completion arrives on its own, with none of the shaping a reply gets on
+    the way out, so a chat reader was handed the full follow-up menu: the
+    skill's suggestions and the host's, six lines of commands under a result
+    they had asked for once — and, on task cbffcbb6, the whole report as well.
+    """
     payload = note.payload if isinstance(note.payload, dict) else {}
     if note.summary and not payload.get("summary"):
         payload = {**payload, "summary": note.summary}
     if note.artifacts and not payload.get("artifacts"):
         payload = {**payload, "artifacts": note.artifacts}
-    return task_presentation_from_result(
+    presentation = task_presentation_from_result(
         subtask_id=note.reference_id,
         task_id=note.task_id,
         object_kind=note.object_kind,
@@ -454,6 +729,44 @@ def task_presentation_from_notification(note: TaskNotification) -> TaskPresentat
         skill=note.display_name,
         status=note.status,
         result=payload,
+    )
+    if not _is_im_channel(channel):
+        return presentation
+    return replace(
+        presentation,
+        summary=_chat_task_body(payload, presentation),
+        next_actions=_task_inspect_action(
+            presentation.task_id or presentation.subtask_id
+        ),
+        settlement_status="",
+        contract_level="",
+    )
+
+
+def _chat_task_body(payload: dict[str, Any], presentation: TaskPresentation) -> str:
+    """What a finished task says in a chat thread.
+
+    ``task_presentation_from_result`` reads the body from ``text`` before
+    ``summary``, which is right at a terminal: ``/task show`` is where the whole
+    result is meant to be legible. research-ideation returns both — a
+    thirty-two-thousand character report and an eighty-character summary of it —
+    and the report went to WeChat, eighteen bubbles of it, of which upstream
+    accepted ten. The report was already a file; only its summary was missing.
+
+    A body that fits is left alone, so nothing changes for the tasks that were
+    never the problem. Past that the skill's own summary is preferred over any
+    cut this could make of the long one.
+    """
+    body = presentation.summary
+    if len(body) <= _CHAT_ANSWER_BUDGET:
+        return body
+    stated = str(payload.get("summary") or "").strip()
+    if stated and len(stated) <= _CHAT_ANSWER_BUDGET:
+        return stated
+    return _bounded_answer(
+        body,
+        has_attachments=bool(presentable_artifacts(presentation.artifacts)),
+        task_id=presentation.task_id or presentation.subtask_id,
     )
 
 
@@ -514,7 +827,33 @@ def submitted_task_presentation_from_tool_result(
     )
 
 
-def turn_presentation_from_result(turn: Any, *, channel: str = "cli") -> TurnPresentation:
+def turn_presentation_from_result(
+    turn: Any,
+    *,
+    channel: str = "cli",
+    output_roots: Sequence[Path] = (),
+) -> TurnPresentation:
+    """Render one turn for one channel.
+
+    The inventory is the task's, on every channel, so a chat reader is handed
+    what ``/task show`` would list for the same task and nothing else. This once
+    completed a chat reply from the whole conversation, on the theory that a
+    follow-up opens a new task and so a reply reporting three finished materials
+    would ship only the one file that turn had touched. The reply that motivated
+    it was reporting materials that did not exist: the survey it named was
+    written later, by the task the user finally asked for it in. Widening the
+    inventory did not correct a scope error, it dressed an over-claim in whatever
+    files were nearby — and once the conversation held a second topic, that meant
+    yesterday's research reports.
+
+    ``output_roots`` are the directories this channel may send files from. A chat
+    channel passes them so a reply that names a deliverable it did not produce
+    this turn can still arrive with the file attached; the terminal has no use for
+    them, because its reader is already sitting next to the file. That lookup is
+    reserved for turns that produced nothing themselves — see
+    :func:`may_fetch_named_files`, which is the last way an over-claim could still
+    hand over another task's work.
+    """
     task_id = str(getattr(turn, "task_id", "") or "")
 
     def completion_presentation(data: dict[str, Any]) -> TaskPresentation:
@@ -570,16 +909,33 @@ def turn_presentation_from_result(turn: Any, *, channel: str = "cli") -> TurnPre
         ]
     elif tasks:
         actions = []
-    text = str(getattr(turn, "text", "") or "")
+    artifacts = [
+        artifact
+        for artifact in (getattr(turn, "artifacts", []) or [])
+        if isinstance(artifact, ArtifactRef)
+    ]
+    raw_text = str(getattr(turn, "text", "") or "")
+    if _is_im_channel(channel):
+        if may_fetch_named_files(artifacts):
+            artifacts = [
+                *artifacts,
+                *artifacts_named_in_text(raw_text, roots=output_roots),
+            ]
+    text = project_artifact_locations(
+        raw_text,
+        artifacts,
+        include_local_paths=not _is_im_channel(channel),
+    )
     kind = str(getattr(turn, "kind", "") or "")
     reason = str(getattr(turn, "terminated_reason", "") or "") or "unknown"
     plan_summary = str(getattr(turn, "plan_summary", "") or "")
-    degraded_warnings = list(getattr(turn, "degraded_warnings", []) or [])
-    verification_status = str(getattr(turn, "verification_status", "") or "")
+    degraded_warnings = display_warnings(turn)
+    user_notices = [str(item) for item in (getattr(turn, "user_notices", None) or []) if str(item).strip()]
+    settlement_status = str(getattr(turn, "settlement_status", "") or "")
     if _is_im_channel(channel):
         plan_summary = ""
-        if kind in {"needs_input", "text"}:
-            verification_status = ""
+        if kind == "needs_input":
+            settlement_status = ""
     if kind in {"partial", "text"} and is_bounded_termination(reason) and _is_im_channel(channel):
         label = termination_reason_label(reason)
         bounded_notice = (
@@ -610,22 +966,498 @@ def turn_presentation_from_result(turn: Any, *, channel: str = "cli") -> TurnPre
         prefix = f"Warning: this turn did not complete: {termination_reason_label(reason)}."
         if prefix not in text:
             text = f"{prefix}\n\n{text}".strip()
-    return TurnPresentation(
+    chat = _is_im_channel(channel)
+    text = _compose_channel_answer(
+        text,
+        _host_cards_from_turn(turn, chat=chat),
+        chat=chat,
+        echoed=_is_observation_echo(text, turn),
+    )
+    presentation = TurnPresentation(
         assistant_text=text,
         session_id=str(getattr(turn, "session_id", "") or ""),
         task_id=task_id,
         submitted_workflow_ids=workflows,
         submitted_subtask_ids=submitted,
         tasks=tasks,
+        artifacts=artifacts,
         plan_summary=plan_summary,
         degraded_warnings=degraded_warnings,
-        verification_status=verification_status,
+        user_notices=user_notices,
+        settlement_status=settlement_status,
         next_actions=actions,
+    )
+    return _chat_shaped(presentation) if _is_im_channel(channel) else presentation
+
+
+# Extensions a reader could plausibly be pointed at as *the deliverable*. Names
+# are matched, not paths, so this only has to describe what a file is — anything
+# resolved still has to be found inside omni's own output area to count.
+_NAMED_DELIVERABLE_SUFFIXES = frozenset({
+    ".bib", ".csv", ".doc", ".docx", ".gif", ".jpeg", ".jpg", ".json", ".md",
+    ".mmd", ".pdf", ".png", ".pptx", ".svg", ".txt", ".xlsx",
+})
+
+# A filename as it appears mid-sentence. The name itself may hold anything the
+# artifact store slugifies into it, including non-Latin scripts (a survey titled
+# in Chinese keeps its title in the filename), so the run is bounded by the
+# punctuation that ends a citation rather than by an allow-list of characters. A
+# trailing "." is left to ``rstrip`` below because a sentence may end on the name.
+_NAMED_FILE = re.compile(
+    r"[^\s\"'`()<>\[\]{}|,;:*?！？，。；：、（）「」『』【】]+"
+    r"\.(?:" + "|".join(sorted(s[1:] for s in _NAMED_DELIVERABLE_SUFFIXES)) + r")",
+    re.IGNORECASE,
+)
+
+# How many files one reply may drag in, and how much of a root it is worth
+# walking to find them. Both exist so a reply that mentions a directory listing
+# cannot turn into an unbounded scan.
+_MAX_NAMED_ARTIFACTS = 8
+_MAX_INDEXED_FILES = 5000
+
+
+def may_fetch_named_files(produced: Sequence[ArtifactRef]) -> bool:
+    """Whether a reply's own words may add files to what the turn produced.
+
+    Only a turn that produced nothing may. A turn that produced deliverables
+    hands over exactly those, which is the one thing both surfaces agree on — so
+    a reply announcing more than the turn did cannot dress the claim in files
+    from another task. "All three materials are complete" was said on a turn that
+    drew a figure, and the survey it named does exist, written by the task the
+    user finally asked for it in.
+
+    Asking after earlier work is the case this exists for, and it produces nothing
+    by definition: the model answers from context and points at where the file is.
+    That a turn with an empty inventory may still over-claim is the residue; a
+    reader told about a file and handed it is at least handed the file named.
+
+    Language-neutral on purpose. Reading the request itself would mean matching
+    how it was phrased, in the languages these channels are used in, inside the
+    control plane — both a contract violation here and a weaker signal than one
+    the host knows for certain.
+    """
+    return not produced
+
+
+def artifacts_named_in_text(text: str, *, roots: Sequence[Path]) -> list[ArtifactRef]:
+    """Deliverables the reply points at, for a turn that produced none itself.
+
+    Asked a follow-up about work already done, the model answers from context —
+    "all three are ready, the figure is at /Users/…/artifacts/figure/….png" — and
+    that reply goes out with nothing attached and a server-local path in the body,
+    which is the one form of the answer its recipient cannot act on. The files
+    exist; only the list of what to send with the message was empty.
+
+    So the reply's own text is taken as the statement of what it delivers. A name
+    is resolved by looking for it *inside* the given roots, which is what keeps
+    this from becoming a way to name any file on the host and have it uploaded:
+    ``/etc/passwd`` is a perfectly good filename and resolves to nothing.
+
+    Callers gate this on :func:`may_fetch_named_files`.
+    """
+    if not text or not roots:
+        return []
+    wanted: list[str] = []
+    for match in _NAMED_FILE.finditer(text):
+        name = Path(match.group(0).rstrip(".").replace("\\", "/")).name
+        if name and name not in wanted:
+            wanted.append(name)
+    if not wanted:
+        return []
+
+    index = _index_output_files(roots)
+    found: list[ArtifactRef] = []
+    for name in wanted:
+        path = index.get(name)
+        if path is None:
+            continue
+        found.append(_ref_for_file(path))
+        if len(found) >= _MAX_NAMED_ARTIFACTS:
+            break
+    return found
+
+
+def _index_output_files(roots: Sequence[Path]) -> dict[str, Path]:
+    """Map filename to location for the deliverables under ``roots``.
+
+    Keyed by name because that is how a reply refers to a file — the path it
+    quotes may be stale, mirrored elsewhere, or the store's internal layout.
+    """
+    index: dict[str, Path] = {}
+    seen = 0
+    for root in roots:
+        try:
+            candidates = Path(root).rglob("*")
+        except OSError:
+            continue
+        try:
+            for path in candidates:
+                seen += 1
+                if seen > _MAX_INDEXED_FILES:
+                    return index
+                if path.suffix.lower() not in _NAMED_DELIVERABLE_SUFFIXES:
+                    continue
+                if path.name not in index and path.is_file():
+                    index[path.name] = path
+        except OSError:
+            continue
+    return index
+
+
+def _ref_for_file(path: Path) -> ArtifactRef:
+    """Describe a file found on disk the way a produced artifact is described."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+    return ArtifactRef(
+        title=artifact_display_label(path.stem) or path.name,
+        format=path.suffix.lstrip(".").lower(),
+        path=str(path),
+        mime=mimetypes.guess_type(path.name)[0] or "",
+        size_bytes=size,
     )
 
 
+def project_artifact_locations(
+    text: str,
+    artifacts: list[ArtifactRef],
+    *,
+    include_local_paths: bool,
+) -> str:
+    """Replace internal artifact locations at the display boundary.
+
+    The URI remains in durable task data and machine-readable inspection, but it
+    is not a useful location for a person. CLI output uses the resolved path;
+    chat output uses the filename because a server-local absolute path is not
+    meaningful to the recipient.
+
+    A path is projected for chat on the same grounds as a URI. The reply that
+    prompted this offered a WeChat reader the figure's location as
+    ``/Users/antonio/.omni/projects/default/artifacts/figure/…``, a directory on
+    somebody else's machine: the file arrives beside the message as an upload, and
+    its name is the only part of that location they can match it against.
+    """
+    projected = text
+    for artifact in sorted(artifacts, key=lambda item: len(item.uri), reverse=True):
+        if not artifact.uri or artifact.uri not in projected:
+            continue
+        if include_local_paths:
+            replacement = artifact.path or artifact_display_label(artifact.title)
+        else:
+            replacement = _artifact_filename(artifact)
+        # Avoid ``/path (/path)`` when a model printed both the resolved path and
+        # the internal URI. Other occurrences (for example a table cell) are
+        # projected in place.
+        projected = projected.replace(f" ({artifact.uri})", "")
+        projected = projected.replace(artifact.uri, replacement)
+    if include_local_paths:
+        return projected
+    for artifact in sorted(artifacts, key=lambda item: len(item.path), reverse=True):
+        if artifact.path and artifact.path in projected:
+            projected = projected.replace(artifact.path, _artifact_filename(artifact))
+    return projected
+
+
+def _artifact_filename(artifact: ArtifactRef) -> str:
+    """What to call an artifact where its location cannot be used."""
+    if artifact.path:
+        return artifact.path.replace("\\", "/").rsplit("/", 1)[-1]
+    return artifact_display_label(artifact.title)
+
+
 def _is_im_channel(channel: str) -> bool:
-    return channel.lower() in {"wechat", "weixin", "feishu", "lark", "dingtalk", "dingding"}
+    # Imported lazily: security imports TurnPresentation from this module.
+    from omni.channels.security import is_im_channel
+
+    return is_im_channel(channel)
+
+
+# How the host chose a provider. Worth reading when routing is what you are
+# debugging; noise to someone who asked for a paper and got a routing report.
+_ROUTING_DETAILS = ("Plan decision:", "Execution mode:", "Provider correction:",
+                    "Selection reasons:", "Match score:")
+
+# Identifiers are shown as eight characters everywhere a person reads them; a
+# message that pasted the raw 32 in mid-sentence was quoting an internal record.
+_FULL_HEX_ID = re.compile(r"\b[0-9a-f]{32}\b")
+
+# A card in one of these states is reporting that work was accepted, not what
+# it produced. ``running`` is left out: a card that reached chat mid-flight is
+# reporting progress on something the reader is already waiting for.
+_SUBMISSION_STATUSES = frozenset({"submitted", "pending"})
+
+# What one answer may occupy in a chat thread. WeChat iLink splits a reply at
+# 1800 characters per message, so a long one does not arrive as a long message —
+# it arrives as a queue of them, and the run that prompted this spent ten on a
+# paper and then could not send the figures behind it. The budget leaves room for
+# the inventory the host appends below the answer.
+_CHAT_ANSWER_BUDGET = 2400
+
+# Tool-observation copy that must not become the user-visible reply. The model
+# quoting an IM approval denial as a "root cause" essay is how b0cd360c spent
+# the chat budget on forensics and never attached the figure.
+_POLICY_FORENSICS = (
+    "sensitive tools triggered from an IM channel",
+    "require local confirmation",
+    "run the request from the CLI on the owner's machine",
+    "writing outside of the project; rejected by user approval settings",
+)
+
+_PENDING_IM_NOTE = (
+    "Remaining deliverables are still running. Files will be sent when they are ready."
+)
+
+
+def _chat_shaped(presentation: TurnPresentation) -> TurnPresentation:
+    """Reduce a reply to what its reader can act on from inside a chat thread.
+
+    The CLI reader is at the machine that ran the work: routing diagnostics and a
+    menu of follow-up commands are cheap there, because the next line of the
+    terminal is where they would be used. A chat reader pays for the same text in
+    screen-fulls, and on WeChat in separate messages — the reply that prompted
+    this carried four command suggestions and a provider-selection report behind
+    a paper it had already sent in eight pieces.
+
+    So this keeps what the request produced and one way to look further, and
+    drops the host explaining itself. Task identity survives: it is how the
+    reader refers to this work later, and the short form is what every other
+    surface shows.
+
+    A submission card is dropped outright. It says the work started, gives its
+    id, and offers a menu — and the reply it sits under has just said all
+    three, so a request that has produced nothing yet arrives as a screenful of
+    the host acknowledging itself. The completion card, which carries the
+    result, is what the reader is waiting for. Only the way back to the task
+    has to survive the card, so it moves up to the reply.
+
+    A turn that still owes a background figure must not attach the paper it
+    already wrote: CLI Outputs wait until drain finishes, and the completion
+    notice is where the same inventory is handed over once.
+    """
+    def spoken(task: TaskPresentation) -> TaskPresentation:
+        return replace(
+            task,
+            summary=_FULL_HEX_ID.sub(lambda m: m.group(0)[:8], task.summary),
+            details=[
+                item
+                for item in task.details
+                if not item.startswith(_ROUTING_DETAILS)
+            ],
+            next_actions=_task_inspect_action(task.task_id or task.subtask_id),
+        )
+
+    answer = _FULL_HEX_ID.sub(lambda m: m.group(0)[:8], presentation.assistant_text)
+    forensics = _looks_like_policy_forensics(answer)
+    answer = _strip_policy_forensics(answer)
+    answer = _strip_cli_manage_hints(answer)
+    pending = presentation.settlement_status == "pending_child_task" or (
+        promises_later_deliverables(answer)
+        and bool(presentation.submitted_subtask_ids)
+    )
+    artifacts = [] if pending else presentation.artifacts
+    if pending:
+        answer = _pending_im_answer(answer, presentation.task_id)
+    elif forensics and presentable_artifacts(artifacts):
+        answer = "Deliverables are attached."
+    cards = [task for task in presentation.tasks if task.status not in _SUBMISSION_STATUSES]
+    announced_a_submission = len(cards) != len(presentation.tasks)
+    # A reply that has already told the reader how to look further does not
+    # need a menu underneath repeating it. The submission notice names the
+    # command and the id in its own sentence, so the block below was the third
+    # time one short message said where to find the same task.
+    said_where_to_look = bool(presentation.task_id) and (
+        f"/task show {presentation.task_id[:8]}" in answer
+    )
+    return replace(
+        presentation,
+        assistant_text=_bounded_answer(
+            answer,
+            has_attachments=bool(presentable_artifacts(artifacts)),
+            task_id=presentation.task_id,
+        ),
+        artifacts=artifacts,
+        tasks=[spoken(task) for task in cards],
+        degraded_warnings=[],
+        settlement_status="",
+        next_actions=(
+            _task_inspect_action(presentation.task_id)
+            if (presentation.next_actions or (announced_a_submission and not cards))
+            and not said_where_to_look
+            else []
+        ),
+    )
+
+
+def _looks_like_policy_forensics(text: str) -> bool:
+    lowered = text.lower()
+    return any(needle.lower() in lowered for needle in _POLICY_FORENSICS)
+
+
+def _strip_policy_forensics(text: str) -> str:
+    if not text or not _looks_like_policy_forensics(text):
+        return text
+    kept = [part for part in text.split("\n\n") if not _looks_like_policy_forensics(part)]
+    return "\n\n".join(kept).strip()
+
+
+def _pending_im_answer(text: str, task_id: str) -> str:
+    """Keep a pending IM turn to a status line, not a paper dump."""
+    inspect = f" Inspect `/task show {task_id[:8]}`." if task_id else ""
+    cleaned = text.strip()
+    if (
+        cleaned
+        and len(cleaned) <= 400
+        and not _looks_like_policy_forensics(cleaned)
+    ):
+        if _PENDING_IM_NOTE not in cleaned:
+            return f"{cleaned.rstrip()} {inspect}{_PENDING_IM_NOTE}".strip()
+        return cleaned
+    return f"Request is in progress.{inspect} {_PENDING_IM_NOTE}"
+
+
+def _bounded_answer(text: str, *, has_attachments: bool, task_id: str) -> str:
+    """Keep an answer to one chat message, saying where the rest of it is.
+
+    The backstop for an answer that should have been a file and was not. It is
+    not a substitute for writing one: what it truncates is unrecoverable from the
+    message, so it always names somewhere the whole thing survives.
+
+    Cutting at a blank line rather than a character count keeps a sentence from
+    ending mid-word, which reads like a delivery failure rather than a summary.
+    """
+    if len(text) <= _CHAT_ANSWER_BUDGET:
+        return text
+    head = text[:_CHAT_ANSWER_BUDGET]
+    if (break_at := head.rfind("\n\n")) > _CHAT_ANSWER_BUDGET // 2:
+        head = head[:break_at]
+    where = (
+        "The full text is attached."
+        if has_attachments
+        else f"Read all of it with `/task show {task_id[:8]}`."
+        if task_id
+        else "The rest is recorded with this task."
+    )
+    return f"{head.rstrip()}\n\n_Shortened for chat._ {where}"
+
+
+def _task_inspect_action(task_id: str) -> list[str]:
+    """The two follow-ups a chat reader needs: see the result, or carry it on.
+
+    Everything else a task menu offers is either the host explaining itself or a
+    command whose id the reader would have to reconstruct. These two are the
+    whole interface to a finished task from inside a thread, and they are worded
+    exactly as every other surface words them.
+    """
+    return _task_navigation_actions(task_id)
+
+
+_SCHEDULE_TOOL_NAMES = frozenset({"schedule_task", "resolve_action_checkpoint"})
+
+# A chat reader cannot run local inspect/list verbs. Approve/deny stay: those
+# are the only way the machine owner finishes an IM-originated proposal.
+_CLI_MANAGE_HINT = re.compile(
+    r"(?:View or manage it with\s+)?"
+    r"`?omni schedule show(?:\s+[A-Za-z0-9_-]+)?`?"
+    r"\.?",
+    re.IGNORECASE,
+)
+
+
+def _host_cards_from_turn(turn: Any, *, chat: bool) -> list[str]:
+    """Structured cards the host can render without trusting model prose."""
+    cards: list[str] = []
+    schedule = _schedule_result_from_turn(turn)
+    if schedule is not None:
+        from omni.scheduling.presentation import build_card
+
+        cards.append(build_card(schedule, chat=chat))
+    return cards
+
+
+def _tool_observation_texts(turn: Any) -> list[str]:
+    texts: list[str] = []
+    for record in getattr(turn, "tool_trace", []) or []:
+        result = getattr(record, "result", None)
+        if isinstance(result, dict):
+            for key in ("summary", "message"):
+                value = str(result.get(key) or "").strip()
+                if value:
+                    texts.append(value)
+        observation = str(getattr(record, "observation", None) or "").strip()
+        if observation:
+            texts.append(observation)
+    return texts
+
+
+def _is_observation_echo(text: str, turn: Any) -> bool:
+    """Whether the visible reply is a tool receipt, not a separate human answer."""
+    stripped = text.strip()
+    if not stripped:
+        return False
+    collapsed = " ".join(stripped.split())
+    for obs in _tool_observation_texts(turn):
+        folded = " ".join(obs.split())
+        if stripped == obs or collapsed == folded:
+            return True
+        if len(folded) >= 40 and folded in collapsed:
+            return True
+    return collapsed.startswith("Scheduled '") and "next run" in collapsed
+
+
+def _compose_channel_answer(
+    text: str,
+    cards: list[str],
+    *,
+    chat: bool,
+    echoed: bool,
+) -> str:
+    """IM never ships a tool observation as the only bubble when a card exists.
+
+    CLI already has process lines, so a model-written reply is left alone unless
+    it is the receipt itself.
+    """
+    stripped = text.strip()
+    joined = "\n\n".join(card.strip() for card in cards if card.strip())
+    if not joined:
+        return text
+    if not stripped or echoed:
+        return joined
+    if any(card.strip() and card.strip() in stripped for card in cards):
+        return stripped
+    if not chat:
+        return stripped
+    return f"{stripped}\n\n{joined}"
+
+
+def _strip_cli_manage_hints(text: str) -> str:
+    """Drop ``omni schedule show`` manage hints a chat reader cannot run."""
+    if not text:
+        return text
+    cleaned = _CLI_MANAGE_HINT.sub("", text)
+    cleaned = re.sub(r"View or manage it with\s*\.?", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def _schedule_result_from_turn(turn: Any) -> Any:
+    """Last schedule-shaped tool payload on this turn, if the host should render it."""
+    # Imported lazily: ``omni.scheduling`` pulls channel security, which imports
+    # this module's ``TurnPresentation``.
+    from omni.scheduling.presentation import result_from_tool_payload
+
+    for record in reversed(list(getattr(turn, "tool_trace", []) or [])):
+        name = str(getattr(record, "name", "") or "")
+        if name not in _SCHEDULE_TOOL_NAMES:
+            continue
+        payload = getattr(record, "result", None)
+        if not isinstance(payload, dict):
+            continue
+        hydrated = result_from_tool_payload(payload)
+        if hydrated is not None:
+            return hydrated
+    return None
 
 
 def _submitted_tasks_from_trace(

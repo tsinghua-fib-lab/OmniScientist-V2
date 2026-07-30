@@ -98,9 +98,9 @@ References:
   provider offers an idempotency key or reconciliation API.
 - `run_compute`, status lookup, and cancellation are durable. Local cancellation terminates the
   process group; submitted schedulers remain `cancel_requested` until a backend acknowledges it.
-- Planner, coordinator, review, prompt-skill, subagent, memory-compaction, profile-maintenance,
-  and self-evolution LLM calls emit component-level `cost.usage` events. Session-end memory work
-  and explicit evolution commands use separate verified `maintenance` runs rather than changing
-  the cost or status of the preceding user turn.
+- Planner, coordinator, review, prompt-skill, subagent, memory-compaction, and
+  profile-maintenance LLM calls emit component-level `cost.usage` events. Session-end memory work
+  uses a separate `maintenance` run rather than changing the cost or status of the preceding
+  user turn.
 - Figure bundles bind figure, code, data, and run ids by SHA-256. Mutation after generation fails
   `verify_figure_bundle` instead of silently presenting a stale figure.

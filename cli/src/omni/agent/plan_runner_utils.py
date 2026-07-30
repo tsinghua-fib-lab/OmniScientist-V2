@@ -38,7 +38,7 @@ def plan_summary(plan: IntentPlan) -> str:
     contract = ", ".join(f"{sel.skill}:{sel.contract_level}" for sel in plan.selected_skills) or "n/a"
     return (
         f"Plan: {plan.intent_type.value}; reason: {plan.rationale}; "
-        f"skills: {skills}; contracts: {contract}; verification: {verification_expectation(plan)}"
+        f"skills: {skills}; contracts: {contract}; outputs: {declared_outputs(plan)}"
     )
 
 
@@ -144,6 +144,95 @@ def loop_result_event(result: Any) -> tuple[str, dict[str, Any]]:
     }
 
 
+# Terminators in both scripts: a gap's question is written in the user's
+# language, and a Latin full stop welded onto a sentence that already ended in
+# "？" reads as a typo the host introduced.
+_SENTENCE_END = (".", "?", "!", "。", "？", "！", ":", "：")
+
+# Labels for the few field names the host itself emits, used only when the gap
+# came with no words of its own.
+_FIELD_LABELS = {
+    "research_topic": "research topic",
+    "deliverable_scope": "target deliverable or candidate paper/arXiv id",
+    "topic": "specific topic",
+}
+
+# Gaps naming what the host cannot do rather than what a person can supply.
+# No answer typed at a prompt installs a provider, so the question is
+# unanswerable by construction — which is how a researcher who asked for
+# protein structure prediction was invited to clarify "contracted providers".
+_SYSTEM_OWNED_FIELDS = frozenset({"capability"})
+
+
+def gap_question(item: Any) -> str:
+    """What one missing input asks the user, or "" if it asks nothing.
+
+    ``ask`` is written for a person and wins wherever it exists. ``reason`` is
+    the fallback because that is where a model puts the question: the planner
+    contract long offered it no ``ask`` field, so every gap the model declared
+    itself carried its question there and the renderer dropped all of them
+    (incident cff3eeda). Only grounding-gate gaps carry both, and there
+    ``reason`` names the fabricated value for the event log — preferring ``ask``
+    keeps that diagnostic off the screen.
+
+    Falling back to ``reason`` is safe for the gaps a *model* wrote and unsafe
+    for the gaps the host writes about itself, so the fallback stops at the
+    system-owned fields. Every host gap meant for a person already sets
+    ``ask``; one that sets only ``reason`` is addressed to the event log.
+
+    A gap with none of the three says nothing the user can act on. Reporting
+    that as a question is what produced "research goal and output scope" for a
+    request whose goal and scope were never in doubt.
+    """
+    if not isinstance(item, dict):
+        return ""
+    field = str(item.get("field") or "")
+    spoken = str(item.get("ask") or "").strip()
+    if spoken:
+        return spoken
+    if field in _SYSTEM_OWNED_FIELDS:
+        return ""
+    return str(item.get("reason") or "").strip() or _FIELD_LABELS.get(field, "")
+
+
+def gap_default(item: Any) -> str:
+    """The value the turn will use for one gap when nobody answers it.
+
+    A gap that carries one is not a reason to stop. Its presence is the model's
+    own statement that it knows what to do here and is naming the choice rather
+    than making it invisibly.
+    """
+    if not isinstance(item, dict):
+        return ""
+    return str(item.get("default") or "").strip()
+
+
+def assumption_block(missing: list[dict[str, Any]]) -> str:
+    """Tell the turn what it is assuming and require it to own the assumptions.
+
+    Proceeding on an unstated guess is worse than the question it replaced: the
+    user cannot correct what they cannot see. Codex pairs the same
+    assumption-first default with an answer that lists "open questions or
+    assumptions", and Plan mode spells out the pairing — an unanswered question
+    means "proceed with the recommended option and record it as an assumption
+    in the final plan".
+    """
+    assumed = [
+        (str(item.get("field") or "").strip() or "unspecified", gap_default(item))
+        for item in missing
+        if isinstance(item, dict) and gap_default(item)
+    ]
+    if not assumed:
+        return ""
+    lines = "\n".join(f"- {field}: {value}" for field, value in assumed)
+    return (
+        "[Assumptions] The request did not specify the following, and rather than "
+        "stop to ask, this turn proceeds on the values below. Use them, and state "
+        "them plainly in your final answer so the user can correct any that are "
+        f"wrong:\n{lines}"
+    )
+
+
 def needs_input_text(missing: list[dict[str, Any]]) -> str:
     """Render a clarifying-question message from a plan's missing_inputs."""
     if any(item.get("field") == "paper_target" for item in missing if isinstance(item, dict)):
@@ -166,35 +255,61 @@ def needs_input_text(missing: list[dict[str, Any]]) -> str:
             "I need a paper target before continuing. Provide an arXiv id, DOI, paper URL, PDF path, "
             "or paste the paper content."
         )
-    asks = []
-    if any(item.get("field") == "research_topic" for item in missing if isinstance(item, dict)):
-        asks.append("research topic")
-    if any(item.get("field") == "deliverable_scope" for item in missing if isinstance(item, dict)):
-        asks.append("target deliverable or candidate paper/arXiv id")
-    if any(item.get("field") == "topic" for item in missing if isinstance(item, dict)):
-        asks.append("specific topic")
-    # A single missing field surfaced by the recovery ladder (e.g. an arXiv id):
-    # ask concretely so the user can unblock in one line.
+    asks: list[str] = []
     for item in missing:
-        if isinstance(item, dict) and item.get("field") and item.get("reason") and not asks:
-            asks.append(str(item.get("reason")))
-    return (
-        "I need a little more information before continuing: "
-        + (", ".join(asks) if asks else "research goal and output scope")
-        + "."
-    )
+        spoken = gap_question(item)
+        if spoken and spoken not in asks:
+            asks.append(spoken)
+    if not asks:
+        return "I need a little more information before continuing: research goal and output scope."
+    body = asks[0] if len(asks) == 1 else "\n" + "\n".join(f"- {ask}" for ask in asks[:3])
+    text = f"I need a little more information before continuing: {body}"
+    return text if text.rstrip().endswith(_SENTENCE_END) else f"{text}."
 
 
-def verification_expectation(plan: IntentPlan) -> str:
+def declared_outputs(plan: IntentPlan) -> str:
     required = plan.verification_plan.required_outputs
     return ", ".join(required) if required else "not specified"
 
 
-def verification_status(drained: list[dict[str, Any]]) -> str:
+def settlement_status(drained: list[dict[str, Any]]) -> str:
     if not drained:
         return "not_applicable"
     if all(item.get("status") == "succeeded" for item in drained):
-        return "passed"
+        return "succeeded"
     if any(item.get("status") == "succeeded" for item in drained):
         return "degraded"
     return "failed"
+
+
+def delivered_skill_answer(drained: list[dict[str, Any]]) -> str:
+    """Return the completed skill body, never a submission receipt.
+
+    Codex keeps a tool result in the turn until the model can speak from it.
+    Omni's ``single_skill_task`` runner already waits when ``drain_tasks`` is
+    on, but used to replace that body with ``Created execution``. The answer
+    the user asked for is the skill's own ``text`` / ``summary``.
+    """
+    for item in drained:
+        result = item.get("result")
+        if not isinstance(result, dict):
+            continue
+        for key in ("text", "summary", "message", "title"):
+            value = str(result.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def completed_skill_answer(
+    drained: list[dict[str, Any]],
+    *,
+    skill: str,
+) -> str:
+    """Foreground copy after a drained skill: the result, or a completion line."""
+    body = delivered_skill_answer(drained)
+    if body:
+        return body
+    if drained and settlement_status(drained) != "failed":
+        return f"`{skill}` completed."
+    return ""

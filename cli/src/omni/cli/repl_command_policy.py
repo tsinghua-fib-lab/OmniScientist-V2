@@ -7,6 +7,7 @@ import shlex
 from collections.abc import MutableMapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from urllib.parse import urlsplit, urlunsplit
 
 
 class ReplCommandMode(StrEnum):
@@ -39,6 +40,10 @@ _FOREGROUND = ReplCommandPolicy(
     ReplCommandMode.FOREGROUND_TTY,
     "command owns the terminal until stopped",
 )
+_PAIRING_OUTPUT = ReplCommandPolicy(
+    ReplCommandMode.CAPTURED,
+    "the one-time pairing code has to stay readable in the transcript",
+)
 
 _SENSITIVE_OPTIONS = frozenset({
     "-k",
@@ -54,6 +59,7 @@ _SENSITIVE_OPTIONS = frozenset({
     "--token",
 })
 _SENSITIVE_KEY_PARTS = ("api_key", "apikey", "password", "secret", "token")
+_ENDPOINT_OPTIONS = frozenset({"-u", "--base-url", "--endpoint"})
 _REDACTED = "REDACTED"
 _RESTART_NOTICE_ENV = "OMNI_REPL_RESTART_NOTICE"
 _RESTART_NOTICE = "Previous command completed; Omni restarted to load the new runtime state."
@@ -77,7 +83,7 @@ def classify_repl_command(tokens: Sequence[str]) -> ReplCommandPolicy:
         return _CAPTURED if _has_option(args, "--non-interactive", "-y") else _INTERACTIVE
 
     if command == "channel":
-        return _INTERACTIVE if subcommand == "login" else _CAPTURED
+        return _channel_login_policy(args) if subcommand == "login" else _CAPTURED
 
     if command in {"update", "upgrade"}:
         return (
@@ -169,6 +175,32 @@ def _is_help(tokens: Sequence[str]) -> bool:
     )
 
 
+_LOGIN_CREDENTIALS = {
+    "feishu": ("--app-id", "--app-secret"),
+    "dingtalk": ("--client-id", "--client-secret"),
+}
+
+
+def _channel_login_policy(tokens: Sequence[str]) -> ReplCommandPolicy:
+    """Suspend the TUI for a login only when the child truly reads the terminal.
+
+    WeChat blocks on a QR scan, so it has to own the raw terminal. Feishu and
+    DingTalk return the moment they print the one-time pairing code: running
+    those interactively repaints that code away before it can be read.
+    """
+    if _has_option(tokens, "--non-interactive"):
+        return _CAPTURED
+    platform = tokens[2] if len(tokens) > 2 and not tokens[2].startswith("-") else ""
+    if platform == "wechat":
+        return _CAPTURED if _has_option(tokens, "--no-wait") else _INTERACTIVE
+    credentials = _LOGIN_CREDENTIALS.get(platform)
+    if credentials is None:
+        return _INTERACTIVE
+    if all(_has_option(tokens, option) for option in credentials):
+        return _PAIRING_OUTPUT
+    return _INTERACTIVE
+
+
 def _has_option(tokens: Sequence[str], *names: str) -> bool:
     for token in tokens[1:]:
         if token in names or any(token.startswith(f"{name}=") for name in names if name.startswith("--")):
@@ -185,6 +217,39 @@ def _redact_tokens(tokens: list[str]) -> bool:
     index = 0
     while index < len(tokens):
         token = tokens[index]
+        if (
+            token in _ENDPOINT_OPTIONS
+            and index + 1 < len(tokens)
+            and not tokens[index + 1].startswith("-")
+        ):
+            safe = _redact_endpoint(tokens[index + 1])
+            if safe != tokens[index + 1]:
+                tokens[index + 1] = safe
+                changed = True
+            index += 2
+            continue
+        endpoint_matched = False
+        for option in _ENDPOINT_OPTIONS:
+            prefix = f"{option}="
+            if option.startswith("--") and token.startswith(prefix):
+                safe = _redact_endpoint(token.removeprefix(prefix))
+                if safe != token.removeprefix(prefix):
+                    tokens[index] = prefix + safe
+                    changed = True
+                endpoint_matched = True
+                break
+        if endpoint_matched:
+            index += 1
+            continue
+        if token.startswith("-u") and token != "-u":
+            separator = "=" if token.startswith("-u=") else ""
+            raw_endpoint = token.removeprefix(f"-u{separator}")
+            safe = _redact_endpoint(raw_endpoint)
+            if safe != raw_endpoint:
+                tokens[index] = f"-u{separator}{safe}"
+                changed = True
+            index += 1
+            continue
         if token in _SENSITIVE_OPTIONS:
             if index + 1 < len(tokens):
                 tokens[index + 1] = _REDACTED
@@ -210,12 +275,56 @@ def _redact_tokens(tokens: list[str]) -> bool:
     ):
         tokens[3] = _REDACTED
         changed = True
+    elif (
+        len(tokens) >= 4
+        and tokens[0:2] == ["config", "set"]
+        and _endpoint_key(tokens[2])
+    ):
+        safe = _redact_endpoint(tokens[3])
+        if safe != tokens[3]:
+            tokens[3] = safe
+            changed = True
     return changed
+
+
+def _redact_endpoint(value: str) -> str:
+    """Redact URL userinfo, query, and fragment before history/transcript use."""
+    raw = str(value or "")
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        return _REDACTED if any(mark in raw for mark in ("@", "?", "#")) else raw
+    if "@" in parsed.path and not parsed.netloc:
+        return _REDACTED
+    hostname = parsed.hostname or ""
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    if port is not None:
+        hostname = f"{hostname}:{port}"
+    safe = urlunsplit(
+        (
+            parsed.scheme,
+            hostname if parsed.netloc else "",
+            parsed.path,
+            _REDACTED if parsed.query else "",
+            "",
+        )
+    )
+    return safe
 
 
 def _sensitive_key(value: str) -> bool:
     lowered = value.casefold()
     return any(part in lowered for part in _SENSITIVE_KEY_PARTS)
+
+
+def _endpoint_key(value: str) -> bool:
+    lowered = value.casefold()
+    return lowered.endswith(("base_url", "endpoint"))
 
 
 def _redact_unparsed(value: str) -> str:
@@ -228,9 +337,33 @@ def _redact_unparsed(value: str) -> str:
         lambda match: f"{match.group('option')}{match.group('separator')}{_REDACTED}",
         redacted,
     )
+    endpoint_pattern = "|".join(
+        re.escape(option) for option in sorted(_ENDPOINT_OPTIONS, key=len, reverse=True)
+    )
+    redacted = re.sub(
+        rf"(?i)(?P<option>{endpoint_pattern})(?P<separator>=|\s+)(?P<value>\S+)",
+        lambda match: (
+            f"{match.group('option')}{match.group('separator')}"
+            f"{_redact_endpoint(match.group('value'))}"
+        ),
+        redacted,
+    )
     redacted = re.sub(
         r"(?i)(\bconfig\s+set\s+\S*(?:api[_-]?key|secret|token|password)\S*\s+)\S+",
         rf"\1{_REDACTED}",
+        redacted,
+    )
+    redacted = re.sub(
+        r"(?i)(\bconfig\s+set\s+\S*(?:base[_-]?url|endpoint)\s+).*$",
+        rf"\1{_REDACTED}",
+        redacted,
+    )
+    # When quoting is malformed, a reliable argument boundary no longer exists.
+    # Fail closed from a credential/endpoint option onward instead of guessing
+    # where an embedded secret ends.
+    redacted = re.sub(
+        r"(?i)(?<!\w)(?:-k|--api-key|-u|--base-url|--endpoint)(?:=|\s*)\S.*$",
+        _REDACTED,
         redacted,
     )
     return redacted

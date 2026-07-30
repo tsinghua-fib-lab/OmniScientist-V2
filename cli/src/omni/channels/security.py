@@ -18,10 +18,19 @@ from omni.channels.config import load_channel_config
 from omni.config.settings import OmniSettings, read_toml_file
 from omni.runtime.presentation import TurnPresentation
 
+# Product names written as Channel.name and ~/.omni/channels/<name>.toml.
 IM_CHANNELS = {"wechat", "feishu", "dingtalk"}
+# Names that still mean the same transport in logs, tests, or older configs.
+_IM_CHANNEL_ALIASES = {
+    "wechat": "wechat",
+    "weixin": "wechat",
+    "feishu": "feishu",
+    "lark": "feishu",
+    "dingtalk": "dingtalk",
+    "dingding": "dingtalk",
+}
 PAIR_RE = re.compile(r"^/pair\s+([A-Za-z0-9_-]+)\s*$", re.IGNORECASE)
 _INBOUND_DEDUPE_TTL_SECONDS = 24 * 60 * 60
-_INBOUND_FALLBACK_WINDOW_SECONDS = 5 * 60
 
 
 @dataclass(frozen=True)
@@ -50,6 +59,30 @@ def with_security_defaults(config: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def canonical_im_channel(channel: str) -> str | None:
+    """Map a transport name to the product IM channel, or ``None`` if it is not IM."""
+    return _IM_CHANNEL_ALIASES.get(str(channel or "").strip().lower())
+
+
+def is_im_channel(channel: str) -> bool:
+    """Whether this name is an IM transport (canonical product name or alias)."""
+    return canonical_im_channel(channel) is not None
+
+
+def completion_notify_channel(notify_channel: str, parent_channel: str = "") -> str:
+    """Channel that receives the completion hop.
+
+    Trust the stored notify. ``enqueue_notify_channel`` already decided:
+    background and IM foreground that do not wait store the surface; an
+    in-turn drain stores empty so the turn itself is the hop. Refilling
+    from an IM parent re-pushes a card for work the turn already showed.
+
+    ``parent_channel`` is accepted for call-site compatibility and ignored.
+    """
+    _ = parent_channel
+    return str(notify_channel or "").strip()
+
+
 def authorize_channel_message(
     settings: OmniSettings,
     channel: str,
@@ -57,6 +90,7 @@ def authorize_channel_message(
     text: str,
 ) -> AuthorizationResult:
     """Authorize one inbound IM message before it reaches the agent."""
+    channel = canonical_im_channel(channel) or ""
     if channel not in IM_CHANNELS:
         return AuthorizationResult(True)
     cfg = with_security_defaults(load_channel_config(settings, channel))
@@ -123,6 +157,7 @@ def add_allowed_external_key(config_path: Path, external_key: str) -> None:
 
 def channel_requires_sensitive_confirm(settings: OmniSettings, channel: str) -> bool:
     """Whether IM-originated tool calls should require local confirmation."""
+    channel = canonical_im_channel(channel) or ""
     if channel not in IM_CHANNELS:
         return False
     cfg = with_security_defaults(load_channel_config(settings, channel))
@@ -133,11 +168,9 @@ def claim_inbound_message(
     settings: OmniSettings,
     channel: str,
     external_key: str,
-    text: str,
     *,
     message_id: str = "",
     event_id: str = "",
-    fallback_window_seconds: int = _INBOUND_FALLBACK_WINDOW_SECONDS,
 ) -> bool:
     """Return True once for each IM inbound event.
 
@@ -145,18 +178,22 @@ def claim_inbound_message(
     redeliver the same event after a retry or websocket reconnect; this guard
     keeps the retry at the channel boundary so the shared agent still sees
     ordinary repeated CLI/user messages.
+
+    Identity comes from the provider's own id and nowhere else. This used to
+    fall back to hashing the message text when an id was missing, which made a
+    person asking the same question twice within five minutes indistinguishable
+    from the network delivering one question twice — and the second ask was
+    dropped in silence. A repeat is a request, not a retransmission; without an
+    id there is nothing to recognise, so the message is answered.
     """
-    if channel not in IM_CHANNELS:
+    if not is_im_channel(channel):
+        return True
+    event = (message_id or event_id or "").strip()
+    if not event:
         return True
     now = datetime.now(UTC)
-    key, ttl = _inbound_dedupe_key(
-        channel,
-        external_key,
-        text,
-        message_id=message_id,
-        event_id=event_id,
-        fallback_window_seconds=fallback_window_seconds,
-    )
+    key = "event:" + sha256_hex(f"{channel}:{external_key}:{event}")
+    ttl = _INBOUND_DEDUPE_TTL_SECONDS
     path = settings.paths.project_dir / "channel_inbound_seen.json"
     store = _read_seen_store(path, now)
     if key in store:
@@ -187,26 +224,8 @@ def _pairing_code_valid(cfg: dict[str, Any], code: str) -> bool:
     return secrets.compare_digest(expected, _hash_pairing_code(salt, code))
 
 
-def _inbound_dedupe_key(
-    channel: str,
-    external_key: str,
-    text: str,
-    *,
-    message_id: str,
-    event_id: str,
-    fallback_window_seconds: int,
-) -> tuple[str, int]:
-    event_key = (message_id or event_id or "").strip()
-    if event_key:
-        return (
-            "event:" + hashlib.sha256(f"{channel}:{external_key}:{event_key}".encode()).hexdigest(),
-            _INBOUND_DEDUPE_TTL_SECONDS,
-        )
-    normalized_text = " ".join(text.split())
-    digest = hashlib.sha256(
-        f"{channel}:{external_key}:{normalized_text}".encode()
-    ).hexdigest()
-    return f"fallback:{digest}", max(1, fallback_window_seconds)
+def sha256_hex(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
 
 
 def _read_seen_store(path: Path, now: datetime) -> dict[str, dict[str, Any]]:

@@ -1,0 +1,65 @@
+{
+  "scientist_name": "Richard Feynman",
+  "aliases": [
+    "Richard Feynman",
+    "Richard P. Feynman",
+    "Richard Phillips Feynman",
+    "R. P. Feynman",
+    "Feynman, Richard P."
+  ],
+  "occupations": [
+    "theoretical physicist",
+    "university professor"
+  ],
+  "research_fields": [
+    "theoretical physics",
+    "quantum electrodynamics",
+    "quantum mechanics",
+    "particle physics",
+    "superfluidity",
+    "scientific method"
+  ],
+  "education_history": [
+    {
+      "institution": "Massachusetts Institute of Technology",
+      "start_year": 1935,
+      "end_year": 1939
+    },
+    {
+      "institution": "Princeton University",
+      "start_year": 1939,
+      "end_year": 1942
+    }
+  ],
+  "employment_history": [
+    {
+      "organization": "Los Alamos Laboratory",
+      "start_year": 1943,
+      "end_year": 1945
+    },
+    {
+      "organization": "Cornell University",
+      "start_year": 1945,
+      "end_year": 1950
+    },
+    {
+      "organization": "California Institute of Technology",
+      "start_year": 1950,
+      "end_year": 1988
+    }
+  ],
+  "institutions": [
+    "Massachusetts Institute of Technology",
+    "Princeton University",
+    "Cornell University",
+    "California Institute of Technology",
+    "Los Alamos Laboratory"
+  ],
+  "sources": [
+    "https://www.nobelprize.org/prizes/physics/1965/feynman/biographical/",
+    "https://www.wikidata.org/wiki/Q39246"
+  ],
+  "google_scholar_url": "",
+  "portrait_url": "",
+  "portrait_source_url": ""
+}

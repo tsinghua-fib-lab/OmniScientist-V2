@@ -16,9 +16,11 @@ minimal/DB-free callers (some unit tests) are unaffected.
 
 from __future__ import annotations
 
+from omni.core.tool_result import owned_result_outcome
 from omni.skills_runtime.builtin_tools.compute import build_compute_tools
 from omni.skills_runtime.builtin_tools.docs import build_docs_tools
 from omni.skills_runtime.builtin_tools.fs import build_fs_tools
+from omni.skills_runtime.builtin_tools.plan import build_plan_tools
 from omni.skills_runtime.builtin_tools.shell import build_shell_tools
 from omni.skills_runtime.builtin_tools.web import build_web_tools
 from omni.skills_runtime.context import ExecContext, Tool
@@ -31,6 +33,8 @@ def build_builtin_tools(ctx: ExecContext) -> list[Tool]:
         *build_shell_tools(ctx),
         *build_compute_tools(ctx),
         *build_web_tools(ctx),
+        # The model's own checklist. Store-free, so every surface offers it.
+        *build_plan_tools(ctx),
     ]
     if getattr(ctx, "db", None) is not None:
         # Imported lazily to avoid a hard import cycle (research → storage → …).
@@ -45,6 +49,11 @@ def build_builtin_tools(ctx: ExecContext) -> list[Tool]:
     from omni.skills_runtime.builtin_tools.delegate import build_delegation_tools
 
     tools.extend(build_delegation_tools(ctx))
+    # These are host-owned result schemas.  Attach the status adapter once at
+    # the trusted catalog boundary; external/MCP tools never pass through here.
+    for tool in tools:
+        if tool.outcome_resolver is None:
+            tool.outcome_resolver = owned_result_outcome
     return tools
 
 

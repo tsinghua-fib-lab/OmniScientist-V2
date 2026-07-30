@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 
 from omni.cli.main import app
 from omni.cli.state import AppState
+from tests.conftest import store_shaped_home
 
 runner = CliRunner()
 
@@ -82,7 +83,7 @@ def test_config_home_switch_and_reset(tmp_path, monkeypatch):
 
 
 def test_config_home_refuses_to_override_environment(tmp_path, monkeypatch):
-    selected = tmp_path / "environment-home"
+    selected = store_shaped_home(tmp_path, "environment")
     monkeypatch.setenv("OMNI_HOME", str(selected))
 
     result = runner.invoke(app, ["config", "home", str(tmp_path / "different")])
@@ -117,6 +118,22 @@ async def test_repl_config_home_requests_a_full_restart(tmp_path, monkeypatch):
         "session-123",
     )
 
-    assert dispatched == [f"config home {tmp_path / 'new-home'}"]
+    assert len(dispatched) == 1
+    assert main._split_repl_command_line(dispatched[0]) == [  # noqa: SLF001
+        "config",
+        "home",
+        str(tmp_path / "new-home"),
+    ]
     assert result.restart is True
     assert result.resume_after_restart is False
+
+
+def test_repl_command_split_preserves_unquoted_windows_home_path():
+    import omni.cli.main as main
+
+    assert main._split_repl_command_line(  # noqa: SLF001
+        r"/config home C:\Users\runneradmin\.omni", windows=True
+    ) == ["config", "home", r"C:\Users\runneradmin\.omni"]
+    assert main._split_repl_command_line(  # noqa: SLF001
+        r'/config home "\\server\share\omni home"', windows=True
+    ) == ["config", "home", r"\\server\share\omni home"]

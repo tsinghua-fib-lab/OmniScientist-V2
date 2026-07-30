@@ -15,10 +15,7 @@ from omni.runtime.notifications import collect_inbox_notes
 from omni.storage.db import get_database
 
 
-def test_collect_inbox_notes_merges_channel_anchor(tmp_path, monkeypatch):
-    home = tmp_path / "omni-home"
-    home.mkdir()
-    monkeypatch.setenv("OMNI_HOME", str(home))
+def test_collect_inbox_notes_merges_channel_anchor(omni_home):
 
     local = get_paths(project="repo-ws")
     local.ensure_dirs()
@@ -64,10 +61,7 @@ def test_collect_inbox_notes_merges_channel_anchor(tmp_path, monkeypatch):
     assert notes[-1]["task_id"].startswith("bbbbbbbb")
 
 
-def test_collect_inbox_notes_skips_duplicate_when_local_is_anchor(tmp_path, monkeypatch):
-    home = tmp_path / "omni-home"
-    home.mkdir()
-    monkeypatch.setenv("OMNI_HOME", str(home))
+def test_collect_inbox_notes_skips_duplicate_when_local_is_anchor(omni_home):
 
     anchor = get_paths(project="default")
     anchor.ensure_dirs()
@@ -87,12 +81,9 @@ def test_collect_inbox_notes_skips_duplicate_when_local_is_anchor(tmp_path, monk
     assert notes[0]["workspace"] == "default"
 
 
-def test_render_inbox_shows_workspace_column(tmp_path, monkeypatch):
+def test_render_inbox_shows_workspace_column(omni_home, monkeypatch):
     from omni.cli.commands import tasks_cmd
 
-    home = tmp_path / "omni-home"
-    home.mkdir()
-    monkeypatch.setenv("OMNI_HOME", str(home))
     paths = get_paths(project="view-ws")
     paths.ensure_dirs()
 
@@ -107,7 +98,7 @@ def test_render_inbox_shows_workspace_column(tmp_path, monkeypatch):
             "summary": "from default",
             "created_at": "2026-07-29T10:00:00+00:00",
             "workspace": "default",
-            "_project_dir": str(home / "projects" / "default"),
+            "_project_dir": str(omni_home / "projects" / "default"),
         }
     ]
     captured: dict = {}
@@ -128,10 +119,7 @@ def test_render_inbox_shows_workspace_column(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_list_open_clarifications_sees_wechat_decider_on_anchor(tmp_path, monkeypatch):
-    home = tmp_path / "omni-home"
-    home.mkdir()
-    monkeypatch.setenv("OMNI_HOME", str(home))
+async def test_list_open_clarifications_sees_wechat_decider_on_anchor(omni_home):
 
     # Seed a WeChat clarification on the unregistered channel anchor.
     anchor = get_paths(project="default")
@@ -160,7 +148,7 @@ async def test_list_open_clarifications_sees_wechat_decider_on_anchor(tmp_path, 
     )
 
     # Local principal filter would miss this; catalog scan with principal=None must not.
-    rows = await list_open_clarifications_all_workspaces(limit=30, home=home)
+    rows = await list_open_clarifications_all_workspaces(limit=30, home=omni_home)
     assert any(r.record.id == rec.id for r in rows)
     hit = next(r for r in rows if r.record.id == rec.id)
     assert hit.workspace == "default"
@@ -168,15 +156,11 @@ async def test_list_open_clarifications_sees_wechat_decider_on_anchor(tmp_path, 
     assert hit.record.channel == "wechat"
 
 
-def test_schedule_clarifications_cli_lists_wechat_draft(tmp_path, monkeypatch):
+def test_schedule_clarifications_cli_lists_wechat_draft(omni_home, monkeypatch):
     """CLI must not hard-filter principal=local — WeChat drafts on default appear."""
     from typer.testing import CliRunner
 
     from omni.cli.main import app
-
-    home = tmp_path / "omni-home"
-    home.mkdir()
-    monkeypatch.setenv("OMNI_HOME", str(home))
 
     async def _seed() -> str:
         agent = await make_agent(AppState(project="default"))

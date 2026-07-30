@@ -6,6 +6,7 @@ from pathlib import Path
 
 import yaml
 
+from omni.core.tool_contracts import validate_json_schema
 from omni.skills_runtime.discovery import active_skill_names
 from omni.skills_runtime.manifest import DeliveryMode, SkillKind, parse_skill_text
 
@@ -175,3 +176,40 @@ def test_builtin_research_output_contract_is_minimal_and_open():
         assert schema.get("additionalProperties") is not False, skill_path
         assert props["status"].get("enum") == lifecycle_status, skill_path
         assert common_fields <= set(props), skill_path
+
+
+def test_paper_review_scientist_perspective_requires_loaded_persona() -> None:
+    root = Path(__file__).resolve().parents[3] / "skills" / "paper-review"
+    text = (root / "SKILL.md").read_text(encoding="utf-8")
+    helix = yaml.safe_load(text.split("---", 2)[1])["metadata"]["helixforge"]
+    input_schema = helix["input_schema"]
+    output_schema = helix["output_schema"]
+
+    loaded_persona = {
+        "loaded": True,
+        "active_scientist_id": "kaiming-he",
+    }
+    inactive_persona = {
+        "loaded": False,
+        "active_scientist_id": None,
+    }
+    valid_input = {
+        "input": "review.pdf",
+        "claim_scientist_perspective": True,
+        "requested_scientist_id": "kaiming-he",
+        "persona": loaded_persona,
+    }
+    invalid_input = {**valid_input, "persona": inactive_persona}
+    assert not list(validate_json_schema(valid_input, input_schema, declared=True))
+    assert list(validate_json_schema(invalid_input, input_schema, declared=True))
+
+    valid_claim = {
+        "status": "ok",
+        "scientist_perspective_applied": True,
+        "persona": loaded_persona,
+    }
+    invalid_claim = {**valid_claim, "persona": inactive_persona}
+    generic_review = {"status": "ok", "scientist_perspective_applied": False}
+    assert not list(validate_json_schema(valid_claim, output_schema, declared=True))
+    assert list(validate_json_schema(invalid_claim, output_schema, declared=True))
+    assert not list(validate_json_schema(generic_review, output_schema, declared=True))

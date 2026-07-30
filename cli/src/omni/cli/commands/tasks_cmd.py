@@ -10,12 +10,25 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any
 
 import typer
 from sqlalchemy import or_, select
 
-from omni.cli.render import console, data_table, error, info, kv_table, success, warn
+from omni.cli import theme
+from omni.cli.render import (
+    artifact_line,
+    artifact_preview,
+    console,
+    data_table,
+    error,
+    info,
+    kv_table,
+    one_line,
+    success,
+    warn,
+)
 from omni.cli.state import (
     AppState,
     make_agent,
@@ -28,12 +41,12 @@ from omni.cli.timefmt import format_local_iso, format_local_time
 from omni.config.paths import OmniPaths
 from omni.config.workspaces import registry_path
 from omni.core.identifiers import short_id, shortest_unique_prefixes
-from omni.core.tool_result import command_result_status
+from omni.core.tool_result import command_failure_hint, command_result_status
 from omni.runtime.aggregate import AggTaskRow, list_tasks_all_workspaces
 from omni.runtime.notifications import collect_inbox_notes, latest_delivery_status
 from omni.runtime.presentation import task_presentation_from_result
 from omni.runtime.task_object_resolver import TaskObjectResolution
-from omni.runtime.task_recorder import _TASK_BLOCKED_STATUSES, _TASK_PROTECTED_STATUSES
+from omni.runtime.task_recorder import _TASK_BLOCKED_STATUSES
 from omni.runtime.task_results import is_dot_artifact
 from omni.runtime.task_status import resolve_task_status
 from omni.storage.models import (
@@ -45,10 +58,14 @@ from omni.storage.models import (
     WorkflowStepORM,
 )
 
+if TYPE_CHECKING:  # imported lazily at call time to keep the CLI start-up light
+    from omni.runtime.task_recovery import RecoveryOutcome
+
 app = typer.Typer(help="Inspect and run background research tasks.", no_args_is_help=True)
 _TASK_SUBCOMMANDS = (
     "list", "session", "all", "show", "subtask", "step", "watch", "attach", "drain", "inbox",
-    "approve", "steer", "cancel", "retry", "resume", "archive", "unarchive", "rm", "clear", "prune", "help",
+    "approve", "steer", "cancel", "retry", "resume", "requeue", "archive", "unarchive", "rm",
+    "delete", "clear", "prune", "help",
 )
 
 
@@ -152,10 +169,7 @@ def _squash_summary(text: str, limit: int) -> str:
     R5: widen the old hard 70/160-char cuts and never break mid-line in a table
     cell (newlines become spaces), so summaries/rationales stay readable.
     """
-    collapsed = " ".join(str(text or "").split())
-    if len(collapsed) <= limit:
-        return collapsed
-    return collapsed[: max(1, limit - 1)].rstrip() + "…"
+    return one_line(text, limit)
 
 
 def _session_matches(session_id: str | None, prefix: str) -> bool:
@@ -279,10 +293,19 @@ async def _resolve_task_artifacts(
                 owned[row.id] = row
 
     for title, path, uri in result_artifacts:
+        row: ArtifactORM | None = None
         if uri.startswith("artifact://"):
             artifact_id = uri.removeprefix("artifact://")
             if db is not None and artifact_id not in owned:
                 continue
+            row = owned.get(artifact_id)
+        # A result that names only a URI is not the richer description this
+        # prefers it for, and it still claims the key the stored row would be
+        # pushed under — which is the side that knows the file. research-ideation
+        # reports its report as ``report_uri`` alone, so `/task show` printed an
+        # identifier for a store instead of a path anyone could open.
+        if not path and row is not None:
+            path = _artifact_abs_path(row, paths)
         push(title, path, uri)
     for row in owned.values():
         push(
@@ -294,20 +317,12 @@ async def _resolve_task_artifacts(
 
 
 def _print_artifacts(rows: Sequence[tuple[str, str, str]], *, limit: int = 24) -> None:
-    """Render artifacts as ``title: path`` with a dim ``artifact://`` URI."""
+    """Render artifacts as a bold **title** plus its path and dim ``artifact://``."""
     if not rows:
         return
-    console.print("\n[bold cyan]artifacts[/bold cyan]")
+    console.print(f"\n[{theme.STRONG} {theme.ACCENT}]artifacts[/]")
     for title, path, uri in list(rows)[:limit]:
-        label = title or "artifact"
-        if path and uri:
-            console.print(f"  • {label}: {path} [dim]{uri}[/dim]")
-        elif path:
-            console.print(f"  • {label}: {path}")
-        elif uri:
-            console.print(f"  • {label}: [dim]{uri}[/dim]")
-        else:
-            console.print(f"  • {label}")
+        artifact_line(title or "artifact", path, uri)
 
 
 def _subtask_summary(task: SubtaskORM) -> str:
@@ -370,6 +385,8 @@ def _event_json_payload(event: TaskEventORM) -> dict[str, Any]:
         "seq": event.seq,
         "event_type": event.event_type,
         "status": event.status,
+        "lifecycle_status": getattr(event, "lifecycle_status", "") or "",
+        "result_success": getattr(event, "result_success", None),
         "name": event.name,
         "tool_name": event.tool_name,
         "skill_name": event.skill_name,
@@ -478,6 +495,12 @@ def _task_json_payload(
         "task_id": task.id,
         "kind": task.kind,
         "depth": task.depth,
+        "attempt": getattr(task, "attempt", 1) or 1,
+        "retry_of_task_id": getattr(task, "retry_of_task_id", "") or "",
+        "root_task_id": getattr(task, "root_task_id", "") or "",
+        "recommended": _task_recommended_action(
+            task, resumable=_awaits_a_checkpoint(events)
+        ),
         "parent_task_id": task.parent_task_id or "",
         "origin_workflow_run_id": task.origin_workflow_run_id or "",
         "origin_workflow_step_id": task.origin_workflow_step_id or "",
@@ -509,6 +532,7 @@ def _task_json_payload(
         "finished_at": format_local_iso(task.finished_at),
         "archived_at": format_local_iso(task.archived_at),
         "archived_reason": task.archived_reason or "",
+        "cost": _task_cost_summary(events),
         "events": [_event_json_payload(e) for e in events],
         "workflows": [
             _workflow_json_payload(workflow, steps, subtasks)
@@ -545,16 +569,32 @@ def _plan_contract_summary(plan_json: dict[str, Any]) -> str:
     return ", ".join(parts) or "-"
 
 
-def _plan_verification_summary(plan_json: dict[str, Any]) -> str:
-    verification = plan_json.get("verification_plan") if isinstance(plan_json.get("verification_plan"), dict) else {}
-    required = verification.get("required_outputs") if isinstance(verification.get("required_outputs"), list) else []
-    events = verification.get("required_events") if isinstance(verification.get("required_events"), list) else []
+def _plan_settlement_summary(plan_json: dict[str, Any]) -> str:
+    declared = plan_json.get("verification_plan") if isinstance(plan_json.get("verification_plan"), dict) else {}
+    required = declared.get("required_outputs") if isinstance(declared.get("required_outputs"), list) else []
+    events = declared.get("required_events") if isinstance(declared.get("required_events"), list) else []
     bits: list[str] = []
     if required:
         bits.append("outputs=" + ",".join(str(x) for x in required[:4]))
     if events:
         bits.append("events=" + ",".join(str(x) for x in events[:4]))
     return "; ".join(bits) or "-"
+
+
+def _host_remaining_summary(plan_json: dict[str, Any], artifact_rows: Sequence[tuple[str, str, str]] | None) -> str:
+    from omni.runtime.remaining import remaining_deliverables
+
+    declared = plan_json.get("verification_plan") if isinstance(plan_json.get("verification_plan"), dict) else {}
+    required = list(declared.get("required_outputs") or plan_json.get("outputs") or [])
+    artifacts = []
+    for kind, title, target in artifact_rows or []:
+        artifacts.append(
+            SimpleNamespace(kind=kind, title=title, path=target, rel_path=target, uri=target, mime="")
+        )
+    remaining = remaining_deliverables([str(x) for x in required], artifacts)
+    if not remaining:
+        return "all named deliverables present" if required else "-"
+    return "missing " + ", ".join(remaining)
 
 
 def _recovery_summary(task: SubtaskORM) -> str:
@@ -821,6 +861,7 @@ def render_tasks_usage_help() -> None:
     """Render task command details for both shell and REPL users."""
     info("Use `/task ...` in the REPL and `omni task ...` in the shell.")
     info(f"Available subcommands: {', '.join(_TASK_SUBCOMMANDS)}.")
+    info("Delete task trees in the current workspace; cross-workspace deletion is not implicit.")
     data_table(
         "Task subcommands",
         ["command", "purpose", "example"],
@@ -836,15 +877,16 @@ def render_tasks_usage_help() -> None:
             ["approve <task>", "Execute a validated plan-mode task", "/task approve c5b6859f"],
             ["steer <task> <instruction>", "Adjust a running task at its next execution boundary", "/task steer c5b6859f finish the figure before the summary"],
             ["cancel <task>", "Cancel at the next boundary and preserve partial results", "/task cancel c5b6859f"],
-            ["retry <execution>", "Create a new skill-execution attempt; use --step for a stable workflow step", "/task retry flow1234 --step diagram"],
-            ["resume <execution>", "Resume an existing execution in place; use --step for a workflow boundary", "/task resume flow1234 --step diagram"],
+            ["retry <object>", "Run a fresh attempt of a task or execution; use --step for a stable workflow step", "/task retry c5b6859f"],
+            ["resume <object>", "Continue where it stopped, keeping finished work; --input answers a waiting task", "/task resume c5b6859f --input am"],
+            ["requeue <execution>", "Return one standalone skill execution to the queue, in place", "/task requeue exec1234"],
             ["drain", "Execute pending workflow runs and standalone skill executions now", "omni task drain"],
             ["inbox", "Show completions for this workspace + IM channel anchor", "/inbox or /task inbox"],
             ["archive <id>", "Archive a task while retaining traceability", "/task archive c5b6859f"],
             ["unarchive <id>", "Return an archived task to default listings", "/task unarchive c5b6859f"],
-            ["rm <id>", "Delete one task and its subtasks; succeeded/running tasks require --force", "/task rm c5b6859f"],
+            ["rm/delete <id...>", "Delete task trees in the current workspace; multiple ids preview until --yes", "/task rm c5b6859f d4e5f678 --yes"],
             ["clear", "Delete matching tasks in bulk; requires --yes and --force for succeeded tasks", "/task clear --status failed --yes"],
-            ["prune", "Remove failed and stale pending tasks, preserving succeeded/running tasks", "/task prune --yes"],
+            ["prune", "Remove failed and stale pending history with full-tree protection", "/task prune --yes"],
         ],
     )
     data_table(
@@ -860,12 +902,13 @@ def render_tasks_usage_help() -> None:
             ["--json", "show / step", "/task show c5b6859f --json"],
             ["--interval N / --once", "watch", "/task watch --interval 1 --once"],
             ["--before <N>d", "clear", "/task clear --before 30d --yes"],
-            ["--force / --yes", "rm / clear / prune", "/task rm c5b6859f --force"],
+            ["--force / --yes", "rm / delete / clear / prune", "/task rm c5b6859f d4e5f678 --force --yes"],
         ],
     )
     info("Typical flow: each request creates a task; use `/task watch` for progress, `/task show <task>` for the execution chain, and `/task subtask <task>` for its skill executions.")
     info("Lists show user requests (kind=turn) by default; conversational/inspection answers are filed under `--kind chat`; other system records need `--kind maintenance`, `--kind subagent`, or `--kind all`.")
     info("Workflow recovery: inspect `/task step <workflow-run> <step-id>`, then use `/task retry|resume <workflow-run> --step <step-id>`.")
+    info("Recovery verbs take any object id: `retry` starts a new attempt, `resume` continues from a checkpoint, `requeue` re-queues one skill execution unchanged.")
     info("History cleanup: prefer `/task archive <id>` to retain provenance; use `/task prune --yes` for failed and stale tasks; deleting succeeded tasks requires --force.")
 
 
@@ -1108,14 +1151,16 @@ def render_all_task_list(
     filters = " ".join(x for x in (f"status={status}" if status else "", f"session={session}" if session else "") if x)
     info(
         "Global tasks are read from the workspace catalog "
-        f"(registry + channel anchor + named projects): {registry_path(home)}"
+        f"(registry + on-disk path workspaces + channel anchor + named projects): "
+        f"{registry_path(home)}"
     )
     shown = list(rows)[:limit]
     if not shown:
         suffix = f" ({filters})" if filters else ""
         info(
-            f"No tasks{suffix}. Catalog covers registered path workspaces, the IM "
-            "channel anchor, and named projects under ~/.omni/projects/."
+            f"No tasks{suffix}. Catalog covers ~/.omni/workspaces/* stores on disk, "
+            "the IM channel anchor, and named projects. A different clone path "
+            "keys a different workspace — `omni status` shows the active store."
         )
         return
     task_prefixes = shortest_unique_prefixes([row.id for row in shown])
@@ -1215,6 +1260,14 @@ def _event_note(event: TaskEventORM) -> str:
         output = str(command.get("output") or "").strip()
         if command.get("command_status") == "succeeded" and output:
             parts.append(output)
+        elif command.get("command_status") == "failed":
+            stderr = str(command.get("stderr") or "")
+            hint = ""
+            if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+                hint = command_failure_hint(exit_code, output, stderr)
+            if not hint and ": " in summary:
+                hint = summary.split(": ", 1)[1]
+            parts.append(hint or summary or str(command.get("reason") or ""))
         elif summary:
             parts.append(summary)
         elif command.get("reason"):
@@ -1226,6 +1279,12 @@ def _event_note(event: TaskEventORM) -> str:
     if event.subtask_id:
         return event.subtask_id[:8]
     return ""
+
+
+def _task_cost_summary(events: Sequence[TaskEventORM]) -> dict[str, Any]:
+    from omni.agent.cost import summarize_cost_events
+
+    return summarize_cost_events(events)
 
 
 def _collapsed_events(
@@ -1269,6 +1328,132 @@ def _collapsed_events(
     return collapsed
 
 
+_ACTIVITY_ROWS = 20
+# Rows the tail always keeps once a run is over, leaving the rest of the window
+# for the records that explain the outcome.
+_ACTIVITY_TAIL_ROWS = 12
+_UNHAPPY_STATUSES = frozenset(
+    {"cancelled", "degraded", "error", "failed", "interrupted", "rejected", "timeout"}
+)
+
+
+def _explains_outcome(event: TaskEventORM) -> bool:
+    """Whether this record is a candidate answer to "why did it end like that"."""
+    return bool(event.error) or str(event.status or "") in _UNHAPPY_STATUSES
+
+
+def _activity_window(
+    collapsed: list[tuple[TaskEventORM, int]], *, terminal: bool
+) -> tuple[list[tuple[TaskEventORM, int]], bool]:
+    """Rows worth showing, plus whether they are a contiguous tail.
+
+    A live run is followed for its tail. A finished one is opened to find out
+    how it ended, and the record that answers that is often not among the last
+    twenty: the ``tool_limit_exceeded`` refusal that shaped run 0792bf0a had
+    long scrolled out by the time the task settled, leaving a view full of
+    unremarkable ticks. Once a run is over, failures keep their place in the
+    window and the uninteresting middle is what gets dropped.
+    """
+    if len(collapsed) <= _ACTIVITY_ROWS:
+        return collapsed, True
+    if not terminal:
+        return collapsed[-_ACTIVITY_ROWS:], True
+    head, tail = collapsed[:-_ACTIVITY_TAIL_ROWS], collapsed[-_ACTIVITY_TAIL_ROWS:]
+    explanatory = [pair for pair in head if _explains_outcome(pair[0])]
+    kept = explanatory[-(_ACTIVITY_ROWS - len(tail)) :]
+    if not kept:
+        return collapsed[-_ACTIVITY_ROWS:], True
+    return [*kept, *tail], False
+
+
+def _step_locators(
+    steps: Sequence[WorkflowStepORM],
+    subtasks: Sequence[SubtaskORM],
+) -> dict[str, str]:
+    """Map every id an event can carry onto a ``position/total`` plan locator.
+
+    An event points at its step by any of three handles depending on who wrote
+    it — the step row id, the plan's own ``step_key``, or the skill execution
+    running under it — so all three are indexed to the same locator.
+    """
+    totals: dict[str, int] = {}
+    for step in steps:
+        run = step.workflow_run_id or ""
+        totals[run] = totals.get(run, 0) + 1
+    by_step_id: dict[str, str] = {}
+    out: dict[str, str] = {}
+    for step in steps:
+        total = totals.get(step.workflow_run_id or "", 0)
+        locator = f"{step.position}/{total}" if total > 1 else str(step.position)
+        if step.id:
+            by_step_id[step.id] = locator
+            out[step.id] = locator
+        if step.step_key:
+            out.setdefault(step.step_key, locator)
+    for execution in subtasks:
+        locator = by_step_id.get(execution.workflow_step_id or "")
+        if locator and execution.id:
+            out.setdefault(execution.id, locator)
+    return out
+
+
+def _event_step(event: TaskEventORM, locators: dict[str, str]) -> str:
+    """Where in the plan a record happened; ``·`` for task-level records.
+
+    The column used to carry ``TaskEventORM.seq``, the per-task event ordinal.
+    It is a faithful number and an unhelpful one: it counts *records*, so a
+    four-step workflow reported step one at ``#43``, and because the view keeps
+    only the last twenty rows the first one visible never started at 1. Codex,
+    OpenCode and OpenClaw all decline to surface an event ordinal at all and
+    locate work in the plan instead (``✔``/``□`` checklists, ``n/m`` progress).
+    The raw ``seq`` is still in ``--json`` for anyone reading the stream itself.
+    """
+    for key in (event.workflow_step_id, event.step_id, event.subtask_id):
+        if key and key in locators:
+            return locators[key]
+    return "·"
+
+
+def _awaits_a_checkpoint(events: Sequence[TaskEventORM]) -> bool:
+    """Whether a clarification checkpoint on this task is still unanswered.
+
+    A tool that suspends mid-run opens a checkpoint and records it here; a later
+    ``resolved``/``expired`` event closes it. Only the newest one decides, so an
+    answered question stops advertising a resume that would now be refused.
+    """
+    for event in reversed(list(events or [])):
+        kind = str(getattr(event, "event_type", "") or "")
+        if kind.startswith("action.checkpoint."):
+            return kind.endswith(".created")
+    return False
+
+
+def _task_recommended_action(task: TaskORM, *, resumable: bool = False) -> str:
+    """Suggest the next recovery verb for a task (mirrors the coordinator).
+
+    Every waiting task used to be told to run ``omni task resume <id> --input
+    <choice>`` — a flag the command did not have, on a command that resolved
+    only skill executions and so answered ``Subtask <id> was not found``. All
+    thirty waiting turns here were given it and none was ever answered.
+
+    Only a task that suspended *inside* a tool has a checkpoint to resume, and
+    for it the choice is a word like ``am`` that ``--input`` now takes. A
+    planner question suspends before any tool runs and leaves nothing to
+    resolve, so the way to answer it is to reply in the session.
+    """
+    status = getattr(task, "status", "") or ""
+    short = (getattr(task, "id", "") or "")[:8]
+    if status == "needs_input":
+        if resumable:
+            return f"omni task resume {short} --input <choice>"
+        return "answer in session"
+    if status == "awaiting_approval":
+        return f"omni task approve {short}"
+    if status in {"failed", "cancelled", "interrupted", "degraded"}:
+        return f"omni task retry {short}"
+    return "-"
+
+
 def render_task_detail(
     task: TaskORM,
     events: Sequence[TaskEventORM],
@@ -1288,6 +1473,13 @@ def render_task_detail(
             ("task_id", task.id),
             ("kind", task.kind or "turn"),
             ("depth", task.depth),
+            ("attempt", getattr(task, "attempt", 1) or 1),
+            ("retry_of", (getattr(task, "retry_of_task_id", "") or "-")[:8]),
+            ("root_task", (getattr(task, "root_task_id", "") or "-")[:8]),
+            (
+                "recommended",
+                _task_recommended_action(task, resumable=_awaits_a_checkpoint(events)),
+            ),
             ("parent_task", (task.parent_task_id or "-")[:8]),
             ("origin_workflow", (task.origin_workflow_run_id or "-")[:8]),
             ("origin_step", task.origin_workflow_step_id or "-"),
@@ -1309,6 +1501,25 @@ def render_task_detail(
             ("error", task.error or "-"),
         ],
     )
+    cost = _task_cost_summary(events)
+    if cost.get("calls") or cost.get("total_tokens"):
+        kv_table(
+            "cost",
+            [
+                ("tokens", f"{int(cost.get('total_tokens') or 0):,}"),
+                ("prompt", f"{int(cost.get('prompt_tokens') or 0):,}"),
+                ("completion", f"{int(cost.get('completion_tokens') or 0):,}"),
+                ("estimated_usd", f"${float(cost.get('cost_usd') or 0.0):.4f}"),
+                ("calls", str(int(cost.get("calls") or 0))),
+                (
+                    "components",
+                    ", ".join(
+                        f"{name}={int(bucket.get('total_tokens') or 0):,}"
+                        for name, bucket in (cost.get("components") or {}).items()
+                    ) or "-",
+                ),
+            ],
+        )
     console.print(f"\n[bold cyan]user input[/bold cyan]\n{task.user_input or '-'}")
     if task.summary:
         console.print(f"\n[bold cyan]summary[/bold cyan]\n{task.summary}")
@@ -1325,7 +1536,8 @@ def render_task_detail(
                 ("provenance", str(plan_json.get("provenance_mode") or "-")),
                 ("skills", skills or "-"),
                 ("contract", _plan_contract_summary(plan_json)),
-                ("verification", _plan_verification_summary(plan_json)),
+                ("settlement", _plan_settlement_summary(plan_json)),
+                ("remaining", _host_remaining_summary(plan_json, artifact_rows)),
                 ("rationale", _squash_summary(str(plan_json.get("rationale") or "-"), 600)),
             ],
         )
@@ -1398,9 +1610,10 @@ def render_task_detail(
                 for child in child_tasks
             ],
         )
+    collapsed = _collapsed_events(events)
     progress_events = [
         pair
-        for pair in _collapsed_events(events)
+        for pair in collapsed
         if pair[0].event_type in {"subtask.progress", "workflow.progress"}
     ]
     if progress_events:
@@ -1412,26 +1625,48 @@ def render_task_detail(
             repeat = f" ×{count}" if count > 1 else ""
             step = f" step={event.step_id}" if event.step_id else ""
             console.print(f"  • {execution_label} {label}{step}{pct}{repeat}")
-    if events:
-        activity = _collapsed_events(events)[-20:]
-        data_table(
-            "activity",
-            ["#", "type", "skill/step", "status", "workflow", "execution", "pct", "note"],
-            [
-                [
-                    event.seq,
-                    event.event_type,
-                    event.skill_name or event.step_id or event.name or event.tool_name,
-                    _event_status(event),
-                    _short(event.workflow_run_id) if event.workflow_run_id else "",
-                    _short(event.subtask_id) if event.subtask_id else "",
-                    "" if event.pct is None else event.pct,
-                    _event_note(event) + (f" (×{count})" if count > 1 else ""),
-                ]
-                for event, count in activity
-            ],
-            layout="activity",
+    if collapsed:
+        activity, contiguous = _activity_window(
+            collapsed, terminal=task.status in _TERMINAL_TASK_STATUSES
         )
+        locators = _step_locators(steps, subtasks)
+        columns = ["type", "actor", "status", "workflow", "execution", "pct", "note"]
+        rows = [
+            [
+                event.event_type,
+                event.skill_name or event.step_id or event.name or event.tool_name,
+                _event_status(event),
+                _short(event.workflow_run_id) if event.workflow_run_id else "",
+                _short(event.subtask_id) if event.subtask_id else "",
+                "" if event.pct is None else event.pct,
+                _event_note(event) + (f" (×{count})" if count > 1 else ""),
+            ]
+            for event, count in activity
+        ]
+        # The column earns its width only when it can tell two positions apart.
+        # A single delegated execution has no plan at all (dc787efa); a one-step
+        # plan has a plan and still nothing to distinguish, so every located row
+        # reads ``1`` and the rest read ``·`` (138c7b6e). Both are the same
+        # column saying nothing, so both suppress it.
+        if len(set(locators.values())) > 1:
+            columns.insert(0, "step")
+            for row, (event, _count) in zip(rows, activity, strict=True):
+                row.insert(0, _event_step(event, locators))
+        data_table("activity", columns, rows, layout="activity")
+        if len(collapsed) > len(activity):
+            # Without this the table looks complete while silently dropping the
+            # beginning of the run — the same gap that made the old ordinal
+            # column read as if the task had started at record 43. When the rows
+            # are not a contiguous tail, say so: an unexplained jump in the
+            # middle of a table is worse than no table.
+            scope = (
+                f"the last {len(activity)}"
+                if contiguous
+                else f"{len(activity)} (every failure, plus the last {_ACTIVITY_TAIL_ROWS})"
+            )
+            console.print(
+                f"[{theme.MUTED}]showing {scope} of {len(collapsed)} records[/]"
+            )
     rows = list(artifact_rows) if artifact_rows is not None else [
         ("artifact", "", f"artifact://{aid}") for aid in (task.artifact_ids or [])[:12]
     ]
@@ -1444,6 +1679,9 @@ def render_task_detail(
 
 # Text-like artifact bodies worth inlining under a task view.
 _PREVIEWABLE_SUFFIXES = frozenset({".md", ".markdown", ".txt", ".rst"})
+# Of those, the ones that are documents rather than transcripts. A ``.txt`` or
+# ``.rst`` body is quoted as written; markdown is rendered (see ``markdown_body``).
+_MARKDOWN_SUFFIXES = frozenset({".md", ".markdown"})
 
 
 def _render_task_artifact_previews(
@@ -1457,13 +1695,16 @@ def _render_task_artifact_previews(
         body = _read_text_artifact(path)
         if not body:
             continue
-        console.print(f"\n[bold cyan]{title or 'artifact'} (preview)[/bold cyan]")
-        console.print(body[:max_chars].rstrip())
-        if len(body) > max_chars:
-            console.print(
-                f"[dim]Preview truncated; open the full artifact with open_artifact "
-                f"{uri or path}[/dim]"
-            )
+        artifact_preview(
+            title or "artifact",
+            body[:max_chars].rstrip(),
+            markdown=Path(path).suffix.lower() in _MARKDOWN_SUFFIXES,
+            hint=(
+                f"Preview truncated; open the full artifact with open_artifact {uri or path}"
+                if len(body) > max_chars
+                else ""
+            ),
+        )
         shown += 1
 
 
@@ -1496,14 +1737,16 @@ def _render_artifact_previews(result: dict[str, Any], paths: OmniPaths | None) -
     for art in presentation.artifacts:
         if not art.preview:
             continue
-        heading = f"{art.title} (preview)" if art.preview_truncated else art.title
-        console.print(f"\n[bold cyan]{heading}[/bold cyan]")
-        console.print(art.preview)
-        if art.preview_truncated:
-            console.print(
-                f"[dim]Preview truncated; open the full artifact with open_artifact "
-                f"{art.uri or art.target}[/dim]"
-            )
+        artifact_preview(
+            art.title,
+            art.preview,
+            markdown=art.is_markdown,
+            hint=(
+                f"Preview truncated; open the full artifact with open_artifact {art.uri or art.target}"
+                if art.preview_truncated
+                else ""
+            ),
+        )
 
 
 def render_subtask_detail(task: SubtaskORM, paths: OmniPaths | None = None) -> None:
@@ -2310,167 +2553,124 @@ def cancel_cmd(
             row = await agent.tasks.get_task(task_id)
             if row is None:
                 raise LookupError(f"task not found: {task_id}")
-            return await agent.tasks.request_control(row.id, action="cancel")
+            control = await agent.tasks.request_control(row.id, action="cancel")
+            await agent.runtime.reconcile_lost_executors(
+                task_id=row.id, explicit=True
+            )
+            status = await agent.tasks.control_status(control.id)
+            return control, status
         finally:
             await agent.aclose()
 
     try:
-        control = run_async(_run())
+        control, status = run_async(_run())
     except (LookupError, ValueError) as exc:
         error(str(exc))
         raise typer.Exit(1) from exc
-    success(f"Requested cancellation of task {task_id[:8]} (control {control.id[:8]}).")
+    if status == "applied":
+        warn(
+            f"Cancelled task {task_id[:8]} (control {control.id[:8]}); "
+            "the owning executor was already gone."
+        )
+        return
+    warn(f"Requested cancellation of task {task_id[:8]} (control {control.id[:8]}).")
+
+
+def _report_recovery(outcome: RecoveryOutcome, *, object_id: str) -> None:
+    """Render one coordinator outcome, or exit non-zero explaining why not.
+
+    Every verb reports through here so the same state reads the same way
+    whichever one the user reached for, and so an id the resolver could not
+    place is described as the id it is rather than as a missing subtask.
+    """
+    if outcome.ok:
+        success(outcome.message or f"Recovered {object_id}.")
+        return
+    if outcome.status == "ambiguous":
+        error(
+            outcome.message
+            or f"Prefix {object_id} matches multiple objects; provide a longer id."
+        )
+        raise typer.Exit(1)
+    if outcome.status == "not_found":
+        error(
+            outcome.message
+            or (
+                f"No task, workflow run, workflow step, or skill execution "
+                f"matched {object_id}."
+            )
+        )
+        raise typer.Exit(1)
+    # A resolved object in the wrong state is not a failure of the command; say
+    # what the state is and which verb fits it.
+    report = warn if outcome.status == "wrong_state" else error
+    report(outcome.message or f"Could not recover {object_id}.")
+    if outcome.suggested_command:
+        info(f"Try: {outcome.suggested_command}")
+    if outcome.status != "wrong_state":
+        raise typer.Exit(1)
+
+
+async def _recover(
+    state: AppState, object_id: str, verb: str, **kwargs: Any
+) -> RecoveryOutcome:
+    """Resolve ``object_id`` to its owning workspace and dispatch one verb."""
+    from omni.runtime.task_recovery import TaskRecoveryCoordinator
+
+    agent, resolution, _remote = await make_agent_for_object(state, object_id)
+    try:
+        coordinator = TaskRecoveryCoordinator(agent)
+        method = getattr(coordinator, verb)
+        return await method(resolution, object_id=object_id, **kwargs)
+    finally:
+        await agent.aclose()
 
 
 @app.command("retry")
 def retry_cmd(
     ctx: typer.Context,
-    subtask_id: str = typer.Argument(..., help="Skill execution or workflow run id/prefix"),
+    object_id: str = typer.Argument(
+        ..., help="Task, workflow run, workflow step, or skill execution id/prefix"
+    ),
     notify: str = typer.Option("", "--notify", help="Override the notification channel"),
     step: str = typer.Option("", "--step", help="Retry this workflow step and its downstream steps"),
 ) -> None:
-    """Create a new skill-execution attempt from the original input snapshot."""
+    """Run a fresh attempt of a task or execution from its original input."""
     state: AppState = ctx.obj
-
-    async def _run():
-        agent = await make_agent(state)
-        try:
-            if step:
-                workflow = await _resolve_workflow_for_recovery(agent, subtask_id)
-                if workflow is None:
-                    return "not_found", None, "", ""
-                new_id = await agent.runtime.retry_workflow_step(
-                    workflow.id, step, notify_channel=notify or None
-                )
-                return (
-                    ("ok" if new_id else "not_found"),
-                    workflow,
-                    new_id or "",
-                    step,
-                )
-            task, status = await _resolve_subtask_for_mutation(agent.runtime, subtask_id)
-            if status == "step":
-                workflow, step_record, step_status = await resolve_workflow_step(
-                    agent.runtime, subtask_id
-                )
-                if workflow is None or step_record is None or step_status != "ok":
-                    return step_status, None, "", ""
-                new_id = await agent.runtime.retry_workflow_step(
-                    workflow.id,
-                    step_record.step_key,
-                    notify_channel=notify or None,
-                )
-                return (
-                    ("ok" if new_id else "not_found"),
-                    workflow,
-                    new_id or "",
-                    step_record.step_key,
-                )
-            if task is None or status != "ok":
-                workflow = await _resolve_workflow_for_recovery(agent, subtask_id)
-                if workflow is not None:
-                    return "needs_step", workflow, "", ""
-                return status, None, "", ""
-            new_id = await agent.runtime.retry_subtask(task.id, notify_channel=notify or None)
-            return "ok", task, new_id or "", ""
-        finally:
-            await agent.aclose()
-
-    status, task, new_id, retried_step = run_async(_run())
-    if status == "ambiguous":
-        error(f"Prefix {subtask_id} matches multiple subtasks; provide a longer id.")
-        raise typer.Exit(1)
-    if status == "needs_step":
-        error(f"Workflow {subtask_id[:8]} requires --step <step-id> for retry.")
-        raise typer.Exit(1)
-    if task is None or not new_id:
-        error(f"Subtask {subtask_id} was not found")
-        raise typer.Exit(1)
-    suffix = f", starting at step {retried_step}" if retried_step else ""
-    success(f"Created skill execution attempt {new_id[:8]}{suffix}.")
+    outcome = run_async(
+        _recover(state, object_id, "retry", notify_channel=notify, step=step)
+    )
+    _report_recovery(outcome, object_id=object_id)
 
 
 @app.command("resume")
 def resume_cmd(
     ctx: typer.Context,
-    subtask_id: str = typer.Argument(..., help="Skill execution or workflow run id/prefix"),
+    object_id: str = typer.Argument(
+        ..., help="Task, workflow run, workflow step, or skill execution id/prefix"
+    ),
     step: str = typer.Option("", "--step", help="Resume the workflow in place from this step"),
+    input_choice: str = typer.Option(
+        "", "--input", help="Answer a waiting task's clarification with this choice"
+    ),
 ) -> None:
-    """Return a failed skill execution or workflow step to the recovery queue."""
+    """Continue an object from where it stopped, keeping the work already done."""
     state: AppState = ctx.obj
-
-    async def _run():
-        agent = await make_agent(state)
-        try:
-            if step:
-                workflow = await _resolve_workflow_for_recovery(agent, subtask_id)
-                if workflow is None:
-                    return "not_found", None, ""
-                ok = await agent.runtime.resume_workflow_step(workflow.id, step)
-                return ("ok" if ok else "not_resumable"), workflow, step
-            task, status = await _resolve_subtask_for_mutation(agent.runtime, subtask_id)
-            if status == "step":
-                workflow, step_record, step_status = await resolve_workflow_step(
-                    agent.runtime, subtask_id
-                )
-                if workflow is None or step_record is None or step_status != "ok":
-                    return step_status, None, ""
-                ok = await agent.runtime.resume_workflow_step(
-                    workflow.id, step_record.step_key
-                )
-                return (
-                    ("ok" if ok else "not_resumable"),
-                    workflow,
-                    step_record.step_key,
-                )
-            if task is None or status != "ok":
-                workflow = await _resolve_workflow_for_recovery(agent, subtask_id)
-                if workflow is not None:
-                    return "needs_step", workflow, ""
-                return status, None, ""
-            ok = await agent.runtime.resume_subtask(task.id)
-            return ("ok" if ok else "not_resumable"), task, ""
-        finally:
-            await agent.aclose()
-
-    status, task, resumed_step = run_async(_run())
-    if status == "ambiguous":
-        error(f"Prefix {subtask_id} matches multiple subtasks; provide a longer id.")
-        raise typer.Exit(1)
-    if status == "not_found" or task is None:
-        error(f"Subtask {subtask_id} was not found")
-        raise typer.Exit(1)
-    if status == "needs_step":
-        error(f"Workflow {subtask_id[:8]} requires --step <step-id> for resume.")
-        raise typer.Exit(1)
-    if status != "ok":
-        warn(f"Execution {task.id[:8]} is {task.status}; it does not need resuming or is not recoverable.")
-        return
-    suffix = f" from step {resumed_step}" if resumed_step else ""
-    object_label = "workflow" if resumed_step else "skill execution"
-    success(f"Returned {object_label} {task.id[:8]} to the recovery queue{suffix}.")
+    outcome = run_async(
+        _recover(state, object_id, "resume", step=step, input_choice=input_choice)
+    )
+    _report_recovery(outcome, object_id=object_id)
 
 
-async def _resolve_subtask_for_mutation(runtime, subtask_id: str) -> tuple[SubtaskORM | None, str]:  # noqa: ANN001
-    """Resolve subtasks for destructive ops: exact id or unique prefix only."""
-    task = await runtime.get_subtask(subtask_id)
-    if task is not None and task.task_id:
-        return task, "ok"
-    if not subtask_id:
-        return None, "not_found"
-    rows = [
-        task for task in await runtime.list_subtasks(limit=1000, include_archived=True)
-        if task.task_id
-    ]
-    matches = [t for t in rows if t.id.startswith(subtask_id)]
-    if len(matches) == 1:
-        return matches[0], "ok"
-    if matches:
-        return None, "ambiguous"
-    _, step, step_status = await resolve_workflow_step(runtime, subtask_id)
-    if step is not None and step_status == "ok":
-        return None, "step"
-    return None, "not_found"
+@app.command("requeue")
+def requeue_cmd(
+    ctx: typer.Context,
+    object_id: str = typer.Argument(..., help="Skill execution id/prefix"),
+) -> None:
+    """Return one standalone skill execution to the queue, in place."""
+    state: AppState = ctx.obj
+    outcome = run_async(_recover(state, object_id, "requeue"))
+    _report_recovery(outcome, object_id=object_id)
 
 
 async def _resolve_workflow_for_recovery(agent, value: str) -> WorkflowRunORM | None:  # noqa: ANN001
@@ -2503,6 +2703,64 @@ async def _resolve_task_for_mutation(agent, task_id: str) -> tuple[TaskORM | Non
     return (task, "ok") if task is not None else (None, "not_found")
 
 
+@dataclass
+class _TaskReferenceResolution:
+    """Exact Task ids resolved from user-supplied ids or unique prefixes."""
+
+    task_ids: list[str]
+    missing: list[str]
+    ambiguous: dict[str, list[str]]
+
+
+async def _resolve_task_references(agent, references: Sequence[str]) -> _TaskReferenceResolution:  # noqa: ANN001
+    """Resolve a batch in one workspace without letting one bad prefix delete anything."""
+    refs = list(dict.fromkeys(str(ref).strip() for ref in references if str(ref).strip()))
+    async with agent.db.session() as session:
+        rows = list((await session.execute(select(TaskORM))).scalars().all())
+    by_id = {row.id: row for row in rows}
+    resolved: list[str] = []
+    missing: list[str] = []
+    ambiguous: dict[str, list[str]] = {}
+    for ref in refs:
+        if ref in by_id:
+            matches = [ref]
+        else:
+            matches = [task_id for task_id in by_id if task_id.startswith(ref)]
+        if len(matches) == 1:
+            if matches[0] not in resolved:
+                resolved.append(matches[0])
+        elif not matches:
+            missing.append(ref)
+        else:
+            ambiguous[ref] = sorted(matches)
+    return _TaskReferenceResolution(
+        task_ids=resolved,
+        missing=missing,
+        ambiguous=ambiguous,
+    )
+
+
+def _task_barrier_details(
+    tasks: dict[str, str],
+    prefixes: dict[str, str],
+) -> str:
+    return ", ".join(
+        f"{prefixes.get(task_id, task_id)} ({status})"
+        for task_id, status in tasks.items()
+    )
+
+
+def _execution_barrier_details(
+    barriers: Sequence[Any],
+    prefixes: dict[str, str],
+) -> str:
+    return ", ".join(
+        f"{prefixes.get(item.task_id, item.task_id)} owns "
+        f"{item.object_kind} {item.object_id} ({item.status})"
+        for item in barriers
+    )
+
+
 def _clear_preview_text(outcome) -> str:  # noqa: ANN001
     """Explain a clear/prune outcome per status so ``0 deletable`` is never opaque."""
     parts: list[str] = [f"{outcome.deleted_total} deletable"]
@@ -2512,6 +2770,11 @@ def _clear_preview_text(outcome) -> str:  # noqa: ANN001
     if outcome.blocked:
         detail = ", ".join(f"{n} {s}" for s, n in sorted(outcome.blocked.items()))
         parts.append(f"{outcome.blocked_total} active ({detail}; wait or reconcile first)")
+    if outcome.retained:
+        detail = ", ".join(f"{n} {s}" for s, n in sorted(outcome.retained.items()))
+        parts.append(f"{outcome.retained_total} retained ({detail})")
+    if outcome.concurrent_write:
+        parts.append("workspace changed concurrently; nothing was deleted")
     return "; ".join(parts)
 
 
@@ -2576,53 +2839,126 @@ def unarchive_cmd(
 @app.command("rm")
 def rm_cmd(
     ctx: typer.Context,
-    task_id: str = typer.Argument(..., help="Task id or unique prefix"),
-    force: bool = typer.Option(False, "--force", "-f", help="Also delete succeeded/active tasks with provenance"),
+    task_ids: list[str] = typer.Argument(..., help="One or more Task ids or unique prefixes"),
+    force: bool = typer.Option(False, "--force", "-f", help="Also delete protected completed tasks; active tasks are never deleted"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Confirm a multi-Task deletion; otherwise preview it"),
 ) -> None:
-    """Delete one task and its subtasks (cascade); provenance-bearing tasks need --force."""
+    """Delete Task trees; multiple ids preview first and require --yes."""
+    if any(not str(task_id).strip() for task_id in task_ids):
+        error("Task ids cannot be empty; provide an exact id or unique prefix.")
+        raise typer.Exit(1)
     state: AppState = ctx.obj
+    batch_requested = len(task_ids) > 1
 
-    async def _run():
+    async def _run(dry_run: bool):
         agent = await make_agent(state)
         try:
-            task, status = await _resolve_task_for_mutation(agent, task_id)
-            if task is None or status != "ok":
-                return status, None, False
-            if task.status in _TASK_BLOCKED_STATUSES and not force:
-                return "active", task, False
-            has_artifacts = await agent.tasks.task_has_artifacts(task.id)
-            if task.status in _TASK_PROTECTED_STATUSES and not force:
-                return "protected", task, has_artifacts
-            ok = await agent.tasks.delete_task(task.id)
-            return ("ok" if ok else "not_found"), task, has_artifacts
+            resolution = await _resolve_task_references(agent, task_ids)
+            if resolution.missing or resolution.ambiguous:
+                return resolution, None
+            outcome = await agent.tasks.delete_tasks(
+                resolution.task_ids,
+                force=force,
+                dry_run=dry_run,
+            )
+            return resolution, outcome
         finally:
             await agent.aclose()
 
-    status, task, has_artifacts = run_async(_run())
-    if status == "not_found" or task is None:
-        error(f"Task {task_id} was not found in the current workspace.")
-        raise typer.Exit(1)
-    if status == "active":
-        warn(f"Task {task.id[:8]} is {task.status}; wait for it to settle or add --force to delete anyway.")
-        raise typer.Exit(1)
-    if status == "protected":
-        why = (
-            "produced artifacts that may be referenced" if has_artifacts
-            else f"is {task.status} and may be referenced"
+    resolution, outcome = run_async(_run(batch_requested and not yes))
+    if resolution.missing:
+        error(
+            "Task reference(s) not found in the current workspace: "
+            + ", ".join(resolution.missing)
         )
-        warn(f"Task {task.id[:8]} {why}; add --force to confirm. This removes the task and its subtasks, not artifact files.")
         raise typer.Exit(1)
-    success(f"Deleted task {task.id[:8]} ({task.status}) and its subtasks.")
+    if resolution.ambiguous:
+        detail = "; ".join(
+            f"{ref} matches {', '.join(matches)}"
+            for ref, matches in resolution.ambiguous.items()
+        )
+        error(f"Ambiguous Task reference(s): {detail}. Use a longer prefix.")
+        raise typer.Exit(1)
+    if outcome is None:
+        error("No Task ids were provided.")
+        raise typer.Exit(1)
+    prefixes = shortest_unique_prefixes(outcome.known_task_ids)
+    if outcome.concurrent_write:
+        warn(
+            "Task deletion could not reserve the current workspace because another "
+            "writer is active; nothing was deleted. Retry after it settles."
+        )
+        raise typer.Exit(1)
+    if outcome.missing_ids:
+        error("Task(s) disappeared before deletion: " + ", ".join(outcome.missing_ids))
+        raise typer.Exit(1)
+    if outcome.blocked_tasks or outcome.blocked_executions:
+        details = [
+            _task_barrier_details(outcome.blocked_tasks, prefixes)
+            if outcome.blocked_tasks else "",
+            _execution_barrier_details(outcome.blocked_executions, prefixes)
+            if outcome.blocked_executions else "",
+        ]
+        warn(
+            "Active work blocks deletion: "
+            f"{'; '.join(detail for detail in details if detail)}; wait for it to settle."
+        )
+        raise typer.Exit(1)
+    if outcome.protected_tasks:
+        warn(
+            "Task deletion includes protected history: "
+            f"{_task_barrier_details(outcome.protected_tasks, prefixes)}; "
+            "add --force to confirm. "
+            "Artifact records and files are preserved."
+        )
+        raise typer.Exit(1)
+    if outcome.retained_tasks:
+        warn(
+            "Task deletion was retained by a tree-integrity boundary: "
+            f"{_task_barrier_details(outcome.retained_tasks, prefixes)}; nothing was deleted."
+        )
+        raise typer.Exit(1)
+    if batch_requested and not yes:
+        data_table(
+            "Task deletion preview",
+            ["task_id", "status", "title"],
+            [
+                [prefixes.get(task.id, task.id), task.status, one_line(task.title, 80)]
+                for task in outcome.deleted_tasks
+            ],
+        )
+        info(
+            f"Would delete {outcome.deleted_total} tasks across "
+            f"{len(resolution.task_ids)} selected Task reference(s). Add --yes to confirm."
+        )
+        return
+    if len(resolution.task_ids) == 1:
+        selected_id = resolution.task_ids[0]
+        task = next(item for item in outcome.deleted_tasks if item.id == selected_id)
+        descendants = max(0, outcome.deleted_total - 1)
+        descendant_text = (
+            f" and {descendants} descendant Task(s)" if descendants else ""
+        )
+        success(
+            f"Deleted task {prefixes.get(task.id, task.id)} ({task.status}) and its subtasks"
+            f"{descendant_text}."
+        )
+        return
+    success(
+        f"Deleted {outcome.deleted_total} tasks across "
+        f"{len(resolution.task_ids)} selected Task reference(s)."
+    )
 
 
 @app.command("delete")
 def delete_cmd(
     ctx: typer.Context,
-    task_id: str = typer.Argument(..., help="Task id or unique prefix"),
-    force: bool = typer.Option(False, "--force", "-f", help="Also delete succeeded/active tasks with provenance"),
+    task_ids: list[str] = typer.Argument(..., help="One or more Task ids or unique prefixes"),
+    force: bool = typer.Option(False, "--force", "-f", help="Also delete protected completed tasks; active tasks are never deleted"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Confirm a multi-Task deletion; otherwise preview it"),
 ) -> None:
-    """Delete one task record (alias for rm)."""
-    rm_cmd(ctx, task_id, force=force)
+    """Alias for ``task rm``."""
+    rm_cmd(ctx, task_ids, force=force, yes=yes)
 
 
 @app.command("clear")
@@ -2670,6 +3006,12 @@ def clear_cmd(
         info(f"Would delete {_clear_preview_text(outcome)}. Add --yes to confirm.")
         raise typer.Exit(0)
     outcome = run_async(_run(False))
+    if outcome.concurrent_write:
+        warn(
+            "Task cleanup could not reserve the current workspace because another "
+            "writer is active; nothing was deleted. Retry after it settles."
+        )
+        raise typer.Exit(1)
     if outcome.deleted_total == 0:
         warn(f"Deleted 0 tasks — {_clear_preview_text(outcome)}.")
         return
@@ -2694,6 +3036,8 @@ def prune_cmd(
             outcome = await agent.tasks.clear_tasks(
                 kind=None, prunable_only=True, dry_run=dry,
             )
+            if outcome.concurrent_write:
+                return outcome, 0
             stale = await agent.runtime.clear_subtasks(
                 status="pending", before=cutoff, protect=("running", "succeeded"), dry_run=dry,
             )
@@ -2709,6 +3053,12 @@ def prune_cmd(
         )
         raise typer.Exit(1)
     outcome, stale = run_async(_run(False))
+    if outcome.concurrent_write:
+        warn(
+            "Task pruning could not reserve the current workspace because another "
+            "writer is active; nothing was deleted. Retry after it settles."
+        )
+        raise typer.Exit(1)
     success(
         f"Removed {outcome.deleted_total} failed/cancelled/interrupted tasks (with subtasks) "
         f"and {stale} stale pending subtasks; succeeded and active work was preserved."

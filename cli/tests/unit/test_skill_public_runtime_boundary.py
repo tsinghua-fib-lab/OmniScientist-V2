@@ -14,6 +14,7 @@ PUBLIC_RESEARCH_MODULES = {
     "omni.research.artifacts",
     "omni.research.connectors",
     "omni.research.engine_util",
+    "omni.research.literature_select",
     "omni.research.store",
     "omni.research.tools",
 }

@@ -47,21 +47,59 @@ async def _agent() -> OmniAgent:
     return agent
 
 
+_DRAFT_GOAL = (
+    "写一个 Transformer/RAG 相关研究小节：先做文献检索，再获取 arXiv 1706.03762，"
+    "生成架构图，最后输出论文段落。"
+)
+
+
 def _draft_workflow_plan() -> dict:
+    """The semantic planner classifies the turn as multi-step and stops there.
+
+    It no longer compiles a DAG; the capable ReAct turn it hands back lets the
+    model sequence the work itself against live results.
+    """
     return {
         "intent_type": "workflow",
         "confidence": 0.93,
-        "workflow_steps": [
-            {"id": "literature", "capability": "literature.search", "input": {"query": "Transformer/RAG"}},
-            {"id": "paper", "capability": "paper.fetch.arxiv", "depends_on": ["literature"], "input": {"identifier": "1706.03762"}},
-            {"id": "figure", "capability": "artifact.figure", "depends_on": ["paper"], "input": {"input": "Transformer/RAG architecture figure"}},
-            {"id": "final_synthesis", "capability": "synthesis.final", "depends_on": ["figure"], "input": {"deliverable": "draft.section"}},
-        ],
         "outputs": ["draft.section"],
         "execution_mode": "background",
         "provenance_mode": "light",
         "rationale": "model proposed a capability-level research workflow with final synthesis",
     }
+
+
+def _draft_workflow_steps() -> list[dict]:
+    """The step list the model hands to ``run_workflow``."""
+    return [
+        {"id": "literature", "capability": "literature.search", "input": {"query": "Transformer/RAG"}},
+        {"id": "paper", "capability": "paper.fetch.arxiv", "depends_on": ["literature"], "input": {"identifier": "1706.03762"}},
+        {"id": "figure", "capability": "artifact.figure", "depends_on": ["paper"], "input": {"input": "Transformer/RAG architecture figure"}},
+        {"id": "final_synthesis", "capability": "synthesis.final", "depends_on": ["figure"], "deliverable": "draft.section", "input": {}},
+    ]
+
+
+def _draft_workflow_llm(*, mode: str) -> PlanningLLM:
+    return PlanningLLM(
+        planner_gated=True,
+        plans=[_draft_workflow_plan()],
+        script=[
+            ChatWithToolsResult(
+                tool_calls=[
+                    ToolCall(
+                        id="call_workflow",
+                        name="run_workflow",
+                        arguments={
+                            "goal": _DRAFT_GOAL,
+                            "mode": mode,
+                            "steps": _draft_workflow_steps(),
+                        },
+                    )
+                ]
+            ),
+            ChatWithToolsResult(content="研究小节已产出。"),
+        ],
+    )
 
 
 async def _seed_figure_task(agent: OmniAgent, session_id: str, name: str = "rag.dot") -> tuple[str, Path]:
@@ -274,16 +312,17 @@ async def test_benchmark_workflow_parent_attach_binds_final_child_artifact(tmp_p
 
 @pytest.mark.asyncio
 async def test_benchmark_draft_section_uses_native_synthesis():
+    """A written deliverable is bound to the native writer, not to some skill.
+
+    The model asks for ``synthesis.final`` by capability; the runtime resolves
+    the whole submitted step list and must bind that one to the native executor
+    (no provider skill) so the draft is written rather than delegated.
+    """
     agent = await _agent()
     try:
-        agent.llm = PlanningLLM(planner_gated=True, plans=[_draft_workflow_plan()])
-        turn = await agent.handle_turn(
-            "写一个 Transformer/RAG 相关研究小节：先做文献检索，再获取 arXiv 1706.03762，"
-            "生成架构图，最后输出论文段落。",
-            channel="cli",
-            drain_tasks=False,
-        )
-        assert turn.kind == "workflow"
+        agent.llm = _draft_workflow_llm(mode="background")
+        turn = await agent.handle_turn(_DRAFT_GOAL, channel="cli", drain_tasks=False)
+        assert turn.submitted_workflow_ids
         workflow = await agent.runtime.get_workflow_run(turn.submitted_workflow_ids[0])
         assert workflow is not None
         steps = workflow.plan_json["steps"]
@@ -347,7 +386,7 @@ def test_benchmark_im_hides_trace_for_salvaged_tool_limit():
         kind="partial",
         terminated_reason="max_tool_calls",
         plan_summary="计划：react_fallback；原因：debug",
-        verification_status="salvaged",
+        settlement_status="salvaged",
     )
 
     im = turn_presentation_from_result(turn, channel="wechat").to_markdown()
@@ -362,7 +401,8 @@ def test_benchmark_im_hides_trace_for_salvaged_tool_limit():
 
 
 @pytest.mark.asyncio
-async def test_benchmark_tool_limit_salvages_partial_result():
+async def test_benchmark_tool_limit_still_answers_and_records_the_refusal():
+    """A spent tool budget ends exploration; the answer and the audit both survive."""
     tool = ToolSpec("echo", "echo back", {"type": "object", "properties": {"x": {"type": "string"}}})
 
     async def invoke(name, args):  # noqa: ANN001
@@ -372,15 +412,15 @@ async def test_benchmark_tool_limit_salvages_partial_result():
         ChatWithToolsResult(tool_calls=[ToolCall("c1", "echo", {"x": "one"})]),
         ChatWithToolsResult(tool_calls=[ToolCall("c2", "echo", {"x": "two"})]),
     ])
-    # Exercise the salvage fallback specifically (synthesis is the default path).
-    agent = ReActLoopAgent(llm, invoke, max_iterations=4, max_tool_calls=1, no_progress_synthesis=False)
+    agent = ReActLoopAgent(llm, invoke, max_iterations=4, max_tool_calls=1)
 
     result = await agent.run(system_prompt="sys", user_message="RAG 如何降低幻觉", tools=[tool])
 
-    assert result.kind == "partial"
-    assert result.terminated_reason == "max_tool_calls"
-    assert "Partial result" in result.content
-    assert "echo" in result.content
+    assert result.kind == "text"
+    assert result.terminated_reason == "synthesized_max_tool_calls"
+    assert result.content.strip()
+    # The call the budget refused stays in the trace rather than vanishing.
+    assert [record.status for record in result.tool_trace] == ["succeeded", "rejected"]
 
 
 @pytest.mark.asyncio
@@ -389,17 +429,15 @@ async def test_benchmark_native_synthesis_still_drains_to_draft(tmp_path, monkey
     agent = await _agent()
     try:
         _install_offline_workflow_fixtures(agent)
-        agent.llm = PlanningLLM(planner_gated=True, plans=[_draft_workflow_plan()])
-        turn = await agent.handle_turn(
-            "写一个 Transformer/RAG 相关研究小节：先做文献检索，再获取 arXiv 1706.03762，"
-            "生成架构图，最后输出论文段落。",
-            channel="cli",
-            drain_tasks=True,
+        agent.llm = _draft_workflow_llm(mode="foreground")
+        turn = await agent.handle_turn(_DRAFT_GOAL, channel="cli", drain_tasks=True)
+        assert turn.submitted_workflow_ids
+        workflow_result = next(
+            record.result for record in turn.tool_trace if record.name == "run_workflow"
         )
-        assert turn.kind == "workflow"
-        assert turn.drained_results
-        result = turn.drained_results[0]["result"]
-        synthesis = [step for step in result["steps"] if step["capability"] == "synthesis.final"]
+        synthesis = [
+            step for step in workflow_result["steps"] if step["capability"] == "synthesis.final"
+        ]
         assert synthesis
         assert synthesis[0]["result"]["deliverable"] == "draft.section"
         assert synthesis[0]["result"]["draft_markdown"]

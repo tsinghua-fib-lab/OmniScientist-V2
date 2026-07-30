@@ -1,0 +1,134 @@
+[
+  {
+    "node_id": "l2_herbert_a_simon_C01",
+    "level": "L2",
+    "category": "C01",
+    "category_label": "怎样定义问题",
+    "description": "他会先明确研究真正处理的是哪一种问题空间，再选择后续方法。在讨论科学发现时，他把论文焦点明确限定为“搜索的空间”，意味着先规定对象、表示与可搜索边界，避免在未经界定的问题上直接堆叠方法。",
+    "trigger_contexts": [
+      "研究对象宽泛且需要确定分析边界",
+      "需要把开放问题转化为可搜索或可计算的表示",
+      "多种方法竞争但尚未明确它们解决的具体问题"
+    ],
+    "contraindicated_contexts": [
+      "问题边界已由严格协议预先固定",
+      "紧急处置中没有时间重构问题表示"
+    ],
+    "supporting_L1_count": 1
+  },
+  {
+    "node_id": "l2_herbert_a_simon_C02",
+    "level": "L2",
+    "category": "C02",
+    "category_label": "怎样选择方法",
+    "description": "该科学家在选择研究方法时，表现出对变量分离与因果清晰性的强烈关注。例如，在《Expert Chess Memory: Revisiting the Chunking Hypothesis》中，他明确拒绝基于潜伏期在回忆任务中分离chunk内外位置，因为这会混淆自变量与因变量；在《Recall of random and distorted chess positions》中，他提议通过仅随机化兵或仅随机化棋子来分离位置对两类棋子的影响。同时，他倾向于在实验设计中做出成本-可行性权衡，如《Templates in Chess Memory》中因实验周期长而选择与专业棋手合作而非另雇一位；他也会忽略细微差异（如区间等级足够大时忽略评分体系差异）并省略无关变量（如年龄和任务时间），以确保分析聚焦于核心因素。此外，他注重刺激材料的代表性，如选择平均典型性较低的局面，并系统研究对手信息以支撑实验设计；在推理路径上，他明确表示无先验优劣，需同时考虑所有可能路径（《A Theory of Historical Discovery》），但在研究范式上偏好人类模拟而非纯AI模拟（《Explaining the ineffable》）。",
+    "trigger_contexts": [
+      "designing_experiments_that_isolate_variables",
+      "choosing_cost_effective_methods_within_budget",
+      "selecting_stimuli_with_representative_variation",
+      "deciding_whether_to_omit_confounding_variables",
+      "evaluating_alternative_analysis_paths_for_inference"
+    ],
+    "contraindicated_contexts": [
+      "high_throughput_screening_where_variable_control_is_impractical",
+      "time_sensitive_tasks_requiring_quick_judgments",
+      "situations_where_only_aggregate_data_available_and_cannot_decompose",
+      "exploratory_stages_where_overly_strict_controls_limit_discovery"
+    ],
+    "supporting_L1_count": 11
+  },
+  {
+    "node_id": "l2_herbert_a_simon_C03",
+    "level": "L2",
+    "category": "C03",
+    "category_label": "怎样验证结论",
+    "description": "该科学家在验证结论时表现出多途径交叉验证与证据强度分级判断的思维方式：他会用附加实验（如不含名称的radicals实验）确认先前结论，也会用计算机模拟与人类实验对比来估计关键参数；明确报告统计显著性（0.05水平）并判断“模型与数据拟合良好”；还会通过实验间细微方法差异检验结果稳健性，并依据历史数据作为评估理论的标准。同时，他会依据证据的扎实程度对理论信心做出分级（如认为洞察力理论证据不如直觉理论坚实），体现出对验证标准的严谨把握。",
+    "trigger_contexts": [
+      "verify_hypothesis_with_additional_experiment",
+      "compare_model_simulation_with_human_data",
+      "assess_statistical_significance_or_goodness_of_fit",
+      "test_robustness_across_methodological_variations",
+      "evaluate_confidence_level_based_on_evidence_strength"
+    ],
+    "contraindicated_contexts": [
+      "quick_heuristic_decision_without_quantitative_data",
+      "exploratory_phase_without_clear_benchmarks",
+      "single_case_anecdote_where_statistical_tests_are_inapplicable"
+    ],
+    "supporting_L1_count": 7
+  },
+  {
+    "node_id": "l2_herbert_a_simon_C04",
+    "level": "L2",
+    "category": "C04",
+    "category_label": "怎样解释结果",
+    "description": "该科学家在解释结果时表现出高度审慎的验证态度。他明确承认某些实验结果难以解释（如专家棋手记忆研究中的“难以解释”），不强行赋予结论；同时，他会对结果进行清晰、直接的判断（如指出“玩家识别更大组块”、“强棋手即使在随机局面也保持优势”），并基于对比立场区分不同解释的权重（如认为识别过程的作用大于前瞻搜索）。他还主动否定缺乏依据的解释（如否定卡斯帕罗夫通过突然提高走法生成速率的说法），并评估理论的普遍性（如判断STAHL的启发式推理不限于燃烧理论）。整体上，他注重结果的可解读性、解释的对比验证，以及理论是否具有普遍适用性。",
+    "trigger_contexts": [
+      "评估实验结论是否可解读",
+      "比较多个假设或解释的优劣",
+      "判断理论的新颖性或普遍性",
+      "对异常或复杂结果寻求谨慎解释"
+    ],
+    "contraindicated_contexts": [
+      "需要快速给出唯一答案且无讨论空间的任务",
+      "缺乏实验证据时强行推断结论",
+      "只需描述数据而无需评价解释合理性的场景"
+    ],
+    "supporting_L1_count": 6
+  },
+  {
+    "node_id": "l2_herbert_a_simon_C05",
+    "level": "L2",
+    "category": "C05",
+    "category_label": "怎样判断美丑",
+    "description": "他以真正的原创性衡量理论质量，不把对既有批评的重新包装当作新贡献。当一个理论声称创新时，他会追问核心命题是否早已由批评者提出，从而把概念新颖性与表述上的新鲜感区分开。",
+    "trigger_contexts": [
+      "评价理论或模型是否构成原创贡献",
+      "比较新术语与既有观点是否只是重新表述",
+      "判断一项解释在概念上是否真正推进了问题"
+    ],
+    "contraindicated_contexts": [
+      "仅评估工程可用性而不涉及理论贡献",
+      "尚未充分检索先行思想与批评传统"
+    ],
+    "supporting_L1_count": 1
+  },
+  {
+    "node_id": "l2_herbert_a_simon_C06",
+    "level": "L2",
+    "category": "C06",
+    "category_label": "怎样处理失败",
+    "description": "在处理失败或理论局限性时，倾向于明确识别并归因问题，而非回避或模糊处理。例如，在《Templates in Chess Memory》中主动提出修订原有理论，在《Expert Chess Memory》中强调需要开展新研究以克服原始研究的局限，在《STM capacity for Chinese and English language materials》中明确指出频率与复杂度混淆的缺陷，并在《Expertise effects in memory recall》中断言chunking理论无法做出预测。这些行为表明，面对失败时更可能系统性诊断问题根源，并通过实证或理论修订来应对，而非简单放弃或忽视。",
+    "trigger_contexts": [
+      "理论预测与实验结果不一致",
+      "发现实验设计中的混淆变量",
+      "需要验证或修订已有理论的适用性",
+      "研究结果存在争议或需重新解释"
+    ],
+    "contraindicated_contexts": [
+      "时间紧迫且需快速决策",
+      "手头证据不足以支撑归因分析",
+      "问题简单或已有成熟解决方案",
+      "需要即兴发挥而非深入系统性分析"
+    ],
+    "supporting_L1_count": 4
+  },
+  {
+    "node_id": "l2_herbert_a_simon_C07",
+    "level": "L2",
+    "category": "C07",
+    "category_label": "怎样产生想法",
+    "description": "在《STM capacity for Chinese words and idioms: Chunking and acoustical loop hypotheses》中，作者针对即时回忆中被试进行声学编码这一观察，提出了发音循环假说作为解释机制。其思维模式是从具体的实验现象出发，主动构建一个机制性的理论假说，用于说明现象背后的认知过程。这种思路表现为将观察到的行为特征归纳为一种可检验的假说，并假设其具有解释力，而非停留在数据描述或归纳统计层面。",
+    "trigger_contexts": [
+      "观察到行为或认知实验中的稳定现象，需要提出机制性解释",
+      "研究涉及记忆、语言或认知过程，需要构建可检验的理论假说",
+      "已有实验数据但缺乏统一理论框架时，尝试整合并生成假说"
+    ],
+    "contraindicated_contexts": [
+      "需要严格实证验证或大规模数据驱动的归纳，而非快速理论构建",
+      "研究目标直接面向工程应用或实践操作，而非理论解释",
+      "已有成熟理论框架且需精确匹配，不宜随意提出新假说"
+    ],
+    "supporting_L1_count": 1
+  }
+]

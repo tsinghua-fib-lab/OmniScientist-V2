@@ -1,6 +1,6 @@
 ---
 name: research-ideation
-description: "Literature-grounded research ideation: search papers, identify gaps, generate novel ideas through structured concept reasoning, and refine them through critique. Use when the user asks for research gaps, novelty analysis, pressure-tested research directions, or structured research ideas."
+description: "Literature-grounded research ideation: search papers, identify gaps, generate novel ideas through structured concept reasoning, and refine them through critique. Use when the user asks for research gaps, novelty analysis, pressure-tested research directions, or structured research ideas. Do not use for a literature search or related-work survey that does not ask for new ideas or gaps."
 license: Apache-2.0
 metadata:
   helixforge:
@@ -32,7 +32,7 @@ metadata:
             semantic_role: instruction
         n_ideas:
           type: integer
-          description: "Number of candidate ideas to generate (1-5; default 3)"
+          description: "Number of candidate ideas to generate (1-5; default 2)"
         use_tools:
           type: boolean
           description: "Whether ideation may query Semantic Scholar for validation (default true)"
@@ -59,13 +59,17 @@ metadata:
         error_info: {type: object}
       required: ["status"]
     execution:
+      # The pipeline reports progress at six coarse stages, so silence — not
+      # elapsed time — is what distinguishes a stuck run from a slow one. The
+      # wall clock is only the runaway backstop.
       max_seconds: 1800
+      stall_seconds: 600
     workflow:
       failure_policy: continue_with_partial
-      failure_types: ["missing_input", "connector_disabled", "literature_search_failed", "ideation_failed", "pipeline_error"]
+      failure_types: ["missing_input", "literature_search_failed", "ideation_failed", "pipeline_error"]
     trigger:
       phrases: ["research ideation", "generate research idea", "brainstorm research", "identify research gaps", "novel research direction"]
-      when_to_use: "Use when the user wants literature-grounded research directions, novelty analysis, or structured research ideas."
+      when_to_use: "Use when the user wants structured research ideas, gap analysis as a means to propose directions, novelty analysis, or pressure-tested research proposals. Do not use for a literature-only search, related-work survey, or source list that does not ask for new ideas."
     notification:
       display_label: "Research ideation"
       title_field: "input"
@@ -81,8 +85,8 @@ metadata:
 
 A literature-grounded research ideation engine. Given a research question, it runs a four-stage pipeline:
 
-1. **Literature search and concept extraction** — query Semantic Scholar, extract core concepts, and merge synonyms.
-2. **Research-gap identification** — use the literature and concepts to identify five to eight valuable gaps.
+1. **Literature search and concept extraction** — query the available scholarly sources, extract core concepts, and merge synonyms.
+2. **Research-gap identification** — use the literature and concepts to identify four to five valuable gaps.
 3. **Idea generation** — create candidate ideas through first-principles reasoning, cross-domain analogy, and hypothesis deduction.
 4. **Critique and refinement** — assess novelty, disruption, and impact, then refine the strongest candidate.
 
@@ -98,22 +102,30 @@ The ideation engine uses a structured concept-evolution process:
 - `<concept_evolve>` changes granularity or expands scope.
 - `<new_concept>` crystallizes a new scientific concept.
 
-## Semantic Scholar API key
+## Where the literature comes from
 
-The pipeline uses Semantic Scholar for its initial literature search and for the
-optional `semantic_scholar_search` tool during ideation. It works without a key,
-but unauthenticated requests share a public quota and may be throttled.
+Inside Omni the search runs through the host's retrieval funnel, which fans out
+across every enabled connector — arXiv, OpenAlex, Crossref, PubMed, Semantic
+Scholar — with health checks, backoff, and a local-corpus floor. No connector is
+required: a missing credential costs that one source and the run continues on the
+rest. When literature is thin the pipeline says so in its warnings and continues
+with LLM-only reasoning rather than stopping.
 
-Omni prompts for the key during `omni init`. It can also be managed later from
-the shell or the interactive `/config` command:
+A Semantic Scholar key is therefore an upgrade, not a prerequisite. Without one
+that connector still works on the public tier, just rate-limited enough that the
+funnel usually ranks it behind the keyless sources. Request a free key at
+<https://www.semanticscholar.org/product/api>; Omni prompts for it during
+`omni init`, and it can be set later from the shell or `/config`:
 
 ```bash
 omni config set research.semantic_scholar_api_key <your-key>
 ```
 
 Omni stores the value in its owner-level secrets file and exposes it to this
-skill only through the Semantic Scholar connector's scoped secrets. In portable
-runner mode or another non-Omni host, set `S2_API_KEY` instead.
+skill only through the Semantic Scholar connector's scoped secrets — never from
+the ambient environment. Run standalone, outside Omni, there is no funnel to
+borrow: the pipeline queries Semantic Scholar directly and reads `S2_API_KEY`
+from the environment to avoid the public tier's strict limits.
 
 ## Output
 

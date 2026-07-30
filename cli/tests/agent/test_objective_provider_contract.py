@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from omni.agent.intent_plan import IntentPlan, IntentType
-from omni.agent.plan_validator import PlanValidator
+from omni.agent.plan_validator import SEVERITY_DEGRADED, PlanValidator
 from omni.agent.provider_binding import provider_contract_hash
 from omni.config import load_settings
 from omni.core.tool_contracts import (
@@ -500,7 +500,14 @@ def test_schema_keyword_outside_model_repair_allowlist_is_not_patchable() -> Non
 
     assert finding.owner == "model"
     assert finding.repairable is False
-    assert finding.repair_strategy == "needs_input"
+    # Not patchable, but not a question either. The compiler already left
+    # ``invented`` out of the provider arguments, so the remedy is spent before
+    # validation runs and the finding only has to report it. Routing this to
+    # ``needs_input`` is what let run 0db3d740 ask the user to answer a schema
+    # diagnostic; a field the provider never declared is nobody's to supply.
+    assert finding.repair_strategy == "drop_undeclared_input"
+    assert finding.severity == SEVERITY_DEGRADED
+    assert finding.message.endswith("the value was dropped and the run continued without it")
 
 
 @pytest.mark.parametrize(
@@ -563,83 +570,6 @@ def test_provider_schema_definition_errors_are_never_model_repairable(
     assert finding.repairable is False
     assert finding.repair_strategy == "provider_contract_fix"
     assert finding.actual is None
-
-
-@pytest.mark.parametrize(
-    "quality_contract",
-    [
-        {},
-        [],
-        "",
-        False,
-        {"checks": []},
-        {"checks": [""]},
-        {"checks": "quality"},
-        {"checks": ["quality"], "assessment_required": "yes"},
-        {"checks": ["quality"], "assessment_schema": 1},
-        {"checks": ["quality"], "retry": []},
-        {"checks": ["quality"], "retry": {"max_attempts": True}},
-        {"checks": ["quality"], "retry": {"max_attempts": "1"}},
-        {"checks": ["quality"], "retry": {"max_attempts": -1}},
-        {
-            "checks": ["quality"],
-            "retry": {"provider_replay_safe_required": "true"},
-        },
-        {"checks": ["quality"], "retry": {"side_effect_policy": 1}},
-        {"checks": ["quality"], "retry": {"idempotency_key_field": []}},
-        {"checks": ["quality"], "retry": {"feedback_field": ""}},
-    ],
-)
-def test_malformed_provider_quality_contract_fails_closed(
-    quality_contract: object,
-) -> None:
-    registry = SkillRegistry(load_settings(), sources=())
-    registry.register(
-        SkillEntry(
-            name="bad-quality-provider",
-            description="provider with malformed quality control metadata",
-            source="project_omni",
-            trusted=True,
-            capabilities=["report.quality"],
-            quality_contract=quality_contract,
-            quality_contract_declared=True,
-            input_schema={
-                "type": "object",
-                "properties": {"input": {"type": "string"}},
-                "required": ["input"],
-            },
-            output_schema={
-                "type": "object",
-                "properties": {"status": {"type": "string"}},
-                "required": ["status"],
-            },
-        )
-    )
-    plan = IntentPlan(
-        task_id="task-bad-quality",
-        user_message="write a report",
-        intent_type=IntentType.WORKFLOW,
-        outputs=["artifact"],
-        workflow_steps=[
-            {
-                "id": "report",
-                "capability": "report.quality",
-                "skill_name": "bad-quality-provider",
-                "skill_source": "project_omni",
-                "input": {"input": "report"},
-            }
-        ],
-    )
-
-    validation = PlanValidator(registry).validate(plan)
-    finding = next(
-        item for item in validation.findings if item.code == "provider_quality_contract_invalid"
-    )
-
-    assert not validation.ok
-    assert finding.owner == "provider"
-    assert finding.repairable is False
-    assert finding.repair_strategy == "provider_contract_fix"
 
 
 def test_manifest_schema_presence_preserves_composed_and_boolean_contracts() -> None:
@@ -914,47 +844,3 @@ def test_direct_workflow_ingress_rejects_explicit_null_provider_schema(
     assert "valid JSON schema" in exc_info.value.missing[0]["reason"]
 
 
-def test_direct_workflow_ingress_rejects_malformed_quality_contract() -> None:
-    registry = SkillRegistry(load_settings(), sources=())
-    registry.register(
-        SkillEntry(
-            name="unsafe-quality-provider",
-            description="malformed retry metadata",
-            source="project_omni",
-            trusted=True,
-            quality_contract={
-                "checks": ["quality"],
-                "assessment_required": True,
-                "retry": {"max_attempts": "1"},
-            },
-            quality_contract_declared=True,
-            capabilities=["report.quality"],
-            input_schema={
-                "type": "object",
-                "properties": {"input": {"type": "string"}},
-                "required": ["input"],
-            },
-            output_schema={
-                "type": "object",
-                "properties": {"status": {"type": "string"}},
-                "required": ["status"],
-            },
-        )
-    )
-
-    with pytest.raises(WorkflowNeedsInput) as exc_info:
-        prepare_workflow_plan(
-            "write report",
-            [
-                {
-                    "id": "report",
-                    "skill_name": "unsafe-quality-provider",
-                    "skill_source": "project_omni",
-                    "input": {"input": "report"},
-                }
-            ],
-            registry,
-        )
-
-    assert exc_info.value.missing[0]["missing"] == ["provider_quality_contract"]
-    assert "max_attempts" in exc_info.value.missing[0]["reason"]

@@ -1,0 +1,55 @@
+{
+  "total": 84,
+  "partition_key": "parent_L2.category",
+  "partitions": [
+    {
+      "category": "C01",
+      "label": "怎样定义问题",
+      "path": "c01.jsonl",
+      "count": 6,
+      "sha256": "70ae5a21d701683413c3e08907a26bae156182546e578252ba47e6889f00efbf"
+    },
+    {
+      "category": "C02",
+      "label": "怎样选择方法",
+      "path": "c02.jsonl",
+      "count": 56,
+      "sha256": "1a36e2b0dd21618ef7a40738b99f08fecf9270e8dfb7fb4036bb5791d5f1044e"
+    },
+    {
+      "category": "C03",
+      "label": "怎样验证结论",
+      "path": "c03.jsonl",
+      "count": 11,
+      "sha256": "0a338a3e66e2cc288445c988d3efc28f5fd3db338986ac7ae436bd059b5dc875"
+    },
+    {
+      "category": "C04",
+      "label": "怎样解释结果",
+      "path": "c04.jsonl",
+      "count": 3,
+      "sha256": "446e3261f1edeea60cafcb6c642a37a4caadaff9bccd1e1ab67b19088d51798a"
+    },
+    {
+      "category": "C05",
+      "label": "怎样判断美丑",
+      "path": "c05.jsonl",
+      "count": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "category": "C06",
+      "label": "怎样处理失败",
+      "path": "c06.jsonl",
+      "count": 7,
+      "sha256": "9f291423306c1beee3896309e45f2b3b2de4c7cf266bf9dc3132d92a7e49bd37"
+    },
+    {
+      "category": "C07",
+      "label": "怎样产生想法",
+      "path": "c07.jsonl",
+      "count": 1,
+      "sha256": "0441487f746205340a6dad7fa49b1ed283d1d295b6e818d2eb514d06aaa4f362"
+    }
+  ]
+}

@@ -16,7 +16,12 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Protocol
 
-from omni.cli.repl_transcript import DataTableData, TranscriptEvent, TranscriptKind
+from omni.cli.repl_transcript import (
+    DataTableData,
+    NoticeData,
+    TranscriptEvent,
+    TranscriptKind,
+)
 from omni.memory.sanitize import redact_secrets
 
 TRANSCRIPT_PROTOCOL_ENV = "OMNI_TRANSCRIPT_PROTOCOL"
@@ -312,6 +317,15 @@ def encode_transcript_event(event: TranscriptEvent) -> bytes:
             "layout": event.payload.layout,
             "row_styles": list(event.payload.row_styles),
         }
+    elif isinstance(event.payload, NoticeData):
+        payload = {
+            "title": event.payload.title,
+            "message": event.payload.message,
+            "actions": list(event.payload.actions),
+            "style": event.payload.style,
+            "glyph": event.payload.glyph,
+            "fallback": event.payload.fallback,
+        }
     else:
         payload = event.payload
     record = {
@@ -324,7 +338,10 @@ def encode_transcript_event(event: TranscriptEvent) -> bytes:
         "foldable": event.foldable,
         "initially_collapsed": event.initially_collapsed,
     }
-    return _WIRE_PREFIX + json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode() + b"\n"
+    encoded = json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8", errors="backslashreplace"
+    )
+    return _WIRE_PREFIX + encoded + b"\n"
 
 
 class TranscriptWireDecoder:
@@ -372,6 +389,17 @@ def _decode_wire_line(line: bytes) -> TranscriptEvent:
                         str(value) for value in payload.get("row_styles", [])
                     ),
                 )
+            elif isinstance(payload, dict):
+                # A card: the only other structured payload, and the kind alone
+                # (STATUS / ERROR) does not distinguish it from ordinary markup.
+                payload = NoticeData(
+                    title=str(payload.get("title", "")),
+                    message=str(payload.get("message", "")),
+                    actions=tuple(str(value) for value in payload.get("actions", [])),
+                    style=str(payload.get("style", "")),
+                    glyph=str(payload.get("glyph", "!")),
+                    fallback=str(payload.get("fallback", "!")),
+                )
             return TranscriptEvent(
                 kind=kind,
                 payload=payload,
@@ -393,6 +421,11 @@ def _decode_wire_line(line: bytes) -> TranscriptEvent:
 def _event_text_fallback(event: TranscriptEvent) -> str:
     if isinstance(event.payload, str):
         return event.payload
+    if isinstance(event.payload, NoticeData):
+        # A sink with no renderer gets the words, not the layout: this stream
+        # has no width to lay a card out against.
+        lines = [event.payload.title, event.payload.message, *event.payload.actions]
+        return "\n".join(line for line in lines if line) + "\n"
     rows = [event.payload.title, " | ".join(event.payload.columns)]
     rows.extend(" | ".join(row) for row in event.payload.rows)
     return "\n".join(rows) + "\n"
@@ -452,11 +485,24 @@ class RoutedTextIO(io.TextIOBase):
         if sink is not None:
             sink.write(text)
             return len(text)
-        return self._stream().write(text)
+        stream = self._stream()
+        return stream.write(_encodable_text(text, stream))
 
     def flush(self) -> None:
         if get_output_sink() is None:
             self._stream().flush()
+
+
+def _encodable_text(text: str, stream: io.TextIOBase) -> str:
+    """Replace only characters unsupported by a legacy output encoding."""
+    encoding = str(getattr(stream, "encoding", None) or "utf-8")
+    try:
+        text.encode(encoding)
+    except UnicodeEncodeError:
+        return text.encode(encoding, errors="replace").decode(encoding)
+    except LookupError:
+        return text
+    return text
 
 
 __all__ = [

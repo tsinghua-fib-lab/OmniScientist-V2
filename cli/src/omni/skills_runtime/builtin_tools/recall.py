@@ -11,6 +11,7 @@ All tools are gated on ``ctx.db`` so DB-free callers (some unit tests) skip them
 from __future__ import annotations
 
 import unicodedata
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from sqlalchemy import select
 
 from omni.core.react_agent import ToolSpec
 from omni.core.timefmt import format_local_iso
+from omni.core.tool_result import recall_result_outcome
 from omni.memory.sanitize import redact_secrets
 from omni.memory.service import (
     MemoryLayer,
@@ -27,7 +29,8 @@ from omni.memory.service import (
 )
 from omni.skills_runtime.context import ExecContext, Tool
 from omni.storage.artifacts import ArtifactStore
-from omni.storage.models import SubtaskORM, TaskORM
+from omni.storage.db import get_database
+from omni.storage.models import ArtifactORM, SubtaskORM, TaskORM
 
 _GROUNDING_KEYS = (("source_id", "source"), ("claim_id", "claim"), ("task_id", "run"))
 
@@ -74,14 +77,25 @@ def _typed_many(namespace: str, values: Any) -> list[str]:
     return [f"{namespace}:{value}" for value in values or [] if value]
 
 
-def _task_payload(run: TaskORM, *, score: float | None = None) -> dict[str, Any]:
+def _task_payload(
+    run: TaskORM, *, score: float | None = None, workspace: str | None = None
+) -> dict[str, Any]:
+    # A finished task's summary and its failure reason are different facts: a
+    # failed task has no real summary, and folding ``run.error`` into ``summary``
+    # is what let a prior attempt's error text be re-consumed downstream as if it
+    # were a valid result. Keep them separate — ``summary`` is the real output
+    # digest (empty for a failure), ``failure_reason`` carries the error.
     payload: dict[str, Any] = {
         "ref": f"task:{run.id}",
         "task_id": run.id,
+        "task_status": run.status,
+        # Compatibility alias for existing clients.  Invocation lifecycle is
+        # carried out-of-band by ToolCallOutcome, never inferred from this key.
         "status": run.status,
         "title": (run.title or run.user_input or "")[:512],
         "user_input": (run.user_input or "")[:1200],
-        "summary": (run.summary or run.error or "")[:1600],
+        "summary": (run.summary or "")[:1600],
+        "failure_reason": (run.error or "")[:1600],
         "subtask_refs": _typed_many("subtask", run.submitted_subtask_ids),
         "artifact_refs": _typed_many("artifact", run.artifact_ids),
         "source_refs": _typed_many("source", run.source_ids),
@@ -93,7 +107,121 @@ def _task_payload(run: TaskORM, *, score: float | None = None) -> dict[str, Any]
     }
     if score is not None:
         payload["match_score"] = round(score, 4)
+    if workspace:
+        payload["workspace"] = workspace
     return payload
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    """Coerce a possibly-naive timestamp to an aware UTC one for comparison."""
+    if value is None:
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _since_from_days(days: Any) -> datetime | None:
+    """Translate a ``days`` argument into an aware UTC lower bound, or ``None``."""
+    if days is None:
+        return None
+    try:
+        span = max(0, int(days))
+    except (TypeError, ValueError):
+        return None
+    return datetime.now(UTC) - timedelta(days=span) if span > 0 else None
+
+
+def _agg_payload(row: Any) -> dict[str, Any]:
+    """Shallow payload for a cross-workspace list/search hit (index-backed row).
+
+    The global index/aggregate row is deliberately thin (no user_input/summary),
+    so this carries identity, status, title, and the owning ``workspace`` label.
+    The model deepens any single hit with ``get_task``, which now routes across
+    workspaces on its own.
+    """
+    return {
+        "ref": f"task:{row.id}",
+        "task_id": row.id,
+        "task_status": row.status,
+        "status": row.status,
+        "title": (row.title or "")[:120],
+        "channel": getattr(row, "channel", "") or "",
+        "session_id": getattr(row, "session_id", "") or "",
+        "created_at": format_local_iso(row.created_at),
+        "workspace": row.workspace,
+    }
+
+
+def _agg_score(query: str, row: Any) -> float:
+    """Title-only fuzzy score for a cross-workspace row (agg rows lack body text)."""
+    query_key = _search_key(query)
+    if not query_key:
+        return 0.0
+    title_key = _search_key(getattr(row, "title", "") or "")
+    if not title_key:
+        return 0.0
+    if title_key in query_key or query_key in title_key:
+        return 1.0
+    grams = _bigrams(title_key)
+    return len(_bigrams(query_key) & grams) / len(grams) if grams else 0.0
+
+
+async def _resolve_foreign_task(
+    ctx: ExecContext, ident: str
+) -> tuple[TaskORM, Any] | None:
+    """Route a task id to the workspace that owns it (index-first, self-healing).
+
+    Mirrors ``omni task show <id>``: ``resolve_task_workspace`` finds the owning
+    workspace via the global task index (with reconcile + scan fallback), then we
+    read the ``TaskORM`` straight from that workspace's own store. Returns
+    ``(task, owner_settings)`` or ``None`` when the id is unknown everywhere.
+    """
+    from omni.runtime.task_index import resolve_task_workspace
+
+    owner = await resolve_task_workspace(ctx.settings, ident)
+    if owner is None:
+        return None
+    try:
+        db = get_database(owner.paths.project_db)
+        await db.init()
+        async with db.session() as session:
+            task = await session.get(TaskORM, ident)
+            if task is None:
+                rows = list(
+                    (
+                        await session.execute(
+                            select(TaskORM)
+                            .where(TaskORM.id.startswith(ident, autoescape=True))
+                            .limit(2)
+                        )
+                    ).scalars().all()
+                )
+                task = rows[0] if len(rows) == 1 else None
+    except Exception:  # noqa: BLE001 - a bad foreign store must fail closed, not crash
+        return None
+    return (task, owner) if task is not None else None
+
+
+async def _all_workspace_tasks(
+    ctx: ExecContext, *, status: str | None, since: datetime | None, limit: int
+) -> list[Any]:
+    """Recent tasks across every registered workspace (newest-first, index-synced).
+
+    Reuses the same catalog aggregate that powers ``omni task --all`` / ``/task
+    all``, so the agent sees exactly what that command sees — and the read also
+    keeps the global index in sync as a side effect.
+    """
+    from omni.runtime.aggregate import list_tasks_all_workspaces
+
+    rows = await list_tasks_all_workspaces(
+        home=ctx.paths.home, status=status, limit_per=max(limit, 50)
+    )
+    if since is not None:
+        rows = [
+            row
+            for row in rows
+            if (created := _as_utc(row.created_at)) is not None and created >= since
+        ]
+    return rows[:limit]
 
 
 def _looks_binary(data: bytes) -> bool:
@@ -104,6 +232,75 @@ def _looks_binary(data: bytes) -> bool:
         return False
     nontext = sum(1 for b in sample if b < 9 or (13 < b < 32))
     return nontext / len(sample) > 0.30
+
+
+def _binary_artifact_result(ctx: ExecContext, ref: str, path: Path, size: int) -> dict[str, Any]:
+    """Content-type-aware result for a binary artifact — never invites shell/pip.
+
+    Dynamically resolves a *declared* reader capability for this content type
+    (registry ``find_reader`` over SKILL.md ``runtime_requirements.reads``):
+
+    * reader declared but its Python deps are missing → surface the one-shot
+      ``dependency_setup_command`` (detect → prompt the existing install flow);
+    * reader declared and ready → name the capability to use;
+    * no reader declared → report honestly and tell the model NOT to shell out.
+
+    This is the generic, non-enumerated answer to "read an artifact I can't
+    natively open": a new readable format is added by *declaring* it on a skill,
+    never by editing this host code (which is why ``df16e466`` — a deck read that
+    fell into ``bash``+``pip`` across the wrong interpreter — cannot recur).
+    """
+    import mimetypes
+
+    from omni.skills_runtime.manifest import missing_python_modules
+
+    suffix = path.suffix.lower()
+    mime = (mimetypes.guess_type(path.name)[0] or "").lower()
+    result: dict[str, Any] = {
+        "uri": ref,
+        "path": str(path),
+        "size": size,
+        "binary": True,
+        "content_type": mime or (suffix.lstrip(".") or "unknown"),
+    }
+    registry = getattr(ctx, "registry", None)
+    reader = registry.find_reader(suffix, mime) if registry is not None else None
+    if reader is None:
+        result["note"] = (
+            f"Binary {suffix or 'artifact'}: no reader capability is registered for this "
+            "type. Reference it by path/uri and use its producer's structured output; do "
+            "NOT parse it with shell or install packages ad hoc."
+        )
+        return result
+    missing = missing_python_modules(reader)
+    command = str(reader.dependency_setup_command or "").strip()
+    if missing:
+        joined = ", ".join(missing)
+        result["reader"] = reader.name
+        result["action_required"] = {
+            "kind": "install",
+            "python_modules": missing,
+            "command": command,
+            "reader": reader.name,
+        }
+        result["setup_command"] = command
+        result["error_info"] = {
+            "code": reader.dependency_error_code or "runtime_dependency_missing",
+            "category": "configuration",
+            "retryable": False,
+        }
+        result["note"] = (
+            f"The '{reader.name}' capability reads {suffix} but needs Python module(s) "
+            f"first: {joined}." + (f" Run: {command}." if command else "")
+            + " Do NOT install packages ad hoc inside the loop."
+        )
+        return result
+    result["reader"] = reader.name
+    result["note"] = (
+        f"This {suffix} artifact is read by the '{reader.name}' capability — route to it "
+        "(e.g. via the skill / run_skill path), NOT shell or pip."
+    )
+    return result
 
 
 def build_recall_tools(ctx: ExecContext) -> list[Tool]:
@@ -197,10 +394,13 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
         return {
             "subtask_id": task.id,
             "skill": task.skill_name,
+            "subtask_status": task.status,
+            # Compatibility alias; invocation lifecycle is carried by the
+            # host-owned ToolCallOutcome attached to Recall tools.
             "status": task.status,
             "session_id": task.session_id,
             "summary": _result_summary(task.result_json) if task.result_json else (task.error or ""),
-            "error": task.error or "",
+            "failure_reason": task.error or "",
             "artifacts": [{"label": a["label"], "uri": a["uri"], "path": a["path"]} for a in artifacts],
         }
 
@@ -228,6 +428,16 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
     async def list_recent_tasks(args: dict) -> Any:
         limit = max(1, min(30, int(args.get("limit", 8) or 8)))
         status = str(args.get("status", "") or "").strip() or None
+        scope = str(args.get("scope", "") or "workspace").strip().lower()
+        since = _since_from_days(args.get("days"))
+        if scope == "all":
+            rows = await _all_workspace_tasks(
+                ctx, status=status, since=since, limit=limit
+            )
+            return {
+                "scope": "all",
+                "tasks": [_agg_payload(row) for row in rows if row.id != ctx.task_id],
+            }
         async with ctx.db.session() as s:
             q = (
                 select(TaskORM)
@@ -236,22 +446,28 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
                     TaskORM.archived_at.is_(None),
                 )
                 .order_by(TaskORM.created_at.desc())
-                .limit(limit)
+                # A time window may skip many recent rows, so widen the scan when
+                # ``days`` is set and slice back to ``limit`` after filtering.
+                .limit(limit if since is None else 500)
             )
             if status:
                 q = q.where(TaskORM.status == status)
+            if since is not None:
+                q = q.where(TaskORM.created_at >= since)
             rows = list((await s.execute(q)).scalars().all())
-        rows = [row for row in rows if row.id != ctx.task_id]
+        rows = [row for row in rows if row.id != ctx.task_id][:limit]
         return {
+            "scope": "workspace",
             "tasks": [
                 {
-                    **_task_payload(row),
+                    **_task_payload(row, workspace=ctx.project),
                     "title": (row.title or row.user_input or "")[:80],
                     "user_input": (row.user_input or "")[:160],
-                    "summary": (row.summary or row.error or "")[:160],
+                    "summary": (row.summary or "")[:160],
+                    "failure_reason": (row.error or "")[:160],
                 }
                 for row in rows
-            ]
+            ],
         }
 
     async def search_tasks(args: dict) -> Any:
@@ -260,6 +476,31 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
             return {"error": "query required"}
         limit = max(1, min(20, int(args.get("limit", 8) or 8)))
         status = str(args.get("status") or "").strip()
+        scope = str(args.get("scope", "") or "workspace").strip().lower()
+        if scope == "all":
+            rows = await _all_workspace_tasks(
+                ctx, status=status or None, since=None, limit=500
+            )
+            ranked_all = sorted(
+                (
+                    (_agg_score(query, row), row)
+                    for row in rows
+                    if row.id != ctx.task_id
+                ),
+                key=lambda pair: (
+                    pair[0],
+                    pair[1].created_at.isoformat() if pair[1].created_at else "",
+                ),
+                reverse=True,
+            )
+            return {
+                "scope": "all",
+                "matches": [
+                    {**_agg_payload(row), "match_score": round(score, 4)}
+                    for score, row in ranked_all[:limit]
+                    if score >= 0.2
+                ],
+            }
         async with ctx.db.session() as session:
             stmt = (
                 select(TaskORM)
@@ -283,12 +524,51 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
             reverse=True,
         )
         return {
+            "scope": "workspace",
             "matches": [
-                _task_payload(row, score=score)
+                _task_payload(row, score=score, workspace=ctx.project)
                 for score, row in ranked[:limit]
                 if score >= 0.2
-            ]
+            ],
         }
+
+    async def _detail(
+        run: TaskORM,
+        db: Any,
+        task_store: ArtifactStore,
+        *,
+        workspace: str = "",
+    ) -> dict[str, Any]:
+        payload = _task_payload(run, workspace=workspace or None)
+        artifact_ids = [str(value) for value in run.artifact_ids or [] if value]
+        if not artifact_ids:
+            payload["artifacts"] = []
+            return payload
+        async with db.session() as artifact_session:
+            rows = list(
+                (
+                    await artifact_session.execute(
+                        select(ArtifactORM).where(ArtifactORM.id.in_(artifact_ids))
+                    )
+                ).scalars().all()
+            )
+        by_id = {row.id: row for row in rows}
+        artifacts: list[dict[str, Any]] = []
+        for artifact_id in artifact_ids:
+            row = by_id.get(artifact_id)
+            if row is None:
+                continue
+            path = await task_store.resolve_path(row.uri or f"artifact://{row.id}")
+            artifacts.append(
+                {
+                    "title": row.title or row.kind or "artifact",
+                    "kind": row.kind or "file",
+                    "uri": row.uri or f"artifact://{row.id}",
+                    "path": str(path) if path is not None else "",
+                }
+            )
+        payload["artifacts"] = artifacts
+        return payload
 
     async def get_task(args: dict) -> Any:
         raw = str(args.get("task_id") or args.get("id") or args.get("ref") or "").strip()
@@ -298,7 +578,7 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
         async with ctx.db.session() as session:
             exact = await session.get(TaskORM, task_id)
             if exact is not None and exact.project == ctx.project:
-                return _task_payload(exact)
+                return await _detail(exact, ctx.db, store, workspace=ctx.project)
             matches = list(
                 (
                     await session.execute(
@@ -312,10 +592,25 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
                 ).scalars().all()
             )
         if len(matches) == 1:
-            return _task_payload(matches[0])
+            return await _detail(matches[0], ctx.db, store, workspace=ctx.project)
         if len(matches) > 1:
             return {"error": "task id prefix is ambiguous", "task_id": task_id}
-        return {"error": f"task {task_id} not found in this workspace"}
+        # Cross-workspace fallback: an id absent from this workspace is routed to
+        # its owning workspace via the global task index (the same path
+        # ``omni task show`` uses), so an agent in workspace A can still read a
+        # task created in workspace B instead of dead-ending on "not found".
+        foreign = await _resolve_foreign_task(ctx, task_id)
+        if foreign is not None:
+            run, owner = foreign
+            foreign_db = get_database(owner.paths.project_db)
+            await foreign_db.init()
+            foreign_store = ArtifactStore(owner.paths, foreign_db)
+            return await _detail(
+                run, foreign_db, foreign_store, workspace=owner.paths.project_name
+            )
+        return {
+            "error": f"task {task_id} not found in this workspace or any registered workspace"
+        }
 
     async def get_run(args: dict) -> Any:
         from omni.research.store import ResearchStore
@@ -385,7 +680,9 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
             from omni.skills_runtime.builtin_tools import fs
 
             raw = ref[len("file://"):] if ref.startswith("file://") else ref
-            p = Path(raw).expanduser()
+            from omni.core.path_lookup import resolve_existing_path
+
+            p = resolve_existing_path(raw) or Path(raw).expanduser()
             if not p.is_file():
                 return {"error": f"artifact not found: {ref}"}
             if not fs.within_roots(p, fs.read_roots(ctx)):
@@ -396,8 +693,7 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
         size = path.stat().st_size
         data = path.read_bytes()[: _MAX_OPEN_BYTES + 1]
         if path.suffix.lower() not in _TEXT_EXT and _looks_binary(data):
-            return {"uri": ref, "path": str(path), "size": size, "binary": True,
-                    "note": "binary artifact; not inlined — reference by path/uri"}
+            return _binary_artifact_result(ctx, ref, path, size)
         text = data[:_MAX_OPEN_BYTES].decode("utf-8", "replace")
         from omni.core.injection import defend_observation
 
@@ -407,7 +703,7 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
         return {"uri": ref, "path": str(path), "size": size,
                 "truncated": size > _MAX_OPEN_BYTES, "content": text}
 
-    return [
+    tools = [
         Tool(
             ToolSpec(
                 "memory_search",
@@ -446,10 +742,15 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
         Tool(
             ToolSpec(
                 "list_recent_tasks",
-                "List recent user-request tasks in the current workspace, optionally filtered by status. Use get_subtask for child subtasks.",
+                "List recent user-request tasks, optionally filtered by status. Default "
+                "scope is the current workspace; pass scope='all' for cross-project "
+                "questions ('everything I worked on', 'the last N days') and days=N to "
+                "bound the time window. Use get_subtask for child subtasks.",
                 {"type": "object", "properties": {
                     "limit": {"type": "integer"},
                     "status": {"type": "string"},
+                    "scope": {"type": "string", "enum": ["workspace", "all"]},
+                    "days": {"type": "integer"},
                 }},
             ),
             list_recent_tasks,
@@ -457,11 +758,14 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
         Tool(
             ToolSpec(
                 "search_tasks",
-                "Search historical user requests by title or description and return typed run, task, artifact, and source references.",
+                "Search historical user requests by title or description and return typed "
+                "run, task, artifact, and source references. Default scope is the current "
+                "workspace; pass scope='all' to search across every workspace.",
                 {"type": "object", "properties": {
                     "query": {"type": "string"},
                     "limit": {"type": "integer"},
                     "status": {"type": "string"},
+                    "scope": {"type": "string", "enum": ["workspace", "all"]},
                 }, "required": ["query"]},
             ),
             search_tasks,
@@ -469,7 +773,10 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
         Tool(
             ToolSpec(
                 "get_task",
-                "Read a user request by task:<id> or unique prefix, including status, summary, and typed object references.",
+                "Read a user request by task:<id> or unique prefix, including status, "
+                "summary, failure reason, and typed object references. Resolves the id "
+                "across all workspaces, so a task created in another project is still "
+                "found.",
                 {"type": "object", "properties": {
                     "task_id": {"type": "string"},
                 }, "required": ["task_id"]},
@@ -479,7 +786,9 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
         Tool(
             ToolSpec(
                 "open_artifact",
-                "Open an artifact by artifact:// URI or local path. Text is returned inline; binary artifacts return metadata only.",
+                "Open an artifact by artifact:// URI or local path. Text is returned "
+                "inline; a binary artifact is routed to a declared reader capability "
+                "(or reports how to enable one) — never read binaries with shell/pip.",
                 {"type": "object", "properties": {
                     "uri": {"type": "string"},
                     "path": {"type": "string"},
@@ -514,3 +823,6 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
             get_run,
         ),
     ]
+    for tool in tools:
+        tool.outcome_resolver = recall_result_outcome
+    return tools

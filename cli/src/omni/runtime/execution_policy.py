@@ -11,6 +11,16 @@ from typing import IO, Any, TypeVar
 
 T = TypeVar("T")
 
+try:
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - platform dependent
+    _fcntl = None  # type: ignore[assignment]
+
+try:
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - platform dependent
+    _msvcrt = None  # type: ignore[assignment]
+
 _FILESYSTEM_MUTATIONS = frozenset({"write_file", "edit_file"})
 _EXECUTION_TOOLS = frozenset({"bash", "run_compute"})
 _STORE_MUTATIONS = frozenset({
@@ -158,24 +168,33 @@ def skill_requires_approval(entry: Any) -> bool:
 
 
 def _try_process_lock(lock_file: IO[bytes]) -> bool:
-    try:
-        import fcntl
-    except ImportError:
+    if _fcntl is not None:
+        try:
+            _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
         return True
-    try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        return False
+    if _msvcrt is not None:
+        try:
+            lock_file.seek(0, 2)
+            if lock_file.tell() == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False
+        return True
     return True
 
 
 def _release_process_lock(lock_file: IO[bytes]) -> None:
     try:
-        try:
-            import fcntl
-        except ImportError:
-            return
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        if _fcntl is not None:
+            _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_UN)
+        elif _msvcrt is not None:
+            lock_file.seek(0)
+            _msvcrt.locking(lock_file.fileno(), _msvcrt.LK_UNLCK, 1)
     finally:
         lock_file.close()
 

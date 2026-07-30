@@ -9,11 +9,15 @@ round-trip through ``resolve_path``.
 
 from __future__ import annotations
 
+import asyncio
+import json
+
 import pytest
 
 from omni.config import load_settings
 from omni.storage.artifacts import ArtifactStore
 from omni.storage.db import get_database
+from omni.storage.models import TaskORM
 
 
 async def _store(mirror_dir=None, formats=None) -> ArtifactStore:
@@ -22,6 +26,20 @@ async def _store(mirror_dir=None, formats=None) -> ArtifactStore:
     db = get_database(s.paths.project_db)
     await db.init()
     return ArtifactStore(s.paths, db, mirror_dir=mirror_dir, mirror_formats=formats)
+
+
+async def _task(store: ArtifactStore, task_id: str, title: str) -> None:
+    async with store._db.session() as session:
+        if await session.get(TaskORM, task_id) is None:
+            session.add(
+                TaskORM(
+                    id=task_id,
+                    session_id=f"session-{task_id}",
+                    project=store._paths.project_name,
+                    title=title,
+                )
+            )
+            await session.commit()
 
 
 @pytest.mark.asyncio
@@ -65,6 +83,83 @@ async def test_reports_go_to_reports_subfolder(tmp_path):
     )
     assert art.path.parent == (out / "reports").resolve()
     assert art.path.name == f"RAG-Review-aabbccdd-{art.id[:8]}.md"
+
+
+@pytest.mark.asyncio
+async def test_one_task_keeps_mixed_outputs_in_one_named_bundle(tmp_path):
+    out = tmp_path / "out"
+    store = await _store(mirror_dir=out, formats=["md", "svg", "json"])
+    task_id = "mixedtask01234567"
+    await _task(store, task_id, "RAG architecture review")
+
+    report = await store.put_bytes(
+        b"# report", kind="report", title="Review", ext="md", task_id=task_id
+    )
+    figure = await store.put_bytes(
+        b"<svg/>", kind="figure", title="Architecture", ext="svg", task_id=task_id
+    )
+    data = await store.put_bytes(
+        b"{}", kind="data", title="Evidence", ext="json", task_id=task_id
+    )
+
+    assert report.path.parent == figure.path.parent == data.path.parent
+    assert report.path.parent.parent == (out / "reports").resolve()
+    assert report.path.parent.name == "RAG-architecture-review_mixedtas"
+    manifest = json.loads((report.path.parent / "_omni-manifest.json").read_text())
+    assert manifest["task_id"] == task_id
+    assert {item["uri"] for item in manifest["artifacts"]} == {
+        report.uri,
+        figure.uri,
+        data.uri,
+    }
+
+
+@pytest.mark.asyncio
+async def test_historical_uri_uses_its_persisted_output_root(tmp_path):
+    first_root = tmp_path / "first"
+    store = await _store(mirror_dir=first_root, formats=["md"])
+    task_id = "history0012345678"
+    await _task(store, task_id, "Historical report")
+    art = await store.put_bytes(
+        b"# report", kind="report", title="Report", ext="md", task_id=task_id
+    )
+
+    moved_session = ArtifactStore(
+        store._paths,
+        store._db,
+        mirror_dir=tmp_path / "second",
+        mirror_formats=["md"],
+    )
+
+    assert await moved_session.resolve_path(art.uri) == art.path.resolve()
+    assert await moved_session.task_output_path(
+        "continued.md", task_id=task_id, kind="document"
+    ) == art.path.parent / "continued.md"
+    assert first_root.resolve() in moved_session.managed_output_roots
+
+
+@pytest.mark.asyncio
+async def test_concurrent_first_outputs_cannot_split_the_task_bundle(tmp_path):
+    out = tmp_path / "out"
+    store = await _store(mirror_dir=out, formats=["md", "svg"])
+    task_id = "concurrent01234567"
+    await _task(store, task_id, "Concurrent output")
+
+    report, figure = await asyncio.gather(
+        store.put_bytes(
+            b"# report", kind="report", title="Report", ext="md", task_id=task_id
+        ),
+        store.put_bytes(
+            b"<svg/>", kind="figure", title="Figure", ext="svg", task_id=task_id
+        ),
+    )
+
+    assert report.path.parent == figure.path.parent
+    manifest = json.loads((report.path.parent / "_omni-manifest.json").read_text())
+    assert {item["uri"] for item in manifest["artifacts"]} == {
+        report.uri,
+        figure.uri,
+    }
 
 
 @pytest.mark.asyncio

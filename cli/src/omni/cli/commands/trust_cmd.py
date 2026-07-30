@@ -1,8 +1,9 @@
 """`omni trust` — manage per-directory workspace trust (Claude Code style).
 
-Trusting a directory lets omni write generated files there and apply its
-repo-local ``.omni`` config; the decision persists in ``~/.omni/trust.json``
-(never inside a repo) and inherits downward.
+Trusting a directory selects the Codex Auto preset (workspace-write +
+on-request), lets omni write generated files there, and applies repo-local
+``.omni`` config. The decision persists in ``~/.omni/trust.json`` (never
+inside a repo) and inherits downward. Untrusted directories stay read-only.
 """
 
 from __future__ import annotations

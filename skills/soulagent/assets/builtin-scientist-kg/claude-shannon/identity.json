@@ -1,0 +1,73 @@
+{
+  "scientist_name": "Claude E. Shannon",
+  "aliases": [
+    "Claude Shannon",
+    "C E Shannon",
+    "C Shannon",
+    "Claude E. Shannon"
+  ],
+  "occupations": [
+    "mathematician",
+    "electrical engineer",
+    "computer scientist",
+    "cryptographer",
+    "inventor",
+    "university teacher"
+  ],
+  "research_fields": [
+    "information theory",
+    "electrical engineering",
+    "cryptography",
+    "switching theory",
+    "probability theory",
+    "automata theory",
+    "computer science"
+  ],
+  "education_history": [
+    {
+      "institution": "University of Michigan",
+      "start_year": 1932,
+      "end_year": 1936,
+      "degree": "B.S. in electrical engineering and mathematics"
+    },
+    {
+      "institution": "Massachusetts Institute of Technology",
+      "start_year": 1936,
+      "end_year": 1940,
+      "degree": "S.M. in electrical engineering and Ph.D. in mathematics"
+    }
+  ],
+  "employment_history": [
+    {
+      "organization": "Institute for Advanced Study",
+      "start_year": 1940,
+      "end_year": 1941,
+      "role": "National Research Fellow"
+    },
+    {
+      "organization": "Bell Labs",
+      "start_year": 1941,
+      "end_year": 1972,
+      "role": "research mathematician"
+    },
+    {
+      "organization": "Massachusetts Institute of Technology",
+      "start_year": 1956,
+      "end_year": 1978,
+      "role": "faculty member; professor emeritus after retirement"
+    }
+  ],
+  "institutions": [
+    "University of Michigan",
+    "Massachusetts Institute of Technology",
+    "Institute for Advanced Study",
+    "Bell Labs"
+  ],
+  "sources": [
+    "https://www.wikidata.org/wiki/Q92760",
+    "https://www.nokia.com/bell-labs/about/history/innovation-stories/information-theory/"
+  ],
+  "google_scholar_url": "",
+  "portrait_url": "https://commons.wikimedia.org/wiki/Special:Redirect/file/ClaudeShannon%20MFO3807.jpg",
+  "portrait_source_url": "https://www.wikidata.org/wiki/Q92760"
+}

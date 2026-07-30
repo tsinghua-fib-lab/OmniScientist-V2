@@ -1,22 +1,22 @@
 """Workspace registry + read catalog for cross-workspace discovery.
 
-Path-keyed workspaces live under ``~/.omni/workspaces/<slug>-<hash8>`` and could
-be enumerated by globbing, but in-place ``.omni`` projects are scattered across
-the filesystem. The registry (``~/.omni/workspaces.json``) records each one so
-cross-workspace views and the daemon can find them. It is best-effort metadata:
-last-writer-wins, rebuilt on the next agent start, never load-bearing for
-correctness.
+Path-keyed workspaces live under ``~/.omni/workspaces/<slug>-<hash8>``. In-place
+``.omni`` projects are scattered across the filesystem. The registry
+(``~/.omni/workspaces.json``) records each one so cross-workspace views and the
+daemon can find them. It is best-effort metadata: last-writer-wins, never
+load-bearing for correctness.
 
 The **catalog** (:func:`iter_catalog_workspaces`) is the read API for those
-views: registry records **plus** the home-service channel anchor and any named
-project that already has a ``sessions.sqlite3``. That way IM work on
-``projects/default`` stays visible even when nothing has called
-:func:`register_workspace` for the anchor yet.
+views: registry records **plus** on-disk path-keyed stores, the home-service
+channel anchor, and any named project that already has a ``sessions.sqlite3``.
+``/task all`` must keep working after a missing or rewritten registry — a
+stale ``workspaces.json`` is not allowed to look like the tasks were deleted.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -24,6 +24,7 @@ from pathlib import Path
 from .paths import OmniPaths, user_home
 
 _DEFAULT_ANCHOR = "default"
+logger = logging.getLogger(__name__)
 
 
 def registry_path(home: Path | None = None) -> Path:
@@ -37,8 +38,65 @@ def _load(home: Path | None = None) -> dict[str, dict]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
+        logger.warning("workspace registry %s is unreadable; catalog will scan the disk", path)
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _slug_from_workspace_dir(name: str) -> str:
+    """Invert :func:`omni.config.paths.workspace_key` ``<slug>-<hash8>``."""
+    if len(name) > 9 and name[-9] == "-":
+        return name[:-9] or name
+    return name
+
+
+def _store_record(
+    project_dir: Path,
+    *,
+    kind: str,
+    name: str,
+    root: str | None = None,
+    last_seen: float = 0.0,
+) -> dict | None:
+    db = project_dir / "sessions.sqlite3"
+    if not db.is_file():
+        return None
+    try:
+        mtime = db.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    return {
+        "name": name,
+        "root": root,
+        "project_dir": str(project_dir),
+        "db": str(db),
+        "kind": kind,
+        "last_seen": last_seen or mtime,
+    }
+
+
+def _disk_workspace_records(home: Path) -> list[dict]:
+    """Path-keyed + named stores that already have a ``sessions.sqlite3``."""
+    records: list[dict] = []
+    workspaces_root = home / "workspaces"
+    if workspaces_root.is_dir():
+        for child in sorted(workspaces_root.iterdir()):
+            if not child.is_dir():
+                continue
+            rec = _store_record(
+                child, kind="path", name=_slug_from_workspace_dir(child.name)
+            )
+            if rec is not None:
+                records.append(rec)
+    projects_root = home / "projects"
+    if projects_root.is_dir():
+        for child in sorted(projects_root.iterdir()):
+            if not child.is_dir():
+                continue
+            rec = _named_record(home, child.name)
+            if rec is not None:
+                records.append(rec)
+    return records
 
 
 def _kind(paths: OmniPaths) -> str:
@@ -50,9 +108,18 @@ def _kind(paths: OmniPaths) -> str:
 
 
 def register_workspace(paths: OmniPaths) -> None:
-    """Upsert the active workspace into the registry (best-effort, atomic)."""
+    """Upsert the active workspace into the registry (best-effort, atomic).
+
+    An empty or unreadable registry is rebuilt from on-disk stores before the
+    upsert so one launch cannot hide every other workspace from ``/task all``.
+    """
     home = paths.home
     data = _load(home)
+    if not data:
+        for rec in _disk_workspace_records(home):
+            key = str(Path(str(rec.get("project_dir") or "")).resolve())
+            if key:
+                data[key] = rec
     data[str(paths.project_dir)] = {
         "name": paths.project_name,
         "root": str(paths.workspace_root) if paths.workspace_root else None,
@@ -134,18 +201,22 @@ def _named_record(home: Path, name: str, *, last_seen: float = 0.0) -> dict | No
 
 
 def iter_catalog_workspaces(home: Path | None = None) -> list[dict]:
-    """Workspaces for cross-workspace list/show — registry ∪ anchor ∪ named DBs.
+    """Workspaces for cross-workspace list/show — registry ∪ disk ∪ anchor.
 
     Unlike :func:`list_workspaces` (write-through cache of what has been opened),
     this is the **read** surface for ``task all`` / ``schedule all`` / object
-    routing. It always includes the channel-anchor named project when its
-    ``sessions.sqlite3`` exists, and any other ``projects/<name>`` store already
-    on disk, so IM work on ``default`` cannot stay invisible merely because the
-    interactive CLI never called :func:`register_workspace` for it.
+    routing. It always includes:
+
+    * registered workspaces whose DB still exists
+    * path-keyed stores under ``home/workspaces/*/sessions.sqlite3``
+    * the channel-anchor named project and any other ``projects/<name>`` store
+
+    so a rewritten ``workspaces.json`` or a launch from a different clone cannot
+    hide tasks that are still on disk.
 
     Records with a missing DB path are skipped (never materialise empty stores).
     Order: most-recently-seen first (registry timestamps), then stable name order
-    for disk-discovered named projects.
+    for disk-discovered stores.
     """
     base = home or user_home()
     by_dir: dict[str, dict] = {}
@@ -166,15 +237,9 @@ def iter_catalog_workspaces(home: Path | None = None) -> list[dict]:
         key = str(Path(anchor["project_dir"]).resolve())
         by_dir.setdefault(key, anchor)
 
-    projects_root = base / "projects"
-    if projects_root.is_dir():
-        for child in sorted(projects_root.iterdir()):
-            if not child.is_dir():
-                continue
-            rec = _named_record(base, child.name)
-            if rec is None:
-                continue
-            key = str(Path(rec["project_dir"]).resolve())
+    for rec in _disk_workspace_records(base):
+        key = str(Path(str(rec.get("project_dir") or "")).resolve())
+        if key:
             by_dir.setdefault(key, rec)
 
     records = list(by_dir.values())
@@ -187,11 +252,47 @@ def iter_catalog_workspaces(home: Path | None = None) -> list[dict]:
     return records
 
 
+def prior_user_data_summary(home: Path | None = None) -> str | None:
+    """Describe existing stores in *home*, or ``None`` when it looks unused.
+
+    Used by first-launch setup so a missing ``config.toml`` is not presented as
+    a blank install when tasks or secrets are already on disk. An empty
+    ``projects/default`` created by home-service converge does not count.
+    """
+    base = home or user_home()
+    bits: list[str] = []
+    config = base / "config.toml"
+    secrets = base / "secrets.toml"
+    if config.is_file():
+        bits.append(f"config {config}")
+    try:
+        if secrets.is_file() and secrets.stat().st_size > 0:
+            bits.append("secrets.toml")
+    except OSError:
+        pass
+    if registry_path(base).is_file():
+        bits.append("workspace registry")
+    stores: list[str] = []
+    workspaces_root = base / "workspaces"
+    if workspaces_root.is_dir():
+        for child in sorted(workspaces_root.iterdir()):
+            if child.is_dir() and (child / "sessions.sqlite3").is_file():
+                stores.append(child.name)
+    if stores:
+        shown = ", ".join(stores[:6])
+        extra = "…" if len(stores) > 6 else ""
+        bits.append(f"{len(stores)} path workspace(s): {shown}{extra}")
+    if not bits:
+        return None
+    return f"Existing data in {base} — {'; '.join(bits)}."
+
+
 __all__ = [
     "channel_anchor_name",
     "channel_anchor_project_dir",
     "iter_catalog_workspaces",
     "list_workspaces",
+    "prior_user_data_summary",
     "register_workspace",
     "registry_path",
 ]

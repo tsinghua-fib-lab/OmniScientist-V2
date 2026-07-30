@@ -99,6 +99,10 @@ class TurnContext:
             elif target.source_uri:
                 parts.append(f"source_uri={target.source_uri}")
             lines.append("Active target: " + "; ".join(parts))
+            lines.append(
+                "Active target is for revise/inspect of that artifact; it is not "
+                "the default scheduled work unless the user refers to it."
+            )
         if self.referenced_task_ids:
             lines.append("Explicit task references: " + ", ".join(self.referenced_task_ids[:5]))
         if self.recent_artifacts:

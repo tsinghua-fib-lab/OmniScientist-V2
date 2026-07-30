@@ -15,7 +15,7 @@ def test_v2_release_metadata_is_aligned() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     cli_readme = (REPO_ROOT / "cli" / "README.md").read_text(encoding="utf-8")
 
-    assert __version__ == "2.0.0rc1"
+    assert __version__ == "2.0.0rc4"
     assert citation["title"] == "OmniScientist V2"
     assert citation["version"] == __version__
     assert __version__ in changelog
@@ -24,6 +24,21 @@ def test_v2_release_metadata_is_aligned() -> None:
     assert f"v{__version__}" in readme
     assert f"v{__version__}" in cli_readme
     assert "official next-generation (V2) implementation" in readme
+
+
+def test_release_selfcheck_hot_paths_exist() -> None:
+    listing = REPO_ROOT / "cli" / "scripts" / "release_hot_tests.txt"
+    script = REPO_ROOT / "cli" / "scripts" / "release_selfcheck.sh"
+    assert listing.is_file()
+    assert script.is_file()
+    paths = [
+        line.strip().split("::", 1)[0]
+        for line in listing.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert paths, "release_hot_tests.txt must list at least one test path"
+    for rel in paths:
+        assert (REPO_ROOT / rel).is_file(), rel
 
 
 def test_public_notices_are_synchronized_and_precise() -> None:
