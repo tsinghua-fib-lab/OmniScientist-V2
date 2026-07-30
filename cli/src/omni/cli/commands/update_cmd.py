@@ -28,14 +28,15 @@ from urllib.parse import unquote, urlparse
 import typer
 
 from omni.cli.render import console, data_table, error, info, success, warn
+from omni.personas.installer import BuiltinPersonaInstallError, install_builtin_personas
 from omni.runtime.daemon import list_running_daemons, untracked_serve_pids
+from omni.runtime.dist_meta import DIST_NAME as DIST
 from omni.runtime.uninstall import installation_method_for_prefix
 from omni.skills_runtime.runtime_setup import (
     SkillRuntimeSetupError,
     setup_research_pptx_runtime,
 )
 
-DIST = "omniscientist"
 app = typer.Typer(
     help="Update OmniScientist and inspect update status.",
     invoke_without_command=True,
@@ -84,6 +85,11 @@ def _manager_environment(kind: str) -> dict[str, str] | None:
     """Bind a manager command to the registry owning the running prefix."""
     prefix = Path(sys.prefix).resolve()
     env = os.environ.copy()
+    # Drop host bin-dir bindings so a CI/dev shell that exported PIPX_BIN_DIR /
+    # UV_TOOL_BIN_DIR cannot redirect the upgrade into another registry. We
+    # re-add them below only when the invoked launcher itself is trustworthy.
+    env.pop("UV_TOOL_BIN_DIR", None)
+    env.pop("PIPX_BIN_DIR", None)
     launcher_dir = _invoked_launcher_dir()
     if kind == "uv":
         env["UV_TOOL_DIR"] = str(prefix.parent)
@@ -556,7 +562,7 @@ def _render_manual_update_help(current: str) -> None:
     warn(f"OmniScientist {current} looks like an unmanaged source build.")
     info("omni update can't upgrade it automatically. To update manually:")
     info("  • from a git checkout:  git -C <repo> pull --ff-only && uv pip install -e <repo>/cli")
-    info("  • or reinstall the tool: uv tool install --force omniscientist  (once published)")
+    info("  • or reinstall the tool: uv tool install --force OmniScientist-V2  (once published)")
 
 
 def _execute_git_update(*, repo_root: Path, src: Path, editable: bool, ref: str) -> None:
@@ -638,6 +644,18 @@ def _prepare_bundled_skill_runtimes(paths) -> None:  # noqa: ANN001
     """Prepare lock-pinned components as part of the update transaction."""
     info("Checking bundled Skill runtimes...")
     try:
+        personas = install_builtin_personas(paths)
+    except BuiltinPersonaInstallError as exc:
+        error(str(exc))
+        raise typer.Exit(1) from exc
+    if personas.installed:
+        success(
+            f"Installed {len(personas.installed)} bundled scientist personas into "
+            f"{paths.scientist_kg_dir}."
+        )
+    else:
+        info("Bundled scientist personas are ready; existing directories were preserved.")
+    try:
         changed = setup_research_pptx_runtime(paths)
     except SkillRuntimeSetupError as exc:
         error(str(exc))
@@ -662,7 +680,7 @@ def _prepare_bundled_skill_runtimes_with_updated_cli(_paths) -> None:  # noqa: A
         "omni.cli.main",
         "skills",
         "setup",
-        "research-pptx",
+        "all",
     ]
     try:
         proc = subprocess.run(command, check=False)
@@ -671,8 +689,8 @@ def _prepare_bundled_skill_runtimes_with_updated_cli(_paths) -> None:  # noqa: A
         raise typer.Exit(1) from exc
     if proc.returncode != 0:
         error(
-            "OmniScientist was updated, but research-pptx runtime setup failed "
-            f"(exit={proc.returncode}). Run `omni skills setup research-pptx` to retry."
+            "OmniScientist was updated, but bundled resource setup failed "
+            f"(exit={proc.returncode}). Run `omni skills setup all` to retry."
         )
         raise typer.Exit(proc.returncode)
 
@@ -923,7 +941,8 @@ def update_command(
                 )
 
             # A successful update is not complete until a previously active
-            # service has reached READY on the newly installed code.
+            # service has claimed the singleton on the newly installed code.
+            # Control-plane READY is preferred; IM channels may still be connecting.
             service_detail = service_guard.restore()
             update_state.record_converged(settings.paths)
 
@@ -1006,7 +1025,10 @@ def _render_update_summary(
         info("• Editable install: pure-Python edits are live on the next launch (no reinstall needed).")
     info("• New omni commands use the new version immediately.")
     if service_detail:
-        info(f"• Home service: {service_detail}")
+        if "still becoming ready" in service_detail:
+            warn(f"• Home service: {service_detail}")
+        else:
+            info(f"• Home service: {service_detail}")
     if daemon_count:
         info(f"• Legacy daemons: {daemon_detail}")
     if not restart_serve:

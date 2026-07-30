@@ -27,7 +27,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from omni.config.paths import OmniPaths
+from omni.config.paths import (
+    OmniPaths,
+    is_control_store_path,
+    is_within_home,
+    os_default_user_home,
+    user_home,
+)
 from omni.config.workspaces import list_workspaces
 from omni.data import BUILTIN_SKILLS_DIR
 from omni.runtime.daemon import (
@@ -36,9 +42,9 @@ from omni.runtime.daemon import (
     read_pidfile_path,
     scan_running_serve_pids,
 )
+from omni.runtime.dist_meta import DIST_NAME, DIST_NORMALIZED, DIST_TOOL_NAMES
 from omni.skills_runtime.discovery import indexed_skill_dirs
 
-DIST_NAME = "omniscientist"
 INSTALL_MANIFEST = "install.json"
 INSTALL_STATE_DIR_ENV = "OMNI_INSTALL_STATE_DIR"
 UNINSTALL_PENDING = "uninstall.pending"
@@ -70,9 +76,9 @@ class InstallationRecord:
     @property
     def identity(self) -> str:
         if self.method == "uv":
-            return "uv-tool:omniscientist"
+            return f"uv-tool:{DIST_NORMALIZED}"
         if self.method == "pipx":
-            return "pipx:omniscientist"
+            return f"pipx:{DIST_NORMALIZED}"
         return f"python:{Path(self.python).expanduser()}"
 
 
@@ -104,6 +110,7 @@ class UninstallPlan:
     in_place_projects: list[Path] = field(default_factory=list)
     installations: list[InstallationRecord] = field(default_factory=list)
     preserved_installations: list[InstallationRecord] = field(default_factory=list)
+    home_identity: tuple[int, int] | None = None
 
     def to_dict(self) -> dict:
         payload = asdict(self)
@@ -261,10 +268,11 @@ def installation_method_for_prefix(prefix: Path) -> str:
     if (prefix / "pipx_metadata.json").is_file():
         return "pipx"
     normalized = str(prefix).replace("\\", "/").lower()
-    if "/uv/tools/omniscientist" in normalized:
-        return "uv"
-    if "/pipx/venvs/omniscientist" in normalized:
-        return "pipx"
+    for tool_name in DIST_TOOL_NAMES:
+        if f"/uv/tools/{tool_name}" in normalized:
+            return "uv"
+        if f"/pipx/venvs/{tool_name}" in normalized:
+            return "pipx"
     return "env"
 
 
@@ -496,15 +504,32 @@ def _completion_paths() -> list[Path]:
     ]
 
 
+def _is_purgeable_in_place(candidate: Path, home: Path) -> bool:
+    """True when *candidate* is a registered in-place marker, not control state."""
+    try:
+        resolved = candidate.expanduser().resolve()
+    except OSError:
+        return False
+    if resolved.name != ".omni":
+        return False
+    if is_control_store_path(resolved, home):
+        return False
+    if resolved == os_default_user_home():
+        return False
+    if is_within_home(home, resolved) and resolved != home.resolve():
+        return False
+    return True
+
+
 def _registered_in_place_projects(paths: OmniPaths) -> list[Path]:
     out: list[Path] = []
     for row in list_workspaces(paths.home):
         if str(row.get("kind") or "") != "in-place":
             continue
         candidate = Path(str(row.get("project_dir") or ""))
-        if candidate.name == ".omni" and candidate not in out:
+        if _is_purgeable_in_place(candidate, paths.home) and candidate not in out:
             out.append(candidate)
-    if paths.project_dir.name == ".omni" and paths.project_dir not in out:
+    if _is_purgeable_in_place(paths.project_dir, paths.home) and paths.project_dir not in out:
         out.append(paths.project_dir)
     return out
 
@@ -540,6 +565,7 @@ def build_uninstall_plan(
         all_installations=all_installations,
         remove_program=remove_program,
         remove_untracked_exports=remove_untracked_exports,
+        home_identity=_path_identity(paths.home),
     )
     in_place = _registered_in_place_projects(paths)
     pidfiles = _daemon_pidfiles(paths, in_place)
@@ -779,24 +805,72 @@ def _remove_completion_files() -> list[str]:
     return removed
 
 
-def _safe_remove_home(home: Path) -> None:
+def _path_identity(path: Path) -> tuple[int, int] | None:
+    """``(st_dev, st_ino)`` of the directory a purge would delete.
+
+    Resolve first so a symlink home and its target share one identity; then
+    ``lstat`` the resolved path so a replacement between plan and execute
+    cannot hide behind a new leaf link.
+    """
+    try:
+        resolved = path.expanduser().resolve()
+        stat_result = resolved.lstat()
+    except OSError:
+        return None
+    return (int(stat_result.st_dev), int(stat_result.st_ino))
+
+
+def _quarantine_remove(path: Path) -> None:
+    """Move *path* aside, then delete, so a half-finished purge is not re-inited.
+
+    Rename failure must stop — falling back to ``rmtree`` in place is what
+    left a husk the home service could recreate as a first-run store.
+    """
+    resolved = path.expanduser().resolve()
+    if not resolved.exists():
+        return
+    sibling = resolved.with_name(f".{resolved.name}.purging-{os.getpid()}")
+    try:
+        resolved.rename(sibling)
+    except OSError as exc:
+        raise ValueError(
+            f"refusing to delete in place; quarantine rename failed for {resolved}: {exc}"
+        ) from exc
+    shutil.rmtree(sibling)
+
+
+def _safe_remove_home(home: Path, *, expected_identity: tuple[int, int] | None = None) -> None:
     resolved = home.expanduser().resolve()
     user = Path.home().resolve()
     cwd = Path.cwd().resolve()
     if resolved in {Path(resolved.anchor), user, cwd} or resolved in cwd.parents:
         raise ValueError(f"refusing to purge unsafe OMNI_HOME: {resolved}")
+    if resolved == os_default_user_home() and resolved != user_home().resolve():
+        raise ValueError(f"refusing to purge the account Omni store: {resolved}")
     if (resolved / ".git").exists() or (resolved / "pyproject.toml").exists():
         raise ValueError(f"refusing to purge OMNI_HOME that looks like a source repository: {resolved}")
-    if resolved.exists():
-        shutil.rmtree(resolved)
+    if expected_identity is not None and resolved.exists():
+        current = _path_identity(resolved)
+        if current is not None and current != expected_identity:
+            raise ValueError(
+                f"refusing to purge OMNI_HOME whose identity changed since planning: {resolved}"
+            )
+    _quarantine_remove(resolved)
 
 
 def _safe_remove_in_place(path: Path) -> None:
     resolved = path.expanduser().resolve()
     if resolved.name != ".omni":
         raise ValueError(f"refusing to remove non-.omni project data: {resolved}")
-    if resolved.exists():
-        shutil.rmtree(resolved)
+    if is_control_store_path(resolved):
+        raise ValueError(
+            f"refusing to remove Omni control-state store as in-place project data: {resolved}"
+        )
+    if is_within_home(user_home(), resolved) and resolved != user_home().resolve():
+        raise ValueError(
+            f"refusing to remove a directory that contains the active Omni store: {resolved}"
+        )
+    _quarantine_remove(resolved)
 
 
 def _powershell_quote(value: str) -> str:
@@ -959,21 +1033,20 @@ def _remove_programs(
         report.errors.append("program removal could not be scheduled after this process exits")
 
 
-def _teardown_home_service(paths: OmniPaths, report: UninstallReport) -> None:
+def _teardown_home_service(paths: OmniPaths, report: UninstallReport) -> bool:
     """Stop and unregister the home background service and its OS supervisor unit.
 
-    An uninstall must remove the launchd/systemd/schtasks unit too, or the OS
-    would keep trying to relaunch a deleted CLI at every login. Best-effort: a
-    failure is recorded but never aborts the rest of the uninstall.
+    Returns True when there is nothing to stop, or the unit was torn down.
+    A failure is recorded and returns False so a purge can abort.
     """
     try:
         from omni.runtime import service_state
         from omni.runtime.service_supervisors import SupervisorSpec, make_supervisor
     except Exception:  # noqa: BLE001 - service modules always import; guard defensively.
-        return
+        return True
     desired = service_state.read_desired(paths)
     if not (desired.configured or service_state.read_runtime(paths)):
-        return
+        return True
     desired.enabled = False
     desired.configured = True
     try:
@@ -992,19 +1065,24 @@ def _teardown_home_service(paths: OmniPaths, report: UninstallReport) -> None:
         supervisor.uninstall()
         service_state.clear_runtime_if_owner(paths)
         report.completed.append("home service: stopped and OS supervisor unit removed")
+        return True
     except Exception as exc:  # noqa: BLE001
         report.errors.append(f"could not tear down the home service: {exc}")
+        return False
 
 
 def execute_uninstall_plan(paths: OmniPaths, plan: UninstallPlan) -> UninstallReport:
     """Execute a confirmed plan in dependency-safe order."""
     report = UninstallReport()
 
-    _teardown_home_service(paths, report)
+    service_ok = _teardown_home_service(paths, report)
 
     stopped, stop_errors = _stop_all_daemons(paths, _registered_in_place_projects(paths))
     report.completed.append(f"services: stopped {stopped} daemon(s) and removed stale pidfiles")
     report.errors.extend(stop_errors)
+    purge_blocked = plan.purge and (not service_ok or bool(stop_errors))
+    if purge_blocked:
+        report.errors.append("purge aborted: services could not be stopped")
 
     from omni.skills_runtime.install import unexport_builtin_skills
 
@@ -1045,7 +1123,9 @@ def execute_uninstall_plan(paths: OmniPaths, plan: UninstallPlan) -> UninstallRe
     for item in _remove_completion_files():
         report.completed.append(f"shell completion: removed {item}")
 
-    if plan.purge:
+    if plan.purge and purge_blocked:
+        report.skipped.append("user data: purge skipped because services could not be stopped")
+    elif plan.purge:
         from omni.channels.credentials import purge_known_channel_secrets
 
         try:
@@ -1061,7 +1141,7 @@ def execute_uninstall_plan(paths: OmniPaths, plan: UninstallPlan) -> UninstallRe
             except (OSError, ValueError) as exc:
                 report.errors.append(str(exc))
         try:
-            _safe_remove_home(plan.home)
+            _safe_remove_home(plan.home, expected_identity=plan.home_identity)
             report.completed.append(f"user data: removed {plan.home}")
         except (OSError, ValueError) as exc:
             report.errors.append(str(exc))

@@ -67,10 +67,15 @@ _WHEN_SCHEMA: dict[str, Any] = {
             "type": "object",
             "description": (
                 "Grounded parts. clock={surface_hour,minute,second?,day_period(am/pm/null),"
-                "hour_system(12/24/null),evidence}; date={kind(relative_day/absolute/weekday),"
+                "day_period_evidence?,hour_system(12/24/null),evidence}; for a non-English/"
+                "non-Chinese AM/PM phrase, day_period_evidence must copy only the exact phrase "
+                "that denotes the period. date={kind(relative_day/absolute/weekday),"
                 "offset|year/month/day|weekday,evidence}; timezone={name,evidence}; "
                 "interval={seconds,evidence}; recurrence={freq(daily/weekly),weekday?,evidence}. "
-                "Every 'evidence' must be a span of raw_expression."
+                "Every 'evidence' is a span of raw_expression; quote the whole component "
+                "you are reporting — for a clock, the hour and the minute together with "
+                "any AM/PM word, not just the hour — since a narrow quote is what selects "
+                "one time out of a sentence that mentions several."
             ),
         },
     },
@@ -235,6 +240,7 @@ def temporal_clarification_payload(
                 choices.append({"id": f"repair_next_day:{cand.id}", "label": f"tomorrow {hhmm}"})
                 lines.append(f"- tomorrow {hhmm} ({nxt[:10]})")
         choices.append({"id": "run_now", "label": "run it now"})
+        choices.append({"id": "other_time", "label": "a different time — just tell me when"})
         choices.append({"id": "cancel", "label": "cancel"})
         message = header + "\n" + "\n".join(lines)
     elif resolution.ambiguous and resolution.unresolved_fields == ("dst_fold",):
@@ -242,6 +248,7 @@ def temporal_clarification_payload(
         for cand in resolution.candidates:
             choices.append({"id": f"pick:{cand.id}", "label": cand.label})
             lines.append(f"- {cand.label}")
+        choices.append({"id": "other_time", "label": "a different time — just tell me when"})
         choices.append({"id": "cancel", "label": "cancel"})
         message = message + "\n" + "\n".join(lines)
     else:
@@ -250,6 +257,7 @@ def temporal_clarification_payload(
             f"{base} Please give a clearer time (for example 'today 7:10 pm'), "
             "or create it with an exact time (omni schedule add --at ...)."
         )
+        choices.append({"id": "other_time", "label": "a different time — just tell me when"})
         choices.append({"id": "cancel", "label": "cancel"})
 
     return {

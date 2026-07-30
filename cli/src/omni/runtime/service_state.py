@@ -295,9 +295,10 @@ def service_runtime_info(paths: OmniPaths) -> dict | None:
 def observe_service(paths: OmniPaths) -> ServiceObservation:
     """Distinguish a live-but-starting owner from a ready runtime.
 
-    The singleton owner is published before heavy initialization, whereas the
-    ready runtime arrives only after agents and channels have started. Treating
-    the former as DOWN is the update/orphan race this state model prevents.
+    The singleton owner is published before heavy initialization. Control-plane
+    READY follows once agents and task runtimes can accept work; IM channels
+    connect afterwards and are tracked in ``channel_health``. Treating STARTING
+    as DOWN is the update/orphan race this state model prevents.
     """
     raw_runtime = read_runtime(paths)
     runtime = service_runtime_info(paths)
@@ -437,13 +438,28 @@ def singleton_path(paths: OmniPaths) -> Path:
     return paths.service_dir / _SINGLETON_NAME
 
 
+def _ensure_windows_lock_byte(fd: int) -> bool:
+    """Ensure byte zero exists before ``msvcrt.locking`` locks its range."""
+    if sys.platform != "win32":
+        return True
+    try:
+        os.lseek(fd, 0, os.SEEK_END)
+        if os.lseek(fd, 0, os.SEEK_CUR) == 0:
+            os.write(fd, b"\0")
+        os.lseek(fd, 0, os.SEEK_SET)
+    except OSError:
+        return False
+    return True
+
+
 def _flock_exclusive_nonblocking(fd: int) -> bool:
     """Take an exclusive, non-blocking lock on ``fd``; ``False`` if held elsewhere."""
     if sys.platform == "win32":
         import msvcrt
 
+        if not _ensure_windows_lock_byte(fd):
+            return False
         try:
-            os.lseek(fd, 0, os.SEEK_SET)
             msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
         except OSError:
             return False
@@ -490,14 +506,24 @@ def acquire_singleton(paths: OmniPaths, *, role: str = "service") -> int | None:
             os.close(fd)
         return None
     recorded_role = role if role in {"service", "update"} else "service"
-    with contextlib.suppress(OSError):
-        os.ftruncate(fd, 0)
+    try:
+        # On Windows byte zero is the msvcrt lock sentinel. Keep JSON outside
+        # that locked range so status/doctor can read holder metadata through a
+        # second handle while the service owns the lock.
+        metadata_offset = 1 if sys.platform == "win32" else 0
+        os.ftruncate(fd, metadata_offset)
+        os.lseek(fd, metadata_offset, os.SEEK_SET)
         os.write(
             fd,
             json.dumps(
                 {"pid": os.getpid(), "ts": time.time(), "role": recorded_role}
             ).encode("utf-8"),
         )
+    except OSError:
+        _flock_release(fd)
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        return None
     return fd
 
 
@@ -524,7 +550,12 @@ def singleton_holder_info(paths: OmniPaths) -> dict | None:
             os.close(fd)
         return None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        if sys.platform == "win32":
+            os.lseek(fd, 1, os.SEEK_SET)
+            payload = os.read(fd, 64 * 1024).decode("utf-8")
+        else:
+            payload = path.read_text(encoding="utf-8")
+        data = json.loads(payload)
         pid = int(data.get("pid", 0) or 0)
     except (OSError, ValueError, TypeError):
         with contextlib.suppress(OSError):

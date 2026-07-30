@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 
 from omni.agent.turn_execution import TurnResult
 from omni.runtime.notifications import TaskNotification
+from omni.runtime.presentation import ArtifactRef
 from omni.runtime.task_status import await_settled_status, is_terminal
 from omni.scheduling.contracts import GOAL_SKILL
 
@@ -132,7 +133,7 @@ class ScheduledGoalRunner:
 
     @staticmethod
     def _incomplete(result: TurnResult | None) -> bool:
-        return result is not None and result.verification_status in _CONTINUABLE
+        return result is not None and result.settlement_status in _CONTINUABLE
 
     @staticmethod
     def _missing(result: TurnResult | None) -> list[str]:
@@ -168,6 +169,7 @@ class ScheduledGoalRunner:
             return result
         max_cont = max(0, int(getattr(cfg, "max_continuations", 1) or 0))
         attempt = 0
+        accumulated_artifacts = list(result.artifacts)
         while attempt < max_cont and self._incomplete(result):
             attempt += 1
             missing = self._missing(result)
@@ -195,7 +197,28 @@ class ScheduledGoalRunner:
             result = await self._run_turn(
                 goal=cont_goal, task_id=cont_task.id, channel=channel, session_id=session_id, grant=grant
             )
+            accumulated_artifacts = self._merge_artifacts(
+                accumulated_artifacts,
+                result.artifacts,
+            )
+            result.artifacts = accumulated_artifacts
         return result
+
+    @staticmethod
+    def _merge_artifacts(
+        existing: list[ArtifactRef],
+        added: list[ArtifactRef],
+    ) -> list[ArtifactRef]:
+        merged: list[ArtifactRef] = []
+        seen: set[str] = set()
+        for artifact in [*existing, *added]:
+            key = artifact.uri or artifact.path
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            merged.append(artifact)
+        return merged
 
     async def _deliver(
         self,
@@ -225,12 +248,13 @@ class ScheduledGoalRunner:
                 status = settled_status
             else:
                 status = _STATUS_MAP.get(
-                    result.verification_status,
+                    result.settlement_status,
                     "succeeded" if result.kind == "text" else "degraded",
                 )
             summary = (result.text or "")[:2000]
-            verification = result.verification_status
+            verification = result.settlement_status
             warnings = list(result.degraded_warnings or [])
+        artifacts = list(result.artifacts) if result is not None else []
         note = TaskNotification(
             subtask_id=task_id or "",
             task_id=task_id or "",
@@ -242,10 +266,16 @@ class ScheduledGoalRunner:
             session_id=session_id,
             title=(goal or "Scheduled goal")[:80],
             summary=summary,
+            artifacts=[
+                artifact.uri or artifact.path
+                for artifact in artifacts
+                if artifact.uri or artifact.path
+            ],
             payload={
                 "schedule_id": schedule_id,
-                "verification_status": verification,
+                "settlement_status": verification,
                 "degraded_warnings": warnings,
+                "artifacts": [artifact.to_dict() for artifact in artifacts],
             },
         )
         try:

@@ -4,7 +4,7 @@ title: "OmniScientist V2"
 type: software
 authors:
   - name: "OmniScientist Contributors"
-version: "2.0.0rc1"
+version: "2.0.0rc3"
 url: "https://github.com/tsinghua-fib-lab/OmniScientist-V2"
 repository-code: "https://github.com/tsinghua-fib-lab/OmniScientist-V2"
 license: Apache-2.0

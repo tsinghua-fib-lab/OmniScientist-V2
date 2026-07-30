@@ -7,39 +7,43 @@ fully-bound, executable plan and asked the user for an id it already had.
 
 These tests pin the repaired contract across the four quadrants:
 
-    bound plan            -> verify resolver fact, execute, never ask (incident replay)
-    resolvable-id gap     -> ReAct floor look-up (search -> id -> fetch), never ask
-    un-groundable gap     -> recovery Rung 3 asks (repair failed -> ask)
+    bound plan            -> execute, never ask (incident replay)
+    resolvable-id gap     -> capable tool-enabled turn looks it up, never asks
+    un-groundable gap     -> the runtime refuses to invent it and asks
     explicit needs_input  -> ask (the model chose it)
 
 plus the deterministic units the routing rests on: placeholder cleaning and
 ``missing_inputs`` reconciliation. Planning is single-pass (Codex-aligned): the
 model binds step inputs itself and reconciliation is a pure, no-LLM check that
 drops stale gaps once the plan proves executable.
+
+Quadrants 1-3 used to be settled while the planner compiled a DAG, so each was
+asserted against an ``IntentType.WORKFLOW`` plan and the rung the recovery
+ladder picked for it. The planner no longer compiles multi-step work; it hands
+the turn to the capable assistant and the model sequences the steps by calling
+``run_workflow``. The ask-last *decision* therefore moved but did not weaken:
+the planner still refuses to short-circuit a gap it might be able to close, and
+the ask now happens where the value is finally proven undiscoverable — at the
+workflow gate, which refuses to persist an under-specified step.
 """
 
 from __future__ import annotations
 
 import json
+import sys
 from typing import Any
 
 import pytest
 
-from omni.agent.input_resolution import resolve_identifier_fields
+from omni.agent import OmniAgent
 from omni.agent.intent_plan import IntentType
 from omni.agent.model_planner import ModelIntentPlanner, ModelPlanProposal
-from omni.agent.plan_recovery import (
-    ACTION_EXECUTE,
-    ACTION_NEEDS_INPUT,
-    ACTION_REACT,
-    recover,
-)
-from omni.agent.plan_validator import PlanValidator
 from omni.agent.planner import IntentPlanner
 from omni.config import load_settings
-from omni.core.llm.client import LLMClient
-from omni.skills_runtime.manifest import DeliveryMode, SkillEntry, SkillKind
+from omni.core.llm.client import ChatWithToolsResult, LLMClient, ToolCall
+from omni.skills_runtime.manifest import DeliveryMode, ExecSpec, SkillEntry, SkillKind
 from omni.skills_runtime.registry import SkillRegistry
+from tests.conftest import PlanningLLM
 
 _INCIDENT_GOAL = (
     "为 RAG 系统综述准备材料：获取 Attention Is All You Need 摘要，"
@@ -77,15 +81,21 @@ def _custom_skill(
     props: dict[str, dict] = {}
     for idx, key in enumerate(required):
         props[key] = {"type": "string", "format": fmt} if (fmt and idx == 0) else {"type": "string"}
+    script = (
+        "import json,sys;"
+        "json.load(sys.stdin);"
+        "print(json.dumps({'status':'ok','summary':'ran " + name + "'}))"
+    )
     return SkillEntry(
         name=name,
         description=f"{name} handles {capability}",
         source="builtin",
-        kind=SkillKind.PYTHON_ENGINE,
+        kind=SkillKind.CLI_EXEC,
         delivery_mode=DeliveryMode.ASYNC_TASK,
         role=role,
         capabilities=[capability],
-        priority=50,
+        priority=500,
+        exec_spec=ExecSpec(command=sys.executable, args=["-c", script], stdout_format="json"),
         input_schema={"type": "object", "properties": props, "required": list(required)},
         output_schema={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]},
     )
@@ -143,42 +153,30 @@ async def test_incident_dfcb92bb_bound_plan_executes_and_never_asks():
     assert proposal.missing_inputs == []
     assert proposal.binding_audit["dropped_missing_inputs"][0]["field"] == "arxiv_id"
 
-    # Ask-last routing builds the workflow, not a needs_input question. Because
-    # the user named only the paper title, the model-supplied id still needs
-    # resolver-owned grounding before execution. The normal in-lane resolver
-    # verifies that exact value rather than trusting model knowledge.
-    planner = IntentPlanner(registry)
-    plan = planner.plan_from_proposal(_INCIDENT_GOAL, proposal, task_id="run-incident")
-    assert plan.intent_type == IntentType.WORKFLOW
-
-    async def _grounded_search(
-        field_format: str,
-        query: str,
-    ) -> list[tuple[str, str]]:
-        assert field_format == "arxiv_id"
-        assert query == "Attention Is All You Need"
-        return [("1706.03762", "Attention Is All You Need")]
-
-    plan, validation, records = await resolve_identifier_fields(
-        plan,
-        PlanValidator(registry).validate(plan),
-        registry=registry,
-        searcher=_grounded_search,
+    # Ask-last routing hands the turn to the capable assistant that can run the
+    # work, not to a needs_input question. The reconciled gap is gone from the
+    # plan too, so nothing downstream can resurrect it as an ask.
+    plan = IntentPlanner(registry).plan_from_proposal(
+        _INCIDENT_GOAL, proposal, task_id="run-incident"
     )
-    assert [record.via for record in records] == ["arxiv_id.verify"]
-    outcome = recover(plan, validation, registry)
-    assert outcome.action == ACTION_EXECUTE
-    fetch = next(s for s in outcome.plan.workflow_steps if s.get("capability") == "paper.fetch.arxiv")
-    assert fetch["input"]["identifier"] == "1706.03762"
-    figure = next(s for s in outcome.plan.workflow_steps if s.get("capability") == "artifact.figure")
-    assert figure["input"].get("figure_kind") == "rag"
+    assert plan.intent_type is not IntentType.NEEDS_INPUT
+    assert plan.missing_inputs == []
+    # The turn keeps the tools that execute the work; the model sequences it.
+    assert "run_workflow" not in plan.tool_policy.blocked_tools
+
+    # Planning carries no second copy of the model's provider inputs. The model
+    # passes the id it already resolved in its own tool call, so there is nothing
+    # here to go stale against it. (A valid-but-wrong id is caught at execution by
+    # verify-by-fetch, not by a slow, low-precision plan-time title search — the
+    # very gate that dead-ended good ids.)
+    assert plan.capability_inputs == {}
 
 
-# ── Quadrant 2: a resolvable-id gap looks it up on the floor, never asks ──
+# ── Quadrant 2: a resolvable-id gap is looked up, never asked ──
 
 
 @pytest.mark.asyncio
-async def test_resolvable_id_gap_hands_off_to_react_lookup_not_a_question():
+async def test_resolvable_id_gap_becomes_a_lookup_turn_not_a_question():
     plan = {
         "intent_type": "workflow",
         "confidence": 0.85,
@@ -196,59 +194,89 @@ async def test_resolvable_id_gap_hands_off_to_react_lookup_not_a_question():
     proposal = await ModelIntentPlanner(_ScriptedLLM(plan), registry).propose(goal)
 
     assert proposal is not None
-    # The placeholder id was stripped and nothing bound it, so the gap is real
-    # and preserved for the recovery ladder.
+    # The placeholder id was stripped and nothing bound it, so the gap is real.
     assert proposal.missing_inputs
 
-    planner = IntentPlanner(registry)
-    plan_obj = planner.plan_from_proposal(goal, proposal, task_id="run-groundable")
-    # Ask-last: a workflow with steps is built, not short-circuited to a question.
-    assert plan_obj.intent_type == IntentType.WORKFLOW
+    plan_obj = IntentPlanner(registry).plan_from_proposal(goal, proposal, task_id="run-groundable")
 
-    # Look-up before ask/error: an arXiv id the in-lane resolver could not bind
-    # (offline in this unit) goes to the ReAct floor to act-and-look-up — never a
-    # lossy whole-sentence search and never a question to the user.
-    outcome = recover(plan_obj, PlanValidator(registry).validate(plan_obj), registry)
-    assert outcome.action == ACTION_REACT
-    assert outcome.rung == "4_react_lookup"
-    assert any("Attention Is All You Need" in note for note in outcome.notes)
-    assert not any(s.get("capability") == "literature.search" for s in outcome.plan.workflow_steps)
+    # Ask-last: a gap the agent may still be able to close does *not*
+    # short-circuit the turn into a question. The request goes to the capable,
+    # tool-enabled turn that can search for the id and then fetch it.
+    assert plan_obj.intent_type is not IntentType.NEEDS_INPUT
+    assert plan_obj.missing_inputs == []
+    blocked = set(plan_obj.tool_policy.blocked_tools)
+    assert not {"search_literature", "run_skill", "run_workflow"} & blocked
+    # And the host does not "helpfully" substitute a lossy whole-sentence search
+    # for the fetch the user actually asked for.
+    assert plan_obj.workflow_steps == []
 
 
-# ── Quadrant 3: an un-groundable gap asks (repair failed → ask) ──
+# ── Quadrant 3: an un-groundable gap asks (execution refuses to invent it) ──
 
 
 @pytest.mark.asyncio
-async def test_ungroundable_gap_asks_after_repair_is_impossible():
-    registry = _registry()
-    # A required task whose only field is strict-typed, not a resolvable identifier
-    # (a DOI we don't search), and has no producer to reroute to: the value
-    # genuinely cannot be discovered, so ask.
-    registry.register(_custom_skill("title-fetch", "custom.fetch", required=["identifier"], fmt="doi"))
-    plan = {
-        "intent_type": "workflow",
-        "confidence": 0.8,
-        "workflow_steps": [
-            {"id": "only", "capability": "custom.fetch", "input": {"identifier": "Some Paper Title"}},
-        ],
-        "outputs": ["data"],
-        "missing_inputs": [{"field": "identifier", "reason": "no concrete id"}],
-        "rationale": "fetch a paper the user only named",
-    }
+async def test_ungroundable_gap_asks_instead_of_executing_on_a_guess():
+    """The last gate before a task exists refuses an unbindable required input.
+
+    The value here is a paper *title* in a strict-typed identifier field with no
+    lookup adapter behind it: genuinely undiscoverable. The model still tries to
+    run it, and the workflow gate declines to persist the run and tells the
+    model to ask the user — the ask-last floor, now enforced where the guess
+    would otherwise have become a task.
+    """
     goal = "获取那篇论文的数据"
+    agent = await OmniAgent.create(load_settings())
+    try:
+        agent.registry.register(
+            _custom_skill("title-fetch", "custom.fetch", required=["identifier"], fmt="doi")
+        )
+        agent.llm = PlanningLLM(
+            [
+                {
+                    "intent_type": "workflow",
+                    "confidence": 0.8,
+                    "outputs": ["data"],
+                    "rationale": "fetch a paper the user only named",
+                }
+            ],
+            script=[
+                ChatWithToolsResult(
+                    tool_calls=[
+                        ToolCall(
+                            id="call_workflow",
+                            name="run_workflow",
+                            arguments={
+                                "goal": goal,
+                                "mode": "background",
+                                "steps": [
+                                    {
+                                        "id": "only",
+                                        "skill": "title-fetch",
+                                        "input": {"paper": "Some Paper Title"},
+                                    }
+                                ],
+                            },
+                        )
+                    ]
+                ),
+                ChatWithToolsResult(content="Which paper do you mean? I need its DOI."),
+            ],
+        )
+        result = await agent.handle_turn(goal, channel="cli", drain_tasks=False)
 
-    proposal = await ModelIntentPlanner(_ScriptedLLM(plan), registry).propose(goal)
-
-    assert proposal is not None
-    planner = IntentPlanner(registry)
-    plan_obj = planner.plan_from_proposal(goal, proposal, task_id="run-ungroundable")
-    # Ask-last still builds first; the ask is the ladder's verdict, not a veto.
-    assert plan_obj.intent_type == IntentType.WORKFLOW
-
-    outcome = recover(plan_obj, PlanValidator(registry).validate(plan_obj), registry)
-    assert outcome.action == ACTION_NEEDS_INPUT
-    assert outcome.rung == "3_needs_input"
-    assert any(item.get("field") == "identifier" for item in outcome.missing_inputs)
+        # Nothing was created from the guess …
+        assert not result.submitted_workflow_ids
+        assert await agent.runtime.list_subtasks(limit=10) == []
+        # … and the tool told the model to ask rather than inventing a value.
+        submission = next(
+            record for record in result.tool_trace if record.name == "run_workflow"
+        )
+        assert submission.result["status"] == "needs_input"
+        assert "Ask the user" in submission.result["message"]
+        assert submission.result["missing"][0]["skill_name"] == "title-fetch"
+        assert submission.result["missing"][0]["missing"] == ["identifier"]
+    finally:
+        await agent.aclose()
 
 
 # ── Quadrant 4: an explicit needs_input intent is always a question ──

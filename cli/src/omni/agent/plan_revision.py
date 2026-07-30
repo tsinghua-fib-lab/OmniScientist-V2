@@ -27,8 +27,6 @@ _REVISION_METADATA_FIELDS = frozenset(
 _LOADED_ENTRYPOINT_IDENTITIES: dict[str, dict[str, Any]] = {}
 _PROVIDER_BINDING_FIELDS = frozenset(
     {
-        "assessment_identity",
-        "assessment_identity_required",
         "consumer_kind",
         "consumer_id",
         "provider_name",
@@ -60,7 +58,7 @@ def canonical_plan_hash(plan: IntentPlan | dict[str, Any]) -> str:
         sort_keys=True,
         separators=(",", ":"),
         default=str,
-    ).encode()
+    ).encode("utf-8", errors="backslashreplace")
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -155,9 +153,6 @@ def registry_snapshot_hashes(
                 "template_signatures": copy.deepcopy(
                     getattr(entry, "template_signatures", None) or {}
                 ),
-                "quality_contract": copy.deepcopy(
-                    getattr(entry, "quality_contract", None) or {}
-                ),
             }
         )
     return _canonical_payload_hash(catalog), _canonical_payload_hash(contracts)
@@ -200,9 +195,6 @@ def provider_authority_snapshot(
             ),
             "template_signatures": copy.deepcopy(
                 getattr(entry, "template_signatures", None) or {}
-            ),
-            "quality_contract": copy.deepcopy(
-                getattr(entry, "quality_contract", None) or {}
             ),
         },
     }
@@ -286,11 +278,6 @@ def provider_authorities_for_plan(
     plan: IntentPlan,
 ) -> tuple[dict[str, Any], ...]:
     """Bind each executable plan consumer to its concrete provider snapshot."""
-    from omni.agent.provider_quality_binding import (
-        selected_skill_assessment_identity,
-        workflow_step_assessment_identity,
-    )
-
     authorities: list[dict[str, Any]] = []
     native_file_cache: dict[str, dict[str, Any]] = {}
     native_snapshots: dict[str, dict[str, Any]] = {}
@@ -310,17 +297,6 @@ def provider_authorities_for_plan(
             )
         return copy.deepcopy(native_snapshots[kind])
 
-    def _assessment_metadata(identity: dict[str, Any]) -> dict[str, Any]:
-        if (
-            plan.plan_schema_version < 2
-            or not plan._plan_schema_version_present  # noqa: SLF001
-        ):
-            return {}
-        return {
-            "assessment_identity_required": True,
-            **({"assessment_identity": identity} if identity else {}),
-        }
-
     for index, selection in enumerate(plan.selected_skills):
         name = str(selection.skill or "")
         source = str(getattr(selection, "skill_source", "") or "")
@@ -331,40 +307,17 @@ def provider_authorities_for_plan(
             file_cache=native_file_cache,
         )
         if snapshot:
-            quality = (
-                entry.quality_contract
-                if isinstance(getattr(entry, "quality_contract", None), dict)
-                else {}
-            )
-            assessment_required = bool(
-                quality.get("assessment_required") is True
-            )
-            assessment_identity = (
-                selected_skill_assessment_identity(plan, index)
-                if assessment_required
-                else {}
-            )
             authorities.append(
                 {
                     "consumer_kind": "selected_skill",
                     "consumer_id": str(index),
                     "provider_name": name,
                     "provider_source": str(getattr(entry, "source", "") or source),
-                    **(
-                        _assessment_metadata(assessment_identity)
-                        if assessment_required
-                        else {}
-                    ),
                     **snapshot,
                 }
             )
     for step in plan.workflow_steps:
         name = str(step.get("skill_name") or step.get("skill") or "")
-        assessment_identity = workflow_step_assessment_identity(step)
-        assessment_required = bool(
-            isinstance(step.get("quality_contract"), dict)
-            and step["quality_contract"].get("assessment_required") is True
-        )
         native_kind = workflow_native_authority_kind(step)
         if native_kind:
             snapshot = (
@@ -382,11 +335,6 @@ def provider_authorities_for_plan(
                     "consumer_id": str(step.get("id") or ""),
                     "provider_name": native_kind,
                     "provider_source": "omni_runtime",
-                    **(
-                        _assessment_metadata(assessment_identity)
-                        if assessment_required
-                        else {}
-                    ),
                     **snapshot,
                 }
             )
@@ -407,11 +355,6 @@ def provider_authorities_for_plan(
                     "consumer_id": str(step.get("id") or ""),
                     "provider_name": name,
                     "provider_source": str(getattr(entry, "source", "") or source),
-                    **(
-                        _assessment_metadata(assessment_identity)
-                        if assessment_required
-                        else {}
-                    ),
                     **snapshot,
                 }
             )
@@ -1706,7 +1649,7 @@ def _canonical_payload_hash(payload: Any) -> str:
         sort_keys=True,
         separators=(",", ":"),
         default=str,
-    ).encode()
+    ).encode("utf-8", errors="backslashreplace")
     return hashlib.sha256(encoded).hexdigest()
 
 

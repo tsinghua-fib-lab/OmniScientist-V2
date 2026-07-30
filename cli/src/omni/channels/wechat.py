@@ -1,20 +1,19 @@
 """WeChat channel.
 
-Three supported integration paths (see the channel documentation):
-
-1. **Operator-managed gateway** (default, ``mode = "gateway"``). OmniScientist
-   polls a local gateway inbox and posts replies through its send API. The gateway
-   can front an official WeCom application.
-2. **iLink bot connector** (experimental, ``mode = "ilink"``). OmniScientist speaks
-   Tencent's documented iLink bot HTTP/JSON API directly — the same backend the
-   official ``@tencent-weixin/openclaw-weixin`` plugin uses. ``omni channel login
-   wechat`` shows the liteapp QR; after the scan the user chats with the shared
-   WeChat ClawBot and OmniScientist answers. No public webhook, Node, or OpenClaw runtime.
+1. **ClawBot bot API** (default, ``mode = "ilink"``). OmniScientist speaks
+   Tencent's official iLink bot HTTP/JSON API directly — the same backend the
+   ``@tencent-weixin/openclaw-weixin`` plugin uses. ``omni channel login wechat``
+   shows the liteapp QR; after the scan the user chats with the WeChat ClawBot
+   and OmniScientist answers. No gateway, public webhook, Node, or OpenClaw runtime.
+2. **Operator-managed gateway** (``mode = "gateway"``). OmniScientist polls a
+   self-hosted gateway inbox and posts replies through its send API. Kept for
+   existing deployments; ``omni channel login`` no longer advertises it.
 3. **WeCom** (``mode = "wecom"``, gateway-fronted for now).
 
 Config (``~/.omni/channels/wechat.toml`` + secrets in ``secrets.toml``/Keychain):
 
-    mode = "gateway"                     # gateway | wecom | experimental ilink
+    mode = "ilink"                       # ilink | gateway | wecom
+    # gateway/wecom only:
     gateway_url = "http://127.0.0.1:8088"
     inbox_path = "/messages"
     send_path = "/send"
@@ -32,7 +31,6 @@ from omni.channels.outbound import (
     WeChatGatewayClient,
     WeixinIlinkOutbound,
     send_presentation,
-    uploadable_roots,
 )
 from omni.channels.security import claim_inbound_message
 from omni.channels.weixin_ilink import (
@@ -51,17 +49,17 @@ logger = logging.getLogger(__name__)
 
 
 def resolve_wechat_mode(cfg: dict[str, Any]) -> str:
-    """Pick the WeChat integration mode, defaulting to an operator gateway.
+    """Pick the WeChat integration mode, defaulting to the official ClawBot API.
 
-    Older gateway configs that predate the ``mode`` key are inferred from their
-    gateway fields remain compatible with older configurations.
+    Configs that predate the ``mode`` key are inferred from their gateway fields
+    so existing gateway deployments keep working untouched.
     """
     mode = str(cfg.get("mode") or cfg.get("backend") or "").strip()
     if mode:
         return mode
     if cfg.get("gateway_url") or cfg.get("inbox_path") or cfg.get("send_path"):
         return "gateway"
-    return "gateway"
+    return "ilink"
 
 
 class WeChatChannel(Channel):
@@ -196,7 +194,7 @@ class WeChatChannel(Channel):
         message_id = str(msg.get("message_id") or msg.get("seq") or "")
         # Claim before downloading media so a duplicate delivery never re-fetches.
         if not claim_inbound_message(
-            self.settings, self.name, external_key, text or "[media]", message_id=message_id
+            self.settings, self.name, external_key, message_id=message_id
         ):
             return
         combined = await self._compose_inbound_text(text, media)
@@ -322,7 +320,6 @@ class WeChatChannel(Channel):
             self.settings,
             self.name,
             external_key,
-            text,
             message_id=str(
                 msg.get("message_id")
                 or msg.get("msg_id")
@@ -338,7 +335,7 @@ class WeChatChannel(Channel):
     async def send_turn(
         self, external_key: str, presentation: TurnPresentation | TaskPresentation
     ) -> None:
-        roots = uploadable_roots(self.settings, artifacts=getattr(self.agent, "artifacts", None))
+        roots = self.uploadable_roots()
         if self._mode == "ilink" and self._ilink_outbound is not None:
             return await send_presentation(
                 self._ilink_outbound,

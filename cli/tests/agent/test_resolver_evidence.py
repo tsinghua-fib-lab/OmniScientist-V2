@@ -103,7 +103,10 @@ def _fact_codes(validation: object) -> set[str]:
     }
 
 
-def test_resolver_fact_gate_is_always_enforced_without_rollout_mode() -> None:
+def test_resolver_fact_gate_is_enforced_for_non_canonical_free_text() -> None:
+    # The gate still fails closed for a value that is *not* a locally-provable
+    # identifier — a paper title sitting in an ``arxiv_id`` field. Free text cannot
+    # self-verify; it must be grounded (search) or handed to the ReAct floor.
     settings = load_settings()
     registry = _registry()
     pipeline = PlanPipeline(
@@ -117,13 +120,41 @@ def test_resolver_fact_gate_is_always_enforced_without_rollout_mode() -> None:
         capability="paper.fetch.arxiv",
         skill="arxiv-fetch",
         field="identifier",
-        value="2401.99999",
+        value="Attention Is All You Need",
     )
 
     validation = pipeline._validate(plan)  # noqa: SLF001
 
     assert "grounded_binding_unverified" in _fact_codes(validation)
     assert not validation.ok
+
+
+def test_syntactically_valid_identifier_is_admitted_without_network_gate() -> None:
+    # Regression for the live task failure: a model-bound, syntactically valid
+    # arXiv id (not quoted in the message) must be admitted at plan time as a
+    # locally-provable fact — ``syntactic`` — and NOT be forced through a slow,
+    # low-precision network title search that fails closed. The provider proves
+    # the id exists when it fetches it; a wrong-but-valid id is caught at
+    # execution by verify-by-fetch, not by blocking the plan.
+    registry = _registry()
+    plan = _workflow_plan(
+        message="Fetch Attention Is All You Need.",
+        capability="paper.fetch.arxiv",
+        skill="arxiv-fetch",
+        field="identifier",
+        value="2401.99999",
+    )
+
+    validation = PlanPipeline(
+        settings=load_settings(),
+        registry=registry,
+        tasks=None,
+        hooks=None,
+    )._validate_structural(plan)  # noqa: SLF001
+
+    assert validation.ok
+    assert plan.resolver_evidence[0]["verified"] is True
+    assert plan.resolver_evidence[0]["verification_mode"] == "syntactic"
 
 
 @pytest.mark.parametrize(
@@ -223,14 +254,16 @@ def test_missing_path_is_not_accepted_as_local_evidence(tmp_path) -> None:  # no
     assert plan.resolver_evidence[0]["verified"] is False
 
 
-def test_title_derived_doi_requires_grounded_evidence() -> None:
+def test_free_text_in_doi_field_requires_grounded_evidence() -> None:
+    # A free-text title in a DOI field is not locally provable, so the fact gate
+    # still requires grounding and fails closed until it is sealed.
     registry = _registry()
     plan = _workflow_plan(
         message="Fetch the paper named Example Systems.",
         capability="doc.fetch.doi",
         skill="doi-fetch",
         field="identifier",
-        value="10.1234/example",
+        value="Example Systems",
     )
 
     validation = PlanPipeline(
@@ -252,6 +285,31 @@ def test_title_derived_doi_requires_grounded_evidence() -> None:
     assert plan.resolver_evidence[0]["verified"] is False
 
 
+def test_model_supplied_canonical_doi_is_admitted_syntactically() -> None:
+    # A canonical DOI the model bound (described by title, not quoted verbatim) is
+    # a locally-provable fact, exactly like an arXiv id: admitted as ``syntactic``
+    # without a plan-time network gate. Existence is proven when the doc is fetched.
+    registry = _registry()
+    plan = _workflow_plan(
+        message="Fetch the paper named Example Systems.",
+        capability="doc.fetch.doi",
+        skill="doi-fetch",
+        field="identifier",
+        value="10.1234/example",
+    )
+
+    validation = PlanPipeline(
+        settings=load_settings(),
+        registry=registry,
+        tasks=None,
+        hooks=None,
+    )._validate_structural(plan)  # noqa: SLF001
+
+    assert validation.ok
+    assert plan.resolver_evidence[0]["verified"] is True
+    assert plan.resolver_evidence[0]["verification_mode"] == "syntactic"
+
+
 def test_grounded_search_evidence_is_sealed_for_the_exact_binding() -> None:
     registry = _registry()
     plan = _workflow_plan(
@@ -259,13 +317,13 @@ def test_grounded_search_evidence_is_sealed_for_the_exact_binding() -> None:
         capability="paper.fetch.arxiv",
         skill="arxiv-fetch",
         field="identifier",
-        value="1706.03762",
+        value="Attention Is All You Need",
     )
     seal_resolver_evidence(
         plan,
         registry,
         field_path="/workflow_steps/0/input/identifier",
-        value="1706.03762",
+        value="Attention Is All You Need",
         verification_mode="grounded_search",
         source="arxiv_id.search",
     )
@@ -301,13 +359,13 @@ def test_grounded_evidence_drift_fails_closed(
         capability="paper.fetch.arxiv",
         skill="arxiv-fetch",
         field="identifier",
-        value="1706.03762",
+        value="Attention Is All You Need",
     )
     seal_resolver_evidence(
         plan,
         registry,
         field_path="/workflow_steps/0/input/identifier",
-        value="1706.03762",
+        value="Attention Is All You Need",
         verification_mode="grounded_search",
         source="arxiv_id.search",
     )
@@ -331,24 +389,28 @@ def test_current_value_drift_invalidates_grounded_evidence() -> None:
         capability="paper.fetch.arxiv",
         skill="arxiv-fetch",
         field="identifier",
-        value="1706.03762",
+        value="Attention Is All You Need",
     )
     assert seal_resolver_evidence(
         plan,
         registry,
         field_path="/workflow_steps/0/input/identifier",
-        value="1706.03762",
+        value="Attention Is All You Need",
         verification_mode="grounded_search",
         source="arxiv_id.search",
     )
-    plan.workflow_steps[0]["input"]["identifier"] = "2401.99999"
+    # Drift to a *different* non-canonical title: the sealed grounded_search
+    # evidence was bound to the original title, so the new value is unproved. (A
+    # canonical id would instead be admitted syntactically — that path is covered
+    # by ``test_syntactically_valid_identifier_is_admitted_without_network_gate``.)
+    plan.workflow_steps[0]["input"]["identifier"] = "A Completely Different Paper"
 
     findings = validate_resolver_evidence(plan, registry)
 
     assert [finding.code for finding in findings] == [
         "grounded_binding_unverified"
     ]
-    assert findings[0].actual == "2401.99999"
+    assert findings[0].actual == "A Completely Different Paper"
 
 
 def test_live_provider_contract_drift_invalidates_grounded_evidence() -> None:
@@ -358,13 +420,13 @@ def test_live_provider_contract_drift_invalidates_grounded_evidence() -> None:
         capability="paper.fetch.arxiv",
         skill="arxiv-fetch",
         field="identifier",
-        value="1706.03762",
+        value="Attention Is All You Need",
     )
     assert seal_resolver_evidence(
         plan,
         registry,
         field_path="/workflow_steps/0/input/identifier",
-        value="1706.03762",
+        value="Attention Is All You Need",
         verification_mode="grounded_search",
         source="arxiv_id.search",
     )
@@ -420,13 +482,13 @@ def test_selected_provider_drift_invalidates_grounded_evidence() -> None:
         capability="paper.fetch.arxiv",
         skill="arxiv-fetch",
         field="identifier",
-        value="1706.03762",
+        value="Attention Is All You Need",
     )
     assert seal_resolver_evidence(
         plan,
         registry,
         field_path="/workflow_steps/0/input/identifier",
-        value="1706.03762",
+        value="Attention Is All You Need",
         verification_mode="grounded_search",
         source="arxiv_id.search",
     )
@@ -469,17 +531,19 @@ def test_current_field_drift_invalidates_grounded_evidence() -> None:
         capability="paper.fetch.dual",
         skill="dual-id-fetch",
         field="primary",
-        value="1706.03762",
+        value="Attention Is All You Need",
     )
     assert seal_resolver_evidence(
         plan,
         registry,
         field_path="/workflow_steps/0/input/primary",
-        value="1706.03762",
+        value="Attention Is All You Need",
         verification_mode="grounded_search",
         source="arxiv_id.search",
     )
-    plan.workflow_steps[0]["input"] = {"secondary": "1706.03762"}
+    # Move the (non-canonical) title to a different objective slot: the sealed
+    # evidence for ``primary`` cannot authorize ``secondary``, which is unproved.
+    plan.workflow_steps[0]["input"] = {"secondary": "Attention Is All You Need"}
 
     findings = validate_resolver_evidence(plan, registry)
 
@@ -495,7 +559,7 @@ def test_legacy_grounded_binding_is_opaque_and_cannot_authorize_execution() -> N
         capability="paper.fetch.arxiv",
         skill="arxiv-fetch",
         field="identifier",
-        value="1706.03762",
+        value="Attention Is All You Need",
     )
     plan.requested_constraints = [
         {
@@ -553,7 +617,7 @@ def test_v2_revision_cannot_authorize_fact_with_legacy_binding_arrays() -> None:
         capability="paper.fetch.arxiv",
         skill="arxiv-fetch",
         field="identifier",
-        value="1706.03762",
+        value="Attention Is All You Need",
     )
     plan.requested_constraints = [
         {
@@ -601,7 +665,7 @@ def test_resolver_evidence_round_trips_and_only_changes_new_plan_hashes() -> Non
         capability="paper.fetch.arxiv",
         skill="arxiv-fetch",
         field="identifier",
-        value="1706.03762",
+        value="Attention Is All You Need",
     )
     legacy_payload = deepcopy(plan.to_dict())
     legacy_payload.pop("resolver_evidence")
@@ -612,7 +676,7 @@ def test_resolver_evidence_round_trips_and_only_changes_new_plan_hashes() -> Non
         plan,
         registry,
         field_path="/workflow_steps/0/input/identifier",
-        value="1706.03762",
+        value="Attention Is All You Need",
         verification_mode="grounded_search",
         source="arxiv_id.search",
     )

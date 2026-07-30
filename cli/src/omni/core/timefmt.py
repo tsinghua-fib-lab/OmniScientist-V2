@@ -16,10 +16,32 @@ zero-dependency equivalent and always keep the numeric offset as a fallback.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+_OFFSET_TZ = re.compile(r"([+-])(\d{2}):?(\d{2})")
+
+
+def _parse_timezone(name: str | None) -> timezone | ZoneInfo | None:
+    """Accept an IANA name, ``UTC+08:00``, or a labelled ``Asia/Shanghai (+08:00)``."""
+    raw = str(name or "").strip()
+    if not raw:
+        return None
+    token = raw.split()[0].strip("()")
+    try:
+        return ZoneInfo(token)
+    except (ZoneInfoNotFoundError, ValueError, KeyError):
+        pass
+    match = _OFFSET_TZ.search(raw)
+    if match is None:
+        return None
+    sign = 1 if match.group(1) == "+" else -1
+    delta = timedelta(hours=int(match.group(2)), minutes=int(match.group(3)))
+    return timezone(sign * delta)
 
 
 def ensure_aware(dt: datetime) -> datetime:
@@ -48,15 +70,24 @@ def coerce_datetime(value: Any) -> datetime | None:
         return None
 
 
-def to_local(value: Any) -> datetime | None:
-    """Coerce then convert to the process-local timezone."""
+def to_local(value: Any, tz: str | None = None) -> datetime | None:
+    """Coerce then convert to ``tz`` or the process-local timezone."""
     dt = coerce_datetime(value)
-    return dt.astimezone() if dt is not None else None
+    if dt is None:
+        return None
+    zone = _parse_timezone(tz)
+    return dt.astimezone(zone) if zone is not None else dt.astimezone()
 
 
-def format_local_time(value: Any, *, default: str = "-", with_tz: bool = True) -> str:
+def format_local_time(
+    value: Any,
+    *,
+    default: str = "-",
+    with_tz: bool = True,
+    tz: str | None = None,
+) -> str:
     """Format a datetime-ish value in local time for humans."""
-    dt = to_local(value)
+    dt = to_local(value, tz)
     if dt is None:
         return default
     fmt = "%Y-%m-%d %H:%M:%S %z" if with_tz else "%Y-%m-%d %H:%M:%S"

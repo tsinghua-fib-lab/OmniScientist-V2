@@ -1,0 +1,14 @@
+{
+  "scientist_id": "alan-turing",
+  "scientist_name": "Alan Turing",
+  "kg_version": "1.0",
+  "schema_version": "1.1.0",
+  "total_L1": 263,
+  "total_L2": 7,
+  "total_L3": 4,
+  "review_status": {
+    "L1_L2": "automatic",
+    "L3": "automatic",
+    "L2_edges": "automatic"
+  }
+}

@@ -29,8 +29,8 @@ database.
 | Store | Content | Lifecycle |
 |---|---|---|
 | `conversation_messages` | User and assistant messages, task-result write-back, compaction bridges | Session-scoped and compactable |
-| `tasks` and `task_events` | User requests, Child Tasks, intent plans, audit events, verification, presentation | Durable |
-| `workflow_runs`, `workflow_steps`, `workflow_checkpoints` | DAG executions, stable logical nodes, dependency and recovery state | Durable; cascades with the owning task |
+| `tasks` and `task_events` | User requests, Child Tasks, intent plans, audit events, settled status, presentation | Durable |
+| `workflow_runs`, `workflow_steps`, `workflow_checkpoints` | Model-submitted multi-step runs, stable logical nodes, dependency and recovery state | Durable; cascades with the owning task |
 | `subtasks` | Retryable Skill Execution attempts, structured results, trace references | Durable; cascades with its task/workflow step |
 | `artifacts` | Artifact URI, path, kind, owning session/subtask, metadata | Durable |
 | `session_focus` | Active task, source, and artifact target for follow-up turns | Short-horizon, append-only |
@@ -171,8 +171,8 @@ to later profile synthesis.
 ## Research provenance
 
 Remembered content is not automatically treated as true. Research memories may
-reference a source, claim, evidence edge, run, or artifact. Verification can
-therefore distinguish:
+reference a source, claim, evidence edge, run, or artifact. The `omni verify`
+honesty pass can therefore distinguish:
 
 - grounded findings with recorded evidence;
 - contextual summaries without a complete evidence chain;
@@ -197,6 +197,10 @@ omni memory rm <id> [--force]
 omni memory clear [filters] --yes
 omni memory sync
 omni memory profile
+omni memory notebook
+omni memory graph
+omni memory link
+omni memory path
 omni resume --last
 omni replay <session>
 ```

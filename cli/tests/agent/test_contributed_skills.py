@@ -107,6 +107,7 @@ def test_explicit_research_pptx_binds_the_user_instruction() -> None:
     assert validation.ok
     params = plan.provider_inputs["research-pptx"]
     assert "RAG group-meeting deck" in str(params.get("topic") or params.get("input") or "")
+    assert "artifact.slides" in plan.verification_plan.required_outputs
 
 
 @pytest.mark.parametrize(
@@ -150,7 +151,7 @@ def test_scientific_poster_omni_workspace_ignores_external_output_dir(tmp_path) 
         session_id = "session"
         task_id = "task"
 
-    workspace = module._create_workspace(  # noqa: SLF001
+    workspace = module._runtime_io.create_workspace(  # noqa: SLF001
         {"output_dir": str(tmp_path / "outside")},
         Context(),
     )
@@ -275,7 +276,11 @@ async def test_livefigure_execute_code_applies_sandbox_prefix(
         argv = captured["argv"]
         assert argv[: len(prefix)] == prefix
         assert "-I" in argv
-        assert argv[-1] == script.name
+        boot = Path(str(argv[-1]))
+        assert boot.name == "_omni_livefigure_boot.py"
+        boot_src = boot.read_text(encoding="utf-8")
+        assert "runpy.run_path" in boot_src
+        assert repr(str(script.resolve())) in boot_src
     finally:
         sys.path.remove(str(skill_dir))
 
@@ -468,6 +473,11 @@ async def test_research_ideation_runs_blocking_pipeline_off_event_loop(
         }
 
     monkeypatch.setattr(module._core, "run_pipeline", fake_pipeline)
+    monkeypatch.setattr(
+        module,
+        "_resolve_s2_key",
+        lambda _ctx: "scoped-s2-secret",
+    )
     engine = module.ResearchIdeationEngine()
     engine.ctx = SimpleNamespace(llm=object(), artifacts=None, paths=None)
     result = await asyncio.wait_for(

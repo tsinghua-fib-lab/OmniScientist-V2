@@ -8,8 +8,8 @@ the capsule answers *"what is this artifact's claim to truth, and is it grounded
 
 The capsule is a small JSON object stored on the artifact
 (``ArtifactORM.meta["provenance"]``) and mirrored as a ``provenance.capsule`` run
-event so the verification runner (``artifact_provenance_capsule`` check) and the
-eval harness can assert an artifact was shipped *with* its grounding — not naked.
+event so the honesty audit (``omni verify``) and the eval harness can assert an
+artifact was shipped *with* its grounding — not naked.
 
 Pure data + stdlib; no LLM, no network.
 """

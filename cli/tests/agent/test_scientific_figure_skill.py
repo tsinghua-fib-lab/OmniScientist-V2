@@ -351,3 +351,189 @@ async def test_scientific_figure_revision_preserves_source_and_adds_engineering_
     assert "Hybrid Retrieval" in dot
     assert "Observability" in dot
     assert "input -> method -> validation -> output" not in dot
+
+
+@pytest.mark.asyncio
+async def test_scientific_figure_emits_a_native_completion_milestone():
+    """The retrofitted engine reports a typed completion milestone, not just a
+    bare "done" stage, so the CLI can compress it to one durable ✓ line."""
+    settings = load_settings()
+    settings.paths.ensure_dirs()
+    db = get_database(settings.paths.project_db)
+    await db.init()
+    registry = SkillRegistry(settings)
+    registry.build_index()
+    entry = registry.get("scientific-figure")
+    assert entry is not None
+
+    ctx = ExecContext(
+        settings=settings,
+        paths=settings.paths,
+        project=settings.paths.project_name,
+        session_id="sess-figure-milestone",
+        channel="cli",
+        db=db,
+        artifacts=ArtifactStore(settings.paths, db),
+        registry=registry,
+    )
+    events: list[dict] = []
+
+    async def progress(stage: str, pct: float = 0.0, **data) -> None:
+        events.append({"stage": stage, **data})
+
+    await execute_skill(
+        entry,
+        {"input": "a transformer architecture diagram", "title": "T", "figure_kind": "transformer"},
+        ctx,
+        progress_callback=progress,
+    )
+
+    milestone_event = next((e for e in events if e.get("milestone")), None)
+    assert milestone_event is not None
+    assert milestone_event["milestone"] == "Figure rendered and checked"
+    assert milestone_event.get("stage_id") == "figure.done"
+
+
+_AUTHORED_LOOP_DOT = """digraph AgentLoop {
+  graph [rankdir=LR, label="Agent Loop"];
+  perceive [label="Perceive / Observe"];
+  act [label="Act"];
+  reflect [label="Reflect / Verify"];
+  subgraph cluster_reason {
+    query [label="Query"];
+    retriever [label="Retriever"];
+    reranker [label="Reranker"];
+    llm [label="LLM"];
+    query -> retriever -> reranker -> llm;
+  }
+  perceive -> query;
+  llm -> act;
+  act -> reflect;
+  reflect -> perceive;
+}
+"""
+
+
+@pytest.mark.asyncio
+async def test_scientific_figure_renders_authored_dot_without_restamping():
+    settings = load_settings()
+    settings.paths.ensure_dirs()
+    db = get_database(settings.paths.project_db)
+    await db.init()
+    registry = SkillRegistry(settings)
+    registry.build_index()
+    entry = registry.get("scientific-figure")
+    assert entry is not None
+
+    out = await execute_skill(
+        entry,
+        {
+            "input": (
+                "Agent loop engineering: Perceive/Observe, Reason/Plan, Act, "
+                "Reflect/Verify, with query, retriever, reranker, LLM inside Reason."
+            ),
+            "title": "Agent Loop Engineering",
+            "figure_kind": "rag",
+            "source_artifact_dot": _AUTHORED_LOOP_DOT,
+        },
+        _figure_ctx(settings, db, registry, "sess-authored-dot"),
+    )
+
+    assert out["status"] == "ok"
+    assert out["effective_inputs"]["authored_source"] is True
+    assert out["effective_inputs"]["revision_mode"] == ""
+    assert "revision" not in out
+    assert out["deliverable_assessment"]["status"] == "passed"
+    assert "provided Graphviz source" in out["deliverable_assessment"]["summary"]
+    dot_path = next(a["path"] for a in out["artifacts"] if a["format"] == "dot")
+    dot = Path(dot_path).read_text(encoding="utf-8")
+    assert "Perceive / Observe" in dot
+    assert "Reflect / Verify" in dot
+    assert "User Query" not in dot
+    assert "Hybrid Retrieval" not in dot
+
+
+@pytest.mark.asyncio
+async def test_scientific_figure_loop_instruction_synthesizes_without_authored_dot():
+    settings = load_settings()
+    settings.paths.ensure_dirs()
+    db = get_database(settings.paths.project_db)
+    await db.init()
+    registry = SkillRegistry(settings)
+    registry.build_index()
+    entry = registry.get("scientific-figure")
+    assert entry is not None
+
+    out = await execute_skill(
+        entry,
+        {
+            "input": (
+                "Agent loop engineering architecture: a closed control loop with "
+                "(1) Perceive/Observe, (2) Reason/Plan, (3) Act, (4) Reflect/Verify, "
+                "and an inner query -> retriever -> reranker -> LLM grounding path."
+            ),
+            "title": "Agent Loop Engineering",
+            "figure_kind": "rag",
+        },
+        _figure_ctx(settings, db, registry, "sess-instruction-graph"),
+    )
+
+    assert out["status"] == "partial"
+    assert out["outcome"]["code"] == "instruction_graph"
+    assert out["recoverable"] is True
+    assert "weaker Graphviz schematic" in out["warning"]
+    assert "source_artifact_dot" not in (out.get("error") or "")
+    assert out.get("artifacts")
+    assert any(a["format"] == "dot" for a in out["artifacts"])
+    assert any(a["format"] == "svg" for a in out["artifacts"])
+    assert out["deliverable_assessment"]["status"] == "degraded"
+    dot_path = next(a["path"] for a in out["artifacts"] if a["format"] == "dot")
+    dot = Path(dot_path).read_text(encoding="utf-8")
+    assert "Perceive / Observe" in dot
+    assert "Act" in dot
+    assert "Reflect / Verify" in dot
+    assert "Query" in dot
+    assert "Retriever" in dot
+    assert "Reranker" in dot
+    assert "LLM" in dot
+    assert "User Query" not in dot
+    assert "Hybrid Retrieval" not in dot
+    assert "input -> method -> validation -> output" not in dot
+
+
+@pytest.mark.asyncio
+async def test_scientific_figure_loop_engineering_prompt_does_not_stamp_rag():
+    """Live wording names loop engineering plus RAG keywords, not Perceive/Act/Reflect."""
+    settings = load_settings()
+    settings.paths.ensure_dirs()
+    db = get_database(settings.paths.project_db)
+    await db.init()
+    registry = SkillRegistry(settings)
+    registry.build_index()
+    entry = registry.get("scientific-figure")
+    assert entry is not None
+
+    out = await execute_skill(
+        entry,
+        {
+            "input": (
+                "为 智能体 loop engineering 系统综述准备材料：获取 Attention Is All You Need 摘要，"
+                "并生成包含 query、retriever、reranker、LLM的科研架构图。并输出一篇论文"
+            ),
+            "title": "智能体 loop engineering 系统综",
+            "figure_kind": "rag",
+        },
+        _figure_ctx(settings, db, registry, "sess-live-loop-engineering"),
+    )
+
+    assert out["status"] == "partial"
+    assert out["outcome"]["code"] == "instruction_graph"
+    assert out.get("artifacts")
+    dot_path = next(a["path"] for a in out["artifacts"] if a["format"] == "dot")
+    dot = Path(dot_path).read_text(encoding="utf-8")
+    assert "Perceive / Observe" in dot
+    assert "Act" in dot
+    assert "Reflect / Verify" in dot
+    assert "Query" in dot
+    assert "Retriever" in dot
+    assert "User Query" not in dot

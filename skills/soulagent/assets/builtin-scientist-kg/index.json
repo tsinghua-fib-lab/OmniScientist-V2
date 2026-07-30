@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "source": "https://gitee.com/cvYaowenHu/scientist-kg-registry",
+  "source_commit": "760d322401bde89ae2360e209db7695eb7ca6bf2",
+  "scientists": [
+    {
+      "scientist_id": "alan-turing",
+      "manifest_sha256": "8e85f604d37f5fd232aaf7c55c921a3f226c82a05a72a1222a546e0fe35771f2"
+    },
+    {
+      "scientist_id": "claude-shannon",
+      "manifest_sha256": "b738d0adc0d59a32245ad2a072443b3312787b7eab1d8a11a5475c418eca605e"
+    },
+    {
+      "scientist_id": "fengli-xu",
+      "manifest_sha256": "7b35651f4986394d83ff44683cf925bc3552cd44b566190c7e00339ee790a47b"
+    },
+    {
+      "scientist_id": "herbert-a-simon",
+      "manifest_sha256": "13fd565089806c6f9bd5bf909aa1d2bc8fe0b1d24f3dc8454e90b836cd1c7d9d"
+    },
+    {
+      "scientist_id": "john-von-neumann",
+      "manifest_sha256": "8ea11dc5f2172c66b6d0145dc6eaae457caf4e83a3ad204de43d75c685412c9f"
+    },
+    {
+      "scientist_id": "kaiming-he",
+      "manifest_sha256": "a50445ebbb1fce38bfa394d6d96ae6024af732298edaefc6261706aeafad56f7"
+    },
+    {
+      "scientist_id": "norbert-wiener",
+      "manifest_sha256": "52967e26cc25829fe408493fd79cc401e52d84092e20aa13fc59890927c35bcf"
+    },
+    {
+      "scientist_id": "richard-feynman",
+      "manifest_sha256": "5694917cc759d3e5de2b06960c2616d15e1337c572df6a5da8570114677f60a6"
+    }
+  ]
+}

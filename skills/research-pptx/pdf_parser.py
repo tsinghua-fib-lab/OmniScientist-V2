@@ -51,10 +51,10 @@ SECTION_PATTERNS = {
 
 def _prescreen_sections_sync(pdf_path: str) -> tuple[dict[str, int], int]:
     """Fast pre-screen to locate section start pages (0-indexed)."""
-    import fitz
+    import pymupdf
 
     try:
-        doc = fitz.open(pdf_path)
+        doc = pymupdf.open(pdf_path)
         total_pages = len(doc)
         sections: dict[str, int] = {}
 
@@ -151,7 +151,7 @@ def _parse_pdf_sync(
       - ``section_pages``: dict[section_name, page_idx]
       - ``total_pages``: total page count (pre-filter)
     """
-    import fitz
+    import pymupdf
     import pymupdf4llm
 
     pages = _page_range_to_list(page_range)
@@ -163,10 +163,10 @@ def _parse_pdf_sync(
     try:
         md_text = pymupdf4llm.to_markdown(pdf_path, **kwargs)
     except Exception:
-        logger.warning("pymupdf4llm failed, falling back to raw fitz", exc_info=True)
-        md_text = _fitz_raw_text_fallback(pdf_path, pages)
+        logger.warning("pymupdf4llm failed, falling back to raw pymupdf", exc_info=True)
+        md_text = _pymupdf_raw_text_fallback(pdf_path, pages)
 
-    doc = fitz.open(pdf_path)
+    doc = pymupdf.open(pdf_path)
     raw_meta = doc.metadata or {}
     metadata: dict[str, Any] = {
         "title": raw_meta.get("title", ""),
@@ -215,10 +215,10 @@ async def parse_pdf(
     )
 
 
-def _fitz_raw_text_fallback(pdf_path: str, pages: list[int] | None) -> str:
-    import fitz
+def _pymupdf_raw_text_fallback(pdf_path: str, pages: list[int] | None) -> str:
+    import pymupdf
 
-    doc = fitz.open(pdf_path)
+    doc = pymupdf.open(pdf_path)
     parts: list[str] = []
 
     target_pages = pages if pages is not None else range(len(doc))
@@ -305,16 +305,16 @@ def _extract_images_from_doc(
 
 
 def _extract_figures_sync(pdf_path: str, output_dir: str) -> list[str]:
-    import fitz
+    import pymupdf
 
     os.makedirs(output_dir, exist_ok=True)
     try:
-        doc = fitz.open(pdf_path)
+        doc = pymupdf.open(pdf_path)
         saved = _extract_images_from_doc(doc, output_dir)
         doc.close()
         return list(saved.values())
     except Exception:
-        logger.debug("fitz image extraction failed", exc_info=True)
+        logger.debug("pymupdf image extraction failed", exc_info=True)
         return []
 
 
@@ -475,12 +475,12 @@ def _extract_tables_from_pdf_layout(
     This catches tables that pymupdf4llm doesn't render as pipe tables —
     which is the majority of scientific PDF tables.
     """
-    import fitz
+    import pymupdf
 
     results: list[dict[str, Any]] = []
 
     try:
-        doc = fitz.open(pdf_path)
+        doc = pymupdf.open(pdf_path)
         target_pages = pages if pages is not None else list(range(len(doc)))
 
         for page_num in target_pages:
@@ -535,7 +535,7 @@ def _extract_tables_from_pdf_layout(
                 # Search for nearby caption on the page
                 caption = ""
                 try:
-                    tbl_bbox = fitz.Rect(tbl.bbox)
+                    tbl_bbox = pymupdf.Rect(tbl.bbox)
                     text_dict = page.get_text("dict", flags=11)
                     for block in text_dict.get("blocks", []):
                         if block.get("type") != 0:
@@ -680,7 +680,7 @@ def _get_image_bboxes_on_page(
     Relaxed thresholds allow sub-panels of composite figures to be captured;
     filtering is done AFTER clustering.
     """
-    import fitz
+    import pymupdf
 
     results: list[dict[str, Any]] = []
     try:
@@ -693,7 +693,7 @@ def _get_image_bboxes_on_page(
         bbox = info.get("bbox")
         if not bbox:
             continue
-        rect = fitz.Rect(bbox)
+        rect = pymupdf.Rect(bbox)
         # Skip images that are extremely tiny on the page (icons, bullets)
         if rect.width < min_display_pt or rect.height < min_display_pt:
             continue
@@ -718,7 +718,7 @@ def _cluster_nearby_rects(
     rects: list[Any],
     distance_pt: float = 25.0,
 ) -> list[dict[str, Any]]:
-    """Cluster nearby fitz.Rect objects using union-find.
+    """Cluster nearby pymupdf.Rect objects using union-find.
 
     *distance_pt* controls how close two rects must be (in points,
     1 inch = 72 pt) to be merged into the same cluster.  25 pt ≈ 0.35 inch
@@ -727,7 +727,7 @@ def _cluster_nearby_rects(
 
     Returns list of ``{bbox, element_count, member_rects}``.
     """
-    import fitz
+    import pymupdf
 
     if not rects:
         return []
@@ -749,7 +749,7 @@ def _cluster_nearby_rects(
     # Merge rects whose expanded envelopes intersect
     for i in range(n):
         ri = rects[i]
-        expanded_i = fitz.Rect(
+        expanded_i = pymupdf.Rect(
             ri.x0 - distance_pt, ri.y0 - distance_pt,
             ri.x1 + distance_pt, ri.y1 + distance_pt,
         )
@@ -766,11 +766,11 @@ def _cluster_nearby_rects(
     # Compute bounding box for each group
     result: list[dict[str, Any]] = []
     for indices in groups.values():
-        bbox = fitz.Rect(rects[indices[0]])
-        members = [fitz.Rect(rects[indices[0]])]
+        bbox = pymupdf.Rect(rects[indices[0]])
+        members = [pymupdf.Rect(rects[indices[0]])]
         for idx in indices[1:]:
             bbox |= rects[idx]
-            members.append(fitz.Rect(rects[idx]))
+            members.append(pymupdf.Rect(rects[idx]))
         result.append({
             "bbox": bbox,
             "element_count": len(indices),
@@ -819,7 +819,7 @@ def _compute_text_overlap_ratio(page: Any, region_rect: Any) -> float:
     Used to distinguish genuine figure regions from paragraphs that happen
     to contain inline images (icons, small diagrams).
     """
-    import fitz
+    import pymupdf
 
     try:
         text_dict = page.get_text("dict", flags=11)
@@ -835,7 +835,7 @@ def _compute_text_overlap_ratio(page: Any, region_rect: Any) -> float:
         if block.get("type") != 0:  # only text blocks
             continue
         bx0, by0, bx1, by1 = block["bbox"]
-        block_rect = fitz.Rect(bx0, by0, bx1, by1)
+        block_rect = pymupdf.Rect(bx0, by0, bx1, by1)
 
         # Heuristic: skip short blocks (likely captions/labels, not body text)
         block_text = " ".join(
@@ -872,11 +872,11 @@ def _render_page_region(
     This is the key advantage over ``extract_image(xref)`` which only
     retrieves individual embedded raster objects.
     """
-    import fitz
+    import pymupdf
 
     try:
         # Add minimal padding without extending into text areas
-        padded = fitz.Rect(
+        padded = pymupdf.Rect(
             region_rect.x0 - padding_pt,
             region_rect.y0 - padding_pt,
             region_rect.x1 + padding_pt,
@@ -885,7 +885,7 @@ def _render_page_region(
         # Clip to page bounds
         padded &= page.rect
 
-        mat = fitz.Matrix(dpi / 72, dpi / 72)
+        mat = pymupdf.Matrix(dpi / 72, dpi / 72)
         pix = page.get_pixmap(matrix=mat, clip=padded)
         pix.save(output_path)
 
@@ -1155,14 +1155,14 @@ def _render_page_as_figure(
     dpi: int = 150,
 ) -> dict[str, Any] | None:
     """Render full page to PNG — last-resort fallback for vector figures."""
-    import fitz
+    import pymupdf
 
     if page_num >= len(doc):
         return None
 
     try:
         page = doc[page_num]
-        mat = fitz.Matrix(dpi / 72, dpi / 72)
+        mat = pymupdf.Matrix(dpi / 72, dpi / 72)
         pix = page.get_pixmap(matrix=mat)
         filename = f"page_render_p{page_num:03d}.png"
         filepath = os.path.join(output_dir, filename)
@@ -1187,12 +1187,12 @@ def _render_page_as_figure(
 def _find_caption_blocks_on_page(page: Any) -> list[dict[str, Any]]:
     """Locate figure-caption text blocks on a page using layout info.
 
-    Returns list of {"fig_num": int, "caption": str, "bbox": fitz.Rect,
+    Returns list of {"fig_num": int, "caption": str, "bbox": pymupdf.Rect,
                      "page_num": int}.
     A caption block is a text block whose first non-whitespace tokens
     match English and Chinese variants of 'Figure N.' / 'Fig. N:' etc.
     """
-    import fitz
+    import pymupdf
 
     results: list[dict[str, Any]] = []
     try:
@@ -1233,7 +1233,7 @@ def _find_caption_blocks_on_page(page: Any) -> list[dict[str, Any]]:
         results.append({
             "fig_num": fig_num,
             "caption": caption_text,
-            "bbox": fitz.Rect(bx0, by0, bx1, by1),
+            "bbox": pymupdf.Rect(bx0, by0, bx1, by1),
             "page_num": page.number,
         })
 
@@ -1249,9 +1249,9 @@ def _find_figure_region_above_caption(
     """Walk upward from a caption bbox and merge all non-caption content
     blocks (images, drawings, sub-labels) into one figure region.
 
-    Returns the merged fitz.Rect or None if nothing is found.
+    Returns the merged pymupdf.Rect or None if nothing is found.
     """
-    import fitz
+    import pymupdf
 
     page_rect = page.rect
 
@@ -1259,7 +1259,7 @@ def _find_figure_region_above_caption(
     col_x0 = max(page_rect.x0, caption_bbox.x0 - side_tolerance_pt)
     col_x1 = min(page_rect.x1, caption_bbox.x1 + side_tolerance_pt)
     search_top = max(page_rect.y0, caption_bbox.y0 - max_search_pt)
-    search_rect = fitz.Rect(
+    search_rect = pymupdf.Rect(
         col_x0, search_top, col_x1, caption_bbox.y0 - min_gap_pt,
     )
     if search_rect.is_empty or search_rect.height < 20:
@@ -1270,7 +1270,7 @@ def _find_figure_region_above_caption(
     # (a) Raster images within the search band
     try:
         for info in page.get_image_info(xrefs=True):
-            r = fitz.Rect(info["bbox"])
+            r = pymupdf.Rect(info["bbox"])
             if not (r & search_rect).is_empty and r.height > 8:
                 candidates.append(r)
     except Exception:
@@ -1279,7 +1279,7 @@ def _find_figure_region_above_caption(
     # (b) Vector drawings within the search band — group small paths
     try:
         for d in page.get_drawings():
-            r = fitz.Rect(d["rect"])
+            r = pymupdf.Rect(d["rect"])
             if r.width < 3 or r.height < 3:
                 continue
             # Drop full-page background rects
@@ -1298,7 +1298,7 @@ def _find_figure_region_above_caption(
             if block.get("type") != 0:
                 continue
             bx0, by0, bx1, by1 = block["bbox"]
-            br = fitz.Rect(bx0, by0, bx1, by1)
+            br = pymupdf.Rect(bx0, by0, bx1, by1)
             if (br & search_rect).is_empty:
                 continue
             txt = " ".join(
@@ -1355,10 +1355,10 @@ def _extract_figures_enriched_sync(
     region containing all images / drawings / small labels above it. This
     handles raster, vector, and mixed figures uniformly.
     """
-    import fitz
+    import pymupdf
 
     os.makedirs(output_dir, exist_ok=True)
-    doc = fitz.open(pdf_path)
+    doc = pymupdf.open(pdf_path)
     total_pages = len(doc)
     target_pages = pages if pages is not None else list(range(total_pages))
 
@@ -1472,8 +1472,8 @@ def _extract_figures_enriched_sync(
         try:
             n_draw = sum(
                 1 for d in page.get_drawings()
-                if fitz.Rect(d["rect"]).width > 10
-                and fitz.Rect(d["rect"]).height > 10
+                if pymupdf.Rect(d["rect"]).width > 10
+                and pymupdf.Rect(d["rect"]).height > 10
             )
         except Exception:
             n_draw = 0
@@ -1556,7 +1556,7 @@ def _detect_drawing_region(
     Excludes text-decoration drawings (underlines, separators, table borders)
     by cross-referencing against text block positions.
     """
-    import fitz
+    import pymupdf
 
     try:
         drawings = page.get_drawings()
@@ -1575,7 +1575,7 @@ def _detect_drawing_region(
             if block.get("type") == 0:
                 bx0, by0, bx1, by1 = block["bbox"]
                 # Expand by a few pt to catch underlines/decorations
-                text_rects.append(fitz.Rect(bx0 - 2, by0 - 2, bx1 + 2, by1 + 2))
+                text_rects.append(pymupdf.Rect(bx0 - 2, by0 - 2, bx1 + 2, by1 + 2))
     except Exception:
         pass
 
@@ -1593,7 +1593,7 @@ def _detect_drawing_region(
 
     significant: list[Any] = []
     for d in drawings:
-        r = fitz.Rect(d["rect"])
+        r = pymupdf.Rect(d["rect"])
         # Skip page-wide fills
         if r.width * r.height > page_area * max_page_ratio:
             continue

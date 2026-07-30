@@ -87,7 +87,11 @@ async def _seed(db, artifacts):  # noqa: ANN001
             id="peerbtask01", kind="turn", channel="feishu", external_key="oc_b",
             status="succeeded", session_id="s-b", title="peer B 的机密图",
         ))
-        # An in-flight turn carries no product yet → excluded.
+        s.add(TaskORM(
+            id="failedreview", kind="turn", channel="cli", external_key="",
+            status="failed", session_id="s-owner", title="Paper review failed during extraction",
+        ))
+        # An in-flight turn has no settled status yet → excluded.
         s.add(TaskORM(id="runningtask", kind="turn", channel="cli", status="running",
                       session_id="s-owner", title="正在进行"))
         await s.commit()
@@ -112,6 +116,7 @@ async def test_recent_activity_digest_owner_unifies_channels() -> None:
     assert "生成 RAG 系统架构图" in digest
     assert "RAG 系统架构图" in digest  # artifact output attached
     assert "peer A 的分析报告" in digest
+    assert "Paper review failed during extraction" in digest
     assert "正在进行" not in digest  # running turn excluded
 
 

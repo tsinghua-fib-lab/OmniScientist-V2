@@ -6,6 +6,8 @@ import typer
 
 from omni.cli.render import assistant_answer, console, data_table, info, warn
 from omni.cli.state import AppState, run_async
+from omni.core.llm.client import chat_result
+from omni.core.termination import mark_truncated_output
 
 app_help = "Answer questions from the local literature corpus with [S#] citations."
 
@@ -121,7 +123,12 @@ async def _synthesize_grounded_answer(agent, question: str, passages: list) -> s
     )
     user = f"Question:\n{question}\n\nEvidence passages:\n{evidence}"
     try:
-        answer = str(await agent.llm.chat(system, user, temperature=0.1)).strip()
+        result = await chat_result(agent.llm, system, user, temperature=0.1)
+        answer = (result.content or "").strip()
+        # A cited answer that stops mid-citation is the shape a reader is least
+        # equipped to spot, because the citations before the cut all check out.
+        if answer and result.truncated_by_output_cap:
+            answer = mark_truncated_output(answer)
     except Exception:  # noqa: BLE001 - retrieval remains useful if synthesis is unavailable
         answer = ""
     if answer:

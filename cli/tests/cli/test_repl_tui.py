@@ -15,7 +15,10 @@ from omni.cli.render import assistant_answer
 from omni.cli.repl_output import RoutedTextIO, use_output_sink, use_output_turn
 from omni.cli.repl_transcript import ANSWER_REPLACE_KEY, clean_scrollback_text, normalize_output
 from omni.cli.repl_tui import (
+    _OSC52_MAX_CHARS,
     _SPINNER_FRAMES,
+    TERMINAL_TURN_STATES,
+    ApprovalOption,
     DataTableData,
     ReplInterrupt,
     ReplSubmission,
@@ -245,6 +248,60 @@ def test_tui_ctrl_l_redraws_without_deleting_transcript(monkeypatch) -> None:
 
     assert redraws == [True]
     assert "kept research history" in tui.transcript.text
+
+
+@pytest.mark.asyncio
+async def test_modify_other_keys_ctrl_c_clears_draft_instead_of_garbled_insert():
+    """Ctrl+C under modifyOtherKeys must clear the draft, not insert CSI junk."""
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    with create_pipe_input() as pipe_input:
+        tui = ReplTui(
+            commands=(),
+            input=pipe_input,
+            output=DummyOutput(),
+        )
+        await tui.start()
+        try:
+            tui._input_buffer.insert_text("draft that should clear")
+            # xterm modifyOtherKeys encoding for Ctrl+C (letter code 99).
+            pipe_input.send_text("\x1b[27;5;99~")
+            for _ in range(40):
+                await asyncio.sleep(0.02)
+                if tui._input_buffer.text == "":
+                    break
+            assert tui._input_buffer.text == ""
+            assert "[27;5;99~" not in tui.transcript.text
+        finally:
+            await tui.close()
+
+
+@pytest.mark.asyncio
+async def test_modify_other_keys_ctrl_u_discards_line_like_bash():
+    """Ctrl+U under modifyOtherKeys must unix-line-discard, not insert CSI junk."""
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    with create_pipe_input() as pipe_input:
+        tui = ReplTui(
+            commands=(),
+            input=pipe_input,
+            output=DummyOutput(),
+        )
+        await tui.start()
+        try:
+            tui._input_buffer.insert_text("aa")
+            # xterm modifyOtherKeys encoding for Ctrl+U (letter code 117).
+            pipe_input.send_text("\x1b[27;5;117~")
+            for _ in range(40):
+                await asyncio.sleep(0.02)
+                if tui._input_buffer.text == "":
+                    break
+            assert tui._input_buffer.text == ""
+            assert "[27;5;117~" not in tui._input_buffer.text
+        finally:
+            await tui.close()
 
 
 @pytest.mark.asyncio
@@ -490,39 +547,6 @@ async def test_foreground_monitor_applies_mode_live_and_blocks_update() -> None:
 
 
 @pytest.mark.asyncio
-async def test_repl_shutdown_closes_independent_resources_after_one_failure() -> None:
-    from omni.cli.main import _shutdown_repl_resources
-
-    calls: list[str] = []
-
-    class Agent:
-        async def end_session(self, _session_id: str) -> None:
-            calls.append("session")
-            raise RuntimeError("session close failed")
-
-        async def aclose(self) -> None:
-            calls.append("agent")
-
-    class Watcher:
-        def stop(self) -> None:
-            calls.append("watcher")
-
-    class Tui:
-        async def close(self) -> None:
-            calls.append("tui")
-
-    await _shutdown_repl_resources(
-        agent=Agent(),
-        session_id="session-1",
-        inbox_watcher=Watcher(),
-        tui=Tui(),  # type: ignore[arg-type]
-        timeout_seconds=1,
-    )
-
-    assert calls == ["watcher", "session", "agent", "tui"]
-
-
-@pytest.mark.asyncio
 async def test_classic_foreground_ctrl_c_requests_cooperative_cancel() -> None:
     from omni.cli.main import _await_classic_foreground_turn
 
@@ -567,10 +591,58 @@ async def test_busy_footer_shows_animated_spinner_and_shimmer():
     finally:
         tui.set_busy(False)
 
-    # Idle collapses back to a single plain footer span and stops the ticker.
+    # Idle drops the spinner and hands the strip to the hint styling.
     assert tui._spinner_task is None
     idle = tui.footer_fragments()
-    assert [style for style, _text in idle] == ["class:dock.footer"]
+    assert all(style != "class:dock.spinner" for style, _text in idle)
+    assert "".join(text for _style, text in idle).strip() == tui.footer_text()
+
+
+def test_dock_styles_resolve_to_visible_attributes():
+    """Resolve the palette the way prompt_toolkit will, container style included.
+
+    Two traps this covers. A muted role must never be a grey that can collide
+    with the terminal background — that is what hid the composer frame and left
+    only the cursor-lit first letter of the placeholder showing. And because a
+    window's style merges into its fragments, an accent inside the muted footer
+    needs ``nodim`` or it arrives dimmed.
+    """
+    from prompt_toolkit.styles.base import DEFAULT_ATTRS
+
+    from omni.cli.repl_tui import _STYLE
+
+    def attrs(*classes: str):
+        return _STYLE.get_attrs_for_style_str(" ".join(f"class:{c}" for c in classes), DEFAULT_ATTRS)
+
+    # The composer border marks where input goes; it must not be a quiet grey.
+    assert attrs("frame.border").color == "ansicyan"
+    # Placeholder is dimmed default foreground, never a background-adjacent colour.
+    placeholder = attrs("composer.placeholder")
+    assert placeholder.dim and placeholder.color == ""
+    # Typed text and footer keys shed the dim they would inherit.
+    assert attrs("dock.input").dim is False
+    key = attrs("dock.footer", "dock.key")
+    assert key.color == "ansicyan" and key.dim is False
+    assert attrs("dock.footer", "dock.mode").dim is False
+    # The labels beside those keys stay quiet.
+    assert attrs("dock.footer").dim is True
+
+
+@pytest.mark.asyncio
+async def test_idle_footer_colours_the_keys_not_the_whole_strip():
+    """One uniform grey gives the eye nowhere to land.
+
+    Codex keeps footer hints structured as key-then-label; spend the accent on
+    the key so the strip can be scanned for what to press.
+    """
+    tui = ReplTui(commands=("/stop",))
+    fragments = tui.footer_fragments()
+    keyed = {text for style, text in fragments if style == "class:dock.key"}
+
+    assert {"Enter", "Ctrl+J", "Ctrl+D"} <= keyed
+    # Labels and the mode indicator stay out of the accent colour.
+    assert "auto mode" in [text for style, text in fragments if style == "class:dock.mode"]
+    assert all(" send" != text or style != "class:dock.key" for style, text in fragments)
 
 
 def _modal_text(tui: ReplTui) -> str:
@@ -581,14 +653,25 @@ def _modal_text(tui: ReplTui) -> str:
 async def test_approval_modal_navigates_and_returns_selected_value():
     tui = ReplTui(commands=())
     task = asyncio.create_task(
-        tui.request_approval("Run command?", "rm -rf build/")
+        tui.request_approval(
+            "Run command?",
+            "omni -P demo task rm deadbeef --force",
+            options=(
+                ApprovalOption("approve", "Approve once"),
+                ApprovalOption(
+                    "approve_rule",
+                    "Approve `omni -P demo task rm <task-id...> --force` for this session",
+                ),
+                ApprovalOption("deny", "Deny"),
+            ),
+        )
     )
     await asyncio.sleep(0)  # let request_approval install the modal
     assert tui._modal_active() is True
 
     body = _modal_text(tui)
     assert "Run command?" in body
-    assert "rm -rf build/" in body
+    assert "omni -P demo task rm deadbeef --force" in body
     assert "Approve once" in body and "Deny" in body
     # First option starts selected (highlighted marker on line 1).
     assert any(
@@ -596,16 +679,49 @@ async def test_approval_modal_navigates_and_returns_selected_value():
         for style, text in tui._modal_fragments()
     )
 
-    tui._modal_move(1)  # ↓ → "Approve for this session"
+    tui._modal_move(1)  # ↓ → matching task deletion rule
     assert any(
-        style == "class:modal.option.selected" and "session" in text
+        style == "class:modal.option.selected" and "Approve `omni" in text
         for style, text in tui._modal_fragments()
     )
 
     tui._resolve_modal(None)  # enter → confirm current selection
     result = await asyncio.wait_for(task, timeout=1)
-    assert result == "approve_session"
+    assert result == "approve_rule"
     assert tui._modal_active() is False
+
+
+@pytest.mark.asyncio
+async def test_approval_modal_wraps_the_complete_session_rule_label():
+    tui = ReplTui(commands=())
+    label = (
+        "Approve `omni --project omniscientist_v2-63cf08e0 task rm "
+        "<task-id...> --force --yes` for this session"
+    )
+    task = asyncio.create_task(
+        tui.request_approval(
+            "Run command?",
+            "omni --project omniscientist_v2-63cf08e0 task rm deadbeef "
+            "--force --yes",
+            options=(
+                ApprovalOption("approve", "Approve once"),
+                ApprovalOption("approve_rule", label),
+                ApprovalOption("deny", "Deny"),
+            ),
+        )
+    )
+    await asyncio.sleep(0)
+    tui._modal_move(1)
+
+    selected = " ".join(
+        text.strip()
+        for style, text in tui._modal_fragments()
+        if style == "class:modal.option.selected" and text.strip()
+    )
+    assert label in selected
+
+    tui._resolve_modal("deny")
+    assert await asyncio.wait_for(task, timeout=1) == "deny"
 
 
 @pytest.mark.asyncio
@@ -614,7 +730,7 @@ async def test_approval_modal_digit_pick_and_deny_paths():
 
     task = asyncio.create_task(tui.request_approval("Approve?", ""))
     await asyncio.sleep(0)
-    tui._modal_pick(2)  # "3." → Deny
+    tui._modal_pick(1)  # "2." → Deny in the fallback contract
     assert await asyncio.wait_for(task, timeout=1) == "deny"
 
     # Esc/Ctrl+C style cancel resolves to deny without a chosen option.
@@ -629,6 +745,47 @@ async def test_approval_modal_digit_pick_and_deny_paths():
     assert await tui.request_approval("Second?", "") == "deny"
     tui._resolve_modal(None)
     await asyncio.wait_for(task3, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_approval_clears_modal_before_the_next_request():
+    tui = ReplTui(commands=())
+    cancelled = asyncio.create_task(tui.request_approval("First?", "one"))
+    await asyncio.sleep(0)
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+
+    assert tui._modal_active() is False
+    next_request = asyncio.create_task(tui.request_approval("Second?", "two"))
+    await asyncio.sleep(0)
+    assert tui._modal_active() is True
+    assert "Second?" in _modal_text(tui)
+    tui._resolve_modal("approve")
+    assert await next_request == "approve"
+
+
+@pytest.mark.asyncio
+async def test_approval_modal_default_highlights_cancel_on_confirmation():
+    tui = ReplTui(commands=())
+    task = asyncio.create_task(
+        tui.request_approval(
+            "Enable Bash trust for this task?",
+            "You will not be asked again, including for git push and rm -rf.",
+            options=(
+                ApprovalOption("enable", "Enable for this task"),
+                ApprovalOption("cancel", "Cancel"),
+            ),
+            default="cancel",
+        )
+    )
+    await asyncio.sleep(0)
+    assert any(
+        style == "class:modal.option.selected" and "Cancel" in text
+        for style, text in tui._modal_fragments()
+    )
+    tui._resolve_modal(None)
+    assert await asyncio.wait_for(task, timeout=1) == "cancel"
 
 
 def test_tui_input_is_multiline_and_grows_to_a_bounded_height():
@@ -740,10 +897,18 @@ def test_ui_mode_can_be_configured_or_overridden_by_environment(monkeypatch):
 @pytest.mark.parametrize(
     ("turn", "expected"),
     [
-        (SimpleNamespace(kind="needs_input", verification_status=""), "needs input"),
-        (SimpleNamespace(kind="error", verification_status="failed"), "failed"),
-        (SimpleNamespace(kind="partial", verification_status="salvaged"), "degraded"),
-        (SimpleNamespace(kind="text", verification_status="passed"), ""),
+        (SimpleNamespace(kind="needs_input", settlement_status=""), "needs input"),
+        (SimpleNamespace(kind="error", settlement_status="failed"), "failed"),
+        (SimpleNamespace(kind="partial", settlement_status="salvaged"), "degraded"),
+        (SimpleNamespace(kind="text", settlement_status="passed"), ""),
+        (
+            SimpleNamespace(
+                kind="text",
+                settlement_status="succeeded",
+                degraded_warnings=["All 3 seed(s) sat on the lower bound of temperature (0.2)."],
+            ),
+            "degraded",
+        ),
     ],
 )
 def test_completed_turns_map_to_compact_header_states(turn, expected) -> None:  # noqa: ANN001
@@ -800,6 +965,49 @@ def test_stable_events_commit_to_scrollback_and_streaming_answer_uses_the_tail(m
     )
     assert any("Hello world" in chunk for chunk in committed)
     assert tui._tail_visible() is False
+
+
+def test_final_answer_is_recorded_at_commit_time_after_intervening_tool_output(monkeypatch):
+    """A resize must preserve chronology, not the live placeholder's first position.
+
+    The streamed answer is provisional dock state.  Recording it in the durable
+    transcript before a later tool event made resize reflow move the final answer
+    above that tool, even though the answer was physically committed afterwards.
+    """
+    tui = ReplTui(commands=())
+    monkeypatch.setattr(tui, "_commit_scrollback", lambda _text: None)
+
+    tui.publish_event(
+        TranscriptEvent(
+            kind=TranscriptKind.MARKDOWN,
+            payload="draft reasoning",
+            turn_id="t1",
+            replace_key=ANSWER_REPLACE_KEY,
+        )
+    )
+    tui.publish_event(
+        TranscriptEvent(
+            kind=TranscriptKind.STATUS,
+            payload="✓ write_file · report.md\n",
+            turn_id="t1",
+        )
+    )
+    tui.publish_event(
+        TranscriptEvent(
+            kind=TranscriptKind.MARKDOWN,
+            payload="Final answer",
+            turn_id="t1",
+            replace_key=ANSWER_REPLACE_KEY,
+            final=True,
+        )
+    )
+
+    entries = list(tui.transcript.entries)
+    assert [entry.payload.strip() for entry in entries] == [
+        "✓ write_file · report.md",
+        "Final answer",
+    ]
+    assert "draft reasoning" not in tui.transcript.text
 
 
 def test_clean_scrollback_text_trims_padding_but_keeps_colour_and_content():
@@ -1128,9 +1336,16 @@ def test_reflow_preserves_inter_cell_gutter_spacing(monkeypatch):
     assert lines[answer_row - 1].strip() == ""  # blank gutter between the cells
 
 
+def _last_copy_notice(tui: ReplTui) -> tuple[TranscriptKind | None, str]:
+    for event in reversed(tui.transcript.entries):
+        if event.kind in {TranscriptKind.STATUS, TranscriptKind.ERROR}:
+            return event.kind, normalize_output(str(event.payload))
+    return None, ""
+
+
 def test_copy_last_answer_emits_osc52_and_reports_copied(monkeypatch):
-    """Phase 1c: /copy (Alt+Y) copies the last answer via OSC 52 and sets a visible
-    "copied" status so the user is never left guessing whether it worked."""
+    """Phase 1c: /copy (Alt+Y) copies the last answer via OSC 52 and commits a
+    scrollback notice so the user can confirm it after the fact (Codex parity)."""
     tui = ReplTui(commands=())
     emitted: list[str] = []
     monkeypatch.setattr(tui, "_emit_osc52", lambda text: emitted.append(text))
@@ -1146,7 +1361,11 @@ def test_copy_last_answer_emits_osc52_and_reports_copied(monkeypatch):
     )
     assert tui.copy_last_answer() is True
     assert emitted == ["the answer body"]
-    assert tui._runtime_status == "copied last answer"
+    kind, notice = _last_copy_notice(tui)
+    assert kind == TranscriptKind.STATUS
+    assert "copied last answer" in notice
+    assert "15 characters" in notice
+    assert tui._last_answer_text() == "the answer body"
 
 
 def test_copy_last_answer_without_an_answer_reports_status(monkeypatch):
@@ -1156,7 +1375,53 @@ def test_copy_last_answer_without_an_answer_reports_status(monkeypatch):
 
     assert tui.copy_last_answer() is False
     assert emitted == []
-    assert "no answer" in tui._runtime_status
+    kind, notice = _last_copy_notice(tui)
+    assert kind == TranscriptKind.ERROR
+    assert "no answer to copy yet" in notice
+    assert "ask a question first" in notice
+
+
+def test_copy_last_answer_reports_write_failure(monkeypatch):
+    tui = ReplTui(commands=())
+    monkeypatch.setattr(tui, "_emit_osc52", lambda text: "failed to write OSC 52")
+    tui.publish_event(
+        TranscriptEvent(
+            kind=TranscriptKind.MARKDOWN,
+            payload="the answer body",
+            turn_id="t1",
+            replace_key=ANSWER_REPLACE_KEY,
+            final=True,
+        )
+    )
+
+    assert tui.copy_last_answer() is False
+    kind, notice = _last_copy_notice(tui)
+    assert kind == TranscriptKind.ERROR
+    assert "copy failed" in notice
+    assert "failed to write OSC 52" in notice
+    assert "select the answer" in notice
+
+
+def test_copy_last_answer_rejects_oversized_payload(monkeypatch):
+    tui = ReplTui(commands=())
+    emitted: list[str] = []
+    monkeypatch.setattr(tui, "_emit_osc52", lambda text: emitted.append(text))
+    tui.publish_event(
+        TranscriptEvent(
+            kind=TranscriptKind.MARKDOWN,
+            payload="x" * (_OSC52_MAX_CHARS + 1),
+            turn_id="t1",
+            replace_key=ANSWER_REPLACE_KEY,
+            final=True,
+        )
+    )
+
+    assert tui.copy_last_answer() is False
+    assert emitted == []
+    kind, notice = _last_copy_notice(tui)
+    assert kind == TranscriptKind.ERROR
+    assert "too long for OSC 52" in notice
+    assert "select the answer" in notice
 
 
 def test_osc52_sequence_is_well_formed_and_roundtrips_utf8():
@@ -1293,6 +1558,120 @@ def test_toggle_transcript_folding_is_a_noop_without_foldable_output(monkeypatch
     assert reflows == []
     assert tui._runtime_status == "no foldable output"
     assert "Ctrl+T" not in tui.footer_text()
+
+
+def _turn_header_states(tui: ReplTui, turn_id: str) -> list[str]:
+    """The footer state currently shown for ``turn_id``, newest last."""
+    return [
+        entry.state
+        for entry in tui.transcript.entries
+        if entry.kind == TranscriptKind.USER_MESSAGE and entry.turn_id == turn_id
+    ]
+
+
+async def _submitted_turn(tui: ReplTui, text: str = "summarise the paper") -> str:
+    assert tui.accept_text(text)
+    return (await tui.read_submission_async()).turn_id
+
+
+@pytest.mark.asyncio
+async def test_a_stage_label_moves_the_turn_footer_off_planning() -> None:
+    """Submission writes "planning" once and never again, so without the
+    reporter the footer of a turn that spent minutes retrieving still read
+    "planning" (incident 599a725b)."""
+    from omni.cli.main import _turn_stage_reporter
+
+    tui = ReplTui(commands=())
+    turn_id = await _submitted_turn(tui)
+    report = _turn_stage_reporter(tui, turn_id)
+    assert report is not None
+
+    assert _turn_header_states(tui, turn_id)[-1] == "planning"
+    report("web_search")
+
+    assert _turn_header_states(tui, turn_id)[-1] == "web_search"
+
+
+@pytest.mark.asyncio
+async def test_a_long_stage_label_is_trimmed_to_what_a_footer_can_show() -> None:
+    """Stage strings are written for a status line and carry whole sentences
+    from python-engine skills; the footer shares its row with the composer."""
+    from omni.cli.main import _turn_stage_reporter
+
+    tui = ReplTui(commands=())
+    turn_id = await _submitted_turn(tui)
+    report = _turn_stage_reporter(tui, turn_id)
+    assert report is not None
+
+    report("  Paper text ready;\n  starting full-manuscript understanding  ")
+
+    state = _turn_header_states(tui, turn_id)[-1]
+    assert len(state) == 32
+    assert state == "Paper text ready; starting full-"
+
+
+@pytest.mark.asyncio
+async def test_a_blank_stage_label_leaves_the_footer_as_it_was() -> None:
+    """An empty state is itself terminal, so forwarding one would retire the
+    turn on nothing more than a skill emitting a whitespace label."""
+    from omni.cli.main import _turn_stage_reporter
+
+    tui = ReplTui(commands=())
+    turn_id = await _submitted_turn(tui)
+    report = _turn_stage_reporter(tui, turn_id)
+    assert report is not None
+
+    report("retrieving")
+    report("   ")
+
+    assert _turn_header_states(tui, turn_id)[-1] == "retrieving"
+
+
+@pytest.mark.asyncio
+async def test_a_progress_label_cannot_impersonate_the_turns_own_verdict() -> None:
+    """A python-engine skill picks its own progress wording, and the TUI retires
+    a turn the moment it is told one of its lifecycle states. A skill reporting
+    a step it calls "failed" would therefore end the turn's footer mid-run and
+    swallow the real outcome — the frozen-footer symptom the stage reporter was
+    added to cure, arriving through the reporter itself.
+    """
+    from omni.cli.main import _turn_stage_reporter
+
+    tui = ReplTui(commands=())
+    turn_id = await _submitted_turn(tui)
+    report = _turn_stage_reporter(tui, turn_id)
+    assert report is not None
+
+    report("failed")
+    # Still shown, so the skill's progress is not lost, but marked as a step.
+    assert _turn_header_states(tui, turn_id)[-1] == "stage: failed"
+
+    # ...and the turn is still live, so the work after it keeps rendering.
+    report("writing section 3")
+    assert _turn_header_states(tui, turn_id)[-1] == "writing section 3"
+    tui.set_turn_state(turn_id, "done")
+    assert _turn_header_states(tui, turn_id)[-1] == "done"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reserved", sorted(state for state in TERMINAL_TURN_STATES if state))
+async def test_no_reserved_lifecycle_word_reaches_the_turn_state_as_a_stage(
+    reserved: str,
+) -> None:
+    """The guard is checked against the TUI's own vocabulary rather than a copy,
+    so adding a lifecycle state cannot quietly reopen the hole."""
+    from omni.cli.main import _turn_stage_reporter
+
+    tui = ReplTui(commands=())
+    turn_id = await _submitted_turn(tui)
+    report = _turn_stage_reporter(tui, turn_id)
+    assert report is not None
+
+    report(reserved)
+
+    assert _turn_header_states(tui, turn_id)[-1] != reserved
+    assert reserved in _turn_header_states(tui, turn_id)[-1]
+    assert tui._turn_inputs.get(turn_id) is not None
 
 
 def test_dock_reserves_space_for_completion_menu():

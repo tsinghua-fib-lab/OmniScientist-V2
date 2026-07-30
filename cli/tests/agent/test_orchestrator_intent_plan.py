@@ -17,6 +17,7 @@ from omni.agent.intent_plan import (
     VerificationPlan,
 )
 from omni.config import load_settings
+from omni.core.approval import ApprovalDecision, ApprovalRequest
 from omni.core.llm.client import ChatWithToolsResult, ToolCall
 from omni.runtime.presentation import turn_presentation_from_result
 from omni.skills_runtime.manifest import DeliveryMode, ExecSpec, SkillEntry, SkillKind
@@ -210,12 +211,79 @@ async def test_model_planner_invalid_json_falls_back_to_bounded_react():
         # Model JSON was unparseable → capable bounded assistant (not a 1-tool stub).
         for name in ("search_corpus", "read_file", "glob"):
             assert name in llm.tool_names
-        for name in ("write_file", "edit_file", "bash"):
+        # Falling back does not widen what the gate can settle: a write is
+        # decided by its destination, a shell command has none to decide on.
+        for name in ("bash", "run_compute"):
             assert name not in llm.tool_names
         events = await agent.tasks.list_events(turn.task_id)
         assert any(event.event_type == "plan.model.degraded" for event in events)
         validated = next(event for event in events if event.event_type == "plan.validated")
         assert validated.output_json["tool_policy"]["allowed_tools"] is None
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_unresolved_planner_capability_recovers_to_bash_and_approval() -> None:
+    """Regression for bceebef0: a hollow route must not erase the tool catalog."""
+    agent = await OmniAgent.create(load_settings())
+    agent.llm = _TranscriptLLM(
+        {
+            "intent_type": "react_fallback",
+            "required_capabilities": ["react_fallback"],
+            "outputs": ["code_review_report"],
+            "confidence": 0.9,
+            "rationale": "review the repository with Git",
+        },
+        script=[
+            ChatWithToolsResult(
+                tool_calls=[
+                    ToolCall(
+                        "git-log",
+                        "bash",
+                        {"command": "git log --oneline -1"},
+                    )
+                ]
+            ),
+            ChatWithToolsResult(content="review complete"),
+        ],
+    )
+
+    async def unexpected_prompt(_request: ApprovalRequest) -> ApprovalDecision:
+        pytest.fail("a known-safe Git read should auto-approve")
+
+    agent.approver = unexpected_prompt
+    session_id = "repeat-code-review"
+    try:
+        await agent._persist_message(  # noqa: SLF001 - seed the incident's history
+            session_id,
+            "assistant",
+            "Previous review: the earlier commits looked correct.",
+        )
+        turn = await agent.handle_turn(
+            "Review today's commits on master.",
+            session_id=session_id,
+            channel="cli",
+            drain_tasks=False,
+        )
+
+        assert turn.text == "review complete"
+        assert "bash" in agent.llm.tool_names
+        assert turn.terminated_reason != "synthesized_max_tool_calls"
+        seeded = "\n".join(
+            str(message.get("content") or "")
+            for message in agent.llm.transcripts[0]
+        )
+        assert "Previous review" in seeded
+        assert "derive the answer in this turn" in seeded
+        events = await agent.tasks.list_events(turn.task_id)
+        kinds = [event.event_type for event in events]
+        assert "approval.auto" in kinds
+        assert "approval.requested" not in kinds
+        assert not any(
+            event.output_json.get("error_code") == "unknown_tool"
+            for event in events
+        )
     finally:
         await agent.aclose()
 
@@ -250,16 +318,25 @@ async def test_arxiv_fetch_direct_route_extracts_identifier_for_skill_schema():
         run = await agent.tasks.get_task(turn.task_id)
         assert run is not None
         assert run.status == "succeeded"
+        assert turn.settlement_status == "succeeded"
         events = await agent.tasks.list_events(turn.task_id)
         event_types = [event.event_type for event in events]
-        assert "verification.failed" not in event_types
-        assert "verification.passed" in event_types
+        assert "task.succeeded" in event_types
+        assert "task.failed" not in event_types
     finally:
         await agent.aclose()
 
 
 @pytest.mark.asyncio
-async def test_drained_plan_executor_records_plan_executed_before_verification():
+async def test_drained_plan_executor_records_plan_executed_before_the_task_settles():
+    """The executed plan is on record before the run commits a terminal status.
+
+    Settlement reads the durable record to decide what the run earned, so
+    anything the run did has to be written first. If ``plan.executed`` landed
+    after ``task.succeeded``, the status would have been decided against an
+    incomplete record and `/task show` would show work that happened after the
+    run was already closed.
+    """
     settings = load_settings()
     agent = await OmniAgent.create(settings)
     agent.registry.register(_figure_async_skill())
@@ -286,9 +363,7 @@ async def test_drained_plan_executor_records_plan_executed_before_verification()
         events = await agent.tasks.list_events(turn.task_id)
         event_types = [event.event_type for event in events]
         assert "plan.executed" in event_types
-        assert "verification.failed" not in event_types
-        assert "verification.passed" in event_types
-        assert event_types.index("plan.executed") < event_types.index("verification.passed")
+        assert event_types.index("plan.executed") < event_types.index("task.succeeded")
     finally:
         await agent.aclose()
 
@@ -365,10 +440,15 @@ async def test_default_turn_uses_capable_tool_catalog():
         turn = await agent.handle_turn("RAG 的核心思路是否合理", channel="cli", drain_tasks=False)
 
         assert turn.text == "这是一个概念性回答。"
-        # Capable-but-safe: real read/recall/search catalog, only mutations blocked.
+        # Capable-but-safe: real read/recall/search catalog, and of the mutations
+        # only those the gate can settle on its own. A write names the file it
+        # will change, so an in-workspace one is auto-approved with no human; a
+        # shell command names nothing to assess and stays out with no approver.
         for name in ("search_corpus", "read_file", "glob", "open_artifact", "list_recent_tasks"):
             assert name in llm.tool_names
-        for name in ("write_file", "edit_file", "bash"):
+        for name in ("write_file", "edit_file"):
+            assert name in llm.tool_names
+        for name in ("bash", "run_compute"):
             assert name not in llm.tool_names
         events = await agent.tasks.list_events(turn.task_id)
         plan_event = next(event for event in events if event.event_type == "plan.validated")
@@ -463,8 +543,6 @@ async def test_vague_context_question_goes_to_capable_react():
 async def test_fallback_tool_limit_keeps_audit_events_but_im_hides_trace():
     settings = load_settings()
     settings.react.max_tool_calls = 1
-    # Exercise the salvage fallback specifically (synthesis is the default path).
-    settings.react.no_progress_synthesis = False
     agent = await OmniAgent.create(settings)
     agent.llm = ScriptedLLM([
         ChatWithToolsResult(tool_calls=[ToolCall("search1", "search_corpus", {"query": "RAG", "k": 1})]),
@@ -473,19 +551,21 @@ async def test_fallback_tool_limit_keeps_audit_events_but_im_hides_trace():
     try:
         turn = await agent.handle_turn("RAG 的核心思路是否合理", channel="wechat", drain_tasks=False)
 
-        assert turn.kind == "partial"
-        assert turn.terminated_reason == "max_tool_calls"
-        assert "search_corpus" in turn.text
+        assert turn.kind == "text"
+        assert turn.terminated_reason == "synthesized_max_tool_calls"
         events = await agent.tasks.list_events(turn.task_id)
         assert any(event.event_type == "react.tool.done" and event.tool_name == "search_corpus" for event in events)
         finished = [event for event in events if event.event_type == "react.finished"]
-        assert finished and finished[-1].output_json["terminated_reason"] == "max_tool_calls"
+        assert finished
+        assert finished[-1].output_json["terminated_reason"] == "synthesized_max_tool_calls"
 
         presentation = turn_presentation_from_result(turn, channel="wechat")
         rendered = presentation.to_markdown()
+        # The IM reader gets the bounded-run notice and a task id to follow up
+        # with, but never the tool trace the CLI shows inline.
         assert "search_corpus" not in rendered
         assert "converged on the available result" in rendered
-        assert "task events" in rendered
+        assert turn.task_id[:8] in rendered
     finally:
         await agent.aclose()
 
@@ -604,37 +684,14 @@ async def test_scientific_figure_input_preserves_user_domain_without_rag_hardcod
 
 
 @pytest.mark.asyncio
-async def test_retired_paper_analysis_fallback_does_not_bypass_goal_contract():
-    settings = load_settings()
-    agent = await OmniAgent.create(settings)
-    agent.llm = PlanningLLM(
-        {
-            "intent_type": "single_skill_task",
-            "confidence": 0.91,
-            "required_capabilities": ["analysis.paper"],
-            "outputs": ["answer", "sources"],
-            "rationale": "the user asked to analyze a contextually referenced paper",
-        }
-    )
-    try:
-        turn = await agent.handle_turn("帮我分析这篇论文", channel="wechat", drain_tasks=False)
-
-        # The retired capability has no specialized route, so recovery may use
-        # the capable ReAct floor. A bare "done" still cannot erase the original
-        # answer + sources contract or its required execution evidence.
-        assert turn.kind == "error"
-        assert turn.verification_status == "failed"
-        assert agent.llm.plan_calls == 1
-        events = await agent.tasks.list_events(turn.task_id)
-        assert not any(event.event_type == "plan.target.paper" for event in events)
-        assert any(event.event_type == "react.finished" for event in events)
-        assert any(event.event_type == "verification.failed" for event in events)
-    finally:
-        await agent.aclose()
-
-
-@pytest.mark.asyncio
 async def test_react_fallback_receives_filtered_tool_catalog(monkeypatch):
+    """A bounded fallback only ever sees the tools its plan allows.
+
+    The catalog handed to the model is the first place a tool policy has to
+    hold: a tool the plan blocked must not be offered at all, and the budget the
+    plan set must be the budget on record.
+    """
+
     class _Planner:
         def __init__(self, registry) -> None:  # noqa: ANN001
             self.registry = registry
@@ -674,7 +731,7 @@ async def test_react_fallback_receives_filtered_tool_catalog(monkeypatch):
         assert plan_event.output_json["tool_policy"]["max_tool_calls"] == 1
         event_types = [event.event_type for event in events]
         assert "react.finished" in event_types
-        assert "verification.passed" in event_types
+        assert turn.settlement_status == "succeeded"
     finally:
         await agent.aclose()
 
@@ -730,7 +787,16 @@ async def test_handle_turn_forwards_planning_events_to_live_callback():
 
 
 @pytest.mark.asyncio
-async def test_verifier_detects_forbidden_tool_even_when_model_attempts_blocked_tool(monkeypatch):
+async def test_blocked_tool_is_refused_when_the_model_calls_it_anyway(monkeypatch):
+    """Hiding a blocked tool is not enough; a call to it has to be refused.
+
+    A model can name a tool that was never offered to it. Admission — not a
+    later review of the finished turn — is what makes the block real, so the
+    call has to be turned away before the tool runs, the refusal has to be
+    durable under the run, and the tool must never post a successful result the
+    answer could be built on.
+    """
+
     class _Planner:
         def __init__(self, registry) -> None:  # noqa: ANN001
             self.registry = registry
@@ -752,29 +818,113 @@ async def test_verifier_detects_forbidden_tool_even_when_model_attempts_blocked_
                 verification_plan=VerificationPlan(
                     required_outputs=["answer"],
                     required_events=["react.finished"],
-                    forbidden_tools=["glob"],
                 ),
-                rationale="test forbidden verifier",
+                rationale="test blocked tool admission",
             )
 
     monkeypatch.setattr(orchestrator_mod, "IntentPlanner", _Planner)
     settings = load_settings()
     agent = await OmniAgent.create(settings)
-    agent.llm = ScriptedLLM(
+    llm = CapturingLLM(
         [
             ChatWithToolsResult(tool_calls=[ToolCall("bad", "glob", {"pattern": "**/*"})]),
             ChatWithToolsResult(content="recovered answer"),
         ]
     )
+    agent.llm = llm
     try:
         turn = await agent.handle_turn("模型尝试 forbidden tool", channel="cli", drain_tasks=False)
 
-        assert turn.text == "recovered answer"
+        assert all("glob" not in names for names in llm.tool_names_seen)
         events = await agent.tasks.list_events(turn.task_id)
-        forbidden = [event for event in events if event.tool_name == "glob"]
-        assert forbidden
-        failed = [event for event in events if event.event_type == "verification.failed"]
-        assert failed
-        assert "forbidden_tools" in failed[-1].output_json
+        attempts = [event for event in events if event.tool_name == "glob"]
+        # Catalog rejection happens before lifecycle start or approval. Recording
+        # only the terminal rejection avoids claiming the blocked tool ran.
+        assert [event.event_type for event in attempts] == ["react.tool.rejected"]
+        assert attempts[-1].status == "rejected"
+        assert "glob" in attempts[-1].error
+        assert not attempts[-1].output_json
+        # The answer is the model's own recovery, never a glob result.
+        assert turn.text == "recovered answer"
+    finally:
+        await agent.aclose()
+
+
+def _dead_skill(name: str) -> SkillEntry:
+    """A skill that resolves and runs, then fails the way a keyless provider does."""
+    script = (
+        "import sys;"
+        "sys.stderr.write('Semantic Scholar API key is not configured');"
+        "sys.exit(3)"
+    )
+    return SkillEntry(
+        name=name,
+        description=f"always-failing {name}",
+        kind=SkillKind.CLI_EXEC,
+        delivery_mode=DeliveryMode.ASYNC_TASK,
+        capabilities=_fixture_capabilities(name),
+        priority=90,
+        input_schema={
+            "type": "object",
+            "properties": {"input": {"type": "string"}},
+            "required": ["input"],
+        },
+        output_schema={"type": "object", "properties": {"summary": {"type": "string"}}},
+        exec_spec=ExecSpec(command=sys.executable, args=["-c", script], stdout_format="json"),
+    )
+
+
+class _TranscriptLLM(PlanningLLM):
+    """PlanningLLM that also keeps the messages each ReAct call was given."""
+
+    def __init__(self, plan: dict, *, script: list[ChatWithToolsResult]) -> None:
+        super().__init__(plan, script=script)
+        self.transcripts: list[list[dict]] = []
+
+    async def chat_with_tools(self, messages, tools, **kwargs):  # noqa: ANN001, ANN003
+        self.transcripts.append([dict(m) for m in messages])
+        return await super().chat_with_tools(messages, tools, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_a_dead_skill_ends_a_route_not_the_turn():
+    """One failed provider is a detour, not the answer to a research question."""
+    settings = load_settings()
+    agent = await OmniAgent.create(settings)
+    agent.registry.register(_dead_skill("literature-search"))
+    llm = _TranscriptLLM(
+        {
+            "intent_type": "single_skill_task",
+            "confidence": 0.9,
+            "required_capabilities": ["literature.search"],
+            "outputs": ["answer"],
+            "execution_mode": "foreground",
+            "rationale": "semantic planner selected literature.search",
+        },
+        script=[ChatWithToolsResult(content="Found the benchmarks via another source.")],
+    )
+    agent.llm = llm
+    try:
+        turn = await agent.handle_turn(
+            "检索最近关于 RAG 评估基准的文献", channel="cli", drain_tasks=True
+        )
+
+        # The turn continued past the failure and the model, not the runner,
+        # wrote the answer.
+        assert llm.calls >= 1, "the turn ended at the failed skill instead of routing around it"
+        assert turn.text == "Found the benchmarks via another source."
+
+        # The model was told which route was already spent, so its retry is a
+        # detour rather than the same call again.
+        seeded = "\n".join(
+            str(m.get("content") or "") for m in llm.transcripts[0]
+        )
+        assert "literature-search" in seeded
+        assert "Semantic Scholar API key is not configured" in seeded
+
+        # And it was handed a catalog it can actually route with, not the
+        # single-skill plan's empty one.
+        assert len(llm.tool_names) > 1
+        assert {"search_literature", "web_search"} & set(llm.tool_names)
     finally:
         await agent.aclose()

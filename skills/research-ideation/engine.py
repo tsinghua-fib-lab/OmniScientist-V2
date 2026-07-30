@@ -40,7 +40,7 @@ class _OmniLLMPort:
                 tools,
                 tool_choice=str(payload.get("tool_choice") or "auto"),
                 temperature=float(payload.get("temperature", self.temperature)),
-                max_tokens=int(payload.get("max_tokens", 2048)),
+                max_tokens=int(payload.get("max_tokens", 16384)),
             ),
             self._loop,
         )
@@ -52,7 +52,15 @@ class _OmniLLMPort:
         ]
         if tool_calls:
             message["tool_calls"] = tool_calls
-        return {"choices": [{"message": message}]}
+        payload: dict[str, Any] = {"choices": [{"message": message}]}
+        usage = getattr(result, "usage", None)
+        if isinstance(usage, dict) and usage:
+            payload["usage"] = {
+                "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                "completion_tokens": int(usage.get("completion_tokens") or 0),
+                "total_tokens": int(usage.get("total_tokens") or 0),
+            }
+        return payload
 
 
 def _tool_call_fragment(call: Any, index: int) -> dict[str, Any]:
@@ -106,33 +114,6 @@ def _pipeline_error(exc: BaseException) -> dict[str, Any]:
     }
 
 
-def _connector_disabled_error() -> dict[str, Any]:
-    """Return a scheduler-safe result when Semantic Scholar is disabled."""
-    message = (
-        "The Semantic Scholar connector is disabled in research.connectors."
-    )
-    return {
-        "status": "error",
-        "outcome": {
-            "code": "connector_disabled",
-            "connector": "semanticscholar",
-        },
-        "error": message,
-        "summary": message,
-        "recoverable": True,
-        "blocking": False,
-        "sources": [],
-        "research": {"source_ids": [], "run_id": ""},
-        "run_id": "",
-        "error_info": {
-            "code": "connector_disabled",
-            "message": message,
-            "retryable": False,
-            "workflow_recoverable": True,
-        },
-    }
-
-
 class ResearchIdeationEngine:
     @staticmethod
     def validate_params(
@@ -153,7 +134,11 @@ class ResearchIdeationEngine:
             or input_data.get("topic")
             or ""
         )
-        n_ideas = max(1, min(5, int(input_data.get("n_ideas", 3) or 3)))
+        default_n_ideas = _core.DEFAULT_N_IDEAS
+        n_ideas = max(
+            1,
+            min(5, int(input_data.get("n_ideas", default_n_ideas) or default_n_ideas)),
+        )
         use_tools = bool(input_data.get("use_tools", True))
 
         ctx = getattr(self, "ctx", None)
@@ -163,10 +148,9 @@ class ResearchIdeationEngine:
             return _pipeline_error(
                 _core.LLMConfigurationError("Omni LLM host service is not available")
             )
-        connector_enabled, s2_api_key = _resolve_s2_access(ctx)
-        if not connector_enabled:
-            return _connector_disabled_error()
+        s2_api_key = _resolve_s2_key(ctx)
         llm = _OmniLLMPort(host_llm, loop)
+        search = _host_search_port(ctx, loop)
 
         async def _notify_progress(msg: str, frac: float) -> None:
             if progress_callback is None:
@@ -189,12 +173,41 @@ class ResearchIdeationEngine:
                 progress=_progress,
                 llm=llm,
                 s2_api_key=s2_api_key,
+                search=search,
             )
         except Exception as exc:
             return _pipeline_error(exc)
 
         report = _build_markdown_report(result)
         result["text"] = report
+
+        # Native completion milestone: the pipeline counts (papers surveyed,
+        # ideas generated) are known only here, so the durable line carries them
+        # rather than a bare "complete" stage.
+        if progress_callback is not None:
+            steps = result.get("steps") if isinstance(result.get("steps"), dict) else {}
+            search = steps.get("search") if isinstance(steps.get("search"), dict) else {}
+            outcome = result.get("outcome") if isinstance(result.get("outcome"), dict) else {}
+            stats: dict[str, Any] = {}
+            if search.get("paper_count"):
+                stats["papers"] = int(search["paper_count"])
+            concepts = search.get("core_concepts")
+            if isinstance(concepts, list) and concepts:
+                stats["concepts"] = len(concepts)
+            if outcome.get("count"):
+                stats["ideas"] = int(outcome["count"])
+            try:
+                emitted = progress_callback(
+                    "ideation complete",
+                    1.0,
+                    stage_id="ideation.done",
+                    milestone="Ideation complete",
+                    stats=stats,
+                )
+            except TypeError:
+                emitted = progress_callback("ideation complete", 1.0)
+            if hasattr(emitted, "__await__"):
+                await emitted
 
         # Store the report when the Omni artifact service is available.
         if ctx is not None and getattr(ctx, "artifacts", None) is not None:
@@ -207,6 +220,10 @@ class ResearchIdeationEngine:
                     mime="text/markdown",
                     session_id=getattr(ctx, "session_id", ""),
                     task_id=getattr(ctx, "task_id", ""),
+                    subtask_id=(
+                        getattr(ctx, "subtask_id", "")
+                        or getattr(ctx, "task_id", "")
+                    ),
                 )
                 result["report_uri"] = stored.uri
                 result["artifacts"] = [{"uri": stored.uri, "kind": "report", "ext": "md"}]
@@ -223,18 +240,58 @@ class ResearchIdeationEngine:
         return result
 
 
-def _resolve_s2_access(ctx: Any) -> tuple[bool, str]:
-    """Resolve one run's Semantic Scholar access through Omni secret scope."""
+def _host_search_port(ctx: Any, loop: asyncio.AbstractEventLoop) -> Any:
+    """Route this run's literature through Omni's funnel instead of one connector.
+
+    The funnel fans out across every enabled connector — arXiv, OpenAlex,
+    Crossref, PubMed, Semantic Scholar — with health checks, backoff, and a local
+    corpus floor, and it treats a connector error as data rather than raising.
+    Going through it is what makes a missing Semantic Scholar key cost one source
+    out of several instead of the entire search.
+
+    Returns ``None`` outside Omni, where the portable Semantic Scholar path is
+    the only source a standalone copy can assume.
+    """
     if ctx is None or getattr(ctx, "settings", None) is None:
-        return True, ""
+        return None
+
+    from omni.research import search_literature
+
+    def _search(query: str, limit: int) -> list[dict]:
+        future = asyncio.run_coroutine_threadsafe(
+            search_literature(ctx, query=query, rows=min(int(limit or 6), 25)),
+            loop,
+        )
+        results = future.result().get("results") or []
+        # The funnel names the field ``summary``; the pipeline reasons over
+        # ``abstract``. Same text, and an idea generated from an empty abstract
+        # is an idea generated from the title alone.
+        return [
+            {**paper, "abstract": paper.get("abstract") or paper.get("summary") or ""}
+            for paper in results
+            if isinstance(paper, dict)
+        ]
+
+    return _search
+
+
+def _resolve_s2_key(ctx: Any) -> str:
+    """Return this run's scoped Semantic Scholar key, or empty public-tier access.
+
+    A disabled Semantic Scholar connector is not a run abort: the host funnel
+    still has arXiv / OpenAlex / Crossref / PubMed. Only the S2 key is resolved
+    here, and only when that connector is enabled, so a kill-switch cannot
+    inherit a process-wide ``S2_API_KEY``.
+    """
+    if ctx is None or getattr(ctx, "settings", None) is None:
+        return ""
 
     from omni.research.engine_util import resolve_connector
 
     resolved = resolve_connector(ctx, "semanticscholar")
     if resolved is None:
-        return False, ""
-    key = str(resolved.secrets.get("semantic_scholar_api_key", "") or "")
-    return True, key
+        return ""
+    return str(resolved.secrets.get("semantic_scholar_api_key", "") or "")
 
 
 def _save_to_library(ctx: Any, papers: list[dict]) -> None:

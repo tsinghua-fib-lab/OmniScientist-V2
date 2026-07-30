@@ -1,0 +1,129 @@
+[
+  {
+    "node_id": "l2_norbert_wiener_C01",
+    "level": "L2",
+    "category": "C01",
+    "category_label": "怎样定义问题",
+    "description": "在定义问题时，他倾向于先对研究对象进行明确的范畴界定和精细分类，再据此构建理论框架。例如，他主张光学观察本质上是对能量或功率的测量，将谱密度条件视为比连续谱更严格的约束，并把随机运动文献按主题归为独立类别。面对复杂对象时，他会主动引入分类结构，如将布朗运动划分为四类，且会明确限定当前考虑的条件范围（如可微且有界导数），以确保问题边界清晰、验证步骤谨慎。这种模式体现为：从测量或可观察量出发，通过区分条件和类别来严格定义问题。",
+    "trigger_contexts": [
+      "defining_problem_boundaries",
+      "classifying_phenomena",
+      "specifying_measurement_conditions",
+      "hierarchical_taxonomy_construction"
+    ],
+    "contraindicated_contexts": [
+      "open_ended_exploration",
+      "qualitative_description_without_metrics",
+      "rapid_prototyping_without_classification"
+    ],
+    "supporting_L1_count": 6
+  },
+  {
+    "node_id": "l2_norbert_wiener_C02",
+    "level": "L2",
+    "category": "C02",
+    "category_label": "怎样选择方法",
+    "description": "该科学家在选择数学方法时，倾向于依据问题的自然性和简便性进行判断，并明确表达对“值得做”“更可取”“容易”等方法价值的评价。他频繁比较不同方法（如经典论证与直接方法、生成函数与直接求和、映射法与密度法），偏好构造性、显式且计算上可行的途径，避免繁琐的矩阵求逆等操作，并常通过引入对称性、简化区间或归一化因子来降低问题复杂度。同时，他也会在必要时灵活调整严格性（如省略边界情况的证明），但整体上重视方法的适用性和统一性。",
+    "trigger_contexts": [
+      "选择不同数学工具或表示形式",
+      "比较证明方法的严格性与简便性",
+      "追求计算可行性和显式表达式",
+      "简化问题以方便推导"
+    ],
+    "contraindicated_contexts": [
+      "必须严格遵循指定方法或标准证明",
+      "不允许省略任何证明细节",
+      "需要系统比较所有可能方案而非择优"
+    ],
+    "supporting_L1_count": 56
+  },
+  {
+    "node_id": "l2_norbert_wiener_C03",
+    "level": "L2",
+    "category": "C03",
+    "category_label": "怎样验证结论",
+    "description": "维纳在验证结论时采取严格的检验态度：他通过构造具体反例来否定与原有概念不符的定义（如在《Limit in terms of continuous transformation》中指出某反例“与原初极限概念不符”），并明确给出必要且充分条件以界定系统的有效性（如“系统成为(J,)的必要且充分条件”）。他不仅关注自身结论的证明，还主动审查他人工作的严格性，指出弗雷歇条件不充分、Zasuhin正则准则无证明、Wiener矩阵值函数分解证明不完整，以及Rosenblatt推导基于错误引理。甚至对看似显然的事实（如“矩完全决定分布”）也主张需要证明，并偏好直接验证级数收敛而非依赖求和次序交换的合理性。总体而言，他坚持“即使明显的事实也需要证明”的标准，善于用反例和直接验证来检验命题的真伪。",
+    "trigger_contexts": [
+      "checking_definition_validity",
+      "constructing_counterexamples",
+      "verifying_sufficiency_and_necessity",
+      "evaluating_others_proofs",
+      "proving_obvious_facts",
+      "direct_convergence_verification"
+    ],
+    "contraindicated_contexts": [
+      "intuitive_heuristic_decision",
+      "quick_approximation_without_proof",
+      "informal_reasoning_in_exploratory_phase",
+      "accepting_claims_without_scrutiny"
+    ],
+    "supporting_L1_count": 11
+  },
+  {
+    "node_id": "l2_norbert_wiener_C04",
+    "level": "L2",
+    "category": "C04",
+    "category_label": "怎样解释结果",
+    "description": "这位科学家在解释结果时，倾向于明确判断现有解释或模型的充分性，承认其近似性和概率性。他会指出某个解释“无可置疑地充分”，表明他接受在当前语境下解释的适用性；同时会强调命题“几乎总是成立，但并非总是”，体现他对结果不确定性的清醒认识；在涉及实际数据与理论模型时，他也会判断两者分布“不会相差太远”，即认可模型对现实的一种近似描述。这种思维模式表现为在解释中平衡理想模型与实际限制，给出带条件的、概率性的陈述。",
+    "trigger_contexts": [
+      "评估解释或模型的充分性",
+      "讨论结果的概率性成立条件",
+      "对比理论模型与实际数据的近似程度"
+    ],
+    "contraindicated_contexts": [
+      "需要绝对精确或确定性结论的场合",
+      "要求严格证明而非近似判断的场景"
+    ],
+    "supporting_L1_count": 3
+  },
+  {
+    "node_id": "l2_norbert_wiener_C05",
+    "level": "L2",
+    "category": "C05",
+    "category_label": "怎样判断美丑",
+    "description": "当前材料中没有足够证据可靠归纳这一思维模式。",
+    "trigger_contexts": [],
+    "contraindicated_contexts": [],
+    "supporting_L1_count": 0
+  },
+  {
+    "node_id": "l2_norbert_wiener_C06",
+    "level": "L2",
+    "category": "C06",
+    "category_label": "怎样处理失败",
+    "description": "这位科学家在论文中处理失败的方式是：明确承认未解决的证明问题（如“未能对一般情况给出证明”）、直接指出无法获得同时必要且充分的条件、清楚标示方法在特定条件下失效（如秩不足或q>1时）并归因于具体数学结构（如矩阵非交换性、指数律不成立），同时主动界定研究边界（如不讨论近似模式和所需样本量）。他倾向于在文本中坦然暴露局限，而不是回避或模糊处理。",
+    "trigger_contexts": [
+      "证明遇到一般情况无法推广时，需要标注开放问题",
+      "方法仅在特定假设下有效，需要说明失效条件",
+      "讨论理论结果的充分必要性边界",
+      "多变量或非交换场景下算法无法直接拓展",
+      "研究范围界定，需明确排除某些困难问题"
+    ],
+    "contraindicated_contexts": [
+      "需要给出完整可执行算法或解决方案的场合",
+      "教学或入门材料，应避免过多开放问题干扰主线",
+      "面向工业应用的报告，需强调实用性而非局限",
+      "初步构思阶段，过早暴露失败可能阻碍合作",
+      "比较性综述中，可能被误解为方法整体不可用"
+    ],
+    "supporting_L1_count": 7
+  },
+  {
+    "node_id": "l2_norbert_wiener_C07",
+    "level": "L2",
+    "category": "C07",
+    "category_label": "怎样产生想法",
+    "description": "这位科学家展现了对既有理论框架中未被探索可能性的敏锐察觉。在《Generalized Harmonic Analysis》中，他明确指出物理学家未考虑过一种频谱的可能性，反映出其思维模式侧重于审视学科现状中的隐含盲区，并敢于设想超越常规理解的抽象构想。这种模式并非笼统的批判，而是针对具体理论环节提出替代性视角。",
+    "trigger_contexts": [
+      "identifying_unexplored_theoretical_gaps",
+      "proposing_novel_mathematical_frameworks",
+      "challenging_disciplinary_assumptions"
+    ],
+    "contraindicated_contexts": [
+      "strict_empirical_validation",
+      "incremental_improvement_within_established_paradigms",
+      "replicating_existing_methodologies"
+    ],
+    "supporting_L1_count": 1
+  }
+]

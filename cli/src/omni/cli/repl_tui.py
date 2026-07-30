@@ -29,13 +29,14 @@ import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Literal, TextIO
 
 from prompt_toolkit.application import Application, get_app, in_terminal, run_in_terminal
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import Completer
-from prompt_toolkit.filters import Condition, has_focus
+from prompt_toolkit.filters import Condition, has_completions, has_focus
 from prompt_toolkit.formatted_text import ANSI, AnyFormattedText, FormattedText
 from prompt_toolkit.input import Input
 from prompt_toolkit.key_binding import KeyBindings
@@ -62,10 +63,20 @@ from prompt_toolkit.output import Output
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import Frame
 
+from omni.cli import theme
 from omni.cli.repl_command_policy import redact_repl_command
 from omni.cli.repl_commands import CommandCatalog
-from omni.cli.repl_composer import install_multiline_bindings
-from omni.cli.repl_input import ReplCommandHistory, SlashCommandCompleter
+from omni.cli.repl_composer import cancel_completion, install_multiline_bindings
+from omni.cli.repl_input import ReplCommandHistory, build_repl_completer
+from omni.cli.repl_layout import (
+    COMPOSER_PLACEHOLDER,
+    center_truncate_path,
+    clip_display,
+    compact_number,
+    display_width,
+    fit_hint_parts,
+    placeholder_for_width,
+)
 from omni.cli.repl_output import (
     bind_event_to_output_turn,
     current_output_turn_id,
@@ -74,6 +85,8 @@ from omni.cli.repl_output import (
 )
 from omni.cli.repl_transcript import (
     ANSWER_REPLACE_KEY,
+    TRACE_COMMIT_STATE,
+    TRACE_DROP_STATE,
     DataTableData,
     TranscriptEvent,
     TranscriptKind,
@@ -95,6 +108,11 @@ _SHIMMER_FPS = 12.0
 # in the dock; completed text is committed to scrollback so the dock stays small.
 _TAIL_MAX_ANSWER_LINES = 10
 _TAIL_MAX_ROWS = 16
+
+# The dynamic status region is capped at three lines (redesign). Line 1 (stage +
+# elapsed) rides the footer beside the spinner; the remaining lines -- the item
+# under work and the long-turn heartbeat -- render just above it, here.
+_STATUS_DETAIL_MAX = 2
 
 # Rows reserved below the composer while the completion menu is open. The dock is
 # a non-full-screen app pinned to the terminal bottom, so a cursor-anchored
@@ -125,29 +143,56 @@ _CLEAR_SCROLLBACK = "\x1b[H\x1b[2J\x1b[3J"
 # under typical limits avoids a silently truncated clipboard on huge answers.
 _OSC52_MAX_CHARS = 100_000
 
+# A turn's lifecycle vocabulary: publishing one of these retires the turn, after
+# which its footer can no longer be updated. Exported because anything feeding
+# ``ReplTui.set_turn_state`` has to be able to tell a verdict apart from a
+# cosmetic progress label, and a private copy of the list would drift.
+TERMINAL_TURN_STATES: frozenset[str] = frozenset(
+    {
+        "",
+        "cancelled",
+        "control",
+        "degraded",
+        "failed",
+        "interrupted",
+        "needs input",
+    }
+)
 
+
+# Named ANSI slots, so the dock inherits whatever palette the user's terminal
+# already uses (see ``omni.cli.theme``). Grey literals here were the reason the
+# footer and the composer placeholder washed out on backgrounds they were not
+# chosen against.
 _STYLE = Style.from_dict(
     {
         "transcript": "",
-        "turn.user": "bg:#3a3a3a #f5f5f5",
-        "turn.assistant": "#e4e4e4",
-        "turn.body": "#c8c8c8",
-        "turn.status": "italic #8a8a8a",
-        "turn.error": "bold #ff5f5f",
-        "dock.meta": "#839496",
-        "dock.rule": "#657b83",
-        "dock.prompt": "bold #00d7af",
-        "dock.prompt.bash": "bold #ff8700",
-        "dock.input": "",
-        "dock.tail": "#e4e4e4",
-        "composer.placeholder": "italic #6c6c6c",
-        "frame.border": "#657b83",
-        "frame.border.bash": "#ff8700",
-        "dock.footer": "#839496",
-        "dock.mode": "bold #b5bd00",
-        "dock.notice": "bold #d7af00",
-        "dock.spinner": "bold #00d7af",
-        "dock.shimmer": "bold #e4e4e4",
+        "turn.user": "bold",
+        "turn.assistant": "",
+        "turn.body": "",
+        "turn.status": f"italic {theme.PTK_MUTED}",
+        "turn.error": f"bold {theme.PTK_DANGER}",
+        "dock.meta": theme.PTK_MUTED,
+        "dock.rule": theme.PTK_MUTED,
+        "dock.prompt": f"bold {theme.PTK_ACCENT}",
+        "dock.prompt.bash": f"bold {theme.PTK_CAUTION}",
+        # What the user typed is never secondary, so it opts out of the dim it
+        # would otherwise inherit from the composer frame.
+        "dock.input": theme.PTK_TEXT,
+        "dock.tail": theme.PTK_TEXT,
+        "composer.placeholder": f"italic {theme.PTK_MUTED}",
+        # The composer border is the only thing marking where input goes: it has
+        # to stay findable, so it takes the accent rather than a quiet grey.
+        "frame.border": theme.PTK_ACCENT,
+        "frame.border.bash": theme.PTK_CAUTION,
+        "dock.footer": theme.PTK_MUTED,
+        "dock.key": theme.PTK_ACCENT,
+        "dock.mode": theme.PTK_STRONG,
+        "dock.notice": f"bold {theme.PTK_CAUTION}",
+        "dock.spinner": f"bold {theme.PTK_ACCENT}",
+        "dock.shimmer": theme.PTK_STRONG,
+        # The modal paints its own background, so its foregrounds stay fixed:
+        # here the contrast is against our colour, not the terminal's.
         "modal": "bg:#1c1c1c #e4e4e4",
         "modal.frame": "bg:#1c1c1c #00d7af",
         "modal.title": "bg:#1c1c1c bold #ffd75f",
@@ -187,7 +232,6 @@ class ApprovalOption:
 # Default approval choices when a caller does not supply its own set.
 _DEFAULT_APPROVAL_OPTIONS: tuple[ApprovalOption, ...] = (
     ApprovalOption("approve", "Approve once"),
-    ApprovalOption("approve_session", "Approve for this session"),
     ApprovalOption("deny", "Deny"),
 )
 
@@ -202,12 +246,19 @@ class _ApprovalModal:
         detail: str,
         options: Sequence[ApprovalOption],
         future: asyncio.Future[str],
+        default: str = "",
     ) -> None:
         self.title = title
         self.detail = detail
         self.options = tuple(options)
         self.future = future
-        self.index = 0
+        index = 0
+        if default:
+            for position, option in enumerate(self.options):
+                if option.value == default:
+                    index = position
+                    break
+        self.index = index
 
     def move(self, delta: int) -> None:
         count = len(self.options)
@@ -218,19 +269,20 @@ class _ApprovalModal:
         return self.options[self.index].value if self.options else ""
 
 
-# Composer placeholder shown when the input buffer is empty (Codex-style hint).
-_COMPOSER_PLACEHOLDER = "Send a message  ·  / commands  ·  ! shell  ·  Ctrl+J newline"
+# Re-export the wide composer hint so existing tests can keep importing it here.
+_COMPOSER_PLACEHOLDER = COMPOSER_PLACEHOLDER
 
 
 class _PlaceholderProcessor(Processor):
     """Render a dim hint on the empty first line without touching buffer text."""
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str | Callable[[], str]) -> None:
         self._text = text
 
     def apply_transformation(self, ti: TransformationInput) -> Transformation:
         if ti.lineno == 0 and not ti.document.text:
-            tail = [("class:composer.placeholder", self._text)]
+            hint = self._text() if callable(self._text) else self._text
+            tail = [("class:composer.placeholder", hint)]
             return Transformation(list(ti.fragments) + tail)
         return Transformation(ti.fragments)
 
@@ -287,6 +339,7 @@ class ReplTui:
         input: Input | None = None,
         output: Output | None = None,
         diagnostic_log_path: str | os.PathLike[str] | None = None,
+        output_base: Path | None = None,
     ) -> None:
         self.enabled = True
         self.transcript = TranscriptModel(max_chars=max_transcript_chars)
@@ -297,6 +350,9 @@ class ReplTui:
         self._context_window = 0
         self._last_elapsed_seconds: float | None = None
         self._runtime_status = ""
+        # Lines 2-3 of the dynamic status region (the item under work and the
+        # long-turn heartbeat); line 1 stays in the footer beside the spinner.
+        self._status_detail: list[str] = []
         self._busy = False
         self._busy_started: float | None = None
         self._spinner_task: asyncio.Task[None] | None = None
@@ -330,7 +386,7 @@ class ReplTui:
         # never sprinkled with blank rows.
         self._last_commit_group: tuple[str, str] | None = None
 
-        completer: Completer = SlashCommandCompleter(commands)
+        completer: Completer = build_repl_completer(commands, output_base=output_base)
         self._input_buffer = Buffer(
             name="OMNI_INPUT",
             completer=completer,
@@ -344,7 +400,7 @@ class ReplTui:
             buffer=self._input_buffer,
             input_processors=[
                 BeforeInput(self._prompt_fragments),
-                _PlaceholderProcessor(_COMPOSER_PLACEHOLDER),
+                _PlaceholderProcessor(self._placeholder_text),
             ],
             focusable=True,
         )
@@ -389,6 +445,18 @@ class ReplTui:
             ),
             filter=Condition(self._show_meta),
         )
+        # Lines 2-3 of the dynamic status region, pinned just above the footer so
+        # the item under work and the heartbeat sit next to the footer spinner.
+        self._status_detail_window = ConditionalContainer(
+            Window(
+                content=self._formatted_control(self._status_detail_fragments),
+                height=Dimension(min=0, max=_STATUS_DETAIL_MAX),
+                dont_extend_height=True,
+                wrap_lines=True,
+                style="class:dock.meta",
+            ),
+            filter=Condition(self._status_detail_visible),
+        )
         self._modal_control = FormattedTextControl(
             self._modal_fragments, focusable=True, show_cursor=False
         )
@@ -401,11 +469,10 @@ class ReplTui:
         root = HSplit(
             [
                 self._tail_window,
-                ConditionalContainer(
-                    self._modal_window, filter=Condition(self._modal_active)
-                ),
+                ConditionalContainer(self._modal_window, filter=Condition(self._modal_active)),
                 self._meta_window,
                 self._composer_frame,
+                self._status_detail_window,
                 Window(
                     content=self._formatted_control(self.footer_fragments),
                     height=1,
@@ -475,6 +542,7 @@ class ReplTui:
             self._resolve_modal("deny")
 
         for _digit in "123456789":
+
             @bindings.add(_digit, filter=modal_active, eager=True)
             def _modal_digit(event, _n=int(_digit)) -> None:  # noqa: ANN001
                 self._modal_pick(_n - 1)
@@ -490,14 +558,25 @@ class ReplTui:
 
         install_multiline_bindings(bindings, submit=submit, active=editable)
 
-        @bindings.add("c-i", filter=focused & busy & ~modal_active, eager=True)
+        # ``~has_completions``: Tab is the conventional accept/cycle key, so while
+        # a menu is open it must reach prompt_toolkit's ``menu-complete`` instead
+        # of queueing the draft. Without this the busy composer left a user who
+        # opened a completion popup with no non-submitting key at all.
+        @bindings.add("c-i", filter=focused & busy & ~modal_active & ~has_completions, eager=True)
         def queue_next(event) -> None:  # noqa: ANN001
             """Tab explicitly queues the draft for the next turn while busy."""
             submit(event, disposition="queue")
 
         @bindings.add("escape", filter=busy & ~modal_active)
-        def stop_active(_event) -> None:  # noqa: ANN001
-            """Esc requests the same cooperative stop as ``/stop``."""
+        def stop_active(event) -> None:  # noqa: ANN001
+            """Esc requests the same cooperative stop as ``/stop``.
+
+            Checked inline rather than via ``~has_completions`` because Escape has
+            no default dismiss binding to fall through to, and because ``escape``
+            is a prefix key here (Alt chords) that must not become eager.
+            """
+            if cancel_completion(event.current_buffer):
+                return
             self.request_stop()
 
         # Scrollback, selection, and history scrolling now belong to the terminal
@@ -557,7 +636,9 @@ class ReplTui:
             if not value:
                 return False
         if disposition is None:
-            disposition = "control" if value.startswith("/") else "steer" if self._busy else "submit"
+            disposition = (
+                "control" if value.startswith("/") else "steer" if self._busy else "submit"
+            )
         if disposition not in {"submit", "steer", "queue", "control"}:
             raise ValueError(f"unsupported REPL submission disposition: {disposition}")
         turn_id = uuid.uuid4().hex
@@ -651,14 +732,7 @@ class ReplTui:
                 state=state,
             )
         )
-        if state in {
-            "",
-            "cancelled",
-            "control",
-            "degraded",
-            "failed",
-            "needs input",
-        }:
+        if state in TERMINAL_TURN_STATES:
             self._turn_inputs.pop(turn_id, None)
         self._invalidate()
 
@@ -693,28 +767,47 @@ class ReplTui:
         detail: str = "",
         *,
         options: Sequence[ApprovalOption] | None = None,
+        default: str = "",
     ) -> str:
         """Show a blocking approve/deny dock row and return the chosen value.
 
         Render-layer only: a caller (approval flow) awaits this to collect a
         human decision. Concurrent requests are declined (returns ``"deny"``).
+        ``default`` selects which option starts highlighted; empty keeps the
+        first option, which is the safe "once" choice on a command prompt.
         """
         if self._modal is not None:
             return "deny"
         loop = asyncio.get_event_loop()
         future: asyncio.Future[str] = loop.create_future()
-        self._modal = _ApprovalModal(
+        modal = _ApprovalModal(
             title=" ".join(str(title).split()) or "Approve action?",
             detail=str(detail),
             options=options or _DEFAULT_APPROVAL_OPTIONS,
             future=future,
+            default=default,
         )
+        self._modal = modal
         try:
             self._app.layout.focus(self._modal_window)
         except Exception:  # noqa: BLE001 - focus is best-effort before run().
             pass
         self._invalidate()
-        return await future
+        try:
+            return await future
+        finally:
+            # Cancellation belongs to this request, not to the next one. A
+            # stale modal would make the next request look concurrent and the
+            # legacy guard above would turn it into an unrelated denial.
+            if self._modal is modal:
+                self._modal = None
+                if not future.done():
+                    future.cancel()
+                try:
+                    self._app.layout.focus(self._input_control)
+                except Exception:  # noqa: BLE001 - focus is best-effort.
+                    pass
+                self._invalidate()
 
     def _modal_move(self, delta: int) -> None:
         if self._modal is not None:
@@ -746,10 +839,15 @@ class ReplTui:
         if modal is None:
             return 40
         _, columns = self.terminal_size()
-        longest = max(
-            [len(modal.title), *(len(opt.label) + 4 for opt in modal.options), 28]
+        preferred = max(
+            [
+                display_width(modal.title),
+                *(display_width(opt.label) + 4 for opt in modal.options),
+                28,
+            ]
         )
-        return max(28, min(longest + 4, columns - 6, 72))
+        available = max(10, columns - 6)
+        return max(10, min(preferred + 4, available, 72))
 
     def _modal_fragments(self) -> FormattedText:
         modal = self._modal
@@ -759,7 +857,8 @@ class ReplTui:
         frags: list[tuple[str, str]] = []
 
         def row(style: str, text: str) -> None:
-            body = text[:inner].ljust(inner)
+            body = clip_display(text, inner)
+            body += " " * max(0, inner - display_width(body))
             frags.append(("class:modal.frame", "│ "))
             frags.append((style, body))
             frags.append(("class:modal.frame", " │\n"))
@@ -775,9 +874,20 @@ class ReplTui:
             selected = pos == modal.index
             marker = "▸ " if selected else "  "
             style = "class:modal.option.selected" if selected else "class:modal.option"
-            row(style, f"{marker}{pos + 1}. {opt.label}")
+            prefix = f"{marker}{pos + 1}. "
+            continuation = " " * len(prefix)
+            wrapped = textwrap.wrap(
+                opt.label,
+                max(1, inner - len(prefix)),
+                break_on_hyphens=False,
+            ) or [""]
+            row(style, prefix + wrapped[0])
+            for line in wrapped[1:]:
+                row(style, continuation + line)
         row("class:modal.frame", "")
-        row("class:modal.hint", "↑/↓ move · 1-9 pick · enter confirm · esc deny")
+        hint = "↑/↓ move · 1-9 pick · enter confirm · esc deny"
+        for line in textwrap.wrap(hint, max(1, inner), break_on_hyphens=False) or [""]:
+            row("class:modal.hint", line)
         frags.append(("class:modal.frame", "╰" + "─" * (inner + 2) + "╯"))
         return FormattedText(frags)
 
@@ -849,10 +959,7 @@ class ReplTui:
                     self._known_width = width
                     self._reflow_deadline = time.monotonic() + _RESIZE_DEBOUNCE_SECONDS
                     continue
-                if (
-                    self._reflow_deadline is not None
-                    and time.monotonic() >= self._reflow_deadline
-                ):
+                if self._reflow_deadline is not None and time.monotonic() >= self._reflow_deadline:
                     self._reflow_deadline = None
                     self._reflow_scrollback()
         except asyncio.CancelledError:  # pragma: no cover - cooperative stop
@@ -940,17 +1047,36 @@ class ReplTui:
         self._publish_event_main(event)
 
     def _publish_event_main(self, event: TranscriptEvent) -> None:
-        # Keep the semantic model as the ordered record (tests + reflow grouping).
-        self.transcript.publish(event)
         if event.replace_key and event.kind != TranscriptKind.USER_MESSAGE:
-            # A live slot (streaming answer / plan checklist): redraw in the dock.
-            self._live[(event.turn_id, event.replace_key)] = event
+            key = (event.turn_id, event.replace_key)
+            # Codex ``flush_active_cell``: commit only this in-flight slot so
+            # the answer / plan live keys are not dragged into scrollback early.
+            if event.state == TRACE_COMMIT_STATE:
+                self._live.pop(key, None)
+                stable = replace(event, replace_key="", state="", final=False)
+                self.transcript.publish(stable)
+                self._commit_event(stable)
+                self._invalidate()
+                return
+            if event.state == TRACE_DROP_STATE:
+                self._live.pop(key, None)
+                self._invalidate()
+                return
+            # A live slot (streaming answer / plan checklist) is provisional dock
+            # state, not durable transcript history.  Recording its first frame
+            # here would pin the eventual final value to that early position;
+            # resize reflow would then move the answer above tool events that
+            # actually completed before it.  Stabilize it only when flushed or
+            # finalized so the semantic model and native scrollback share one
+            # chronology.
+            self._live[key] = event
             if event.final:
                 self._commit_answer_final(event)
             else:
                 self._invalidate()
             return
         # Everything else is stable: commit straight to native scrollback.
+        self.transcript.publish(event)
         self._commit_event(event)
 
     def _tail_visible(self) -> bool:
@@ -999,8 +1125,11 @@ class ReplTui:
         turn_id = event.turn_id
         answer_key = (event.turn_id, event.replace_key)
         for key in [k for k in self._live if k[0] == turn_id and k != answer_key]:
-            self._commit_event(self._live.pop(key))
+            sibling = self._live.pop(key)
+            self.transcript.publish(sibling)
+            self._commit_event(sibling)
         self._live.pop(answer_key, None)
+        self.transcript.publish(event)
         self._commit_event(event)
         self._invalidate()
 
@@ -1010,6 +1139,7 @@ class ReplTui:
         pending = list(self._live.values())
         self._live.clear()
         for event in pending:
+            self.transcript.publish(event)
             self._commit_event(event)
         self._invalidate()
 
@@ -1162,24 +1292,51 @@ class ReplTui:
         return self.terminal_size()[1]
 
     def set_status(self, text: str) -> None:
-        self._runtime_status = " ".join(str(text).split())
+        # The status may arrive as up to three newline-separated lines (redesign
+        # dynamic region). Line 1 goes to the footer beside the spinner; the rest
+        # render in the detail strip above it. Each line collapses its own inner
+        # whitespace, so a single-line status is unchanged from before.
+        lines = [" ".join(line.split()) for line in str(text).split("\n")]
+        lines = [line for line in lines if line]
+        self._runtime_status = lines[0] if lines else ""
+        self._status_detail = lines[1 : 1 + _STATUS_DETAIL_MAX]
         self._invalidate()
+
+    def _status_detail_visible(self) -> bool:
+        # Hidden when idle or when a modal owns the dock, so the "still running"
+        # strip never lingers beside a confirmation prompt.
+        return bool(self._status_detail) and self._modal is None
+
+    def _status_detail_fragments(self) -> FormattedText:
+        if not self._status_detail:
+            return FormattedText([])
+        width = max(1, self.terminal_size()[1])
+        lines = [clip_display(line, width) for line in self._status_detail]
+        return FormattedText([("class:dock.meta", "\n".join(lines))])
 
     def _last_answer_text(self) -> str:
         """Raw text of the most recent assistant answer, or '' if none yet.
 
-        Prefers the streaming-answer slot (``ANSWER_REPLACE_KEY``) but also accepts
-        any committed markdown cell, so ``/copy`` works the moment a turn produces
-        prose — before or after finalize.
+        Prefers the streaming-answer slot (``ANSWER_REPLACE_KEY``) and only then
+        falls back to any committed markdown cell, so ``/copy`` works the moment a
+        turn produces prose — before or after finalize. The two passes are what
+        make "prefers" true: the task card that follows an answer now renders its
+        report deliverables as markdown too, and a single reversed scan matching
+        either condition would hand the user a preview instead of the answer.
         """
-        for event in reversed(self.transcript.entries):
-            if not isinstance(event.payload, str):
-                continue
-            if event.replace_key == ANSWER_REPLACE_KEY or event.kind == TranscriptKind.MARKDOWN:
+
+        def newest(match: Callable[[TranscriptEvent], bool]) -> str:
+            for event in reversed(self.transcript.entries):
+                if not isinstance(event.payload, str) or not match(event):
+                    continue
                 text = normalize_output(event.payload).strip("\n")
                 if text.strip():
                     return text
-        return ""
+            return ""
+
+        return newest(lambda event: event.replace_key == ANSWER_REPLACE_KEY) or newest(
+            lambda event: event.kind == TranscriptKind.MARKDOWN
+        )
 
     @staticmethod
     def _osc52_sequence(text: str) -> str:
@@ -1188,49 +1345,91 @@ class ReplTui:
         encoded = base64.b64encode(payload).decode("ascii")
         return f"\x1b]52;c;{encoded}\x07"
 
-    def _emit_osc52(self, text: str) -> None:
+    def _emit_osc52(self, text: str) -> str | None:
         """Write an OSC 52 clipboard sequence straight to the terminal.
 
         OSC 52 produces no visible output and never moves the cursor, so — unlike
         a dock repaint — it does not disturb an in-progress native selection.
+        Returns an error message when the write fails, otherwise ``None``.
         """
         sequence = self._osc52_sequence(text)
         output = self._app.output
+        error: list[str] = []
 
         def _writer() -> None:
             try:
                 output.write_raw(sequence)
                 output.flush()
-            except (OSError, ValueError):  # pragma: no cover - terminal closed
-                pass
+            except (OSError, ValueError) as exc:  # pragma: no cover - terminal closed
+                error.append(str(exc) or exc.__class__.__name__)
 
         loop = getattr(self._app, "loop", None)
         if loop is None or not self._app.is_running:
             _writer()
-            return
+            return error[0] if error else None
         try:
             running = asyncio.get_running_loop()
         except RuntimeError:
             running = None
         if running is loop:
             _writer()
+            return error[0] if error else None
+        loop.call_soon_threadsafe(_writer)
+        return None
+
+    def _report_copy_notice(self, message: str, *, ok: bool) -> None:
+        """Record a durable copy result in scrollback (Codex ``/copy`` notice).
+
+        The footer status is complementary and still invisible while idle; the
+        transcript line is what the user can confirm after the fact. Composer
+        focus and the draft are left untouched.
+        """
+        from rich.markup import escape
+
+        self.set_status(message)
+        if ok:
+            kind = TranscriptKind.STATUS
+            payload = f"[{theme.ACCENT}]·[/{theme.ACCENT}] {escape(message)}\n"
         else:
-            loop.call_soon_threadsafe(_writer)
+            kind = TranscriptKind.ERROR
+            payload = f"[{theme.CAUTION}]![/{theme.CAUTION}] {escape(message)}\n"
+        self.publish_event(TranscriptEvent(kind=kind, payload=payload, final=True))
 
     def copy_last_answer(self) -> bool:
         """Copy the latest assistant answer to the clipboard via OSC 52.
 
         A deterministic alternative to a mouse selection (Codex ``Ctrl+O``
-        parity): the copy always succeeds regardless of what — if anything — is
-        selected, and the visible "copied" status confirms it so the user is never
-        left guessing. Returns ``True`` when there was an answer to copy.
+        parity): the copy does not depend on a mouse selection. Success and
+        failure are committed to native scrollback — the same notice channel
+        ``/mode`` uses — so the user is never left guessing. Returns ``True``
+        only when the write was attempted and succeeded.
         """
         text = self._last_answer_text()
         if not text:
-            self.set_status("no answer to copy yet")
+            self._report_copy_notice(
+                "no answer to copy yet · ask a question first",
+                ok=False,
+            )
             return False
-        self._emit_osc52(text)
-        self.set_status("copied last answer")
+        if len(text) > _OSC52_MAX_CHARS:
+            self._report_copy_notice(
+                "copy failed · answer too long for OSC 52 "
+                f"({len(text):,} chars; max {_OSC52_MAX_CHARS:,}); "
+                "select the answer in the terminal instead",
+                ok=False,
+            )
+            return False
+        error = self._emit_osc52(text)
+        if error:
+            self._report_copy_notice(
+                f"copy failed · {error}; select the answer in the terminal instead",
+                ok=False,
+            )
+            return False
+        self._report_copy_notice(
+            f"copied last answer ({len(text):,} characters)",
+            ok=True,
+        )
         return True
 
     def _has_foldable_output(self) -> bool:
@@ -1243,8 +1442,7 @@ class ReplTui:
 
     def _has_collapsed_foldable_output(self) -> bool:
         return any(
-            event.foldable and not self._event_expanded(event)
-            for event in self.transcript.entries
+            event.foldable and not self._event_expanded(event) for event in self.transcript.entries
         )
 
     def toggle_transcript_folding(self) -> bool:
@@ -1272,6 +1470,7 @@ class ReplTui:
         self.transcript.clear()
         self._turn_inputs.clear()
         self._live.clear()
+        self._status_detail = []
         self._last_commit_group = None
         self._foldable_override = None
         self._invalidate()
@@ -1285,7 +1484,14 @@ class ReplTui:
                 pass
         self._invalidate()
 
-    def footer_text(self) -> str:
+    def footer_text(self, width: int | None = None) -> str:
+        """Hint strip. ``width is None`` is the full logical line (tests, wide terminals)."""
+        parts = self._footer_parts()
+        if width is None:
+            return " · ".join(parts)
+        return " · ".join(fit_hint_parts(parts, width, drop_order=self._footer_drop_order()))
+
+    def _footer_parts(self) -> list[str]:
         if self._busy:
             status = self._runtime_status or "working"
             if self._busy_started is not None:
@@ -1302,14 +1508,37 @@ class ReplTui:
         if self._has_foldable_output():
             action = "expand" if self._has_collapsed_foldable_output() else "collapse"
             parts.insert(-1, f"Ctrl+T {action}")
-        return " · ".join(parts)
+        return parts
+
+    def _footer_drop_order(self) -> tuple[str, ...]:
+        extras: list[str] = []
+        if self._has_foldable_output():
+            action = "expand" if self._has_collapsed_foldable_output() else "collapse"
+            extras.append(f"Ctrl+T {action}")
+        if self._busy:
+            return ("Tab queue", "Enter steer", *extras, "Ctrl+D exit")
+        return ("select to copy", "Ctrl+J newline", *extras, "Ctrl+D exit", "Enter send")
 
     def footer_fragments(self) -> FormattedText:
-        text = self.footer_text()
+        columns = self.terminal_size()[1]
         if self._busy:
             frame = _SPINNER_FRAMES[int(time.monotonic() * _SPINNER_FPS) % len(_SPINNER_FRAMES)]
-            return FormattedText([("class:dock.spinner", f" {frame} "), *self._shimmer(text)])
-        return FormattedText([("class:dock.footer", f" {text}")])
+            prefix = f" {frame} "
+            text = self.footer_text(width=max(0, columns - display_width(prefix)))
+            return FormattedText([("class:dock.spinner", prefix), *self._shimmer(text)])
+        # Idle hints are the strip the user reads to learn the keys, so the keys
+        # are what carries the colour; one uniform grey gave the eye nowhere to land.
+        text = self.footer_text(width=max(0, columns - 1))
+        mode, separator, hints = text.partition(" · ")
+        fragments: list[tuple[str, str]] = [("class:dock.footer", " "), ("class:dock.mode", mode)]
+        if separator:
+            fragments.append(("class:dock.footer", separator))
+            fragments.extend(
+                theme.hint_fragments(
+                    hints, key_class="class:dock.key", label_class="class:dock.footer"
+                )
+            )
+        return FormattedText(fragments)
 
     def _shimmer(self, text: str) -> list[tuple[str, str]]:
         """Sweep a bright band across the leading status label (Codex shimmer)."""
@@ -1327,16 +1556,29 @@ class ReplTui:
         return fragments
 
     def meta_text(self) -> str:
+        width = self.terminal_size()[1]
+        model = clip_display(self._model, 24) if self._model else ""
+        focus = center_truncate_path(self._focus, 22 if width >= 112 else 16) if self._focus else ""
         parts: list[str] = []
-        if self._model:
-            parts.append(self._model)
-        if self._focus:
-            parts.append(self._focus)
+        if model:
+            parts.append(model)
+        if focus:
+            parts.append(focus)
         if self._context_window:
-            parts.append(f"ctx {self._context_tokens}/{self._context_window}")
+            parts.append(
+                f"ctx {compact_number(self._context_tokens)}/{compact_number(self._context_window)}"
+            )
         if self._last_elapsed_seconds is not None:
             parts.append(f"last {self._last_elapsed_seconds:.1f}s")
-        return (" · ".join(parts) + " ") if parts else ""
+        if not parts:
+            return ""
+        drop_order = tuple(part for part in (focus, model) if part)
+        fitted = fit_hint_parts(parts, max(0, width - 1), drop_order=drop_order)
+        return (" · ".join(fitted) + " ") if fitted else ""
+
+    def _placeholder_text(self) -> str:
+        # Frame chrome plus the ``› `` prompt; keep the hint on one composer line.
+        return placeholder_for_width(max(1, self.terminal_size()[1] - 6))
 
     def _prompt_fragments(self) -> FormattedText:
         # A leading ``!`` puts the composer in shell intent: show a distinct
@@ -1362,9 +1604,7 @@ class ReplTui:
         self._sink_context.__enter__()
         try:
             self._keyboard_protocol.start()
-            self._app_task = asyncio.create_task(
-                self._app.run_async(set_exception_handler=False)
-            )
+            self._app_task = asyncio.create_task(self._app.run_async(set_exception_handler=False))
             self._resize_task = asyncio.create_task(self._watch_resize())
             await asyncio.sleep(0)
             if self._app_task.done():
@@ -1442,6 +1682,7 @@ def _normalize_output(text: str) -> str:
 
 
 __all__ = [
+    "TERMINAL_TURN_STATES",
     "ApprovalOption",
     "DataTableData",
     "ReplInterrupt",

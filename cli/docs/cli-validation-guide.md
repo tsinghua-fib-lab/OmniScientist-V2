@@ -16,6 +16,10 @@ omni -P skill-verify skills examples
 
 > Real multi-step intent recognition and workflow planning require a real model. The `mock`
 > provider is useful for deterministic tool tests, but it is not a full planner.
+>
+> `omni exec` in these scenarios is workspace-auto: in-workspace writes and sandboxed
+> `bash` / `run_compute` run without a TTY prompt. Use `omni exec --ask` when you want
+> to exercise the approval loop.
 
 ## Core Validation Loop
 
@@ -45,27 +49,17 @@ Expected result:
 - Completed steps keep their structured results even if a later step fails.
 - Recoverable failures include `status`, `error`, `summary`, and partial outputs.
 
-## Objective Provider and Deliverable Acceptance
+## Objective Provider Binding and Settlement
 
 This suite validates the boundary between model planning and execution without a central semantic
 preference interpreter. The host decides only objective legality, provenance, policy, and replay
-safety. The model chooses semantics from exact provider schemas; providers assess their own output;
-the verifier enforces the resulting typed evidence.
+safety. The model chooses semantics from exact provider schemas and judges its own results; the host
+settles the turn against what the durable record shows.
 
 ### Runtime controls
 
-Objective JSON Schema and resolver-evidence validation are always fail-closed. Only the optional
-single repair call is configurable:
-
-```toml
-[planner]
-model_repair = "auto"          # off | allowlist | auto
-model_repair_capabilities = ["artifact.figure"]  # used only by allowlist
-```
-
-`off` disables the additional model call, not validation. `allowlist` permits a repair for named
-capabilities; `auto` permits it for trusted exact full-contract providers. Neither mode can patch
-resolver-owned facts, provider identity, policy, DAG structure, approval state, or budgets.
+Objective JSON Schema and resolver-evidence validation are always fail-closed, and neither is
+configurable.
 
 ### Revision truth and exact provider binding
 
@@ -87,7 +81,7 @@ plan.revision.accepted (exactly one final authority)
 plan.validated
 plan.execution.bound
 plan/tool/workflow execution events
-verification.<passed|degraded|failed|needs_input|skipped>
+task.<succeeded|degraded|failed|needs_input|cancelled|interrupted>
 ```
 
 Check the JSON rather than display text:
@@ -145,58 +139,54 @@ proof, and the model cannot patch or manufacture resolver evidence.
 
 Required assertions:
 
-- findings identify the exact provider source/contract and a patchable JSON Pointer;
+- findings identify the exact provider source/contract and a precise JSON Pointer;
 - nested enum findings include allowed and actual values;
 - provider-neutral scalar aliases still compile, while exact full contracts reject unknown keys;
 - resolver evidence is scoped to provider binding + field + value and is rechecked before dispatch;
 - stale, mismatched, missing, or insufficient evidence blocks provider execution.
 
-### One bounded objective repair
+There is no pre-execution repair rung: a rejected plan goes to the deterministic recovery ladder
+(safety hard stop, `needs_input` for one user-suppliable field, otherwise the ReAct floor), never
+back to the model for a patch. A schema-valid semantic preference never opens a finding at all.
 
-A healthy turn uses only the original planning call. If and only if a finding is an objective
-schema error on a model-owned provider field, Omni may make one `submit_plan_patch` call. The
-repair prompt contains the user request, minimal findings/current values, and sanitized complete
-schemas for the exact selected providers. It excludes the full plan, provider-input cache, policy,
-approval state, secrets, and unrelated provider contracts.
+### Settlement, not deliverable grading
 
-The candidate must use allowlisted paths, keep provider identity/DAG/deliverables intact, clear
-every targeted finding after full recompile, introduce no blocker, and strictly improve the
-finding score. Otherwise it is audited as rejected and normal recovery continues.
+The host does not grade the produced output. `runtime/settlement.py` reads durable rows and decides
+a terminal status; the model, which can see the tool results, owns everything about quality.
 
-```bash
-.venv/bin/pytest -q cli/tests/agent/test_model_plan_repair_contract.py
-```
+Settlement rules are intentionally narrow:
 
-Required assertions: zero repair calls for healthy, mock, offline, and scripted runs; at most one
-for an eligible error; stale hashes, resolver paths, provider identity changes, and non-improving
-patches are rejected. A schema-valid semantic preference never opens a repair finding.
+- submitted subtasks or workflow runs still active ⇒ `pending`, and the task stays running;
+- on an outbound channel, no `presentation.sent|degraded|failed` event yet ⇒ `pending`;
+- a `VerificationPlan.required_events` name with no matching event is an unfounded claim ⇒ `failed`;
+- lost, cancelled, interrupted, or unaccounted-for children ⇒ `failed`; `degraded` children ⇒
+  `degraded`;
+- a budget-bounded stop on `execution.finished`/`react.finished` ⇒ `degraded`;
+- after the turn ends, a `VerificationPlan.required_outputs` name with no matching artifact on
+  *this* task ⇒ `degraded` (`undelivered_outputs`). A sidecar `.dot`/`.json` does not satisfy
+  `artifact.figure`.
 
-### Provider-owned quality and deliverable verification
+A skill engine may still put a `deliverable_assessment` block in its own result. It is provider
+self-reporting for the model to read; nothing in the host matches it against a contract.
 
-Selected skills declare `metadata.helixforge.quality_contract`. A provider emits
-`omni.deliverable-assessment/v1` after execution with effective inputs, criterion statuses,
-evidence references, feedback, and retryability. The host overwrites identity from the sealed
-step, so acceptance binds to the exact deliverable, step, provider source/version, and contract
-hash rather than trusting provider-supplied identity.
-
-Verification rules are intentionally explicit:
-
-- a required assessment or criterion that is missing fails;
-- a `failed` criterion fails;
-- `unknown` and `degraded` produce a degraded verdict and remain visible;
-- only an identity-matched `passed` criterion satisfies the task contract;
-- the verifier does not contain per-domain language, layout, figure-kind, or review-mode rules.
-
-A provider assessment can request one retry, but admission requires all of: retryable assessment,
-contract opt-in, replay-safe concrete provider, remaining max-one budget, and an idempotency key
-when side effects may have committed. The count is durable across process restart and feedback is
-sent only through a provider-declared field.
+Check `task show <id> --json`: the terminal outcome is the `task.<status>` event plus the task row
+status. There are no `verification.*` events.
 
 ```bash
 .venv/bin/pytest -q \
-  cli/tests/agent/test_provider_quality_contracts.py \
-  cli/tests/runtime/test_deliverable_assessment.py \
+  cli/tests/agent/test_turn_completion.py \
+  cli/tests/agent/test_trust_closure.py \
   cli/tests/agent/test_workflow_runtime.py
+```
+
+### Model-owned plan checklist
+
+`update_plan` is the model's own step list, not a host contract. Run a multi-step request with
+`--verbose` and watch the `☐ / ▸ / ✔` checklist appear and update in place; the model replaces it
+wholesale each call, and a single-step request should produce no checklist at all.
+
+```bash
+.venv/bin/pytest -q cli/tests/agent/test_update_plan_tool.py
 ```
 
 ### Legacy persisted-plan compatibility
@@ -204,8 +194,8 @@ sent only through a provider-declared field.
 Old task snapshots may contain the retired `requested_constraints` and `binding_records` arrays.
 Validate by loading an old fixture and inspecting `task show --json`: the historical bytes/hash
 remain readable, but the arrays are opaque. They must not create resolver evidence, provider
-identity, patch authority, recovery behavior, or a passing deliverable assessment. New
-plan-schema-v2 snapshots keep the compatibility arrays empty and never populate them.
+identity, recovery behavior, or a settled status. New plan-schema-v2 snapshots keep the
+compatibility arrays empty and never populate them.
 
 ### Execution gateway and replay safety
 
@@ -232,8 +222,8 @@ Start a long-running turn in the interactive CLI. While it is active:
 5. During a deterministic workflow, Enter becomes one next-turn item; detached steering creates no
    orphan control.
 
-Normal verbosity shows planning, executing, verifying, and the terminal result. A successful
-objective repair must not expose internal finding codes or a failure-looking warning. Use verbose
+Normal verbosity shows planning, executing, and the terminal result. A finding a recovery rung
+absorbed must not expose internal finding codes or a failure-looking warning. Use verbose
 mode or task JSON for revision and finding details.
 
 ```bash
@@ -252,15 +242,12 @@ Run the migrated end-to-end corpus and focused contracts:
   cli/tests/agent/test_objective_provider_contract.py \
   cli/tests/agent/test_provider_binding_contract.py \
   cli/tests/agent/test_resolver_evidence.py \
-  cli/tests/agent/test_model_plan_repair_contract.py \
-  cli/tests/agent/test_provider_quality_contracts.py \
-  cli/tests/runtime/test_deliverable_assessment.py
+  cli/tests/agent/test_turn_completion.py
 ```
 
 The corpus must include non-vacuous cases for exact-source collisions, nested objective errors,
-ungrounded resolver values, a valid one-patch repair, rejected patches, assessment identity drift,
-missing/unknown/degraded quality, admitted replay-safe retry, refused unsafe retry, and legacy
-read-only plans. It also requires accepted/persisted/execution-bound hash equality and zero
+ungrounded resolver values, schema-valid semantic preferences that must *not* block execution, and
+legacy read-only plans. It also requires accepted/persisted/execution-bound hash equality and zero
 duplicate non-replay-safe executions.
 
 ## Under-Specified Workflow Check
@@ -341,9 +328,9 @@ Expected result:
 
 These checks validate local config, QR/pairing generation, credential handling, and daemon
 management. Full IM round-trips still require real platform apps/gateways and should be run as a
-manual platform test. They run the same on macOS, Linux, and Windows; `--credential-store file` is
-the cross-platform form (required on Windows/Linux, optional on macOS where the Keychain is the
-default). On Windows run the same commands in PowerShell (`$env:FEISHU_APP_SECRET`).
+manual platform test. They run the same on macOS, Linux, and Windows. Real usage needs no storage
+flag; `--credential-store file` is pinned below only so a validation run never writes to the
+tester's Keychain. On Windows run the same commands in PowerShell (`$env:FEISHU_APP_SECRET`).
 
 ```bash
 omni -P skill-verify channel add feishu
@@ -365,7 +352,8 @@ Expected result:
   channel config, and creates a short-lived `/pair <code>`.
 - `channel test` confirms required config fields and SDK availability; it is not a live platform
   message round-trip.
-- `serve start/status/stop` manages the per-workspace daemon and writes logs under `<OMNI_HOME>/logs/`;
+- `serve start/status/stop` manages the single home service for this `OMNI_HOME` (not a
+  per-workspace daemon) and writes logs under `<OMNI_HOME>/logs/`;
   enabled channel adapters are reconciled dynamically from channel config.
 
 ## Research Object Model Checks
@@ -472,13 +460,22 @@ cd skills/arxiv-fetch
 python3 scripts/run.py --json '{"identifier":"1706.03762"}'
 
 cd ../scientific-figure
-python3 scripts/run.py --json '{"input":"RAG system architecture with query, retriever, reranker, LLM","output_dir":"/tmp/rag-fig"}'
+python3 scripts/run.py --json-file payload.json
 
 cd ../livefigure
 python3 scripts/run.py --self-test
 
 cd ../research-pptx
 python3 scripts/run.py --self-test
+```
+
+On Windows PowerShell, write the payload as UTF-8 and pass `--json-file`. Do not
+use `--json '{"..."}'` — PowerShell strips the inner quotes, and a legacy
+console code page rewrites Chinese `output_dir` values to `????`.
+
+```powershell
+python3 scripts/run.py --json-file payload.json
+Get-Content -Raw -Encoding utf8 payload.json | python3 scripts/run.py
 ```
 
 Expected result:
@@ -490,26 +487,24 @@ Expected result:
 
 ## Final Acceptance Checklist
 
-- The objective-provider-quality offline corpus exercises exact schema, ResolverEvidence, bounded
-  repair, provider assessment, quality retry, and legacy-read compatibility without network access.
+- The objective-provider offline corpus exercises exact schema, ResolverEvidence, exact provider
+  sealing, and legacy-read compatibility without network access.
 - Changed executable Python lines under `cli/src/omni/**/*.py` meet the independent 80% coverage
   gate with resolved baseline/candidate provenance and a complete uploaded report.
 - Accepted, persisted, approval-bound, and execution-bound plan hashes agree.
-- Every consumer is bound to the exact provider source/version/contract hash; final binding and
-  assessment identity must match it.
-- Healthy plans add no repair call; an eligible objective schema error uses at most one
-  host-allowlisted patch; resolver facts are never model-repairable.
-- Missing/failed required assessments fail; unknown/degraded assessments remain degraded; only an
-  identity-matched provider pass satisfies a deliverable.
-- Quality retry is max one, replay-safe, and side-effect-aware; side-effecting retries require an
-  idempotency key and non-replay-safe providers are never duplicated.
+- Every consumer is bound to the exact provider source/version/contract hash, and the final binding
+  must match it.
+- Planning adds no repair call; a rejected plan is handled by the deterministic recovery ladder, and
+  resolver facts are never model-repairable.
+- A turn that claims a side effect without the matching event settles `failed`; an active child
+  keeps the task running instead of publishing an unearned status.
 - Gateway contract and replay-safety tests prove malformed output schemas cannot reach
   authorization/hooks/provider execution, external references are never fetched, and
   non-replay-safe operations are never duplicated.
 - Provider root/nested/renewal/latest authority, runtime closure, recovery continuity, and retry
   idempotency all meet their non-zero case floors with zero errors.
-- Legacy persisted arrays are readable only; they create no evidence, binding, repair authority, or
-  verification pass, and new plan-schema-v2 snapshots keep them empty.
+- Legacy persisted arrays are readable only; they create no evidence, binding, recovery authority,
+  or settled status, and new plan-schema-v2 snapshots keep them empty.
 - Revocable gateway leases prevent copied contexts from retaining authority; delegated authority is
   exact-target and one-shot.
 - Busy Enter/Tab/Esc behavior and 10,000 independent finish/insert interleavings have no lost or

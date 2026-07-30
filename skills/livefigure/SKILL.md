@@ -1,17 +1,17 @@
 ---
 name: livefigure
-description: Generate one high-fidelity, editable scientific figure as a single-slide PPTX using an owner-configured vision model and python-pptx. Use for LiveFigure or explicitly editable single-slide diagrams; do not use for complete multi-slide presentations or ordinary SVG/PNG diagrams.
+description: Prefer this skill for architecture, system, and workflow diagrams as one editable PPTX. Requires owner VLM (`omni config vlm`). Fall back to scientific-figure only if VLM is unavailable or the user wants DOT/SVG/PNG. Do not use for complete multi-slide decks (research-pptx).
 license: Apache-2.0
 metadata:
   helixforge:
-    version: "1.0"
+    version: "1.1"
     dependencies: ["python>=3.11", "httpx>=0.27", "python-pptx>=1.0.2"]
     allowed_tools: [write_file, bash, read_file, log_run]
     tier: research
     role: task
     research_contract: portable_provenance_v1
     status: stable
-    priority: 90
+    priority: 110
     delivery_mode: async_task
     kind: python_engine
     execution:
@@ -26,6 +26,9 @@ metadata:
       - artifact.pptx
       - figure.livefigure
       - figure.editable
+    default_for:
+      - architecture diagram
+      - system diagram
     deliverables:
       - artifact.pptx
     engine:
@@ -71,8 +74,16 @@ metadata:
         error_info: {type: object}
       required: [status]
     trigger:
-      phrases: ["LiveFigure", "single editable PPTX", "editable PPTX scientific figure", "one-slide editable scientific figure"]
-      when_to_use: "Use only for an explicitly editable single-slide PPTX scientific figure. Use research-pptx for a complete or multi-slide deck, and scientific-figure for ordinary SVG/PNG diagrams."
+      phrases:
+        - LiveFigure
+        - architecture diagram
+        - system diagram
+        - workflow schematic
+        - flowchart
+        - single editable PPTX
+        - editable PPTX scientific figure
+        - one-slide editable scientific figure
+      when_to_use: "Prefer livefigure for architecture, system, workflow, and schematic figures. Requires configured VLM (`omni config vlm`). Use scientific-figure only as fallback for Graphviz DOT/SVG/PNG, topology revision via source_artifact_dot, or when VLM is not configured. Use research-pptx for a complete or multi-slide deck."
     notification:
       display_label: "LiveFigure PPTX"
       title_field: "title"
@@ -84,12 +95,20 @@ metadata:
 
 # LiveFigure
 
+Prefer this skill over `scientific-figure` for architecture, system, workflow,
+and schematic figures. The deliverable is one editable single-slide PPTX.
+`scientific-figure` is the fallback when the owner has not configured a VLM,
+or when the user asked for Graphviz DOT/SVG/PNG. Use `research-pptx` for a
+complete multi-slide deck. This skill does not claim `artifact.figure`.
+
 Generate one editable PPTX figure from a research requirement. The default
 one-pass workflow asks an OpenAI-compatible multimodal model for constrained
 `python-pptx` source. It never generates a reference image implicitly, renders
 the PPTX to PNG, or performs a visual critic/actor revision loop.
 
-Configure the reusable owner-controlled VLM in Omni before execution:
+A configured owner-controlled VLM is required. If it is missing, Omni stops
+before the engine runs and asks the owner to run `omni config vlm` — do not
+silently switch providers. Configure it once:
 
 ```toml
 # ~/.omni/config.toml

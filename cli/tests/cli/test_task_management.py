@@ -9,9 +9,11 @@ Covers the storage-level operations that back the CLI:
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import text
 
 from omni.config import load_settings
 from omni.runtime.notifications import InboxNotifier
@@ -19,7 +21,14 @@ from omni.runtime.subtask_runtime import SubtaskRuntime
 from omni.runtime.task_recorder import TaskRecorder
 from omni.skills_runtime.registry import SkillRegistry
 from omni.storage.db import get_database
-from omni.storage.models import ArtifactORM, SubtaskORM, TaskEventORM, TaskORM
+from omni.storage.models import (
+    ArtifactORM,
+    SubtaskORM,
+    TaskEventORM,
+    TaskORM,
+    WorkflowRunORM,
+    WorkflowStepORM,
+)
 
 
 async def _runtime():
@@ -178,6 +187,78 @@ async def _seed_task_tree(db, task_id: str, *, status: str = "failed") -> None:
         await s.commit()
 
 
+async def _seed_child_task(
+    db,
+    task_id: str,
+    *,
+    parent_task_id: str,
+    status: str,
+) -> None:
+    """Add a delegated child whose lifecycle must protect its whole tree."""
+    async with db.session() as s:
+        s.add(
+            TaskORM(
+                id=task_id,
+                parent_task_id=parent_task_id,
+                status=status,
+                title=f"child {task_id}",
+                kind="subagent",
+            )
+        )
+        await s.commit()
+
+
+async def _seed_execution(
+    db,
+    task_id: str,
+    *,
+    object_kind: str,
+    status: str = "running",
+) -> None:
+    """Attach one execution object whose active lease protects its owner."""
+    async with db.session() as s:
+        if object_kind == "workflow_run":
+            s.add(
+                WorkflowRunORM(
+                    id=f"run-{task_id}",
+                    task_id=task_id,
+                    goal="active run",
+                    status=status,
+                )
+            )
+        elif object_kind == "workflow_step":
+            s.add(
+                WorkflowRunORM(
+                    id=f"run-{task_id}",
+                    task_id=task_id,
+                    goal="settled run with active step",
+                    status="succeeded",
+                )
+            )
+            await s.flush()
+            s.add(
+                WorkflowStepORM(
+                    id=f"step-{task_id}",
+                    workflow_run_id=f"run-{task_id}",
+                    task_id=task_id,
+                    step_key="active-step",
+                    status=status,
+                )
+            )
+        elif object_kind == "subtask":
+            s.add(
+                SubtaskORM(
+                    id=f"active-sub-{task_id}",
+                    task_id=task_id,
+                    skill_name="x",
+                    status=status,
+                )
+            )
+        else:  # pragma: no cover - test helper contract
+            raise AssertionError(f"unsupported execution object: {object_kind}")
+        await s.commit()
+
+
 @pytest.mark.asyncio
 async def test_delete_task_cascades_to_subtasks_and_events():
     rec, db = await _recorder()
@@ -214,6 +295,27 @@ async def test_delete_task_preserves_artifact_and_clears_direct_owner():
     assert artifact.subtask_id is None
 
 
+@pytest.mark.parametrize("descendant_status", ["running", "recovering", "succeeded"])
+@pytest.mark.asyncio
+async def test_legacy_delete_task_cannot_bypass_descendant_protection(
+    descendant_status: str,
+):
+    """The compatibility bool API must apply the same full-tree policy."""
+    rec, db = await _recorder()
+    await _seed_task_tree(db, "tk_parent", status="failed")
+    await _seed_child_task(
+        db,
+        "tk_child",
+        parent_task_id="tk_parent",
+        status=descendant_status,
+    )
+
+    assert await rec.delete_task("tk_parent") is False
+    async with db.session() as s:
+        assert await s.get(TaskORM, "tk_parent") is not None
+        assert await s.get(TaskORM, "tk_child") is not None
+
+
 @pytest.mark.asyncio
 async def test_clear_tasks_outcome_buckets_and_dry_run():
     rec, db = await _recorder()
@@ -248,6 +350,333 @@ async def test_clear_tasks_force_takes_protected_but_never_running():
     async with db.session() as s:
         assert await s.get(TaskORM, "tk_ok") is None
         assert await s.get(TaskORM, "tk_run") is not None
+
+
+@pytest.mark.parametrize(
+    ("descendant_status", "force", "outcome_bucket"),
+    [
+        ("running", False, "blocked"),
+        ("recovering", True, "blocked"),
+        ("succeeded", False, "protected"),
+        ("degraded", False, "protected"),
+        ("needs_input", False, "protected"),
+        ("awaiting_approval", False, "protected"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_clear_tasks_fail_closed_when_descendant_is_not_deletable(
+    descendant_status: str,
+    force: bool,
+    outcome_bucket: str,
+):
+    """A selectable parent must not bypass protection on an unselected child."""
+    rec, db = await _recorder()
+    await _seed_task_tree(db, "tk_parent", status="failed")
+    await _seed_child_task(
+        db,
+        "tk_child",
+        parent_task_id="tk_parent",
+        status=descendant_status,
+    )
+
+    outcome = await rec.clear_tasks(force=force)
+
+    assert outcome.deleted_total == 0
+    assert getattr(outcome, outcome_bucket).get(descendant_status) == 1
+    async with db.session() as s:
+        assert await s.get(TaskORM, "tk_parent") is not None
+        assert await s.get(TaskORM, "tk_child") is not None
+
+
+@pytest.mark.asyncio
+async def test_clear_tasks_does_not_restart_below_a_protected_intermediate_descendant():
+    """A lower matching row cannot bypass a barrier inside its selected ancestor tree."""
+    rec, db = await _recorder()
+    await _seed_task_tree(db, "tk_root", status="failed")
+    await _seed_child_task(
+        db,
+        "tk_middle",
+        parent_task_id="tk_root",
+        status="succeeded",
+    )
+    await _seed_child_task(
+        db,
+        "tk_leaf",
+        parent_task_id="tk_middle",
+        status="failed",
+    )
+
+    outcome = await rec.clear_tasks(kind=None)
+
+    assert outcome.deleted_total == 0
+    assert outcome.protected.get("succeeded") == 1
+    async with db.session() as s:
+        for task_id in ("tk_root", "tk_middle", "tk_leaf"):
+            assert await s.get(TaskORM, task_id) is not None
+
+
+@pytest.mark.parametrize(
+    ("descendant_status", "force", "outcome_bucket"),
+    [
+        ("running", False, "blocked"),
+        ("recovering", True, "blocked"),
+        ("succeeded", False, "protected"),
+        ("degraded", False, "protected"),
+        ("needs_input", False, "protected"),
+        ("awaiting_approval", False, "protected"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_delete_tasks_fail_closed_when_descendant_is_not_deletable(
+    descendant_status: str,
+    force: bool,
+    outcome_bucket: str,
+):
+    """Explicit deletion applies active/protected policy to the full closure."""
+    rec, db = await _recorder()
+    await _seed_task_tree(db, "tk_parent", status="failed")
+    await _seed_child_task(
+        db,
+        "tk_child",
+        parent_task_id="tk_parent",
+        status=descendant_status,
+    )
+
+    outcome = await rec.delete_tasks(["tk_parent"], force=force)
+
+    assert outcome.deleted_total == 0
+    assert getattr(outcome, outcome_bucket).get(descendant_status) == 1
+    async with db.session() as s:
+        assert await s.get(TaskORM, "tk_parent") is not None
+        assert await s.get(TaskORM, "tk_child") is not None
+
+
+@pytest.mark.asyncio
+async def test_delete_tasks_is_atomic_across_multiple_roots():
+    """One protected tree prevents deletion of every root in the request batch."""
+    rec, db = await _recorder()
+    await _seed_task_tree(db, "tk_blocked_root", status="failed")
+    await _seed_child_task(
+        db,
+        "tk_protected_child",
+        parent_task_id="tk_blocked_root",
+        status="succeeded",
+    )
+    await _seed_task_tree(db, "tk_other_root", status="failed")
+
+    outcome = await rec.delete_tasks(["tk_blocked_root", "tk_other_root"])
+
+    assert outcome.deleted_total == 0
+    assert outcome.protected.get("succeeded") == 1
+    async with db.session() as s:
+        for task_id in ("tk_blocked_root", "tk_protected_child", "tk_other_root"):
+            assert await s.get(TaskORM, task_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_delete_tasks_deduplicates_overlapping_root_closures():
+    """Selecting a root and its child counts/deletes each task exactly once."""
+    rec, db = await _recorder()
+    await _seed_task_tree(db, "tk_root", status="failed")
+    await _seed_child_task(
+        db,
+        "tk_child",
+        parent_task_id="tk_root",
+        status="cancelled",
+    )
+    await _seed_task_tree(db, "tk_other_root", status="interrupted")
+    selected = ["tk_root", "tk_child", "tk_other_root", "tk_root"]
+
+    preview = await rec.delete_tasks(selected, dry_run=True)
+    assert preview.deleted_total == 3
+    async with db.session() as s:
+        for task_id in ("tk_root", "tk_child", "tk_other_root"):
+            assert await s.get(TaskORM, task_id) is not None
+
+    outcome = await rec.delete_tasks(selected)
+    assert outcome.deleted_total == 3
+    async with db.session() as s:
+        for task_id in ("tk_root", "tk_child", "tk_other_root"):
+            assert await s.get(TaskORM, task_id) is None
+
+
+@pytest.mark.parametrize("object_kind", ["workflow_run", "workflow_step", "subtask"])
+@pytest.mark.asyncio
+async def test_delete_tasks_blocks_terminal_task_with_active_execution(object_kind: str):
+    """A stale terminal projection cannot authorize deleting live execution work."""
+    rec, db = await _recorder()
+    await _seed_task_tree(db, "tk_terminal", status="failed")
+    await _seed_execution(db, "tk_terminal", object_kind=object_kind)
+
+    outcome = await rec.delete_tasks(["tk_terminal"])
+
+    assert outcome.deleted_total == 0
+    assert outcome.blocked.get("running") == 1
+    assert len(outcome.blocked_executions) == 1
+    blocker = outcome.blocked_executions[0]
+    assert blocker.task_id == "tk_terminal"
+    assert blocker.object_kind == object_kind.replace("subtask", "skill_execution")
+    assert blocker.status == "running"
+    assert await rec.get_task("tk_terminal") is not None
+
+
+@pytest.mark.asyncio
+async def test_delete_rechecks_state_after_waiting_for_a_concurrent_writer():
+    """The deletion-side write reservation closes the status-check TOCTOU gap."""
+    rec, db = await _recorder()
+    await _seed_task_tree(db, "tk_race", status="failed")
+
+    async with db.session() as writer:
+        await writer.execute(text("BEGIN IMMEDIATE"))
+        row = await writer.get(TaskORM, "tk_race")
+        row.status = "running"
+        await writer.flush()
+        deletion = asyncio.create_task(rec.delete_tasks(["tk_race"]))
+        await asyncio.sleep(0.05)
+        assert not deletion.done()
+        await writer.commit()
+
+    outcome = await deletion
+    assert outcome.deleted_total == 0
+    assert outcome.blocked.get("running") == 1
+    assert await rec.get_task("tk_race") is not None
+
+
+@pytest.mark.asyncio
+async def test_delete_corrupt_parent_cycle_fails_closed():
+    """Malformed ancestry cannot report success while leaving Task rows behind."""
+    rec, db = await _recorder()
+    async with db.session() as session:
+        session.add(
+            TaskORM(
+                id="tk_cycle",
+                parent_task_id="tk_cycle",
+                status="failed",
+                title="cycle",
+                kind="turn",
+            )
+        )
+        await session.commit()
+
+    outcome = await rec.delete_tasks(["tk_cycle"])
+
+    assert outcome.deleted_total == 0
+    assert outcome.retained.get("invalid_task_tree") == 1
+    assert await rec.get_task("tk_cycle") is not None
+
+
+@pytest.mark.parametrize("object_kind", ["workflow_run", "workflow_step", "subtask"])
+@pytest.mark.asyncio
+async def test_clear_tasks_blocks_terminal_task_with_active_execution(object_kind: str):
+    """Filter-based cleanup observes leases below the selected Task row."""
+    rec, db = await _recorder()
+    await _seed_task_tree(db, "tk_terminal", status="failed")
+    await _seed_execution(db, "tk_terminal", object_kind=object_kind)
+
+    outcome = await rec.clear_tasks()
+
+    assert outcome.deleted_total == 0
+    assert outcome.blocked.get("running") == 1
+    assert await rec.get_task("tk_terminal") is not None
+
+
+@pytest.mark.parametrize(
+    ("ancestor_status", "archived", "bucket", "reason"),
+    [
+        ("running", False, "blocked", "running"),
+        ("recovering", False, "blocked", "recovering"),
+        ("succeeded", False, "protected", "succeeded"),
+        ("degraded", False, "protected", "degraded"),
+        ("failed", True, "retained", "archived"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_prunable_clear_cannot_delete_failed_child_below_retained_ancestor(
+    ancestor_status: str,
+    archived: bool,
+    bucket: str,
+    reason: str,
+):
+    """Cleanup never severs a child from an ancestor outside its deletion set."""
+    rec, db = await _recorder()
+    await _seed_task_tree(db, "tk_ancestor", status=ancestor_status)
+    await _seed_child_task(
+        db,
+        "tk_failed_child",
+        parent_task_id="tk_ancestor",
+        status="failed",
+    )
+    if archived:
+        async with db.session() as s:
+            ancestor = await s.get(TaskORM, "tk_ancestor")
+            ancestor.archived_at = datetime.now(UTC)
+            await s.commit()
+
+    outcome = await rec.clear_tasks(kind=None, prunable_only=True)
+
+    assert outcome.deleted_total == 0
+    assert getattr(outcome, bucket).get(reason) == 1
+    async with db.session() as s:
+        assert await s.get(TaskORM, "tk_ancestor") is not None
+        assert await s.get(TaskORM, "tk_failed_child") is not None
+
+
+@pytest.mark.asyncio
+async def test_archived_descendant_is_a_barrier_unless_explicitly_included():
+    """A root cannot implicitly delete hidden history below it."""
+    rec, db = await _recorder()
+    await _seed_task_tree(db, "tk_root", status="failed")
+    await _seed_child_task(
+        db,
+        "tk_archived_child",
+        parent_task_id="tk_root",
+        status="failed",
+    )
+    async with db.session() as s:
+        child = await s.get(TaskORM, "tk_archived_child")
+        child.archived_at = datetime.now(UTC)
+        await s.commit()
+
+    retained = await rec.clear_tasks(include_archived=False)
+    assert retained.deleted_total == 0
+    assert retained.retained.get("archived") == 1
+    async with db.session() as s:
+        assert await s.get(TaskORM, "tk_root") is not None
+        assert await s.get(TaskORM, "tk_archived_child") is not None
+
+    deleted = await rec.clear_tasks(include_archived=True)
+    assert deleted.deleted_total == 2
+    async with db.session() as s:
+        assert await s.get(TaskORM, "tk_root") is None
+        assert await s.get(TaskORM, "tk_archived_child") is None
+
+
+@pytest.mark.asyncio
+async def test_recent_descendant_blocks_deleting_old_root_by_cutoff():
+    """A cutoff applies to every node that the root's FK cascade would remove."""
+    rec, db = await _recorder()
+    await _seed_task_tree(db, "tk_old_root", status="failed")
+    await _seed_child_task(
+        db,
+        "tk_recent_child",
+        parent_task_id="tk_old_root",
+        status="failed",
+    )
+    old = datetime.now(UTC) - timedelta(days=40)
+    cutoff = datetime.now(UTC) - timedelta(days=30)
+    async with db.session() as s:
+        root = await s.get(TaskORM, "tk_old_root")
+        root.created_at = old
+        root.finished_at = old
+        await s.commit()
+
+    outcome = await rec.clear_tasks(before=cutoff)
+
+    assert outcome.deleted_total == 0
+    assert outcome.retained.get("newer_than_cutoff") == 1
+    async with db.session() as s:
+        assert await s.get(TaskORM, "tk_old_root") is not None
+        assert await s.get(TaskORM, "tk_recent_child") is not None
 
 
 @pytest.mark.asyncio
@@ -352,6 +781,6 @@ async def test_housekeep_disabled_by_default_retention():
     rt._settings.tasks.interrupt_stale_after_s = 0  # reconcile off
     rt._settings.tasks.retention_days = 0           # retention off
     out = await rt.housekeep()
-    assert out == {"interrupted": 0, "retention_deleted": 0}
+    assert out == {"interrupted": 0, "retention_deleted": 0, "orphans": 0}
     async with db.session() as s3:
         assert await s3.get(TaskORM, "tk_ancient") is not None

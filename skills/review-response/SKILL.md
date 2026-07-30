@@ -21,16 +21,12 @@ metadata:
     capabilities: [review.response, writing.revision]
     deliverables: [response_letter, cover_letter, revision_package]
     execution:
-      max_iterations: 6
+      max_iterations: 12
       max_tool_calls: 24
       max_seconds: 600
       tool_limits:
         read_file: 8
         web_fetch: 3
-        cite_source: 8
-        write_file: 6
-        package_artifact: 3
-        attach_provenance: 2
     workflow:
       failure_policy: continue_with_partial
       allow_failed_dependencies: true
@@ -196,6 +192,27 @@ directory path.
 When Omni tools are available, use real source and artifact identifiers. In other runtimes,
 include a Markdown **Provenance** section with supplied document paths, journal URLs, citations,
 and artifact paths. Never invent provenance IDs.
+
+## OmniScientist completion contract
+
+This is a `prompt_only` Skill and stays one: drafting a revision response is a
+single reasoning pass, not a measurable multi-stage pipeline, so there are no
+typed stage events to emit and a `python_engine` promotion would add a wrapper
+with nothing to report. Its live progress under OmniScientist is simply the tool
+calls it makes (`read_file`, `web_fetch`, `write_file`); its completion is read
+from the returned result. Keep that result legible to the CLI's closing block:
+
+- Deliverable. Always return a one-line `summary` (decision type, task mode, and
+  what was produced) and any `artifacts` (response letter, cover letter, revision
+  package, or LaTeX). The closing deliverable block reads these fields.
+- Readiness is the completion state. Set `readiness` to exactly one of
+  `ready_to_submit`, `draft_with_placeholders`, `needs_author_input`, or
+  `blocked`. This is the Skill's completion vocabulary — do not report
+  `ready_to_submit` while any `AUTHOR_INPUT_NEEDED` marker remains.
+- Human input. `needs_author_input` / `blocked`, together with the
+  `AUTHOR_INPUT_NEEDED` markers, are the signal that the operator must supply a
+  missing fact before the response can be finished; surface them rather than
+  inventing the fact.
 
 ## External agent portability
 

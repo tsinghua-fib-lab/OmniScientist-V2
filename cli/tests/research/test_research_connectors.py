@@ -230,6 +230,8 @@ def test_openalex_engine_indexes_into_corpus(monkeypatch):
 
     res, chunks = _run(_go())
     assert res["status"] == "ok" and res["indexed"] == 1 and chunks >= 1
+    assert "RAG" in res["summary"]
+    assert "2020 ·" in res["summary"]
 
 
 @pytest.mark.asyncio
@@ -297,7 +299,11 @@ def test_connector_killswitch_disables_engine(monkeypatch):
     async def _fake_search(query, *, rows=8, email=""):
         return [{"title": "x", "summary": "y", "origin": "openalex"}]
 
+    async def _no_arxiv(*_a, **_k):
+        return []
+
     monkeypatch.setattr(connectors, "openalex_search", _fake_search)
+    monkeypatch.setattr("omni.research.arxiv.search", _no_arxiv)
 
     async def _go():
         reg = SkillRegistry(load_settings())

@@ -1,8 +1,0 @@
-{
-  "schema": "scientific-poster.layout-policy.v1",
-  "id": "conference-figure-led",
-  "version": "1.0.0",
-  "purpose": "Figure-led conference composition for papers whose decisive evidence is visual.",
-  "page_modes": ["portrait", "landscape"],
-  "strategies": ["figure-led", "asymmetric", "adaptive-columns"]
-}

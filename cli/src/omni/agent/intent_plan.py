@@ -77,6 +77,11 @@ class ToolPolicy:
     max_tool_calls: int | None = None
     max_iterations: int | None = None
     final_reserve_enabled: bool = True
+    # Require the *opening* model turn to call a tool (vs. "auto"). Used by the
+    # scheduling surface so an ambiguous request is resolved through
+    # ``schedule_task`` (a structured clarification the loop can suspend on)
+    # instead of a prose question that produces no schedule event.
+    require_opening_tool: bool = False
 
     def allows(self, tool_name: str) -> bool:
         if tool_name in self.blocked_tools:
@@ -91,24 +96,26 @@ class ToolPolicy:
 
 @dataclass(slots=True)
 class VerificationPlan:
-    """Executable acceptance contract for one turn.
+    """The durable trace a turn's claims must leave.
 
-    The planner owns intent; the validator/executor owns whether that intent was
-    actually satisfied. Keep this deliberately data-shaped so it can be rendered
-    in every channel and asserted in tests.
+    This used to be an eight-field acceptance contract the host re-graded the
+    finished turn against. The model can see its own tool results, so grading
+    them again from outside only produced a verdict that could disagree with the
+    answer the user was already shown.
+
+    What is left is the one thing the answer cannot vouch for: over IM and in
+    headless runs the user sees prose, not tool calls, so a turn that says it
+    created a schedule has to have left a ``schedule.resolved`` event behind.
+    :mod:`omni.runtime.settlement` checks these names against the event log; a
+    claim with no trace settles ``failed``.
+
+    Named scientific ``required_outputs`` (figure, manuscript, slides) are a
+    contract :mod:`omni.runtime.settlement` checks against artifacts. Prose names
+    such as ``answer`` stay descriptive — the turn's text *is* the answer.
     """
 
     required_outputs: list[str] = field(default_factory=list)
     required_events: list[str] = field(default_factory=list)
-    forbidden_tools: list[str] = field(default_factory=list)
-    required_tasks: list[str] = field(default_factory=list)
-    artifact_checks: list[str] = field(default_factory=list)
-    provenance_checks: list[str] = field(default_factory=list)
-    presentation_checks: list[str] = field(default_factory=list)
-    # Provider-declared quality checks bound to exact contract deliverables.
-    # Domain semantics stay with the provider; the host only aggregates the
-    # resulting typed assessment envelopes.
-    deliverable_checks: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -170,6 +177,12 @@ class IntentPlan:
     verification_plan: VerificationPlan = field(default_factory=VerificationPlan)
     validation_warnings: list[str] = field(default_factory=list)
     degraded_warnings: list[str] = field(default_factory=list)
+    # Presentation-only: a footnote for the user, never a model instruction and
+    # never a degraded warning. Omitted from the hash when empty.
+    user_notices: list[str] = field(default_factory=list)
+    # Presentation-only: the succeeded twin this turn is redoing. Delivery may
+    # attach that task's still-valid contract files; settlement does not.
+    twin_task_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -215,6 +228,10 @@ class IntentPlan:
             "validation_warnings": list(self.validation_warnings),
             "degraded_warnings": list(self.degraded_warnings),
         }
+        if self.user_notices:
+            payload["user_notices"] = list(self.user_notices)
+        if self.twin_task_id:
+            payload["twin_task_id"] = self.twin_task_id
         if self._plan_schema_version_present:
             payload["plan_schema_version"] = int(self.plan_schema_version)
         if self._provider_bindings_present or self.provider_bindings:
@@ -332,6 +349,8 @@ class IntentPlan:
             verification_plan=VerificationPlan(**_known_fields(VerificationPlan, verify)),
             validation_warnings=[str(item) for item in payload.get("validation_warnings") or []],
             degraded_warnings=[str(item) for item in payload.get("degraded_warnings") or []],
+            user_notices=[str(item) for item in payload.get("user_notices") or [] if str(item).strip()],
+            twin_task_id=str(payload.get("twin_task_id") or ""),
         )
 
 

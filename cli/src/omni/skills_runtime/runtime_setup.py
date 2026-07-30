@@ -77,6 +77,49 @@ def _require_supported_node(node: str) -> None:
         )
 
 
+def _which_node() -> str | None:
+    return shutil.which("node") or shutil.which("node.exe")
+
+
+def _which_npm() -> str | None:
+    return shutil.which("npm") or shutil.which("npm.cmd")
+
+
+def _which_pnpm() -> str | None:
+    return shutil.which("pnpm") or shutil.which("pnpm.cmd")
+
+
+def _format_found_node(node: str) -> str:
+    """Describe a resolved Node binary without blaming it for a missing npm."""
+    version = _node_version(node)
+    if version is None:
+        return f"Node is installed ({node})"
+    return f"Node {'.'.join(str(part) for part in version)} is installed"
+
+
+def npm_missing_message(node: str) -> str:
+    """Explain that setup needs npm even when Node (and maybe pnpm) is present.
+
+    Does not suggest installing Node.js — that remedy is reserved for a missing
+    or stale ``node`` binary. Mentions pnpm only as a detected-but-unused tool:
+    this installer stays on ``npm ci`` and the pinned ``package-lock.json``.
+    """
+    parts = [
+        f"research-pptx setup requires npm. {_format_found_node(node)}, "
+        "but npm is not on PATH.",
+        "Setup installs the pinned renderer with `npm ci` against package-lock.json.",
+    ]
+    if _which_pnpm():
+        parts.append(
+            "pnpm is on PATH but cannot consume this lockfile; this setup does not use pnpm."
+        )
+    parts.append(
+        "Install npm (your distro's npm package, or `corepack enable`), "
+        f"then run `{RESEARCH_PPTX_SETUP_COMMAND}`."
+    )
+    return " ".join(parts)
+
+
 def research_pptx_runtime_dir(paths: Any) -> Path:
     """Return the fixed cache path that holds the installed Node renderer."""
     return Path(paths.cache_dir) / "skill-runtimes" / "research-pptx"
@@ -119,19 +162,16 @@ def setup_research_pptx_runtime(
     if not force and _packages_installed(runtime_dir):
         return False
 
-    node = shutil.which("node") or shutil.which("node.exe")
+    node = _which_node()
     if not node:
         raise SkillRuntimeSetupError(
             f"research-pptx setup requires Node.js >= {_MIN_NODE_LABEL}. Install it, then run "
             f"`{RESEARCH_PPTX_SETUP_COMMAND}`."
         )
     _require_supported_node(node)
-    npm = shutil.which("npm") or shutil.which("npm.cmd")
+    npm = _which_npm()
     if not npm:
-        raise SkillRuntimeSetupError(
-            f"research-pptx setup requires npm. Install Node.js >= {_MIN_NODE_LABEL}, then run "
-            f"`{RESEARCH_PPTX_SETUP_COMMAND}`."
-        )
+        raise SkillRuntimeSetupError(npm_missing_message(node))
 
     runtime_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(package_json, runtime_dir / package_json.name)

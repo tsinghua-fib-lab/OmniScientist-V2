@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import select
 import shutil
 import signal
@@ -26,18 +27,46 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _tmux_config_text() -> str:
+    """Build a tmux.conf compatible with old and new tmux versions.
+
+    ``extended-keys`` already uses the xterm encoding consumed by this test on
+    older tmux. Do not set ``extended-keys-format``: that option is absent from
+    some GitHub-hosted runner builds, and version strings are not a reliable
+    capability check across distro backports.
+    """
+    return (
+        "set -g default-terminal 'screen-256color'\n"
+        "set -s extended-keys on\n"
+        "set -g allow-passthrough on\n"
+        "set -as terminal-features 'xterm*:extkeys'\n"
+    )
+
+
+def _tmux_supports_extended_keys() -> bool:
+    """Return whether tmux understands the extended-key options used here."""
+
+    if shutil.which("tmux") is None:
+        return False
+    result = subprocess.run(
+        ["tmux", "-V"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    match = re.search(r"tmux\s+(\d+)\.(\d+)", result.stdout)
+    return bool(match and tuple(map(int, match.groups())) >= (3, 3))
+
+
+@pytest.mark.skipif(
+    not _tmux_supports_extended_keys(),
+    reason="Shift+Enter passthrough requires tmux 3.3 or newer",
+)
 def test_shift_enter_survives_a_real_pty_and_nested_tmux(tmp_path: Path) -> None:
     assert pty is not None
     socket_name = f"omni-test-{uuid.uuid4().hex}"
     config = tmp_path / "tmux.conf"
-    config.write_text(
-        "set -g default-terminal 'screen-256color'\n"
-        "set -s extended-keys on\n"
-        "set -s extended-keys-format xterm\n"
-        "set -g allow-passthrough on\n"
-        "set -as terminal-features 'xterm*:extkeys'\n",
-        encoding="utf-8",
-    )
+    config.write_text(_tmux_config_text(), encoding="utf-8")
     code = (
         "import asyncio\n"
         "from prompt_toolkit import PromptSession\n"
@@ -375,6 +404,10 @@ def test_real_cli_auth_failure_is_actionable_and_keeps_composer_usable(tmp_path:
         "verbosity = \"normal\"\n"
         "\n[memory]\n"
         "embeddings_enabled = false\n"
+        "\n[service]\n"
+        # This test exercises TUI auth UX in a throwaway OMNI_HOME. Never let the
+        # bare-omni ensure hook install a KeepAlive LaunchAgent into the host.
+        "ensure_on_launch = false\n"
         "\n[trust]\n"
         f"allow = [{json.dumps(str(work_dir))}]\n",
         encoding="utf-8",
@@ -482,6 +515,9 @@ def test_real_cli_auth_failure_is_actionable_and_keeps_composer_usable(tmp_path:
             capture_output=True,
             env=env,
         )
+        # Belt-and-suspenders: if an older build still bootstrapped launchd for
+        # this throwaway home, boot it out before tmp_path is deleted.
+        _scrub_ephemeral_home_service(omni_home, env=env, python=sys.executable)
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
@@ -489,6 +525,27 @@ def test_real_cli_auth_failure_is_actionable_and_keeps_composer_usable(tmp_path:
     diagnostics = (omni_home / "logs" / "omni-tui.log").read_text(encoding="utf-8")
     assert "status=401" in diagnostics
     assert "invalid" not in diagnostics.lower()
+
+
+def _scrub_ephemeral_home_service(
+    omni_home: Path, *, env: dict[str, str], python: str
+) -> None:
+    """Best-effort disable + orphan prune for a test OMNI_HOME."""
+    scrub_env = {**env, "OMNI_HOME": str(omni_home)}
+    subprocess.run(
+        [python, "-m", "omni.cli.main", "serve", "stop"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=scrub_env,
+    )
+    subprocess.run(
+        [python, "-m", "omni.cli.main", "serve", "prune", "--orphans", "--yes"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=scrub_env,
+    )
 
 
 def shlex_quote(value: str) -> str:

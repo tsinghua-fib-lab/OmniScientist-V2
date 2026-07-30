@@ -1,11 +1,12 @@
 """Session transcript compaction.
 
 Folds older turns into a single bridge summary once a session exceeds the
-message-count guard or the model-window token budget, after flushing durable
-facts so nothing is lost (Claude/Codex-style auto-compaction). A narrow
-collaborator over the conversation store (transcript I/O), the memory service
-(fact extraction), the LLM (summary), settings (window + autocompact pct), and
-the task recorder (cost metering).
+model-window token budget, after flushing durable facts so nothing is lost
+(Codex-style auto-compaction: compact when the next prompt would not fit,
+not at a message-count heuristic). A narrow collaborator over the conversation
+store (transcript I/O), the memory service (fact extraction), the LLM
+(summary), settings (window + autocompact pct), and the task recorder (cost
+metering).
 """
 
 from __future__ import annotations
@@ -47,22 +48,21 @@ class SessionCompactor:
         self._tasks = tasks
 
     def token_budget(self) -> int:
-        """Transcript token budget = model window × ``memory.autocompact_pct``
-        (model-aware, Claude/Codex-style, rather than a fixed char budget)."""
-        from omni.config.settings import resolve_context_window_tokens
+        """Transcript size that triggers the summary tier (model-aware)."""
+        from omni.config.settings import session_compact_token_budget
 
-        window = resolve_context_window_tokens(self._settings)
-        pct = min(max(float(getattr(self._settings.memory, "autocompact_pct", 0.70) or 0.70), 0.1), 0.95)
-        return max(1, int(window * pct))
+        return session_compact_token_budget(self._settings)
 
     async def maybe_compact(self, session_id: str, *, task_id: str = "") -> None:
         from omni.memory.compaction import estimate_tokens
 
         rows = await self._store.visible_normal_messages(session_id)
         tokens = sum(estimate_tokens(r.content or "") for r in rows)
-        # Two triggers: a message-count guard (many small turns) and the
-        # model-window token budget (few but huge turns). Either folds.
-        if len(rows) <= _COMPACT_THRESHOLD and tokens <= self.token_budget():
+        # Codex: compact only when the next prompt would not fit. A long WeChat
+        # research thread of short turns must not block a two-minute once-
+        # schedule behind fact-extraction + summary LLMs. ``_COMPACT_THRESHOLD``
+        # remains a context-report hint, not a trigger.
+        if tokens <= self.token_budget():
             return
         try:
             await self.compact(session_id, keep_last=_COMPACT_KEEP_LAST, task_id=task_id)

@@ -8,6 +8,7 @@ The live polling/streaming runtime is started by ``omni serve``.
 from __future__ import annotations
 
 import importlib.util
+import sys
 import time
 import tomllib
 from typing import Any
@@ -37,18 +38,16 @@ from omni.runtime.daemon import daemon_info
 app = typer.Typer(help="Configure messaging channels.", no_args_is_help=True)
 
 _KNOWN = ("cli", "wechat", "feishu", "dingtalk")
+# WeChat allow-lists the account that scanned, so only these need a `/pair <code>`.
+_PAIRING_CHANNELS = frozenset({"feishu", "dingtalk"})
 
 # Minimal config templates. Secrets (tokens/app secrets) belong in
 # ~/.omni/secrets.toml under [channels.<name>] or the system keychain, never here.
 _BASE_TEMPLATES: dict[str, dict[str, Any]] = {
+    # WeChat defaults to the official ClawBot bot API; `base_url`/`bot_type` are
+    # filled in from the connector's defaults during login.
     "wechat": {
-        "mode": "gateway",
-        "gateway_url": "http://127.0.0.1:8088",
-        "inbox_path": "/messages",
-        "send_path": "/send",
-        "login_qr_path": "/login/qrcode",
-        "login_status_path": "/login/status",
-        "poll_interval": 2,
+        "mode": "ilink",
     },
     "feishu": {
         "mode": "ws",
@@ -93,7 +92,7 @@ def _required_fields(name: str, data: dict[str, Any]) -> tuple[str, ...]:
     return _REQUIRED.get(name, ())
 
 _DINGTALK_SETUP_URL = "https://open.dingtalk.com/document/direction/stream-mode-protocol-access-description"
-_CHANNEL_SUBCOMMANDS = ("list", "add", "login", "remove", "test", "help")
+_CHANNEL_SUBCOMMANDS = ("list", "add", "login", "pair", "remove", "test", "help")
 
 
 def _enabled(paths) -> list[str]:  # noqa: ANN001
@@ -174,41 +173,62 @@ def render_channel_usage_help() -> None:
             ["list", "List channel enablement and configuration status"],
             ["add <name>", "Enable a channel and write a template without pairing"],
             ["login <name>", "Configure credentials and create a pairing code or QR code"],
+            ["pair <name>", "Issue a fresh pairing code for Feishu or DingTalk"],
             ["remove <name>", "Disable a channel; --purge also deletes its config"],
             ["test <name>", "Validate configuration and dependencies without connecting"],
             ["help", "Show help and examples"],
         ],
     )
     data_table(
-        "Examples (replace placeholders)",
-        ["scenario", "command"],
+        "Connect a platform — same command on Linux, macOS, and Windows",
+        ["platform", "command (replace placeholders)"],
         [
+            ["WeChat", "/channel login wechat --start"],
             [
-                "Log in to Feishu and start listening",
+                "Feishu",
                 "/channel login feishu --app-id <FEISHU_APP_ID> "
-                "--app-secret '<FEISHU_APP_SECRET>' --credential-store file --start",
+                "--app-secret '<FEISHU_APP_SECRET>' --start",
             ],
-            ["Show channel status", "/channel list"],
-            ["Validate Feishu configuration", "/channel test feishu"],
-            ["Write a Feishu template", "/channel add feishu"],
-            ["Disable Feishu", "/channel remove feishu"],
             [
-                "Log in to DingTalk Stream",
+                "DingTalk",
                 "/channel login dingtalk --client-id <DINGTALK_CLIENT_ID> "
-                "--client-secret '<DINGTALK_CLIENT_SECRET>' --credential-store file --start",
+                "--client-secret '<DINGTALK_CLIENT_SECRET>' --start",
             ],
-            [
-                "Managed WeChat gateway for production",
-                "/channel login wechat --method wecom --gateway-url http://127.0.0.1:8088 --start",
-            ],
-            ["Local WeChat gateway; assess platform compliance", "/channel login wechat --method gateway "
-             "--gateway-url http://127.0.0.1:8088 --start"],
-            ["Experimental WeChat iLink connector", "/channel login wechat --method ilink "
-             "--credential-store file --start"],
         ],
     )
     warn("Do not put real app secrets in documentation or screenshots; replace every placeholder.")
-    info("After login, send `/pair <code>` to the bot. One `/serve start` handles all enabled channels.")
+    info(
+        "WeChat goes through Tencent's official ClawBot bot API: scan the QR shown in the terminal "
+        "and the scanning account is bound automatically — no local gateway, port, or `/pair`."
+    )
+    info(
+        "Feishu and DingTalk take their app credentials from the developer console, and their long "
+        'connections need `pip install "OmniScientist-V2[channels]"`.'
+    )
+    info(
+        "Those credentials authorize the app rather than a person, so open the bot chat and send "
+        "`/pair <code>` once to bind the conversation; `--allow <id>` pre-authorizes it instead."
+    )
+    info(
+        "That code is single-use and lasts 10 minutes — `/channel pair feishu` issues a new one "
+        "whenever it expires."
+    )
+    info(
+        "Credentials are stored for you: the macOS Keychain where it exists, otherwise "
+        "secrets.toml with mode 0600. No extra flag is needed on any platform."
+    )
+    data_table(
+        "Everyday commands",
+        ["scenario", "command"],
+        [
+            ["Show channel status", "/channel list"],
+            ["Re-issue an expired pairing code", "/channel pair feishu"],
+            ["Validate a configuration", "/channel test feishu"],
+            ["Write a template without pairing", "/channel add feishu"],
+            ["Disable a channel", "/channel remove feishu"],
+        ],
+    )
+    info("One `/serve start` handles all enabled channels.")
 
 
 @app.command("help")
@@ -266,8 +286,7 @@ def add_cmd(ctx: typer.Context, name: str) -> None:
     success(f"Enabled channel '{name}'. Enabled channels: {', '.join(enabled)}.")
     info("A running omni serve will reconcile it automatically; otherwise run `omni serve start`.")
     if name == "wechat":
-        info("The default template uses a local gateway; use a managed enterprise gateway in production.")
-        warn("Experimental iLink is enabled only with `channel login wechat --method ilink`.")
+        info("Run `omni channel login wechat --start` to scan the QR and bind your account.")
     if name != "cli":
         warn(f"`channel add` only writes a template; run `omni channel login {name}` to pair.")
 
@@ -276,7 +295,14 @@ def add_cmd(ctx: typer.Context, name: str) -> None:
 def login_cmd(
     ctx: typer.Context,
     name: str,
-    method: str = typer.Option("auto", "--method", help="wechat: ilink|gateway|wecom；feishu/dingtalk: manual|auto"),
+    method: str = typer.Option(
+        "auto",
+        "--method",
+        help=(
+            "Connection method. wechat: ilink (default, official ClawBot) | gateway | wecom, "
+            "where gateway and wecom need a self-hosted gateway; feishu/dingtalk: auto | manual."
+        ),
+    ),
     gateway_url: str = typer.Option("http://127.0.0.1:8088", "--gateway-url", help="WeChat gateway URL."),
     bot_url: str = typer.Option("", "--bot-url", help="AppLink or deep link that opens the bot conversation."),
     setup_url: str = typer.Option("", "--setup-url", help="Platform setup or installation URL."),
@@ -341,6 +367,33 @@ def login_cmd(
         )
     if start:
         _start_channel_daemon(ctx, name)
+
+
+@app.command("pair")
+def pair_cmd(
+    ctx: typer.Context,
+    name: str,
+    no_qr: bool = typer.Option(False, "--no-qr", help="Print the code without a QR symbol."),
+) -> None:
+    """Issue a fresh one-time pairing code for an already configured channel."""
+    if name not in _PAIRING_CHANNELS:
+        error(f"Pairing codes apply to: {', '.join(sorted(_PAIRING_CHANNELS))}.")
+        raise typer.Exit(2)
+    paths = ctx.obj.settings().paths
+    cfg_path = paths.channels_dir / f"{name}.toml"
+    if not cfg_path.is_file():
+        error(f"Channel '{name}' is not configured yet; run `omni channel login {name}` first.")
+        raise typer.Exit(2)
+    cfg = _load_effective_channel_config(paths, name)
+    code = create_pairing_code(cfg_path)
+    success(f"New pairing code for {name} (valid for 10 minutes).")
+    _show_pairing_qr(
+        name,
+        code,
+        bot_url=str(cfg.get("bot_url") or ""),
+        setup_url=str(cfg.get("setup_url") or ""),
+        no_qr=no_qr,
+    )
 
 
 @app.command("remove")
@@ -409,7 +462,11 @@ def _login_wechat(
     non_interactive: bool,
     yes: bool,
 ) -> None:
-    method = "gateway" if method in {"auto", ""} else method
+    # The official WeChat ClawBot bot API (iLink) is the default: it needs no
+    # self-hosted gateway and works the same on Linux, macOS, and Windows. The
+    # gateway/wecom paths stay reachable for existing deployments but are no
+    # longer advertised, so `--method` must name them explicitly.
+    method = "ilink" if method in {"auto", ""} else method
     if method == "ilink":
         _login_wechat_ilink(
             paths,
@@ -419,7 +476,6 @@ def _login_wechat(
             no_qr=no_qr,
             timeout_s=timeout_s,
             non_interactive=non_interactive,
-            yes=yes,
         )
         return
     if method not in {"gateway", "wecom"}:
@@ -467,9 +523,8 @@ def _login_wechat_ilink(
     no_qr: bool,
     timeout_s: int,
     non_interactive: bool,
-    yes: bool,
 ) -> None:
-    """Log in to WeChat via Tencent's iLink bot connector."""
+    """Log in to WeChat through the official ClawBot (iLink) bot API."""
     import asyncio
 
     from omni.channels.weixin_ilink import (
@@ -489,19 +544,16 @@ def _login_wechat_ilink(
         _write_channel_config(paths, "wechat", cfg)
         _enable(paths, "wechat")
         _bind_allowed(paths, "wechat", allow)
-        success("Wrote the WeChat iLink template without scanning.")
-        info("Run `omni channel login wechat --method ilink` to scan and connect.")
+        success("Wrote the WeChat template without scanning.")
+        info("Run `omni channel login wechat --start` to scan and connect.")
         return
 
-    if not yes:
-        msg = (
-            "This experimental client connects local OmniScientist through Tencent's iLink bot backend. "
-            "It is not endorsed or supported by Tencent or OpenClaw and may be affected by platform terms, "
-            "rate limits, or account restrictions. Use a managed enterprise path in production. Continue?"
-        )
-        if non_interactive or not confirm(msg, default=True):
-            error("WeChat iLink login cancelled.")
-            raise typer.Exit(1)
+    # Tencent published this bot API — with its own terms — so state what the
+    # scan does and go straight to the QR instead of gating it behind a prompt.
+    info(
+        "Connecting through the official WeChat ClawBot bot API "
+        f"({DEFAULT_BASE_URL}); Tencent's ClawBot terms govern the paired account."
+    )
 
     client = WeixinIlinkClient.from_config(effective)
 
@@ -562,8 +614,10 @@ def _login_wechat_ilink(
     else:
         success("Connected local OmniScientist to WeChat.")
         if result.user_id:
-            info(f"Automatically allowed WeChat account: {result.user_id}")
-    info("Run `omni serve start` to keep the WeChat conversation online.")
+            # The scan itself proves who is on the other end, so WeChat skips the
+            # `/pair <code>` step Feishu and DingTalk need.
+            info(f"Allowed the WeChat account that scanned ({result.user_id}); no /pair needed.")
+    info("Chat with the bot in WeChat once `omni serve` is up (`--start` does that for you).")
 
 
 def _login_feishu(
@@ -580,7 +634,7 @@ def _login_feishu(
     non_interactive: bool,
 ) -> None:
     if method == "auto":
-        info("Feishu scan flow: open the bot chat with AppLink and send the one-time pairing code.")
+        info("Feishu pairing: scan or open the AppLink below, then send the one-time code.")
     elif method != "manual":
         error("Feishu login supports only --method manual or auto.")
         raise typer.Exit(2)
@@ -631,7 +685,7 @@ def _login_dingtalk(
     non_interactive: bool,
 ) -> None:
     if method == "auto":
-        info("DingTalk scan flow: open the bot or setup page and send the one-time pairing code.")
+        info("DingTalk pairing: open the bot conversation, then send the one-time code below.")
     elif method != "manual":
         error("DingTalk login supports only --method manual or auto.")
         raise typer.Exit(2)
@@ -686,43 +740,47 @@ def _store_secret(
     try:
         ref = store_channel_secret(paths, channel, key, value, backend=backend)
     except CredentialStoreError as exc:
-        # A freshly-scanned credential is expensive to obtain (the user just did
-        # a QR flow). When an encrypted store *exists* but refuses the write at
-        # runtime — e.g. a locked keychain / non-interactive (SSH) session:
-        # "SecKeychainItemCreateFromContent: User interaction is not allowed." —
-        # don't discard it: fall back to secrets.toml (0600) with a loud warning.
-        # When no encrypted store exists at all, keep the deliberate opt-in.
+        # A freshly-scanned credential is expensive to obtain (the user just
+        # completed a QR flow), so ``auto`` must never discard it *after* that
+        # step. Two distinct causes reach here:
+        #   1. an encrypted store exists but refuses the write at runtime — a
+        #      locked keychain / non-interactive (SSH) session:
+        #      "SecKeychainItemCreateFromContent: User interaction is not allowed."
+        #   2. the platform has no encrypted store at all (Linux / Windows).
+        # Both fall back to secrets.toml (0600) with a loud warning. An explicit
+        # --credential-store keychain still fails closed: it asked for a store
+        # this machine cannot provide.
         wants_keychain = backend in {"auto", "keychain", "macos-keychain"}
-        if wants_keychain and keychain_available():
+        has_keychain = keychain_available()
+        if wants_keychain and has_keychain:
             warn(f"Could not write to the system keychain: {exc}")
-            try:
-                store_channel_secret(paths, channel, key, value, backend="file")
-            except CredentialStoreError as exc2:
-                error(str(exc2))
-                raise typer.Exit(2) from exc2
-            _drop_credential_ref(cfg, key)
-            warn(
-                f"Fell back to storing {channel}.{key} in {paths.secrets_file} "
-                "with mode 0600 instead of the system keychain."
-            )
+        elif backend != "auto":
+            error(str(exc))
+            raise typer.Exit(2) from exc
+        try:
+            store_channel_secret(paths, channel, key, value, backend="file")
+        except CredentialStoreError as exc2:
+            error(str(exc2))
+            raise typer.Exit(2) from exc2
+        _drop_credential_ref(cfg, key)
+        if has_keychain:
+            warn(f"Fell back to storing {channel}.{key} in {paths.secrets_file} with mode 0600.")
             info(
                 "To use the keychain, first run "
                 "`security unlock-keychain ~/Library/Keychains/login.keychain-db`, "
                 f"then rerun `omni channel login {channel}`."
             )
             return
-        if backend == "auto" and not keychain_available():
-            # Windows / Linux have no built-in OS keychain here. Don't dump a bare
-            # English exception — tell the user the exact, secure way to proceed.
-            error(f"No supported encrypted credential store is available; {channel}.{key} was not saved.")
+        # Linux and Windows have no OS-level encrypted store, so secrets.toml is
+        # simply where credentials live there. Reporting the platform's normal
+        # outcome as a fault only teaches users to type --credential-store file.
+        info(f"Stored {channel}.{key} in {paths.secrets_file} with mode 0600.")
+        if sys.platform == "win32":
             info(
-                f"Log in again with --credential-store file to write the credential to {paths.secrets_file}. "
-                "The file uses mode 0600 on Linux and macOS; on Windows, restrict it to the current user."
+                "Windows has no POSIX file modes; restrict that file to your own account "
+                "under Properties → Security if this machine is shared."
             )
-            info(f"Example: omni channel login {channel} --credential-store file --start")
-            raise typer.Exit(2) from exc
-        error(str(exc))
-        raise typer.Exit(2) from exc
+        return
     if ref:
         cfg.setdefault("credential_refs", {})[key] = ref
         success(f"Stored {channel}.{key} in the encrypted system credential store.")
@@ -753,20 +811,26 @@ def _show_pairing_qr(
     fallback_hint: str = "Send after opening the bot chat",
 ) -> None:
     command = f"/pair {code}"
-    target = (bot_url or setup_url).strip()
-    if target:
-        if bot_url:
-            info(f"Scan to open the {channel} bot chat: {target}")
-        else:
-            info(f"Scan to open the {channel} setup page: {target}")
+    chat_url = bot_url.strip()
+    guide_url = setup_url.strip()
+    if chat_url:
+        info(f"Scan to open the {channel} bot chat: {chat_url}")
         if not no_qr:
-            render_terminal_qr(target)
-        info(f"{fallback_hint}: {command}")
-        return
-    warn(f"No bot_url is configured for {channel}; showing only the pairing code.")
-    if not no_qr:
-        render_terminal_qr(command)
+            render_terminal_qr(chat_url)
+    elif guide_url:
+        # DingTalk has no deep link to a bot conversation, so the only URL left
+        # is a developer guide — read on the same machine, never scanned.
+        info(f"Find the bot in {channel} (setup guide: {guide_url}).")
+    else:
+        warn(f"No bot_url is configured for {channel}; showing only the pairing code.")
+        if not no_qr:
+            render_terminal_qr(command)
     info(f"{fallback_hint}: {command}")
+    if channel in _PAIRING_CHANNELS:
+        info(
+            f"The code is single-use and expires in 10 minutes; "
+            f"run `omni channel pair {channel}` for a fresh one."
+        )
 
 
 def _start_channel_daemon(ctx: typer.Context, channel: str) -> None:
@@ -864,6 +928,6 @@ def _extract_first(data: dict[str, Any], keys: tuple[str, ...]) -> str:
 def _warn_missing_runtime_dependency(name: str, data: dict[str, Any]) -> None:
     mode = str(data.get("mode") or "")
     if name == "feishu" and mode != "gateway" and importlib.util.find_spec("lark_oapi") is None:
-        warn("Missing runtime dependency: Feishu long connections require lark-oapi. Reinstall `omniscientist[channels]`.")
+        warn("Missing runtime dependency: Feishu long connections require lark-oapi. Reinstall `OmniScientist-V2[channels]`.")
     if name == "dingtalk" and mode != "gateway" and importlib.util.find_spec("dingtalk_stream") is None:
-        warn("Missing runtime dependency: DingTalk Stream mode requires dingtalk-stream. Reinstall `omniscientist[channels]`.")
+        warn("Missing runtime dependency: DingTalk Stream mode requires dingtalk-stream. Reinstall `OmniScientist-V2[channels]`.")

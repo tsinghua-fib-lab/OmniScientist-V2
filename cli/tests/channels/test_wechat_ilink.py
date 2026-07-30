@@ -737,7 +737,6 @@ def test_login_persists_credentials_and_binds_user(settings, monkeypatch):
         no_qr=True,
         timeout_s=5,
         non_interactive=True,
-        yes=True,
     )
 
     data = load_channel_config(settings, "wechat")
@@ -802,7 +801,6 @@ def test_login_falls_back_to_secrets_file_when_keychain_refuses(settings, monkey
         no_qr=True,
         timeout_s=5,
         non_interactive=True,
-        yes=True,
     )
 
     data = load_channel_config(settings, "wechat")
@@ -822,6 +820,104 @@ def test_login_falls_back_to_secrets_file_when_keychain_refuses(settings, monkey
     assert configured is True, reason
 
 
+def test_login_without_any_keychain_still_stores_the_token(settings, monkeypatch):
+    """Linux and Windows have no OS keychain, and the default must still succeed.
+
+    The bot token only exists because the user just scanned a QR, so failing
+    here would discard the expensive step and force every non-macOS user to
+    rerun login with an explicit ``--credential-store file``.
+    """
+    import tomllib
+
+    import omni.channels.credentials as creds
+    from omni.channels.config import load_channel_config
+    from omni.channels.manager import channel_config_state
+    from omni.cli.commands import channel_cmd
+
+    class _FakeLoginClient:
+        @classmethod
+        def from_config(cls, cfg: dict[str, Any]) -> _FakeLoginClient:
+            return cls()
+
+        async def get_bot_qrcode(self, *, base: str | None = None) -> wi.QrCode:
+            return wi.QrCode(qrcode="QR", qrcode_url="https://liteapp.weixin.qq.com/x")
+
+        async def wait_for_login(self, qrcode: str, **kwargs: Any) -> wi.LoginResult:
+            return wi.LoginResult(
+                connected=True,
+                bot_token="tok-nokeychain",
+                account_id="botacc@im.bot",
+                base_url="https://idc.example.com",
+                user_id="user@im.wechat",
+            )
+
+    monkeypatch.setattr(wi, "WeixinIlinkClient", _FakeLoginClient)
+    monkeypatch.setattr(creds, "_has_macos_keychain", lambda: False)
+
+    channel_cmd._login_wechat_ilink(
+        settings.paths,
+        credential_store="auto",
+        allow=None,
+        no_wait=False,
+        no_qr=True,
+        timeout_s=5,
+        non_interactive=True,
+    )
+
+    secrets = tomllib.loads(settings.paths.secrets_file.read_text(encoding="utf-8"))
+    assert secrets["channels"]["wechat"]["bot_token"] == "tok-nokeychain"
+    data = load_channel_config(settings, "wechat")
+    assert data.get("mode") == "ilink"
+    assert "user@im.wechat" in (data.get("allowed_external_keys") or [])
+    configured, reason = channel_config_state(settings, "wechat")
+    assert configured is True, reason
+
+
+def test_login_scan_is_not_gated_behind_a_confirmation_prompt(settings, monkeypatch):
+    """`channel login wechat` must go straight to the QR.
+
+    The ClawBot API is Tencent's own, so the old "not endorsed by Tencent"
+    confirmation is both wrong and the reason a non-interactive run used to
+    abort before ever showing a code.
+    """
+    from omni.cli import render
+    from omni.cli.commands import channel_cmd
+
+    shown: list[str] = []
+
+    class _FakeLoginClient:
+        @classmethod
+        def from_config(cls, cfg: dict[str, Any]) -> _FakeLoginClient:
+            return cls()
+
+        async def get_bot_qrcode(self, *, base: str | None = None) -> wi.QrCode:
+            return wi.QrCode(qrcode="QR", qrcode_url="https://liteapp.weixin.qq.com/x")
+
+        async def wait_for_login(self, qrcode: str, **kwargs: Any) -> wi.LoginResult:
+            return wi.LoginResult(connected=True, bot_token="tok", user_id="user@im.wechat")
+
+    monkeypatch.setattr(wi, "WeixinIlinkClient", _FakeLoginClient)
+    monkeypatch.setattr(channel_cmd, "render_terminal_qr", shown.append)
+
+    def _no_prompts(*args: Any, **kwargs: Any) -> bool:
+        raise AssertionError("login must not ask for confirmation before showing the QR")
+
+    monkeypatch.setattr(channel_cmd, "confirm", _no_prompts)
+    monkeypatch.setattr(render, "confirm", _no_prompts)
+
+    channel_cmd._login_wechat_ilink(
+        settings.paths,
+        credential_store="file",
+        allow=None,
+        no_wait=False,
+        no_qr=False,
+        timeout_s=5,
+        non_interactive=True,
+    )
+
+    assert shown == ["https://liteapp.weixin.qq.com/x"]
+
+
 def test_login_no_wait_writes_template_without_token(settings):
     from omni.channels.manager import channel_config_state
     from omni.cli.commands import channel_cmd
@@ -834,7 +930,6 @@ def test_login_no_wait_writes_template_without_token(settings):
         no_qr=True,
         timeout_s=5,
         non_interactive=True,
-        yes=True,
     )
 
     configured, reason = channel_config_state(settings, "wechat")

@@ -120,6 +120,45 @@ def test_settings_for_record_mirrors_into_trusted_root(tmp_path):
     assert _artifact_mirror_dir(trusted) == root.resolve()
 
 
+def _service() -> HomeService:
+    return HomeService(
+        load_settings(project="default"),
+        workers=1,
+        enable_channels=False,
+        reconcile_interval_s=999.0,
+    )
+
+
+def test_a_neighbour_of_the_store_was_never_vouched_for(tmp_path):  # noqa: ANN001
+    """Trust asked "is anything at or above this adopted?" and meant "was this
+    adopted?".
+
+    An upward walk answers yes for every sibling of the omni home, because the
+    home is itself named like an adoption marker. The daemon then mirrors a
+    turn's figures and reports into a directory the owner never vouched for.
+    Asserted directly rather than only through ``_settings_for_record``, so the
+    check keeps a defence of its own: the naming collision that first exposed it
+    has since been fixed elsewhere, and a defect that only fails through
+    somebody else's bug comes back the moment that bug is fixed differently.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+
+    assert _service()._workspace_trusted(root) is False
+
+
+def test_an_adopted_parent_does_not_vouch_for_a_directory_below_it(tmp_path):  # noqa: ANN001
+    """Adoption is consent for the directory that carries the marker. Reading it
+    as consent for everything beneath widens a decision the owner made once."""
+    parent = tmp_path / "monorepo"
+    (parent / ".omni").mkdir(parents=True)
+    child = parent / "packages" / "api"
+    child.mkdir(parents=True)
+
+    assert _service()._workspace_trusted(parent) is True
+    assert _service()._workspace_trusted(child) is False
+
+
 def test_settings_for_record_respects_disabled_trust_gate(tmp_path, monkeypatch):
     """When workspace trust is globally disabled, every hosted root mirrors —
     matching the interactive CLI, which treats ``trust.enabled=false`` as "trust
@@ -216,3 +255,116 @@ async def test_run_publishes_starting_identity_before_heavy_initialization():
     assert seen["phase"] == "starting"
     assert seen["service_id"] == service_state.service_instance_id(service.paths)
     assert seen["instance_id"]
+
+
+@pytest.mark.asyncio
+async def test_control_plane_is_ready_before_channel_http(monkeypatch):
+    """READY is published before IM adapters finish their HTTP handshake."""
+    hang = asyncio.Event()
+
+    class _FakeRuntime:
+        def set_notifier(self, notifier):  # noqa: ANN001
+            self.notifier = notifier
+
+        async def start(self, workers=1):  # noqa: ANN001
+            return None
+
+        async def stop(self):
+            return None
+
+    class _FakeAgent:
+        def __init__(self, settings):  # noqa: ANN001
+            self.paths = settings.paths
+            self.runtime = _FakeRuntime()
+
+        async def aclose(self):
+            return None
+
+    async def _hanging_reconcile(_self):  # noqa: ANN001
+        await hang.wait()
+
+    monkeypatch.setattr(
+        "omni.channels.manager.ChannelManager.reconcile_once",
+        _hanging_reconcile,
+    )
+
+    async def _idle_start(_self):  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(
+        "omni.channels.manager.ChannelManager.start",
+        _idle_start,
+    )
+
+    service = HomeService(
+        load_settings(project="default"),
+        workers=1,
+        enable_channels=True,
+        channels_filter="cli",
+        reconcile_interval_s=999.0,
+    )
+    async def _build(_settings):  # noqa: ANN001
+        return _FakeAgent(_settings)
+
+    monkeypatch.setattr(service, "_build_agent", _build)
+
+    start_task = asyncio.create_task(service.start())
+    try:
+        ready = False
+        for _ in range(80):
+            info = service_state.read_runtime(service.paths)
+            if info and info.get("ready") is True:
+                ready = True
+                break
+            await asyncio.sleep(0.05)
+        assert ready, "control plane should be ready while channels are still connecting"
+        assert not start_task.done()
+    finally:
+        hang.set()
+        await asyncio.wait_for(start_task, timeout=2)
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_channel_install_failure_does_not_clear_control_plane_ready(monkeypatch):
+    class _FakeRuntime:
+        def set_notifier(self, notifier):  # noqa: ANN001
+            self.notifier = notifier
+
+        async def start(self, workers=1):  # noqa: ANN001
+            return None
+
+        async def stop(self):
+            return None
+
+    class _FakeAgent:
+        def __init__(self, settings):  # noqa: ANN001
+            self.paths = settings.paths
+            self.runtime = _FakeRuntime()
+
+        async def aclose(self):
+            return None
+
+    async def _boom(*_args, **_kwargs):  # noqa: ANN001
+        raise RuntimeError("wechat notify_start failed")
+
+    service = HomeService(
+        load_settings(project="default"),
+        workers=1,
+        enable_channels=True,
+        channels_filter="wechat",
+        reconcile_interval_s=999.0,
+    )
+    async def _build(_settings):  # noqa: ANN001
+        return _FakeAgent(_settings)
+
+    monkeypatch.setattr(service, "_build_agent", _build)
+    monkeypatch.setattr(service, "_install_channels", _boom)
+
+    await service.start()
+    try:
+        info = service_state.read_runtime(service.paths)
+        assert info is not None and info["ready"] is True
+        assert info["phase"] == "ready"
+    finally:
+        await service.stop()

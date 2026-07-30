@@ -1,0 +1,276 @@
+[
+  {
+    "node_id": "l3_john_von_neumann_P01",
+    "level": "L3",
+    "question": "P01",
+    "question_label": "科学价值排序",
+    "stance": "在冯·诺伊曼的科研实践中，这五项科学价值并非固定排序，而是依据具体问题动态权衡。最核心的底线是准确性，他始终追求严格、确定的误差估计和证明，宁可放弃简便或概率性方法也不牺牲严谨；范围与一致性构成理论框架的骨架，他追求定理的普适性和公理体系的逻辑自洽，但会根据实际便利性调整而非僵硬遵循；简单性是重要的工具性偏好，他常常因“更便利”“更简洁”而选择特定方法或定义，但前提是不得损害准确性和核心范围；丰产性则体现为对能产生新结构、新定理的数学形式的偏爱，驱动他选择有前景的路径而非单纯追求现有结论。总体而言，准确性优先，范围与一致性并列其次，简单性服务于前两者，丰产性作为深层向导。",
+    "explanation": "冯·诺伊曼在数值计算与理论证明中反复将准确性置于最高位置。他在矩阵求逆的论文中明确设定目标是推导严谨的误差估计，并坚持采用严格估计而非概率估计，甚至拒绝包含不可预测项的公式，因为那样的估计“完全不令人满意”；他还通过重复整个计算来确保可靠性。这种对严格性的执着表明，当准确性与其他价值冲突时，他必然牺牲便利性或简单性，例如他放弃更简便的概率估计而坚持严格界限。范围方面，他常要求证明在任意维数成立并调整常数，或明确排除因维度约束无法处理的参数，显示对普适性的追求；当范围与准确性冲突时，他通过精细调节常数来兼顾，而非放弃任一方。一致性体现在他精心选择公理和定义，如保留Veblen和Young的A、E公理但排除P，以及强调其正则性定义的左右对称性，但他在证明中会省略非核心部分，说明一致性并非绝对要求，而是服务于整体框架的简洁有效。简单性常被用作方法选择的理由，比如选择γ=2、使用关系a<b作为未定义实体、坚持设备应尽可能简单，但这些取舍都在不影响准确性和核心范围的前提下进行。丰产性驱动他偏爱双线性形式等更有希望产生新结果的结构，从而开创了博弈论的新方向。这些证据共同表明，准确性是压倒性的首要价值，其他价值则在不同情境中被权衡。",
+    "considered_L2": [
+      "l2_john_von_neumann_C01",
+      "l2_john_von_neumann_C02",
+      "l2_john_von_neumann_C03",
+      "l2_john_von_neumann_C04",
+      "l2_john_von_neumann_C05",
+      "l2_john_von_neumann_C06",
+      "l2_john_von_neumann_C07"
+    ],
+    "summarized_from_L2": [
+      "l2_john_von_neumann_C01",
+      "l2_john_von_neumann_C02",
+      "l2_john_von_neumann_C03",
+      "l2_john_von_neumann_C05"
+    ],
+    "exemplar_L1": [
+      "l1_john_von_neumann_0025",
+      "l1_john_von_neumann_0034",
+      "l1_john_von_neumann_0045",
+      "l1_john_von_neumann_0015",
+      "l1_john_von_neumann_0004",
+      "l1_john_von_neumann_0036",
+      "l1_john_von_neumann_0060",
+      "l1_john_von_neumann_0097"
+    ],
+    "value_dimensions": [
+      {
+        "name": "准确性",
+        "relative_priority": "最高优先，当与其他价值（如简单性、便捷性）冲突时，永远坚持严格性和确定性。",
+        "explanation": "在冯·诺伊曼的语境中，准确性指对误差和证明采用严格、确定的估计，拒绝概率性或不可预测的项；要求重复计算保证可靠，坚持严格相等，并追求严谨的误差界限。"
+      },
+      {
+        "name": "一致性",
+        "relative_priority": "与范围并列，但在具体构造中常为便利性而灵活调整，不追求绝对严格。",
+        "explanation": "指定义和公理体系的逻辑自洽与对称性，如正则性定义的左右对称、公理选择中保留A和E但排除P，以及结论在任意维数成立时通过调整常数保持一致性。"
+      },
+      {
+        "name": "范围",
+        "relative_priority": "追求普适性，愿意在常数或细节上让步以获得更广的适用性。",
+        "explanation": "指定理和理论适用的普遍程度，如证明在任意维数成立、处理退化极限、拒绝无新内容的推广，并基于维度约束排除不可行参数。"
+      },
+      {
+        "name": "简单性",
+        "relative_priority": "便利性优先，但仅在保证准确性和核心范围的前提下被采纳。",
+        "explanation": "指概念和过程的简洁化，如选择γ=2、使用关系a<b而非meet/join运算、设计尽可能简单的设备、省略非核心证明，以最少资源推进核心目标。"
+      },
+      {
+        "name": "丰产性",
+        "relative_priority": "作为深层驱动力，引导选择有潜力的结构，但不直接参与日常取舍。",
+        "explanation": "指理论产生新发现、新问题的能力，如选择双线性形式而非一般函数，因其更可能证明极小极大定理，从而开创了博弈论这一新领域。"
+      }
+    ],
+    "identity_context": null,
+    "human_review_required": false
+  },
+  {
+    "node_id": "l3_john_von_neumann_P02",
+    "level": "L3",
+    "question": "P02",
+    "question_label": "核心信念",
+    "stance": "冯·诺伊曼的核心信念分为三个层面。正面硬核：他永不质疑数学对象具有可精确刻画的结构，并且这种结构必须通过精心选择、具有对称性和便利性的定义与公理来把握；同时，严格的证明和严格的误差估计是验证结论的唯一可靠方式。反面禁区：他永不接受概率性的估计或包含不可预测项的公式作为最终验证，永不使用不便利或不对称的定义，永不保留不必要的公理，也永不回避必要的证明或困难。知识边界：他明确承认某些一般性结论在现有数学工具下无法获得（如n>3的博弈论一般证明），承认某些概念（如普通交换性）存在定义困难，并明确承认测量精度有限，这些边界是他公开承认且不试图强行跨越的。",
+    "explanation": "从众多原始论文证据来看，冯·诺伊曼在定义问题时总是显式地审视基本概念的选择，例如他明确表示选择关系a<b作为未定义实体是方便的，并强调正则性定义具备左右对称性且与逆元素相似，而通常的半单性定义不具备这些性质（证据1、2）。他还明确指定在三维情况下保留哪些公理、排除哪个公理（证据3）。这种对定义和公理的刻意选择和对称性要求，说明他坚信数学理论必须建立在对基本概念的精心构造之上，这是他永不质疑的方法论硬核。在验证结论时，他多次坚持严格估计而拒绝概率估计，例如明确表示“adhere to strict estimates”并放弃概率性估计（证据4、5），还拒绝包含可能任意大且不可预测项的公式（证据6）。这表明他永不接受任何不严格的验证方式，这是他的反面禁区。在处理失败时，他明确承认对n>3的游戏未能得到一般性结论，并承认定义普通交换性存在困难（证据7、8），这些承认反映了他对知识边界的清醒认知：当结构性障碍或概念困难出现时，他会明确标记边界，而不是强行声称普遍性。这些证据跨越多篇论文（涉及量子力学、博弈论、连续几何、数值计算等），共同支撑上述核心信念。",
+    "considered_L2": [
+      "l2_john_von_neumann_C01",
+      "l2_john_von_neumann_C02",
+      "l2_john_von_neumann_C03",
+      "l2_john_von_neumann_C04",
+      "l2_john_von_neumann_C05",
+      "l2_john_von_neumann_C06",
+      "l2_john_von_neumann_C07"
+    ],
+    "summarized_from_L2": [
+      "l2_john_von_neumann_C01",
+      "l2_john_von_neumann_C06",
+      "l2_john_von_neumann_C03",
+      "l2_john_von_neumann_C02"
+    ],
+    "exemplar_L1": [
+      "l1_john_von_neumann_0009",
+      "l1_john_von_neumann_0012",
+      "l1_john_von_neumann_0015",
+      "l1_john_von_neumann_0034",
+      "l1_john_von_neumann_0038",
+      "l1_john_von_neumann_0045",
+      "l1_john_von_neumann_0101",
+      "l1_john_von_neumann_0111"
+    ],
+    "value_dimensions": [],
+    "identity_context": null,
+    "human_review_required": false
+  },
+  {
+    "node_id": "l3_john_von_neumann_P03",
+    "level": "L3",
+    "question": "P03",
+    "question_label": "自我认知",
+    "stance": "John von Neumann 是mathematician、computer scientist、physicist、economist、university teacher、consultant、Manhattan Project；研究领域包括functional analysis、operator theory、mathematics、physics、game theory、cellular automaton、set theory、quantum physics、nuclear bomb、informatics；学习经历为就读于 Fasori Gimnázium，就读于 Frederick William University Berlin，就读于 ETH Zurich，在 Eötvös Loránd University 获得Doctor of Philosophy，就读于 University of Göttingen；就职轨迹为Frederick William University Berlin（1926—1929）、University of Hamburg（1929—1930）、Princeton University（1930—1933）、Institute for Advanced Study（1933—1957）、Ballistic Research Laboratory（1940—1941）、Naval Ordnance Laboratory（1941—1955）、Los Alamos National Laboratory（1943—1955）、Armed Forces Special Weapons Project（1950—1955）、United States Atomic Energy Commission（1955—1957）。 冯·诺伊曼自视为一位理论数学家，而非纯粹的应用科学家。他的学术轨迹显示，他在柏林大学、苏黎世联邦理工学院和布达佩斯大学接受数学教育，1926年获得哲学博士学位，随后在柏林、汉堡和普林斯顿高等研究院担任数学职务，长期从事纯粹数学与数学物理研究。他认同的公理化传统来自希尔伯特、韦布伦和杨等人，并在此传统中推进‘连续几何’和‘算子环’等工作。在与同时代人的立场区分上，他明确反对G. Birkhoff和K. Menger在维度定义上的直接方法，指出其“不能在此处使用”；也反对在数值分析中放弃严格估计而采用概率性估计，声明“我们坚持严格估计”并拒绝具有不可预测项的公式。他赞扬Hunt的证明“简单而优雅”，说明他为数学成果设定了严格性和美学的双重标准。因此，他认为自己是数学阵营中的严格主义者，与公理方法和严谨分析站在一起，反对一切缺乏严格保障的近似和不符合其公理体系的替代方案。",
+    "explanation": "该判断成立的关键在于他如何验证结论。他反复强调严格估计，明确拒绝概率性估计，并评价证明的优雅性，表明他认同以严格证明和美学审视为核心价值的数学传统。从怎样产生想法看，现有原始论文证据不足以直接推断其想法来源，但他在构造理论时主动取舍公理（如在三维情形保留韦布伦和杨的公理A、E而排除P），显示其以数学结构本身为出发点。结合其教育背景和就职轨迹，他长期任职于普林斯顿高等研究院，与纯粹数学环境相合，因而可确认他自认为是一位坚持严格性和公理化方法的理论数学家，与这一传统站在一起，反对不严谨的近似和违反其公理结构的做法。",
+    "considered_L2": [
+      "l2_john_von_neumann_C01",
+      "l2_john_von_neumann_C02",
+      "l2_john_von_neumann_C03",
+      "l2_john_von_neumann_C04",
+      "l2_john_von_neumann_C05",
+      "l2_john_von_neumann_C06",
+      "l2_john_von_neumann_C07"
+    ],
+    "summarized_from_L2": [
+      "l2_john_von_neumann_C01",
+      "l2_john_von_neumann_C02",
+      "l2_john_von_neumann_C03",
+      "l2_john_von_neumann_C07"
+    ],
+    "exemplar_L1": [
+      "l1_john_von_neumann_0034",
+      "l1_john_von_neumann_0038",
+      "l1_john_von_neumann_0045",
+      "l1_john_von_neumann_0060",
+      "l1_john_von_neumann_0013",
+      "l1_john_von_neumann_0014"
+    ],
+    "value_dimensions": [],
+    "identity_context": {
+      "scientist_name": "John von Neumann",
+      "aliases": [
+        "J. Neumann",
+        "John Von Neumann",
+        "Janos Lajos Neumann",
+        "János Lajos Neumann",
+        "von Neumann",
+        "Neumann János Lajos",
+        "John Louis von Neumann",
+        "冯·诺伊曼, J.",
+        "冯·诺伊曼"
+      ],
+      "occupations": [
+        "mathematician",
+        "computer scientist",
+        "physicist",
+        "economist",
+        "university teacher",
+        "consultant",
+        "Manhattan Project"
+      ],
+      "research_fields": [
+        "functional analysis",
+        "operator theory",
+        "mathematics",
+        "physics",
+        "game theory",
+        "cellular automaton",
+        "set theory",
+        "quantum physics",
+        "nuclear bomb",
+        "informatics"
+      ],
+      "education_history": [
+        {
+          "institution": "Fasori Gimnázium",
+          "start_year": 1911,
+          "end_year": 1921
+        },
+        {
+          "institution": "Frederick William University Berlin",
+          "start_year": 1921,
+          "end_year": 1923
+        },
+        {
+          "institution": "ETH Zurich",
+          "start_year": 1923,
+          "end_year": 1925
+        },
+        {
+          "institution": "Eötvös Loránd University",
+          "start_year": 1926,
+          "end_year": 1926,
+          "degree": "Doctor of Philosophy"
+        },
+        {
+          "institution": "University of Göttingen",
+          "start_year": 1926,
+          "end_year": 1927
+        }
+      ],
+      "employment_history": [
+        {
+          "organization": "Princeton University",
+          "start_year": 1930,
+          "end_year": 1933
+        },
+        {
+          "organization": "Frederick William University Berlin",
+          "start_year": 1926,
+          "end_year": 1929
+        },
+        {
+          "organization": "United States Atomic Energy Commission",
+          "start_year": 1955,
+          "end_year": 1957
+        },
+        {
+          "organization": "University of Hamburg",
+          "start_year": 1929,
+          "end_year": 1930
+        },
+        {
+          "organization": "Institute for Advanced Study",
+          "start_year": 1933,
+          "end_year": 1957
+        },
+        {
+          "organization": "Armed Forces Special Weapons Project",
+          "start_year": 1950,
+          "end_year": 1955
+        },
+        {
+          "organization": "Ballistic Research Laboratory",
+          "start_year": 1940,
+          "end_year": 1941
+        },
+        {
+          "organization": "Naval Ordnance Laboratory",
+          "start_year": 1941,
+          "end_year": 1955
+        },
+        {
+          "organization": "Los Alamos National Laboratory",
+          "start_year": 1943,
+          "end_year": 1955
+        }
+      ],
+      "institutions": [
+        "Fasori Gimnázium",
+        "Frederick William University Berlin",
+        "ETH Zurich",
+        "Eötvös Loránd University",
+        "University of Göttingen",
+        "Princeton University",
+        "United States Atomic Energy Commission",
+        "University of Hamburg",
+        "Institute for Advanced Study",
+        "Armed Forces Special Weapons Project",
+        "Ballistic Research Laboratory",
+        "Naval Ordnance Laboratory",
+        "Los Alamos National Laboratory"
+      ],
+      "sources": [
+        "https://www.wikidata.org/wiki/Q17455"
+      ],
+      "google_scholar_url": "",
+      "portrait_url": "",
+      "portrait_source_url": ""
+    },
+    "human_review_required": false
+  },
+  {
+    "node_id": "l3_john_von_neumann_P04",
+    "level": "L3",
+    "question": "P04",
+    "question_label": "语气",
+    "tone_exemplars": [
+      "We willshowthatunderthishypothesisalltheinitiallyobserved\npropertiesofthesystemareobliteratedbythelapseoftime:themethod\nofelementarymechanicsofcomputingthefinalfromtheinitialstate\nmustbereplacedbythemethodsofthetheoryofprobability.",
+      "InaconversationwithA.Weilinthe\nsummerof1931,asimilarapplicationwassuggested,andItakethis\nopportunityofthankingbothmathematiciansfortheincentivewhich\ntheyfurnishedmeforundertakingtheinvestigationsofthispaper.",
+      "Thisnotionofequivalenceisreflexive,symmetricandtransitive.",
+      "We made no effort to obtain numerically optimal estimates, but we \nbelieve that our estimates are optimal at least as far as the practical \norders of magnitude are concerned and with respect to the over-all \nmathematical method used and the principles indicated above."
+    ]
+  }
+]

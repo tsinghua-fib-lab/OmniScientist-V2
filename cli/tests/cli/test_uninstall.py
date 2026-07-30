@@ -29,7 +29,10 @@ def _paths(tmp_path: Path):  # noqa: ANN202
 
 def test_uninstall_plan_is_pure_and_dry_run_json_creates_no_home(tmp_path):
     paths = _paths(tmp_path)
-    assert not paths.home.exists()
+    # ``isolated_home`` pre-creates an empty ``$OMNI_HOME`` so sqlite init cannot
+    # race under the full suite. Planning / dry-run must leave that shell untouched.
+    assert paths.home.is_dir()
+    assert list(paths.home.iterdir()) == []
 
     plan = uninstall.build_uninstall_plan(
         paths,
@@ -40,7 +43,7 @@ def test_uninstall_plan_is_pure_and_dry_run_json_creates_no_home(tmp_path):
         remove_untracked_exports=False,
     )
 
-    assert not paths.home.exists()
+    assert list(paths.home.iterdir()) == []
     assert any(action.category == "service" for action in plan.actions)
 
     result = runner.invoke(
@@ -51,7 +54,7 @@ def test_uninstall_plan_is_pure_and_dry_run_json_creates_no_home(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["purge"] is False
     assert payload["remove_program"] is False
-    assert not paths.home.exists()
+    assert list(paths.home.iterdir()) == []
 
 
 def test_all_project_data_requires_explicit_purge():
@@ -74,7 +77,7 @@ def test_json_execution_requires_non_interactive_confirmation():
 
 def test_default_execution_preserves_data_and_unrelated_integrations(tmp_path, monkeypatch):
     paths = _paths(tmp_path)
-    paths.home.mkdir(parents=True)
+    paths.home.mkdir(parents=True, exist_ok=True)
     paths.config_file.write_text("[model]\nprovider = 'mock'\n", encoding="utf-8")
 
     exported = paths.codex_user_skills / "managed-example"
@@ -144,7 +147,7 @@ def test_default_execution_preserves_data_and_unrelated_integrations(tmp_path, m
 
 def test_purge_removes_home_and_registered_in_place_projects(tmp_path, monkeypatch):
     paths = _paths(tmp_path)
-    paths.home.mkdir(parents=True)
+    paths.home.mkdir(parents=True, exist_ok=True)
     paths.config_file.write_text("[model]\nprovider = 'mock'\n", encoding="utf-8")
     in_place = tmp_path / "research-project" / ".omni"
     in_place.mkdir(parents=True)
@@ -227,7 +230,7 @@ def test_everything_only_removes_untracked_exports_that_still_match(tmp_path):
 
 def test_corrupt_skill_export_manifest_cannot_delete_arbitrary_directory(tmp_path, monkeypatch):
     paths = _paths(tmp_path)
-    paths.home.mkdir(parents=True)
+    paths.home.mkdir(parents=True, exist_ok=True)
     victim = tmp_path / "important-user-directory"
     victim.mkdir()
     (victim / "keep.txt").write_text("keep", encoding="utf-8")
@@ -308,7 +311,7 @@ def test_installation_manifest_records_reversible_owner(tmp_path, monkeypatch):
     manifest = uninstall.record_installation(
         paths,
         method="uv",
-        source="omniscientist @ git+https://user:secret@example.test/repo?token=abc",
+        source="OmniScientist-V2 @ git+https://user:secret@example.test/repo?token=abc",
         editable=False,
     )
 
@@ -316,13 +319,13 @@ def test_installation_manifest_records_reversible_owner(tmp_path, monkeypatch):
     assert payload["schema_version"] == 1
     assert payload["installations"][0]["method"] == "uv"
     source = payload["installations"][0]["source"]
-    assert source == "omniscientist @ git+https://***@example.test/repo?token=***"
+    assert source == "OmniScientist-V2 @ git+https://***@example.test/repo?token=***"
     assert "secret" not in source and "abc" not in source
 
 
 def test_installation_manifest_prunes_missing_owner_records(tmp_path, monkeypatch):
     paths = _paths(tmp_path)
-    paths.home.mkdir(parents=True)
+    paths.home.mkdir(parents=True, exist_ok=True)
     stale = tmp_path / "removed-conda" / "bin" / "omni"
     uninstall.install_manifest_path(paths).write_text(
         json.dumps(
@@ -344,7 +347,7 @@ def test_installation_manifest_prunes_missing_owner_records(tmp_path, monkeypatc
     current.write_text("launcher", encoding="utf-8")
     monkeypatch.setattr(uninstall, "_current_entrypoint", lambda: str(current))
 
-    uninstall.record_installation(paths, method="uv", source="omniscientist")
+    uninstall.record_installation(paths, method="uv", source="OmniScientist-V2")
 
     payload = json.loads(uninstall.install_manifest_path(paths).read_text(encoding="utf-8"))
     assert [row["executable"] for row in payload["installations"]] == [str(current)]
@@ -353,7 +356,7 @@ def test_installation_manifest_prunes_missing_owner_records(tmp_path, monkeypatc
 def test_hidden_record_install_hook_is_a_real_command_not_a_chat_prompt():
     result = runner.invoke(
         app,
-        ["_record-install", "--method", "uv", "--source", "omniscientist"],
+        ["_record-install", "--method", "uv", "--source", "OmniScientist-V2"],
     )
 
     assert result.exit_code == 0, result.output
@@ -364,8 +367,8 @@ def test_hidden_record_install_hook_is_a_real_command_not_a_chat_prompt():
 def test_program_removal_is_deferred_until_the_cli_process_exits(monkeypatch):
     installation = uninstall.InstallationRecord(
         method="uv",
-        executable="/tmp/uv-tools/omniscientist/bin/omni",
-        python="/tmp/uv-tools/omniscientist/bin/python",
+        executable="/tmp/uv-tools/omniscientist-v2/bin/omni",
+        python="/tmp/uv-tools/omniscientist-v2/bin/python",
         current=True,
     )
     report = uninstall.UninstallReport()
@@ -383,7 +386,7 @@ def test_program_removal_is_deferred_until_the_cli_process_exits(monkeypatch):
 
     uninstall._remove_programs([installation], report)
 
-    assert scheduled == [[['uv', 'tool', 'uninstall', 'omniscientist']]]
+    assert scheduled == [[['uv', 'tool', 'uninstall', 'OmniScientist-V2']]]
     assert report.program_removal_deferred is True
     assert report.errors == []
     assert report.completed == ["scheduled program removal after this process exits"]
@@ -405,7 +408,7 @@ def test_posix_deferred_removal_publishes_an_install_operation_marker(tmp_path, 
     operation_dir = tmp_path / "install-state"
 
     scheduled = uninstall._defer_posix_program_removal(
-        [["uv", "tool", "uninstall", "omniscientist"]],
+        [["uv", "tool", "uninstall", "OmniScientist-V2"]],
         operation_dir,
     )
 
@@ -425,7 +428,7 @@ def test_default_plan_exposes_other_installations_without_removing_them(tmp_path
     current = uninstall.InstallationRecord(
         method="uv",
         executable="/home/user/.local/bin/omni",
-        python="/home/user/.local/share/uv/tools/omniscientist/bin/python",
+        python="/home/user/.local/share/uv/tools/omniscientist-v2/bin/python",
         current=True,
     )
     other = uninstall.InstallationRecord(

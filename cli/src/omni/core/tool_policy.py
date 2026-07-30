@@ -28,27 +28,69 @@ def policy_summary(policy: Any | None) -> dict[str, Any]:
     return policy.to_dict()
 
 
-def policy_max_tool_calls(policy: Any | None, default: int) -> int:
-    if policy is None or policy.max_tool_calls is None:
-        return max(0, int(default))
-    return min(max(0, int(default)), max(0, int(policy.max_tool_calls)))
+def _configured_limit(value: int) -> int | None:
+    """Normalize owner config: negative disables; zero remains exact zero."""
+    parsed = int(value)
+    return None if parsed < 0 else parsed
 
 
-def policy_max_iterations(policy: Any | None, default: int) -> int:
-    if policy is None or policy.max_iterations is None:
-        return default
-    return max(0, int(policy.max_iterations))
+def _effective_limit(scoped: int | None, configured: int) -> int | None:
+    global_limit = _configured_limit(configured)
+    if scoped is None:
+        return global_limit
+    scoped_limit = max(0, int(scoped))
+    if global_limit is None:
+        return scoped_limit
+    return min(global_limit, scoped_limit)
+
+
+def policy_max_tool_calls(policy: Any | None, default: int) -> int | None:
+    scoped = None if policy is None else policy.max_tool_calls
+    return _effective_limit(scoped, default)
+
+
+def policy_max_iterations(policy: Any | None, default: int) -> int | None:
+    scoped = None if policy is None else policy.max_iterations
+    return _effective_limit(scoped, default)
+
+
+def _remedy(name: str, reason: str) -> str:
+    """Say what the model may do instead of re-issuing a refused call.
+
+    A refusal is deterministic: the same call will be refused again. Without a
+    stated alternative the model's only move is to vary the arguments and try
+    again, which reads as fresh work to a signature-keyed progress detector and
+    quietly consumes the run.
+    """
+    code = reason.split(":", 1)[0]
+    if code == "tool_limit_exceeded":
+        return (
+            f"the '{name}' budget for this task is spent; fold the remaining work "
+            f"into what you already produced, or finish with the results you have"
+        )
+    if code == "max_tool_calls_exceeded":
+        return "the tool budget is spent; answer now from the results you have"
+    if code in {"not_in_allowed_tools", "blocked_by_plan"}:
+        return (
+            f"'{name}' is not part of this task's tool surface; use one of the "
+            f"offered tools, or answer directly"
+        )
+    if code == "unknown_tool":
+        return f"there is no tool named '{name}'; choose one of the offered tools"
+    return "do not re-issue this call unchanged; take a different approach"
 
 
 def policy_violation(name: str, reason: str) -> HostToolRejection:
     """Return a protocol-safe result for a tool rejected before execution."""
+    remedy = _remedy(name, reason)
     return _mint_host_tool_rejection(
         {
             "status": "error",
-            "error": f"tool '{name}' rejected by execution policy: {reason}",
+            "error": f"tool '{name}' rejected by execution policy: {reason} — {remedy}",
             "policy_violation": True,
             "tool_name": name,
             "reason": reason,
+            "remedy": remedy,
         }
     )
 
@@ -91,15 +133,22 @@ class ToolPolicyGuard:
         return None
 
     def budget_rejection(self, name: str) -> dict[str, Any] | None:
-        """Charge one logical operation after every target is authorized."""
-        self._total += 1
-        if self.max_tool_calls is not None and self._total > self.max_tool_calls:
+        """Charge one logical operation, but only if it is admitted.
+
+        A refused call executes nothing, so it must cost nothing. Charging for
+        it let a model exhaust an entire run against a wall it had already hit:
+        every retry was refused *and* billed to the shared budget. Convergence
+        is the loop's job — it counts consecutive refusals and stops — not the
+        meter's.
+        """
+        if self.max_tool_calls is not None and self._total >= self.max_tool_calls:
             return policy_violation(name, f"max_tool_calls_exceeded:{self.max_tool_calls}")
         limit = max(0, int(self.per_tool_limits.get(name, 0) or 0))
+        if limit and self._counts.get(name, 0) >= limit:
+            return policy_violation(name, f"tool_limit_exceeded:{limit}")
+        self._total += 1
         if limit:
             self._counts[name] = self._counts.get(name, 0) + 1
-            if self._counts[name] > limit:
-                return policy_violation(name, f"tool_limit_exceeded:{limit}")
         return None
 
     def rejection(self, name: str) -> dict[str, Any] | None:

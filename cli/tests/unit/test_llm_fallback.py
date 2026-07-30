@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
 import httpx
@@ -180,7 +182,119 @@ def test_provider_records_arguments_parse_error_instead_of_silent_empty():
     assert len(calls) == 1
     assert calls[0].arguments == {}
     assert calls[0].arguments_error is not None
+    assert calls[0].raw_arguments == "{not json"
+    assert calls[0].to_message_fragment()["function"]["arguments"] == "{not json"
 
     ok = _finalize_tool_calls({0: {"id": "c2", "name": "echo", "arguments": '{"x": 1}'}})
     assert ok[0].arguments == {"x": 1}
     assert ok[0].arguments_error is None
+    assert ok[0].arguments_repaired is False
+
+
+def test_provider_bounded_repair_accepts_one_object_with_non_json_trailing_text(
+    caplog,
+):
+    from omni.core.llm.providers import _finalize_tool_calls
+
+    raw = '{"goal":"总结科研","cron":"0 18 * * *"} trailing explanation'
+    call = _finalize_tool_calls(
+        {0: {"id": "c1", "name": "schedule_task", "arguments": raw}}
+    )[0]
+
+    assert call.arguments == {"goal": "总结科研", "cron": "0 18 * * *"}
+    assert call.arguments_error is None
+    assert call.arguments_repaired is True
+    assert call.raw_arguments == raw
+    assert call.to_message_fragment()["function"]["arguments"] == json.dumps(
+        call.arguments,
+        ensure_ascii=False,
+    )
+    assert hashlib.sha256(raw.encode()).hexdigest()[:12] in caplog.text
+    assert "总结科研" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"x":1}{"x":2}',
+        '{"x":1} true',
+        '{"x":1} 2',
+        '{"x":1} "second"',
+        '{"x":1} tru',
+        '{"x":1} "second',
+        '{"x":1} -',
+    ],
+)
+def test_provider_bounded_repair_rejects_multiple_json_values(raw):
+    from omni.core.llm.providers import _finalize_tool_calls
+
+    call = _finalize_tool_calls({0: {"id": "c1", "name": "echo", "arguments": raw}})[0]
+
+    assert call.arguments == {}
+    assert call.arguments_error is not None
+    assert call.arguments_repaired is False
+    assert call.raw_arguments == raw
+
+
+class _BlankToolNameClient:
+    """Returns one usable tool call plus one with a blank function name."""
+
+    def __init__(self, **_kwargs) -> None:  # noqa: ANN003
+        pass
+
+    async def __aenter__(self):  # noqa: ANN204
+        return self
+
+    async def __aexit__(self, *_args) -> None:  # noqa: ANN002
+        return None
+
+    async def post(self, url: str, **_kwargs) -> httpx.Response:  # noqa: ANN003
+        return httpx.Response(
+            200,
+            request=httpx.Request("POST", url),
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {"id": "c1", "function": {"name": "", "arguments": "{}"}},
+                                {"id": "c2", "function": {"name": "echo", "arguments": '{"x":1}'}},
+                            ],
+                        }
+                    }
+                ]
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_blank_tool_name_is_dropped_on_both_streaming_and_non_streaming_paths(
+    monkeypatch,
+):
+    """A blank function name is malformed transport and never reaches the loop.
+
+    The streaming and non-streaming providers must agree: a nameless call has no
+    identity to report back, so relaying it would render as ``?`` and burn an
+    iteration on an ``unknown tool ''`` the model cannot correct. Prompt
+    sub-agents always take the non-streaming path (no token sink), which is
+    exactly where the asymmetry used to let these through.
+    """
+    from omni.core.llm import providers
+    from omni.core.llm.providers import OpenAICompatibleProvider, _finalize_tool_calls
+
+    streamed = _finalize_tool_calls({
+        0: {"id": "c1", "name": "", "arguments": "{}"},
+        1: {"id": "c2", "name": "echo", "arguments": '{"x":1}'},
+    })
+    assert [c.name for c in streamed] == ["echo"]
+
+    monkeypatch.setattr(providers.httpx, "AsyncClient", _BlankToolNameClient)
+    provider = OpenAICompatibleProvider(
+        base_url="https://models.invalid/v1",
+        api_key="k",
+        model="test-model",
+    )
+    result = await provider.chat_with_tools([{"role": "user", "content": "hi"}], [])
+
+    assert [c.name for c in result.tool_calls] == ["echo"]

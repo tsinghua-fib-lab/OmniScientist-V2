@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # ── enum alias normalization (LLM planners often pass natural-language values) ──
 _LANGUAGE_ALIASES = {
@@ -25,9 +25,37 @@ _COLOR_THEME_ALIASES = {
     "charcoal_minimal": "charcoal_minimal", "charcoal": "charcoal_minimal", "minimal": "charcoal_minimal",
 }
 
+_COMMON_FIELD_ALIASES: dict[str, str] = {
+    "paper_path": "pdf_uri",
+    "paper_uri": "pdf_uri",
+    "source_path": "pdf_uri",
+    "source_uri": "pdf_uri",
+    "file_path": "pdf_uri",
+    "slide_count": "target_slides",
+    "slide_number": "target_slides",
+    "num_slides": "target_slides",
+    "page_count": "target_slides",
+    "outline_path": "markdown_uri",
+    "outline_uri": "markdown_uri",
+    "output_language": "language",
+}
+
+
+def remap_common_alias_fields(data: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy with common planner aliases mapped to contract fields."""
+
+    normalized = dict(data)
+    for alias, target in _COMMON_FIELD_ALIASES.items():
+        if alias not in normalized:
+            continue
+        if not normalized.get(target):
+            normalized[target] = normalized[alias]
+        normalized.pop(alias, None)
+    return normalized
+
 def normalize_language(value: Any) -> str:
     key = str(value or "").strip().lower()
-    return _LANGUAGE_ALIASES.get(key, key)
+    return _LANGUAGE_ALIASES.get(key, "en" if not key else key)
 
 
 def normalize_talk_type(value: Any) -> str:
@@ -36,6 +64,19 @@ def normalize_talk_type(value: Any) -> str:
 
 class PresentationRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")  # tolerate ctx.base_input() fields
+
+    @model_validator(mode="before")
+    @classmethod
+    def _remap_common_alias_fields(cls, data: Any) -> Any:
+        """Auto-correct common parameter-name mistakes so models find the right fields.
+
+        The Omni planner/routing often invents names like ``paper_path`` or
+        ``slide_count`` that aren't in our input_schema. Remap them silently
+        instead of rejecting the call or forcing a multi-turn docs_search.
+        """
+        if not isinstance(data, dict):
+            return data
+        return remap_common_alias_fields(data)
 
     topic: str = Field("", description="Main topic or instruction prompt")
     user_instruction: str | None = None
@@ -89,6 +130,13 @@ class PresentationRequest(BaseModel):
     review_mode: str = Field("none", description="none | plan | interactive")
     resume_token: str = ""
     approved_plan: dict[str, Any] | None = None
+    plan_edits: list[dict[str, Any]] | None = Field(
+        None,
+        description="Lightweight edit ops applied to the cached plan on resume "
+        "(set_title, set_bullets, set_bullet, remove_slide, add_slide, set_figure, "
+        "set_type, swap_slides, move_slide). Use this instead of approved_plan "
+        "for surgical edits — the engine applies them on top of the original plan.",
+    )
 
     # ── Feature 1: adopt a user PPTX's theme (colours + fonts) ──
     template_uri: str | None = Field(None, description="artifact:// or path of a PPTX template")

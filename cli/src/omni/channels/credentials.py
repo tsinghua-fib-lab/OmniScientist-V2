@@ -40,9 +40,9 @@ def store_channel_secret(
 ) -> str:
     """Store one channel secret and return a non-secret reference string.
 
-    ``backend='auto'`` defaults to macOS Keychain when available. It refuses to
-    silently fall back to plaintext storage; callers must pass
-    ``backend='file'`` to use ``secrets.toml`` deliberately.
+    ``backend='auto'`` uses the macOS Keychain when available and otherwise
+    raises, so a caller decides deliberately — and says so — before a secret
+    lands in ``secrets.toml``; ``backend='file'`` writes there directly.
     """
     value = value.strip()
     if not value:
@@ -110,9 +110,7 @@ def _choose_backend(backend: str) -> str:
     if backend == "auto":
         if _has_macos_keychain():
             return "macos-keychain"
-        raise CredentialStoreError(
-            "no encrypted credential store found; pass --credential-store file to use secrets.toml"
-        )
+        raise CredentialStoreError("this platform has no OS-level encrypted credential store")
     if backend in {"file", "secrets", "secrets.toml"}:
         return "file"
     raise CredentialStoreError("credential store must be one of: auto, keychain, file")

@@ -1,0 +1,88 @@
+{
+  "scientist_name": "Alan Turing",
+  "aliases": [
+    "Alan Turing",
+    "A TURING",
+    "A. M. TURING",
+    "ALAN M. TURING",
+    "Alan Mathison Turing",
+    "Alan M. Turing",
+    "Turing"
+  ],
+  "occupations": [
+    "computer scientist",
+    "mathematician",
+    "university teacher",
+    "cryptographer",
+    "logician",
+    "statistician",
+    "marathon runner",
+    "artificial intelligence researcher"
+  ],
+  "research_fields": [
+    "cryptanalysis",
+    "computer science",
+    "mathematics",
+    "logic",
+    "cryptography"
+  ],
+  "education_history": [
+    {
+      "institution": "Hazlehurst Community Primary School",
+      "end_year": 1926
+    },
+    {
+      "institution": "Sherborne School",
+      "start_year": 1926,
+      "end_year": 1931
+    },
+    {
+      "institution": "King's College",
+      "start_year": 1931,
+      "end_year": 1934
+    },
+    {
+      "institution": "Princeton University",
+      "start_year": 1937,
+      "end_year": 1938
+    }
+  ],
+  "employment_history": [
+    {
+      "organization": "University of Cambridge",
+      "start_year": 1934,
+      "end_year": 1937
+    },
+    {
+      "organization": "Government Communications Headquarters",
+      "start_year": 1938,
+      "end_year": 1945
+    },
+    {
+      "organization": "National Physical Laboratory",
+      "start_year": 1945,
+      "end_year": 1947
+    },
+    {
+      "organization": "Victoria University of Manchester",
+      "start_year": 1948,
+      "end_year": 1952
+    }
+  ],
+  "institutions": [
+    "Hazlehurst Community Primary School",
+    "Sherborne School",
+    "King's College",
+    "Princeton University",
+    "University of Cambridge",
+    "Government Communications Headquarters",
+    "National Physical Laboratory",
+    "Victoria University of Manchester"
+  ],
+  "sources": [
+    "https://www.wikidata.org/wiki/Q7251"
+  ],
+  "google_scholar_url": "",
+  "portrait_url": "",
+  "portrait_source_url": ""
+}

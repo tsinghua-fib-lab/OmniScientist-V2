@@ -1,6 +1,9 @@
 # Renderer setup
 
-`research-pptx` requires Python 3.11+, Node.js 20.9+, and npm. PyMuPDF handles PDF
+`research-pptx` requires Python 3.11+ and Node.js 20.9+. The first owner-CLI
+setup also needs npm on PATH (`npm ci` against the pinned `package-lock.json`);
+pnpm cannot replace that step. Rendering afterwards only needs Node plus the
+installed cache. PyMuPDF handles PDF
 inputs, matplotlib renders equations, python-pptx reuses templates, and
 PptxGenJS plus `sharp` perform the final render.
 

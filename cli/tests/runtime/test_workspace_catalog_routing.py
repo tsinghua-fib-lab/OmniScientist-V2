@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -70,33 +71,27 @@ async def _seed_named_schedule(name: str, schedule_id: str, *, title: str):
 
 
 @pytest.mark.asyncio
-async def test_task_all_sees_unregistered_im_anchor(tmp_path, monkeypatch):
-    home = tmp_path / "omni-home"
-    home.mkdir()
-    monkeypatch.setenv("OMNI_HOME", str(home))
+async def test_task_all_sees_unregistered_im_anchor(omni_home, tmp_path):
 
     task_id = "784058a9000000000000000000000001"
     await _seed_named_task("default", task_id, title="wechat deliverable")
 
     # Registry empty — previously /task all only showed path workspaces.
-    assert list_workspaces(home) == []
-    assert not registry_path(home).exists()
+    assert list_workspaces(omni_home) == []
+    assert not registry_path(omni_home).exists()
 
-    rows = await list_tasks_all_workspaces(home=home, limit_per=50)
+    rows = await list_tasks_all_workspaces(home=omni_home, limit_per=50)
     assert any(r.id == task_id and r.workspace == "default" for r in rows)
 
 
 @pytest.mark.asyncio
-async def test_schedule_all_and_show_route_unregistered_anchor(tmp_path, monkeypatch):
-    home = tmp_path / "omni-home"
-    home.mkdir()
-    monkeypatch.setenv("OMNI_HOME", str(home))
+async def test_schedule_all_and_show_route_unregistered_anchor(omni_home, tmp_path):
 
     schedule_id = "d106b237000000000000000000000001"
     await _seed_named_schedule("default", schedule_id, title="RAG 系统综述材料准备")
-    assert list_workspaces(home) == []
+    assert list_workspaces(omni_home) == []
 
-    rows = await list_schedules_all_workspaces(home=home)
+    rows = await list_schedules_all_workspaces(home=omni_home)
     assert any(r.id == schedule_id and r.workspace == "default" for r in rows)
 
     # From a path-keyed CLI cwd, show must still resolve to the anchor.
@@ -110,14 +105,11 @@ async def test_schedule_all_and_show_route_unregistered_anchor(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_resolve_task_object_index_first_without_registry(tmp_path, monkeypatch):
-    home = tmp_path / "omni-home"
-    home.mkdir()
-    monkeypatch.setenv("OMNI_HOME", str(home))
+async def test_resolve_task_object_index_first_without_registry(omni_home, tmp_path):
 
     task_id = "784058a9000000000000000000000002"
     await _seed_named_task("default", task_id, title="wechat task")
-    assert list_workspaces(home) == []
+    assert list_workspaces(omni_home) == []
 
     # Caller is a different path workspace (repo CLI).
     repo = tmp_path / "repo"
@@ -134,10 +126,7 @@ async def test_resolve_task_object_index_first_without_registry(tmp_path, monkey
 
 
 @pytest.mark.asyncio
-async def test_home_service_registers_hosted_workspaces(tmp_path, monkeypatch):
-    home = tmp_path / "omni-home"
-    home.mkdir()
-    monkeypatch.setenv("OMNI_HOME", str(home))
+async def test_home_service_registers_hosted_workspaces(omni_home, tmp_path):
 
     # Ensure the anchor project dir exists before the service hosts it.
     get_paths(project="default").ensure_dirs()
@@ -154,6 +143,6 @@ async def test_home_service_registers_hosted_workspaces(tmp_path, monkeypatch):
         assert "default" in names
         # Registry file should mention the anchor project_dir.
         data = json.loads(registry_path(user_home()).read_text(encoding="utf-8"))
-        assert any("projects/default" in key for key in data)
+        assert any(Path(key).parts[-2:] == ("projects", "default") for key in data)
     finally:
         await service.stop()

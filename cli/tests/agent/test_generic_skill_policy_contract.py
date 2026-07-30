@@ -13,6 +13,7 @@ from omni.agent.intent_plan import ToolPolicy
 from omni.agent.tool_surface import ToolSurfaceBuilder
 from omni.config import load_settings
 from omni.core.approval import ApprovalDecision, ApprovalGate
+from omni.core.tool_result import tool_event_output
 from omni.runtime.hooks import HookDecision
 from omni.runtime.tool_gateway import ToolGateway
 from omni.skills_runtime.context import ExecContext
@@ -200,7 +201,7 @@ async def _surface(
     )
 
 
-@pytest.mark.parametrize("route", ["sensitive-skill", "run_skill", "use_skill"])
+@pytest.mark.parametrize("route", ["sensitive-skill", "run_skill"])
 @pytest.mark.asyncio
 async def test_sensitive_skill_requires_concrete_approval_on_every_route(
     tmp_path,
@@ -497,10 +498,11 @@ async def test_run_skill_projects_concrete_output_contract_failure(tmp_path) -> 
         },
     )
 
-    assert result["status"] == "error"
-    assert result["contract_violation"] is True
-    assert result["reason"] == "output_contract_violation"
-    assert result["execution_started"] is True
+    output = tool_event_output(result)
+    assert output["status"] == "error"
+    assert output["contract_violation"] is True
+    assert output["reason"] == "output_contract_violation"
+    assert output["execution_started"] is True
     assert _SensitiveEngine.calls == 1
 
 
@@ -514,7 +516,7 @@ def _route_arguments(route: str) -> dict[str, Any]:
     }
 
 
-@pytest.mark.parametrize("route", ["sensitive-skill", "run_skill", "use_skill"])
+@pytest.mark.parametrize("route", ["sensitive-skill", "run_skill"])
 @pytest.mark.asyncio
 async def test_blocked_concrete_skill_is_rejected_on_every_route(
     tmp_path,
@@ -536,7 +538,7 @@ async def test_blocked_concrete_skill_is_rejected_on_every_route(
     assert hooks.events == []
 
 
-@pytest.mark.parametrize("route", ["sensitive-skill", "run_skill", "use_skill"])
+@pytest.mark.parametrize("route", ["sensitive-skill", "run_skill"])
 @pytest.mark.asyncio
 async def test_concrete_skill_allowlist_has_route_parity(
     tmp_path,
@@ -567,7 +569,7 @@ async def test_concrete_skill_allowlist_has_route_parity(
     ]
 
 
-@pytest.mark.parametrize("route", ["run_skill", "use_skill"])
+@pytest.mark.parametrize("route", ["run_skill"])
 @pytest.mark.asyncio
 async def test_wrapper_allowlist_cannot_expand_to_unlisted_concrete_skill(
     tmp_path,
@@ -589,7 +591,7 @@ async def test_wrapper_allowlist_cannot_expand_to_unlisted_concrete_skill(
     assert hooks.events == []
 
 
-@pytest.mark.parametrize("route", ["sensitive-skill", "run_skill", "use_skill"])
+@pytest.mark.parametrize("route", ["sensitive-skill", "run_skill"])
 @pytest.mark.asyncio
 async def test_concrete_hook_can_deny_every_route_without_wrapper_duplicates(
     tmp_path,

@@ -1,0 +1,103 @@
+{
+  "scientist_name": "Norbert Wiener",
+  "aliases": [
+    "Norbert Wiener",
+    "Norbert Vineris",
+    "Norbert Viner"
+  ],
+  "occupations": [
+    "mathematician",
+    "autobiographer",
+    "university teacher",
+    "psychologist",
+    "computer scientist",
+    "founder",
+    "scientist"
+  ],
+  "research_fields": [
+    "mathematics",
+    "cybernetics",
+    "informatics",
+    "applied mathematics",
+    "probability theory",
+    "stochastic process",
+    "philosophy"
+  ],
+  "education_history": [
+    {
+      "institution": "Harvard University",
+      "start_year": 1909,
+      "end_year": 1910
+    },
+    {
+      "institution": "Cornell University",
+      "start_year": 1910,
+      "end_year": 1911
+    },
+    {
+      "institution": "Tufts University",
+      "start_year": 1906,
+      "end_year": 1909
+    },
+    {
+      "institution": "Peabody School",
+      "start_year": 1901,
+      "end_year": 1903
+    },
+    {
+      "institution": "Ayer High School",
+      "start_year": 1903,
+      "end_year": 1906
+    },
+    {
+      "institution": "Harvard University",
+      "start_year": 1911,
+      "end_year": 1913
+    },
+    {
+      "institution": "University of Cambridge",
+      "start_year": 1913,
+      "end_year": 1914
+    },
+    {
+      "institution": "University of Göttingen",
+      "start_year": 1914,
+      "end_year": 1915
+    },
+    {
+      "institution": "Tufts University School of Engineering",
+      "start_year": null,
+      "end_year": null
+    }
+  ],
+  "employment_history": [
+    {
+      "organization": "Massachusetts Institute of Technology",
+      "start_year": 1919,
+      "end_year": 1960
+    },
+    {
+      "organization": "Aberdeen Proving Ground",
+      "start_year": 1916,
+      "end_year": 1919
+    }
+  ],
+  "institutions": [
+    "Harvard University",
+    "Cornell University",
+    "Tufts University",
+    "Peabody School",
+    "Ayer High School",
+    "University of Cambridge",
+    "University of Göttingen",
+    "Tufts University School of Engineering",
+    "Massachusetts Institute of Technology",
+    "Aberdeen Proving Ground"
+  ],
+  "sources": [
+    "https://www.wikidata.org/wiki/Q178577"
+  ],
+  "google_scholar_url": "",
+  "portrait_url": "",
+  "portrait_source_url": ""
+}

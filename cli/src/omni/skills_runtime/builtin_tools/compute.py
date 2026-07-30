@@ -14,6 +14,7 @@ from omni.core.react_agent import ToolSpec
 from omni.runtime.compute import backend_names
 from omni.skills_runtime.builtin_tools.shell import command_is_destructive
 from omni.skills_runtime.context import ExecContext, Tool
+from omni.skills_runtime.exec_io import OMNI_OUTPUT_ENV, durable_output_dir
 
 _VALID_BACKENDS = backend_names()
 
@@ -42,10 +43,18 @@ def build_compute_tools(ctx: ExecContext) -> list[Tool]:
             return {"status": "error", "error": f"unknown backend '{backend}'"}
 
         from omni.runtime.compute import run_compute as _run
-        from omni.skills_runtime.sandbox import SandboxUnavailableError, sandbox_prefix
+        from omni.skills_runtime.exec_io import (
+            OMNI_OUTPUT_ENV,
+            compute_env,
+            durable_output_dir,
+            register_output_dir,
+        )
+        from omni.skills_runtime.sandbox import SandboxUnavailableError
 
         requested = backend or cfg.backend or "local"
         cwd = str(args.get("cwd", "") or ctx.working_dir or "")
+        output_dir = durable_output_dir(ctx)
+        env = compute_env(ctx)
         job_store = None
         job = None
         if getattr(ctx, "db", None) is not None:
@@ -61,29 +70,45 @@ def build_compute_tools(ctx: ExecContext) -> list[Tool]:
                 profile=str(getattr(ctx, "compute_profile", "") or ""),
             )
             await job_store.mark_running(job.id)
-        try:
-            exec_prefix = sandbox_prefix(ctx.settings.security, ctx.paths, warn_on_fallback=True)
-        except SandboxUnavailableError as exc:
-            if job_store is not None and job is not None:
-                from omni.runtime.compute import ComputeResult
+        from omni.runtime.compute import backend_available
 
-                await job_store.finish(
-                    job.id,
-                    ComputeResult(requested, "error", -1, "", command, str(exc)),
-                )
-            return {"status": "error", "error": f"OS sandbox required but unavailable: {exc}"}
+        remote_ok = requested != "local" and backend_available(requested, cfg)[0]
+        exec_prefix: list[str] = []
+        if not remote_ok:
+            try:
+                from omni.skills_runtime.exec_io import confined_exec_prefix
+
+                exec_prefix = confined_exec_prefix(ctx)
+            except SandboxUnavailableError as exc:
+                if job_store is not None and job is not None:
+                    from omni.runtime.compute import ComputeResult
+
+                    await job_store.finish(
+                        job.id,
+                        ComputeResult(requested, "error", -1, "", command, str(exc)),
+                    )
+                return {"status": "error", "error": f"OS sandbox required but unavailable: {exc}"}
         res = await _run(
             command,
             cfg=cfg,
             cwd=cwd,
             timeout=_float_or_none(args.get("timeout")), backend=backend,
             exec_prefix=exec_prefix,
+            env=env,
             cancel_check=(
                 (lambda: _cancel_requested(job_store, job.id))
                 if job_store is not None and job is not None
                 else None
             ),
         )
+        if res.backend == "local":
+            registered = await register_output_dir(ctx, output_dir)
+            if registered:
+                note = (
+                    f"registered {registered} artifact(s) from "
+                    f"${OMNI_OUTPUT_ENV}={output_dir}"
+                )
+                res.detail = f"{res.detail}; {note}" if res.detail else note
         if job_store is not None and job is not None:
             await job_store.finish(job.id, res)
         await _record_compute_event(
@@ -140,15 +165,18 @@ def build_compute_tools(ctx: ExecContext) -> list[Tool]:
         Tool(
             ToolSpec("run_compute", (
                 "Run a command through a compute backend. Local execution is the default; configured "
-                "Docker, SSH, Slurm, or Modal backends may handle long or compute-heavy jobs."
+                "Docker, SSH, Slurm, or Modal backends may handle long or compute-heavy jobs. "
+                f"On the local backend, write durable CSV/JSON/PNG/SVG to {durable_output_dir(ctx)} "
+                f"(${OMNI_OUTPUT_ENV}); that directory is registered as this task's artifacts."
             ), {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "Command to execute"},
-                    "backend": {"type": "string", "enum": list(_VALID_BACKENDS),
-                                "description": "Optional backend override"},
-                    "cwd": {"type": "string", "description": "Optional working directory"},
-                    "timeout": {"type": "number", "description": "Optional timeout in seconds"},
+                    # No parameter docs where the name and type already say it: the
+                    # enum states the backends, and cwd/command are conventional.
+                    "command": {"type": "string"},
+                    "backend": {"type": "string", "enum": list(_VALID_BACKENDS)},
+                    "cwd": {"type": "string"},
+                    "timeout": {"type": "number", "description": "Seconds"},
                 },
                 "required": ["command"],
             }),

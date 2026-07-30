@@ -12,6 +12,7 @@ from omni.agent import OmniAgent
 from omni.compat import integrations
 from omni.compat.mcp_server import _dispatch
 from omni.config import load_settings
+from omni.runtime.presentation import ArtifactRef
 from omni.skills_runtime.manifest import ExecSpec, SkillEntry, SkillKind
 
 
@@ -82,6 +83,44 @@ async def test_mcp_omni_ask_preserves_needs_input_boundary():
 
     assert out["kind"] == "needs_input"
     assert out["terminated_reason"] == "vlm_not_configured"
+
+
+@pytest.mark.asyncio
+async def test_mcp_omni_ask_returns_structured_turn_artifacts() -> None:
+    class Agent:
+        async def handle_turn(self, *_args, **_kwargs):  # noqa: ANN002, ANN003
+            return SimpleNamespace(
+                text="Created the review.",
+                kind="text",
+                terminated_reason="done",
+                tool_trace=[],
+                drained_results=[],
+                artifacts=[
+                    ArtifactRef(
+                        title="Review",
+                        format="md",
+                        uri="artifact://review",
+                        path="/workspace/reports/review.md",
+                        mime="text/markdown",
+                        size_bytes=42,
+                    )
+                ],
+            )
+
+    out = await _dispatch(Agent(), "omni_ask", {"prompt": "write a review"})
+
+    assert out["answer"] == "Created the review."
+    assert out["artifacts"] == [
+        {
+            "title": "Review",
+            "format": "md",
+            "uri": "artifact://review",
+            "path": "/workspace/reports/review.md",
+            "mime": "text/markdown",
+            "size_bytes": 42,
+            "presentation_role": "primary",
+        }
+    ]
 
 
 def test_register_with_codex_and_claude_idempotent():

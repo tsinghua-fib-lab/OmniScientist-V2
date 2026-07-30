@@ -24,6 +24,12 @@ def _fmt_size(path) -> str:  # noqa: ANN001
         return "—"
 
 
+def _approval_status(settings, trusted: bool | None) -> str:  # noqa: ANN001
+    from omni.config.security_preset import security_preset_label
+
+    return security_preset_label(settings, trusted=trusted)
+
+
 @app.callback(invoke_without_command=True)
 def status(ctx: typer.Context) -> None:
     state: AppState = ctx.obj or AppState()
@@ -38,11 +44,11 @@ def status(ctx: typer.Context) -> None:
             rom = await ResearchStore(agent.db).counts()
             mirror_dir = str(agent.artifacts._mirror_dir or "")
             schedules = await agent.scheduler.list(include_disabled=True, limit=10_000)
-            return agent.paths, tasks, sessions, rom, mirror_dir, schedules
+            return agent.paths, tasks, sessions, rom, mirror_dir, schedules, agent.settings
         finally:
             await agent.aclose()
 
-    paths, tasks, sessions, rom, mirror_dir, schedules = run_async(_run())
+    paths, tasks, sessions, rom, mirror_dir, schedules, settings = run_async(_run())
     from omni.memory.files import user_memory_file
 
     by_status = Counter(t.status for t in tasks)
@@ -69,6 +75,7 @@ def status(ctx: typer.Context) -> None:
         schedules_txt = "; ".join(parts)
 
     rows = [
+        ["Data directory", str(paths.home)],
         ["Workspace", paths.project_name],
         ["Root", str(paths.workspace_root) if paths.workspace_root else "(named project via -P)"],
         ["Tool working dir", str(paths.local_ops_dir)],
@@ -77,6 +84,7 @@ def status(ctx: typer.Context) -> None:
         ["Memory store", f"{paths.project_db}  (memory_entries table)"],
         ["User MEMORY.md", str(user_memory_file(paths))],
         ["Trusted dir", "yes" if state.trusted else "no (read-only; run `omni trust`)"],
+        ["Approval", _approval_status(settings, state.trusted)],
         ["Output files", mirror_dir if mirror_dir else "(durable store only)"],
         ["Daemon", daemon_txt],
         ["Schedules", schedules_txt],
@@ -84,6 +92,23 @@ def status(ctx: typer.Context) -> None:
         ["Tasks", str(len(tasks))],
     ]
     data_table("OmniScientist workspace status", ["field", "value"], rows)
+
+    from omni.config.workspaces import iter_catalog_workspaces
+
+    catalog = iter_catalog_workspaces(paths.home)
+    if catalog:
+        data_table(
+            "Known workspaces (`/task all` lists their tasks; each folder path keys its own store)",
+            ["name", "root", "store"],
+            [
+                [
+                    str(rec.get("name") or ""),
+                    str(rec.get("root") or "—"),
+                    str(rec.get("project_dir") or ""),
+                ]
+                for rec in catalog
+            ],
+        )
 
     if tasks:
         parts = [f"{k}={by_status[k]}" for k in ("pending", "running", "succeeded", "failed")

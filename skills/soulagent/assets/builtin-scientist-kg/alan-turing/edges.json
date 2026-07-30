@@ -1,0 +1,1171 @@
+{
+  "summarizes": [
+    {
+      "from": "l3_alan_turing_P01",
+      "to": "l2_alan_turing_C02"
+    },
+    {
+      "from": "l3_alan_turing_P01",
+      "to": "l2_alan_turing_C05"
+    },
+    {
+      "from": "l3_alan_turing_P02",
+      "to": "l2_alan_turing_C01"
+    },
+    {
+      "from": "l3_alan_turing_P02",
+      "to": "l2_alan_turing_C06"
+    },
+    {
+      "from": "l3_alan_turing_P03",
+      "to": "l2_alan_turing_C01"
+    },
+    {
+      "from": "l3_alan_turing_P03",
+      "to": "l2_alan_turing_C03"
+    },
+    {
+      "from": "l3_alan_turing_P03",
+      "to": "l2_alan_turing_C07"
+    }
+  ],
+  "supports": [
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0001"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0002"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0003"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0004"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0005"
+    },
+    {
+      "from": "l2_alan_turing_C01",
+      "to": "l1_alan_turing_0006"
+    },
+    {
+      "from": "l2_alan_turing_C01",
+      "to": "l1_alan_turing_0007"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0008"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l1_alan_turing_0009"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0010"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0011"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0012"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0013"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0014"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0015"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0016"
+    },
+    {
+      "from": "l2_alan_turing_C01",
+      "to": "l1_alan_turing_0017"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0018"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0019"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l1_alan_turing_0020"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0021"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0022"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0023"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0024"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l1_alan_turing_0025"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0026"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0027"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0028"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l1_alan_turing_0029"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0030"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0031"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0032"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0033"
+    },
+    {
+      "from": "l2_alan_turing_C01",
+      "to": "l1_alan_turing_0034"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0035"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0036"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0037"
+    },
+    {
+      "from": "l2_alan_turing_C01",
+      "to": "l1_alan_turing_0038"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0039"
+    },
+    {
+      "from": "l2_alan_turing_C01",
+      "to": "l1_alan_turing_0040"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0041"
+    },
+    {
+      "from": "l2_alan_turing_C01",
+      "to": "l1_alan_turing_0042"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l1_alan_turing_0043"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0044"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0045"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0046"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0047"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0048"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0049"
+    },
+    {
+      "from": "l2_alan_turing_C01",
+      "to": "l1_alan_turing_0050"
+    },
+    {
+      "from": "l2_alan_turing_C01",
+      "to": "l1_alan_turing_0051"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0052"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0053"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l1_alan_turing_0054"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0055"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l1_alan_turing_0056"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0057"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0058"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0059"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0060"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0061"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l1_alan_turing_0062"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0063"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0064"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l1_alan_turing_0065"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0066"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0067"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0068"
+    },
+    {
+      "from": "l2_alan_turing_C01",
+      "to": "l1_alan_turing_0069"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0070"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0071"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0072"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0073"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0074"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0075"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0076"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0077"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0078"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0079"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0080"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0081"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l1_alan_turing_0082"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0083"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0084"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0085"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l1_alan_turing_0086"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0087"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l1_alan_turing_0088"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0089"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0090"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0091"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0092"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0093"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0094"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0095"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0096"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0097"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0098"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l1_alan_turing_0099"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0100"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0101"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0102"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0103"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0104"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0105"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0106"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0107"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0108"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0109"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0110"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0111"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0112"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0113"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0114"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0115"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l1_alan_turing_0116"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0117"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l1_alan_turing_0118"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0119"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0120"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0121"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0122"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0123"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0124"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0125"
+    },
+    {
+      "from": "l2_alan_turing_C01",
+      "to": "l1_alan_turing_0126"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0127"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0128"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0129"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0130"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0131"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0132"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0133"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0134"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0135"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0136"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0137"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0138"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0139"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0140"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0141"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0142"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0143"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0144"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l1_alan_turing_0145"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0146"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l1_alan_turing_0147"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0148"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0149"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0150"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0151"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0152"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0153"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0154"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0155"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0156"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0157"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0158"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0159"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0160"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0161"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0162"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0163"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0164"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0165"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0166"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0167"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0168"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0169"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l1_alan_turing_0170"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0171"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l1_alan_turing_0172"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0173"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l1_alan_turing_0174"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0175"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0176"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0177"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0178"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0179"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0180"
+    },
+    {
+      "from": "l2_alan_turing_C05",
+      "to": "l1_alan_turing_0181"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0182"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0183"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0184"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0185"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0186"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0187"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0188"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0189"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0190"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0191"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0192"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0193"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0194"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0195"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0196"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0197"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0198"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0199"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l1_alan_turing_0200"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0201"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0202"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0203"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0204"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0205"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0206"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0207"
+    },
+    {
+      "from": "l2_alan_turing_C01",
+      "to": "l1_alan_turing_0208"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0209"
+    },
+    {
+      "from": "l2_alan_turing_C05",
+      "to": "l1_alan_turing_0210"
+    },
+    {
+      "from": "l2_alan_turing_C05",
+      "to": "l1_alan_turing_0211"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0212"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0213"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0214"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0215"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0216"
+    },
+    {
+      "from": "l2_alan_turing_C05",
+      "to": "l1_alan_turing_0217"
+    },
+    {
+      "from": "l2_alan_turing_C01",
+      "to": "l1_alan_turing_0218"
+    },
+    {
+      "from": "l2_alan_turing_C01",
+      "to": "l1_alan_turing_0219"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0220"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0221"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0222"
+    },
+    {
+      "from": "l2_alan_turing_C01",
+      "to": "l1_alan_turing_0223"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0224"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0225"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0226"
+    },
+    {
+      "from": "l2_alan_turing_C01",
+      "to": "l1_alan_turing_0227"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0228"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0229"
+    },
+    {
+      "from": "l2_alan_turing_C01",
+      "to": "l1_alan_turing_0230"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0231"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0232"
+    },
+    {
+      "from": "l2_alan_turing_C01",
+      "to": "l1_alan_turing_0233"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0234"
+    },
+    {
+      "from": "l2_alan_turing_C05",
+      "to": "l1_alan_turing_0235"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0236"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0237"
+    },
+    {
+      "from": "l2_alan_turing_C05",
+      "to": "l1_alan_turing_0238"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0239"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0240"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0241"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0242"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l1_alan_turing_0243"
+    },
+    {
+      "from": "l2_alan_turing_C05",
+      "to": "l1_alan_turing_0244"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0245"
+    },
+    {
+      "from": "l2_alan_turing_C05",
+      "to": "l1_alan_turing_0246"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0247"
+    },
+    {
+      "from": "l2_alan_turing_C05",
+      "to": "l1_alan_turing_0248"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0249"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0250"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0251"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0252"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0253"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0254"
+    },
+    {
+      "from": "l2_alan_turing_C05",
+      "to": "l1_alan_turing_0255"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l1_alan_turing_0256"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l1_alan_turing_0257"
+    },
+    {
+      "from": "l2_alan_turing_C06",
+      "to": "l1_alan_turing_0258"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0259"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0260"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l1_alan_turing_0261"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l1_alan_turing_0262"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l1_alan_turing_0263"
+    }
+  ],
+  "reinforces": [
+    {
+      "from": "l2_alan_turing_C01",
+      "to": "l2_alan_turing_C03",
+      "reason": "图灵在定义问题时主动设定边界、明确概念内涵并反思定义的有效性；在验证结论时，他又为有效性设定明确可操作的标准并检查其是否被满足，例如将代表元替换后乘积等价作为定义有效的判据。两者都关乎‘定义有效性’的严谨审视，缺少任一方，他对待定义的态度都会不完整。"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l2_alan_turing_C05",
+      "reason": "图灵在选择方法时频繁依据‘更简单’、‘更方便’、‘更合适’、‘工作量更少’等标准选取定义、证明路径或表达形式；在判断理论或方案时，他也常从简洁性、可读性、趣味性等美学维度进行评价，如认为某公式写法‘最为方便’、某浓度单位‘可能更为合适’。两者都体现了他基于实用与审美偏好作出取舍的同一姿态，缺少任一方，这一偏好就难以全面体现。"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l2_alan_turing_C06",
+      "reason": "图灵验证结论时采用反证、构造实例、检查误差界，并主张将检查直接内置，确保标准绝对可靠；处理失败时，他明确承认并精确定位失败，将谬误归因于具体假设或组件，并设计测试放大或以局部化错误。验证是发现缺陷，处理失败是应对缺陷，两者共同构成他严格审查与应对瑕疵的态度，缺少任一方，这一态度都会残缺。"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l2_alan_turing_C05",
+      "reason": "图灵解释结果时直接给出明确的评价性判断并附具体理由，如某项结果‘没有价值’、某形式‘对控制目的不太方便’；判断美丑时他也基于主观审美与实用标准评价方案，称某些情形‘最令人感兴趣’、某写法‘最为方便’。这些都是一贯的主观评价姿态，强调“我认为”和实用性，缺少任一方面，他评价科学对象的这一方式就不完整。"
+    },
+    {
+      "from": "l2_alan_turing_C04",
+      "to": "l2_alan_turing_C06",
+      "reason": "图灵解释结果时善于归因局限，如将证明冗长归因于缺少整数、将生物学实例有限归因于现象复杂；处理失败时他也明确承认并精确定位失败，归因于具体条件、假设或组件。两者都是对结果或失败进行具体归因的认知姿态，缺少任一方，他对待不理想结果的方式就缺乏一致性。"
+    }
+  ],
+  "enables": [
+    {
+      "from": "l2_alan_turing_C01",
+      "to": "l2_alan_turing_C02",
+      "reason": "在着手解决问题前必须先明确研究对象、设定边界条件并反思定义的有效性，之后才能依据‘更简单’、‘更方便’等标准选择合适的定义、证明路径或表达形式。例如，只有先确定‘可计算数’的精确定义及限定范围，才能讨论选择‘技术上最不笨重’的可计算数进行显式处理。"
+    },
+    {
+      "from": "l2_alan_turing_C01",
+      "to": "l2_alan_turing_C03",
+      "reason": "验证结论的前提是明确‘定义’或‘判据’本身，因为验证标准往往来自对定义中前提和边界的清晰把握。例如，将‘代表元替换为等价元后乘积仍等价’作为定义有效的判据，就需要先理解类上乘积的定义及等价关系；同样，要检验构造是否满足‘可计算’的要求，也必须先明确‘可计算’的定义。"
+    },
+    {
+      "from": "l2_alan_turing_C02",
+      "to": "l2_alan_turing_C03",
+      "reason": "进行验证时首先要选择验证的方法、标准或测试方案，这正是‘怎样选择方法’所涵盖的权衡过程。例如，在设计电路时选择内置模255校验和多级信号比对，或确定误差范围是否‘可以接受’，都需要先根据工作量、清晰性和可靠性等标准选定验证策略，才能执行验证。"
+    },
+    {
+      "from": "l2_alan_turing_C03",
+      "to": "l2_alan_turing_C06",
+      "reason": "处理失败（如发现构造不打印数字或系统错误）时，必须先通过验证检查来精确定位是哪一环节出了问题——例如将谬误归因于‘J是可计算的’这一假设，或区分错误指令表与电路缺陷——只有经过验证步骤才能明确失败的具体条件与原因，进而提出修正或规避策略。"
+    },
+    {
+      "from": "l2_alan_turing_C01",
+      "to": "l2_alan_turing_C06",
+      "reason": "处理失败时需要对失败进行归因，而归因常常指向定义中的前提或边界条件。例如将瑕疵归因于‘J是可计算的’这一假设，或承认某些断言‘不完全正确’，这都依赖于对问题定义中初始假设和前提条件的清晰认识；只有先理解定义，才能准确识别是哪一前提导致失败。"
+    },
+    {
+      "from": "l2_alan_turing_C01",
+      "to": "l2_alan_turing_C04",
+      "reason": "解释结果时需要对结论的价值、局限或原因作出评价，而这种评价常依赖于对定义中所设定边界和前提的理解。例如将证明冗长归因于Z中缺少整数，或判断某个定理‘如往常一样没有价值’，都是基于对问题定义中初始条件、术语局限的了解；只有先明确定义，才能合理归因结果的来源与意义。"
+    }
+  ],
+  "tension": [
+    {
+      "between": [
+        "l2_alan_turing_C01",
+        "l2_alan_turing_C02"
+      ],
+      "context": "selecting_formulation_or_definition",
+      "reason": "在决定如何表述或定义问题时，怎样定义问题要求精确界定概念并明确边界条件，而怎样选择方法则偏向于更简单、更方便、工作量更少的方案。前者在明确研究范围时强调严谨性和前提条件，后者在简化模型时追求易处理性，两者会直接争夺主导权：精确定义可能增加复杂度，简化处理则可能牺牲定义上的严谨性。例如，前者要求避免过度理想化掩盖实际问题，后者则反对保留原始定义而不做任何改动。"
+    },
+    {
+      "between": [
+        "l2_alan_turing_C02",
+        "l2_alan_turing_C03"
+      ],
+      "context": "simplifying_model_for_tractability",
+      "reason": "在为了数学可处理性而简化模型或选择近似时，怎样选择方法倾向于采用工作量更少、更简便的路径，而怎样验证结论则要求设定严格且可操作的验证标准并检查误差是否在可接受范围内。前者在比较方法工作量和简化模型时偏好近似，后者在检查数值计算误差和确保构造在替换后保持性质时需要严谨验证；简化可能引入超出允许范围的误差，而强制验证又会增加额外成本，两者在资源与精度约束下形成竞争。"
+    },
+    {
+      "between": [
+        "l2_alan_turing_C03",
+        "l2_alan_turing_C05"
+      ],
+      "context": "evaluating_theoretical_quality",
+      "reason": "在评估理论成果或数学表达时，怎样验证结论坚持绝对可靠、严格不过度保守的验证标准，而怎样判断美丑则从简洁性、可读性、趣味性等美学维度进行主观评价。前者在评估定理证明的严格性和完备性时要求客观验证，后者在评估多种表达方式的清晰性或优雅性时偏好美观；严谨验证可能要求复杂繁琐的检查，美学标准可能青睐简洁优雅但缺乏严格验证的方案，二者在质量评判标准上产生张力。"
+    }
+  ]
+}

@@ -11,6 +11,7 @@ from pathlib import Path
 
 import typer
 
+from omni.cli.command_surface import spell_commands
 from omni.cli.render import console, data_table
 from omni.cli.state import AppState, make_agent, run_async
 from omni.cli.terminal_harness import inspect_terminal
@@ -194,10 +195,23 @@ def doctor(ctx: typer.Context) -> None:
             n_stale = len(stale)
         except Exception:  # noqa: BLE001 — hygiene check must never break doctor
             n_stale = 0
-        await agent.aclose()
-        return db_ok, n_skills, n_async, n_stale, dict(by_source), n_shadowed
+        try:
+            from omni.runtime.execution_ownership import list_lost_executors
 
-    db_ok, n_skills, n_async, n_stale, by_source, n_shadowed = run_async(_runtime_checks())
+            n_orphans = len(
+                await list_lost_executors(
+                    agent.db,
+                    stale_after_s=s.tasks.interrupt_stale_after_s,
+                )
+            )
+        except Exception:  # noqa: BLE001 — hygiene check must never break doctor
+            n_orphans = 0
+        await agent.aclose()
+        return db_ok, n_skills, n_async, n_stale, n_orphans, dict(by_source), n_shadowed
+
+    db_ok, n_skills, n_async, n_stale, n_orphans, by_source, n_shadowed = run_async(
+        _runtime_checks()
+    )
     checks.append(["Database (SQLite)", _OK if db_ok else _FAIL, str(s.paths.project_db)])
     source_detail = ", ".join(f"{src} {cnt}" for src, cnt in sorted(by_source.items())) or "none"
     checks.append(["Skills discovered", _OK if n_skills else _WARN, f"{n_skills} ({n_async} async) · {source_detail}"])
@@ -206,16 +220,22 @@ def doctor(ctx: typer.Context) -> None:
             ["Skills shadowed", _OK, f"{n_shadowed} same-named skill(s) overridden by higher priority; `omni skills why <capability>`"]
         )
 
-    # Task hygiene: running/recovering tasks whose process looks dead. They are
-    # settled to `interrupted` by `omni serve` / `omni task drain` housekeeping.
+    # Task hygiene: running/recovering tasks whose process looks dead, plus
+    # standalone executions whose owner PID is gone. Both are settled by
+    # `omni serve` / `omni task drain` housekeeping.
     if s.tasks.interrupt_stale_after_s <= 0:
         checks.append(["Task hygiene", _WARN, "stale-task reconcile disabled (tasks.interrupt_stale_after_s = 0)"])
-    elif n_stale:
+    elif n_stale or n_orphans:
+        parts = []
+        if n_stale:
+            parts.append(f"{n_stale} task(s) look stuck in running")
+        if n_orphans:
+            parts.append(f"{n_orphans} skill execution(s) lost their executor")
         checks.append(
             [
                 "Task hygiene",
                 _WARN,
-                f"{n_stale} task(s) look stuck in running; start `omni serve` or run "
+                f"{'; '.join(parts)}; start `omni serve` or run "
                 "`omni task drain` to settle them as interrupted",
             ]
         )
@@ -230,7 +250,7 @@ def doctor(ctx: typer.Context) -> None:
                 "Model",
                 _WARN,
                 "mock (offline placeholder); configure a model with "
-                "`omni config set model.provider openai`",
+                f"`{spell_commands('/model')}` or `{spell_commands('/model deepseek-chat')}`",
             ]
         )
     else:
@@ -271,13 +291,48 @@ def doctor(ctx: typer.Context) -> None:
             [
                 "MCP support",
                 _WARN,
-                "install `omniscientist[mcp]` to enable `omni mcp serve`",
+                "install `OmniScientist-V2[mcp]` to enable `omni mcp serve`",
             ]
         )
 
-    # optional bins
+    # optional bins — Node and npm are separate: research-pptx setup needs both,
+    # but a ready renderer cache only needs Node at render time.
+    from omni.skills_runtime.runtime_setup import (
+        RESEARCH_PPTX_SETUP_COMMAND,
+        research_pptx_runtime_ready,
+    )
+
+    node = shutil.which("node") or shutil.which("node.exe")
+    npm = shutil.which("npm") or shutil.which("npm.cmd")
+    checks.append(
+        [
+            "bin: node",
+            _OK if node else _WARN,
+            node or "not installed (research-pptx renderer + external MCP/npx servers)",
+        ]
+    )
+    if npm:
+        npm_detail = npm
+    elif node:
+        npm_detail = (
+            "Node is installed, but npm is not on PATH "
+            "(research-pptx setup uses `npm ci`)"
+        )
+    else:
+        npm_detail = "not installed (research-pptx setup uses `npm ci`)"
+    checks.append(["bin: npm", _OK if npm else _WARN, npm_detail])
+    if research_pptx_runtime_ready(s.paths):
+        checks.append(["research-pptx runtime", _OK, "renderer cache ready"])
+    else:
+        checks.append(
+            [
+                "research-pptx runtime",
+                _WARN,
+                f"not installed; run `{RESEARCH_PPTX_SETUP_COMMAND}`",
+            ]
+        )
+
     for tool, why in [
-        ("node", "external MCP/npx servers"),
         ("ffmpeg", "media-processing skills"),
         ("git", "Git-related skills"),
         ("soffice", "document-conversion skills"),

@@ -30,7 +30,6 @@ CHECK_DIMENSION: dict[str, str] = {
     "im_hides": "presentation",
     "retrieval": "retrieval",
     "safety": "safety",
-    "evolution": "self_evolution",
     "provenance_capsule": "provenance",
     "self_review": "self_review",
     "literature": "literature",

@@ -2,6 +2,15 @@
 
 本文用于在 Codex 中检查 SoulAgent 是否被正确触发，以及科学家人格能否按任务加载、刷新、切换和卸载。
 
+## 目录
+
+- [1. 测试对象](#1-测试对象)
+- [2. 测试前准备](#2-测试前准备)
+- [3. 最短验证流程](#3-最短验证流程)
+- [4. 补充任务示例](#4-补充任务示例)
+- [5. 建议记录内容](#5-建议记录内容)
+- [6. 常见问题](#6-常见问题)
+
 ## 1. 测试对象
 
 本次测试的入口是 `soulagent`：
@@ -10,16 +19,23 @@
 skills/soulagent/
 ```
 
-仓库附带的只读示例数据位于：
+仓库附带的只读内置数据位于：
 
 ```text
-skills/soulagent/examples/scientist-kg/
+skills/soulagent/assets/builtin-scientist-kg/
+├── alan-turing/
+├── claude-shannon/
 ├── fengli-xu/
-└── kaiming-he/
+├── herbert-a-simon/
+├── john-von-neumann/
+├── kaiming-he/
+├── norbert-wiener/
+└── richard-feynman/
 ```
 
-实际运行时，SoulAgent 从测试项目或用户项目根目录的
-`scientist-kg/` 读取数据，不把生成结果写回 Skill 安装目录。
+实际运行时，SoulAgent 优先使用显式 `kg_root`，其次使用当前项目已存在的
+`scientist-kg/` 兼容目录，否则扫描 `~/.omni/scientist-kg/`。远端下载和蒸馏器
+安装必须写入这一个实际扫描目录；SoulAgent 不把生成结果写回 Skill 安装目录。
 
 测试过程中，Codex 应调用：
 
@@ -62,18 +78,19 @@ $env:SOULAGENT_BASE_URL = "<OPENAI_COMPATIBLE_BASE_URL>"
 
 ### 2.3 准备独立测试项目
 
-不要直接修改 Skill 内的只读示例。先创建测试项目，并将示例 KG
+不要直接修改 Skill 内的只读资源。先创建测试项目，并将内置 KG
 复制到项目根目录：
 
 ```powershell
 New-Item ".\soulagent-smoke" -ItemType Directory -Force
-Copy-Item ".\skills\soulagent\examples\scientist-kg" `
+Copy-Item ".\skills\soulagent\assets\builtin-scientist-kg" `
   ".\soulagent-smoke\scientist-kg" -Recurse
 ```
 
 ### 2.4 从正确目录启动 Codex
 
-SoulAgent 默认从当前项目根目录的 `scientist-kg/` 读取数据，因此应以刚创建的独立测试项目为工作目录启动：
+本例已经创建项目本地 `scientist-kg/`，它会优先于全局
+`~/.omni/scientist-kg/` 被扫描，因此应以刚创建的独立测试项目为工作目录启动：
 
 ```powershell
 codex -C "<仓库路径>\soulagent-smoke"
@@ -92,7 +109,7 @@ codex -C "<仓库路径>\soulagent-smoke"
 预期结果：
 
 - Codex 调用 `Skill(soulagent)`。
-- 返回 `kaiming-he` 和 `fengli-xu`。
+- 返回全部 8 位内置科学家人格。
 - 不生成或修改人格文件。
 
 ### 3.2 加载何恺明并进行失败诊断

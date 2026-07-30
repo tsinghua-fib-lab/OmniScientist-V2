@@ -20,7 +20,7 @@ from omni.channels.commands import handle_channel_command
 from omni.config import load_settings
 from omni.memory.service import MemoryLayer
 from omni.runtime.notifications import TaskNotification
-from omni.runtime.presentation import TaskPresentation
+from omni.runtime.presentation import ArtifactRef, TaskPresentation, TurnPresentation
 from tests.conftest import ScriptedLLM
 
 
@@ -161,6 +161,30 @@ async def test_im_run_controls_are_session_scoped(monkeypatch) -> None:  # noqa:
         )
         approved = await handle_channel_command(agent, f"/task approve {run.id[:8]}", session_a)
         assert approved is not None and approved.assistant_text == "approved"
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel", ["wechat", "feishu", "dingtalk"])
+async def test_bare_task_id_on_im_is_inspect_not_a_new_turn(channel: str) -> None:
+    agent = await OmniAgent.create(load_settings())
+    session = await agent.ensure_session(channel=channel, external_key="user-a")
+    run = await agent.tasks.create_task(
+        session_id=session,
+        channel=channel,
+        user_input="long research",
+    )
+    try:
+        shown = await handle_channel_command(agent, run.id[:8], session)
+        assert shown is not None
+        assert f"Task `{run.id[:8]}`" in shown.assistant_text
+        unknown = await handle_channel_command(agent, "6978342b", session)
+        assert unknown is None
+        generative = await handle_channel_command(
+            agent, f"基于 {run.id[:8]} 继续写论文", session
+        )
+        assert generative is None
     finally:
         await agent.aclose()
 
@@ -311,6 +335,104 @@ async def test_duplicate_task_notification_is_sent_once() -> None:
 
 
 @pytest.mark.asyncio
+async def test_skill_notice_is_not_resent_when_the_parent_turn_already_attached_files() -> None:
+    settings = load_settings()
+    agent = await OmniAgent.create(settings)
+    channel = _RecordingChannel(settings, agent)
+    session_id = await agent.ensure_session()
+    task = await agent.tasks.create_task(
+        session_id=session_id,
+        channel="wechat",
+        user_input="为 RAG 系统综述准备材料",
+    )
+    paper = ArtifactRef(
+        title="RAG系统综述",
+        format="md",
+        path="/tmp/RAG系统综述.md",
+        uri="artifact://paper",
+    )
+    try:
+        await channel._send_task_presentation(
+            "user-a",
+            TurnPresentation(
+                assistant_text="任务已完成，三份材料都已产出并保存在工作区。",
+                task_id=task.id,
+                artifacts=[paper],
+            ),
+            task_id=task.id,
+            kind="turn",
+        )
+        assert await agent.tasks.turn_covers_deliverables(
+            task.id, channel="wechat", external_key="user-a"
+        )
+        status = await channel.send_task_notification(
+            TaskNotification(
+                subtask_id="3a06844f" + "0" * 24,
+                skill_name="scientific-figure",
+                status="succeeded",
+                object_kind="skill_execution",
+                channel="wechat",
+                session_id=session_id,
+                external_key="user-a",
+                task_id=task.id,
+                summary="Generated an auditable, reproducible RAG System Architecture.",
+            )
+        )
+        assert status == "sent"
+        assert len(channel.sent) == 1
+        assert "任务已完成" in channel.sent[0][1].assistant_text
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_pending_child_turn_still_sends_the_skill_notice() -> None:
+    settings = load_settings()
+    agent = await OmniAgent.create(settings)
+    channel = _RecordingChannel(settings, agent)
+    session_id = await agent.ensure_session()
+    task = await agent.tasks.create_task(
+        session_id=session_id,
+        channel="wechat",
+        user_input="生成架构图",
+    )
+    try:
+        await channel._send_task_presentation(
+            "user-a",
+            TurnPresentation(
+                assistant_text=(
+                    "Remaining deliverables are still running. "
+                    "Files will be sent when they are ready."
+                ),
+                task_id=task.id,
+            ),
+            task_id=task.id,
+            kind="turn",
+        )
+        assert not await agent.tasks.turn_covers_deliverables(
+            task.id, channel="wechat", external_key="user-a"
+        )
+        status = await channel.send_task_notification(
+            TaskNotification(
+                subtask_id="3a06844f" + "0" * 24,
+                skill_name="scientific-figure",
+                status="succeeded",
+                object_kind="skill_execution",
+                channel="wechat",
+                session_id=session_id,
+                external_key="user-a",
+                task_id=task.id,
+                summary="Figure rendered.",
+            )
+        )
+        assert status == "sent"
+        assert len(channel.sent) == 2
+        assert isinstance(channel.sent[1][1], TaskPresentation)
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
 async def test_cost_summary_includes_durable_child_runs() -> None:
     agent = await OmniAgent.create(load_settings())
     session_id = await agent.ensure_session()
@@ -369,7 +491,14 @@ async def test_cost_summary_includes_durable_child_runs() -> None:
 
 
 @pytest.mark.asyncio
-async def test_session_memory_maintenance_has_verified_cost_run() -> None:
+async def test_session_memory_maintenance_has_settled_cost_run() -> None:
+    """Ending a session leaves a finished maintenance run that owns its cost.
+
+    Memory hygiene calls the model without a user turn to bill it to, so it gets
+    its own run. That run has to reach a terminal status like any other: one
+    left open would sit in `omni task list` forever, and its model spend would
+    never be attributable to anything.
+    """
     settings = load_settings()
     agent = await OmniAgent.create(settings)
     llm = ScriptedLLM()
@@ -396,4 +525,5 @@ async def test_session_memory_maintenance_has_verified_cost_run() -> None:
     assert maintenance.status == "succeeded"
     assert any(event.event_type == "cost.usage" for event in events)
     assert any(event.name == "memory:profile_merge" for event in events)
-    assert any(event.event_type == "verification.passed" for event in events)
+    assert any(event.event_type == "maintenance.completed" for event in events)
+    assert any(event.event_type == "task.succeeded" for event in events)

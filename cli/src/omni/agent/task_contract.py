@@ -56,6 +56,7 @@ def build_schedule_task_contract(
     *,
     objective: str,
     deferred_goal: str,
+    schedule_proposal: dict[str, Any] | None = None,
     provenance_mode: str = "light",
     confidence: float = 0.0,
 ) -> dict[str, Any]:
@@ -68,7 +69,7 @@ def build_schedule_task_contract(
     normalized_provenance = (
         provenance_mode if provenance_mode in {"light", "full"} else "light"
     )
-    return {
+    contract = {
         "schema_version": TASK_CONTRACT_SCHEMA_VERSION,
         "objective": objective,
         "deliverables": [_deliverable_contract("schedule")],
@@ -85,6 +86,9 @@ def build_schedule_task_contract(
             "provenance_mode": normalized_provenance,
         },
     }
+    if schedule_proposal:
+        contract["schedule_proposal"] = copy.deepcopy(schedule_proposal)
+    return contract
 
 
 def task_contract_deliverables(contract: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -127,164 +131,8 @@ def task_contract_deliverables(contract: dict[str, Any] | None) -> list[dict[str
         ):
             if item.get(key):
                 record[key] = str(item[key])
-        if isinstance(item.get("required_checks"), list):
-            record["required_checks"] = _declared_check_ids(
-                item["required_checks"]
-            )
         normalized.append(record)
     return normalized
-
-
-def bind_task_contract_providers(
-    contract: dict[str, Any],
-    workflow_steps: list[dict[str, Any]],
-) -> dict[str, Any]:
-    """Attach provider-owned quality obligations to exact workflow consumers.
-
-    The host never invents domain checks here. It copies only check identifiers
-    declared by the selected provider's ``quality_contract`` and binds them to
-    the sealed provider identity. The provider judges those checks after
-    execution; the verifier merely matches and aggregates the envelopes.
-    """
-    bound = copy.deepcopy(contract)
-    deliverables = task_contract_deliverables(bound)
-    used_record_indexes: set[int] = set()
-    for index, step in enumerate(workflow_steps):
-        quality = (
-            step.get("quality_contract")
-            if isinstance(step.get("quality_contract"), dict)
-            else {}
-        )
-        checks = _declared_check_ids(quality.get("checks"))
-        if not checks or quality.get("assessment_required") is not True:
-            continue
-        step_id = str(step.get("id") or "")
-        binding_id = str(step.get("provider_binding_id") or "")
-        contract_hash = str(step.get("provider_contract_hash") or "")
-        if not step_id or not binding_id or not contract_hash:
-            # An unsealed provider cannot authoritatively own an assessment.
-            # Plan validation/materialization will either seal it later or fail.
-            continue
-        deliverable_id = str(step.get("deliverable_id") or step_id)
-        step["deliverable_id"] = deliverable_id
-        exact_index = _exact_obligation_index(
-            deliverables,
-            deliverable_id=deliverable_id,
-            step_id=step_id,
-            provider_binding_id=binding_id,
-            provider_contract_hash=contract_hash,
-        )
-        record_index = exact_index
-        if record_index is None:
-            record_index = _unbound_deliverable_index(
-                deliverables,
-                deliverable_id=deliverable_id,
-                excluded=used_record_indexes,
-            )
-        if record_index is None:
-            record = {
-                "id": deliverable_id,
-                "kind": str(
-                    step.get("deliverable")
-                    or step.get("capability")
-                    or deliverable_id
-                ),
-                "required": bool(step.get("required", True))
-                and not bool(step.get("optional")),
-                "acceptance": [],
-            }
-            deliverables.append(record)
-            record_index = len(deliverables) - 1
-        else:
-            record = deliverables[record_index]
-        used_record_indexes.add(record_index)
-        record.update(
-            {
-                "consumer_step_id": step_id,
-                "provider_binding_id": binding_id,
-                "provider_contract_hash": contract_hash,
-                "provider_name": str(
-                    step.get("provider_name")
-                    or step.get("skill_name")
-                    or step.get("skill")
-                    or ""
-                ),
-                "provider_source": str(step.get("provider_source") or ""),
-                "input_pointer": str(
-                    step.get("input_pointer")
-                    or f"/workflow_steps/{index}/input"
-                ),
-                "required_checks": checks,
-            }
-        )
-    bound["deliverables"] = deliverables
-    return bound
-
-
-def _exact_obligation_index(
-    deliverables: list[dict[str, Any]],
-    *,
-    deliverable_id: str,
-    step_id: str,
-    provider_binding_id: str,
-    provider_contract_hash: str,
-) -> int | None:
-    """Return an existing obligation only when its sealed identity is exact."""
-
-    for index, record in enumerate(deliverables):
-        if (
-            str(record.get("id") or "") == deliverable_id
-            and str(record.get("consumer_step_id") or "") == step_id
-            and str(record.get("provider_binding_id") or "")
-            == provider_binding_id
-            and str(record.get("provider_contract_hash") or "")
-            == provider_contract_hash
-        ):
-            return index
-    return None
-
-
-def _unbound_deliverable_index(
-    deliverables: list[dict[str, Any]],
-    *,
-    deliverable_id: str,
-    excluded: set[int],
-) -> int | None:
-    """Return one unclaimed generic record that can become an exact obligation."""
-
-    for index, record in enumerate(deliverables):
-        if index in excluded or str(record.get("id") or "") != deliverable_id:
-            continue
-        if any(
-            str(record.get(key) or "")
-            for key in (
-                "consumer_step_id",
-                "provider_binding_id",
-                "provider_contract_hash",
-            )
-        ):
-            continue
-        return index
-    return None
-
-
-def provider_quality_checks(
-    workflow_steps: list[dict[str, Any]],
-) -> list[str]:
-    """Return required check ids declared by exact selected providers."""
-    checks: list[str] = []
-    for step in workflow_steps:
-        if bool(step.get("optional")) or not bool(step.get("required", True)):
-            continue
-        quality = (
-            step.get("quality_contract")
-            if isinstance(step.get("quality_contract"), dict)
-            else {}
-        )
-        if quality.get("assessment_required") is not True:
-            continue
-        checks.extend(_declared_check_ids(quality.get("checks")))
-    return _unique(checks)
 
 
 def build_workflow_dag(workflow_steps: list[dict[str, Any]]) -> dict[str, Any]:
@@ -392,20 +240,6 @@ def _unique(values: list[str]) -> list[str]:
         seen.add(item)
         out.append(item)
     return out
-
-
-def _declared_check_ids(value: Any) -> list[str]:
-    """Return check ids only from the contract's declared string array."""
-
-    if not isinstance(value, list):
-        return []
-    return _unique(
-        [
-            item.strip()
-            for item in value
-            if isinstance(item, str) and item.strip()
-        ]
-    )
 
 
 def _topological_order(node_ids: list[str], edges: list[dict[str, str]]) -> tuple[list[str], list[str]]:

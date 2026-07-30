@@ -1,0 +1,256 @@
+{
+  "summarizes": [
+    {
+      "from": "l3_claude_shannon_P01",
+      "to": "l2_claude_shannon_C02"
+    },
+    {
+      "from": "l3_claude_shannon_P01",
+      "to": "l2_claude_shannon_C05"
+    },
+    {
+      "from": "l3_claude_shannon_P02",
+      "to": "l2_claude_shannon_C01"
+    },
+    {
+      "from": "l3_claude_shannon_P02",
+      "to": "l2_claude_shannon_C06"
+    },
+    {
+      "from": "l3_claude_shannon_P02",
+      "to": "l2_claude_shannon_C02"
+    },
+    {
+      "from": "l3_claude_shannon_P02",
+      "to": "l2_claude_shannon_C03"
+    },
+    {
+      "from": "l3_claude_shannon_P03",
+      "to": "l2_claude_shannon_C01"
+    },
+    {
+      "from": "l3_claude_shannon_P03",
+      "to": "l2_claude_shannon_C02"
+    },
+    {
+      "from": "l3_claude_shannon_P03",
+      "to": "l2_claude_shannon_C03"
+    },
+    {
+      "from": "l3_claude_shannon_P03",
+      "to": "l2_claude_shannon_C07"
+    }
+  ],
+  "supports": [
+    {
+      "from": "l2_claude_shannon_C02",
+      "to": "l1_claude_shannon_0001"
+    },
+    {
+      "from": "l2_claude_shannon_C02",
+      "to": "l1_claude_shannon_0002"
+    },
+    {
+      "from": "l2_claude_shannon_C02",
+      "to": "l1_claude_shannon_0003"
+    },
+    {
+      "from": "l2_claude_shannon_C01",
+      "to": "l1_claude_shannon_0004"
+    },
+    {
+      "from": "l2_claude_shannon_C06",
+      "to": "l1_claude_shannon_0005"
+    },
+    {
+      "from": "l2_claude_shannon_C02",
+      "to": "l1_claude_shannon_0006"
+    },
+    {
+      "from": "l2_claude_shannon_C02",
+      "to": "l1_claude_shannon_0007"
+    },
+    {
+      "from": "l2_claude_shannon_C02",
+      "to": "l1_claude_shannon_0008"
+    },
+    {
+      "from": "l2_claude_shannon_C01",
+      "to": "l1_claude_shannon_0009"
+    },
+    {
+      "from": "l2_claude_shannon_C05",
+      "to": "l1_claude_shannon_0010"
+    },
+    {
+      "from": "l2_claude_shannon_C05",
+      "to": "l1_claude_shannon_0011"
+    },
+    {
+      "from": "l2_claude_shannon_C02",
+      "to": "l1_claude_shannon_0012"
+    },
+    {
+      "from": "l2_claude_shannon_C05",
+      "to": "l1_claude_shannon_0013"
+    },
+    {
+      "from": "l2_claude_shannon_C02",
+      "to": "l1_claude_shannon_0014"
+    },
+    {
+      "from": "l2_claude_shannon_C03",
+      "to": "l1_claude_shannon_0015"
+    },
+    {
+      "from": "l2_claude_shannon_C01",
+      "to": "l1_claude_shannon_0016"
+    },
+    {
+      "from": "l2_claude_shannon_C05",
+      "to": "l1_claude_shannon_0017"
+    },
+    {
+      "from": "l2_claude_shannon_C02",
+      "to": "l1_claude_shannon_0018"
+    },
+    {
+      "from": "l2_claude_shannon_C01",
+      "to": "l1_claude_shannon_0019"
+    },
+    {
+      "from": "l2_claude_shannon_C02",
+      "to": "l1_claude_shannon_0020"
+    },
+    {
+      "from": "l2_claude_shannon_C05",
+      "to": "l1_claude_shannon_0021"
+    },
+    {
+      "from": "l2_claude_shannon_C03",
+      "to": "l1_claude_shannon_0022"
+    },
+    {
+      "from": "l2_claude_shannon_C03",
+      "to": "l1_claude_shannon_0023"
+    },
+    {
+      "from": "l2_claude_shannon_C07",
+      "to": "l1_claude_shannon_0024"
+    },
+    {
+      "from": "l2_claude_shannon_C05",
+      "to": "l1_claude_shannon_0025"
+    },
+    {
+      "from": "l2_claude_shannon_C02",
+      "to": "l1_claude_shannon_0026"
+    },
+    {
+      "from": "l2_claude_shannon_C04",
+      "to": "l1_claude_shannon_0027"
+    },
+    {
+      "from": "l2_claude_shannon_C02",
+      "to": "l1_claude_shannon_0028"
+    },
+    {
+      "from": "l2_claude_shannon_C02",
+      "to": "l1_claude_shannon_0029"
+    },
+    {
+      "from": "l2_claude_shannon_C06",
+      "to": "l1_claude_shannon_0030"
+    }
+  ],
+  "reinforces": [
+    {
+      "from": "l2_claude_shannon_C01",
+      "to": "l2_claude_shannon_C02",
+      "reason": "该科学家在定义问题时主动划清边界、剔除无关因素，将问题简化为可操作目标；在选择方法时同样采用简化模型、省略次要效应，并强调在形式简单性与真实性间取得平衡。两者都依赖抽象和简化来把握问题，缺少“怎样选择方法”那套抽象工具，界定的问题便难以操作；反过来，没有清晰的问题边界，简化也就失去对象。"
+    },
+    {
+      "from": "l2_claude_shannon_C01",
+      "to": "l2_claude_shannon_C07",
+      "reason": "该科学家在定义问题时把通信目标转化为可量化的传输指标，并主动将问题限定为可计算、可量化的形式；在产生想法时则聚焦于极值或最小化问题，并抽象出可度量、可优化的维度。两者都以量化、边界清晰为共同姿态，没有极值探求，定义出的量化指标就缺少理论牵引；没有清晰定义，极值也无从谈起。"
+    },
+    {
+      "from": "l2_claude_shannon_C01",
+      "to": "l2_claude_shannon_C03",
+      "reason": "该科学家在定义问题时偏好可计算、可量化，并剔除模糊方面；在验证结论时追求明确无歧义的判定，强调证明存在性或不可能性。两者都拒绝模棱两可，缺少验证思维会使定义的问题无法确认其有效性，缺少清晰定义则验证也缺乏可检验的对象。"
+    },
+    {
+      "from": "l2_claude_shannon_C02",
+      "to": "l2_claude_shannon_C07",
+      "reason": "该科学家在选择方法时偏好抽象符号分析和理论建模，并采用简化模型；在产生想法时则将研究方向聚焦于极值或最小化问题，把问题抽象为可度量的理论目标。两者都从具体机制中走向抽象和优化，没有抽象方法，极值探索难以理论化；没有极值问题，抽象方法也失去独特的引导。"
+    },
+    {
+      "from": "l2_claude_shannon_C03",
+      "to": "l2_claude_shannon_C06",
+      "reason": "该科学家在验证结论时坚持给出明确无歧义的判定，并用否定性断言划定不可能性范围；在处理失败时也明确承认研究局限、将不足归因于具体技术困难或范围限制。两者都要求对结果做清晰、直接的说明，拒绝模糊或回避，缺少失败归因会使得验证的边界变得模煳，缺少严格验证则失败也缺少判据。"
+    },
+    {
+      "from": "l2_claude_shannon_C05",
+      "to": "l2_claude_shannon_C07",
+      "reason": "该科学家在判断美丑时总是通过对比不同方法或系统的优劣，并依靠敏感性、计算难度等定量或定性指标来评价；在产生想法时则以“最小状态-符号乘积”这类可量化的理论极值来判断问题是否有趣。两者都以明确的指标来支撑价值判断，拒绝没有指标的主观品味，没有极值思维则比较缺少理论导向，没有比较则极值的趣味性也难以彰显。"
+    }
+  ],
+  "enables": [
+    {
+      "from": "l2_claude_shannon_C01",
+      "to": "l2_claude_shannon_C02",
+      "reason": "理解“怎样选择方法”必须先理解“怎样定义问题”。因为科学家在定义问题时划清边界、排除无关因素，并追求可量化目标，这为选择简化模型、符号演算等方法提供了前提。他的方法选择依赖对问题边界的清晰界定。"
+    },
+    {
+      "from": "l2_claude_shannon_C02",
+      "to": "l2_claude_shannon_C03",
+      "reason": "理解“怎样验证结论”必须先理解“怎样选择方法”。因为他验证时使用构造性逼近或否定性断言，这些都需要具体方法支撑，而方法选择决定了他采用何种演算或证明手段。"
+    },
+    {
+      "from": "l2_claude_shannon_C03",
+      "to": "l2_claude_shannon_C04",
+      "reason": "理解“怎样解释结果”必须先理解“怎样验证结论”。因为他解释结果时批判性反思数学框架的适用性，但前提是已有验证过的结论，他才能对结论的可靠性进行反思。"
+    },
+    {
+      "from": "l2_claude_shannon_C02",
+      "to": "l2_claude_shannon_C05",
+      "reason": "理解“怎样判断美丑”必须先理解“怎样选择方法”。因为他在判断美丑时通过对比不同方法或系统的优劣，必须首先知晓哪些方法可供选择，才能进行比较。"
+    },
+    {
+      "from": "l2_claude_shannon_C03",
+      "to": "l2_claude_shannon_C06",
+      "reason": "理解“怎样处理失败”必须先理解“怎样验证结论”。因为他在处理失败时明确承认未找到显式构造等局限，这些失败是在验证边界时遇到的，需要理解验证过程的严格性才能正确归因。"
+    },
+    {
+      "from": "l2_claude_shannon_C01",
+      "to": "l2_claude_shannon_C07",
+      "reason": "理解“怎样产生想法”必须先理解“怎样定义问题”。因为他产生想法时聚焦于极值或最小化问题，这需要先在定义问题时明确可量化的边界和目标，才能形成对极值的探索。"
+    }
+  ],
+  "tension": [
+    {
+      "between": [
+        "l2_claude_shannon_C02",
+        "l2_claude_shannon_C04"
+      ],
+      "context": "evaluating_model_fit",
+      "reason": "在评估模型拟合时，怎样选择方法倾向于通过符号推导和理论建模直接采用数学框架，而怎样解释结果则强调数学框架可能只是次级语言，不应直接映射到底层机制，并明确反对直接应用数学框架。两者在同一项模型评估任务中对是否直接使用数学工具产生竞争，一方要直接代入，另一方要批判性限定。"
+    },
+    {
+      "between": [
+        "l2_claude_shannon_C06",
+        "l2_claude_shannon_C07"
+      ],
+      "context": "selecting_research_direction",
+      "reason": "在评估研究方向时，怎样处理失败倾向于明确承认局限、归因于技术困难，并避免鼓励冒险探索；而怎样产生想法则优先考虑理论趣味性和挑战性，主动将研究引向最小化极值问题。当面对一个开放而充满挑战的问题时，一方要求稳妥承认现有困难，另一方却追求理论冒险，二者对‘是否应冒险’这一资源分配形成冲突。"
+    },
+    {
+      "between": [
+        "l2_claude_shannon_C04",
+        "l2_claude_shannon_C07"
+      ],
+      "context": "assessing_theoretical_models",
+      "reason": "在判断理论模型的价值时，怎样解释结果认为数学框架可能只是描述性工具，不应直接应用，需预留不确定性；而怎样产生想法则致力于寻找最简参数配置，将理论模型视为可直接应用的研究目标。在评估形式化表述是否应直接指导研究方向时，两者竞争对数学框架的信任程度。"
+    }
+  ]
+}

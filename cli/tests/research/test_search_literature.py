@@ -88,10 +88,12 @@ async def test_search_literature_one_bad_source_does_not_sink(monkeypatch):
     monkeypatch.setattr(connectors, "_get_json", _fake)
     ctx = await _ctx(connectors_allow=["openalex", "crossref"])
     out = await _tool(ctx, "search_literature").handler({"query": "x"})
-    assert out["status"] == "ok"          # partial success, not a hard fail
+    assert out["status"] == "partial"     # one source failed but there are results
     assert out["count"] == 1
     assert any("crossref" in e for e in out["errors"])
     assert out["per_source"]["crossref"].get("error")
+    # provider diagnostics surface the failed connector's classification
+    assert any(p["name"] == "crossref" and p["state"] == "failed" for p in out["providers"])
 
 
 @pytest.mark.asyncio
@@ -121,5 +123,6 @@ async def test_search_literature_requires_query():
 async def test_search_literature_no_enabled_connectors():
     ctx = await _ctx(connectors_allow=["nonexistent"])
     out = await _tool(ctx, "search_literature").handler({"query": "x"})
-    assert out["status"] == "error"
+    assert out["status"] == "empty"       # three-state: no source, not a hard error
     assert out["results"] == []
+    assert out["remediation"]             # tells the user how to enable connectors

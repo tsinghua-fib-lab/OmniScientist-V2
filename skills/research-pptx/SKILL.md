@@ -44,6 +44,12 @@ metadata:
       - group meeting
       - seminar
       - presentation
+      - outline review
+      - check outline
+      - review outline
+      - approve outline
+      - generate ppt
+      - make ppt
     engine:
       module: engine
       class: ResearchPptxEngine
@@ -94,7 +100,7 @@ metadata:
             step) to build the deck from. Their citations become footnotes.
         reference_text:
           type: string
-          description: "Inline source text (rarely needed)."
+          description: "Primary text source, including pasted content or a structured summary of prior discussion."
         language:
           type: string
           enum: [en, zh]
@@ -110,6 +116,9 @@ metadata:
             Output language. MUST be exactly 'zh' or 'en'. Map Chinese → 'zh',
             English → 'en'. Default 'en'. (Aliases like 'Chinese' are auto‑corrected
             but you should pass the enum value directly.)
+        output_language:
+          type: string
+          description: "Compatibility alias mapped to language; prefer language."
         talk_type:
           type: string
           enum: [conference, seminar, group_meeting, defense]
@@ -191,7 +200,13 @@ metadata:
           description: "Returned by a review checkpoint; pass back to continue."
         approved_plan:
           type: object
-          description: "User‑edited plan to render when resuming."
+          description: "Complete replacement plan to render when resuming."
+        plan_edits:
+          type: array
+          items: {type: object}
+          description: >
+            Ordered surgical edits applied to the cached plan. Indices refer to
+            the plan produced by the preceding edit; see references/omni.md.
         template_uri:
           type: string
           description: "artifact:// or path of a PPTX whose theme (colours+fonts) to adopt."
@@ -258,12 +273,16 @@ metadata:
                 "generate slides", "generate a slide deck", "make a deck",
                 "create a presentation", "from an outline", "from a markdown",
                 "from a pdf", "from a paper", "review outline",
-                "approve before rendering"]
+                "approve before rendering", "outline review",
+                "check outline first", "show outline", "outline first",
+                "approve outline", "make ppt", "generate ppt", "create pptx"]
       when_to_use: >
         Build a slide deck from a paper/topic/outline/markdown; OR draft an
         outline for the user to review first (review_mode=plan). Read the user's
         intent and set the matching input fields — never paste intent phrases
         like 'action=export' or 'review_mode=plan' into topic.
+        For outline-first requests invoke this skill with review_mode=plan; the
+        skill owns planning, plan_edits, and typed resume_token continuation.
     notification:
       display_label: "Slide Generation"
       title_field: "title"
@@ -388,23 +407,6 @@ An `outline` or `markdown_uri` source is parsed for:
 So a markdown‑driven or outline‑driven deck now has the same feature surface
 as a PDF‑driven one, minus the auto‑extracted PDF figures.
 
-## Parameters
-
-| param | type | required | rule |
-|-------|------|----------|------|
-| topic | string | yes (new deck) | user's core topic/instruction, verbatim; omit only when resuming |
-| pdf_uri | string | no | `artifact://` or local path of a PDF |
-| reference_text | string | no | inline source text (rarely needed) |
-| language | string | no | `zh` for Chinese users, else `en` (default `en`) |
-| talk_type | string | no | conference / seminar / group_meeting / defense |
-| duration_minutes | int | no | 5‑90, default 15 |
-| target_slides | int | no | 3‑80, only if the user states a count |
-| color_theme | string | no | only if the user specifies a style |
-| mode | string | no | `auto` (default) or `agentic` (LLM decides strategy) |
-| review_mode | string | no | `none` (default); `plan`/`interactive` only if the user asks to review |
-| resume_token | string | no | returned by a review checkpoint; pass back to resume |
-| approved_plan | object | no | user‑edited plan to render when resuming |
-
 ## Duration → slide count
 
 | talk_type | minutes → slides |
@@ -424,20 +426,6 @@ when) the user asked to review first, returns `status: "partial"` with
 `outcome.code: "awaiting_review"`, `resume_token`, `plan`, `strategy`, and
 `report_uri`. Tell the user the deck is ready (or awaiting their approval); do
 not keep calling tools.
-
-## Telemetry (for offline analysis)
-
-Every run appends JSONL rows under
-`<workspace>/artifacts/telemetry/research_pptx.jsonl`:
-
-- `audit` — start / complete / fail milestones.
-- `stage` — one row per internal stage (parse / strategy / plan / render / QA /
-  visual‑critique / store) with latency and I/O summaries.
-- `decision` — one row per decision point (strategy choice, review checkpoint,
-  outline approval, visual critique) with `options`, `chosen`, `decided_by`
-  (`llm`/`user`/`default`), `requires_review`, and `rationale`.
-
-Rows carry `session_id` / `task_id`, so decisions and outcomes stay joinable.
 
 ## Source formats
 

@@ -23,9 +23,10 @@ from omni.storage.artifacts import ArtifactStore
 from omni.storage.db import Database
 from omni.storage.models import ArtifactORM, TaskORM
 
-# Statuses that mean "a product exists to reopen"; running/needs_input turns are
-# in-flight and carry nothing to bind a referent to yet.
-_TERMINAL_WITH_PRODUCT = ("succeeded", "degraded")
+# Terminal tasks remain valid follow-up targets even when they produced no
+# artifact: users commonly ask why the immediately preceding task failed.
+# Running/needs_input turns stay excluded because their outcome is not settled.
+_RECENT_TERMINAL = ("succeeded", "degraded", "failed", "cancelled")
 # How many recent turns to scan before principal filtering. Bounded so the
 # digest stays a cheap single read even on a busy workspace.
 _SCAN_LIMIT = 60
@@ -61,18 +62,18 @@ async def recent_activity_digest(
             .scalars()
             .all()
         )
-    produced = [
+    recent = [
         t
         for t in rows
-        if t.status in _TERMINAL_WITH_PRODUCT
+        if t.status in _RECENT_TERMINAL
         and principal_of(t.channel or "cli", t.external_key or "") == principal
     ][:limit]
-    if not produced:
+    if not recent:
         return ""
 
     # Resolve artifact titles for the shown tasks in one batched read so the
     # digest names the concrete outputs the planner can bind a referent to.
-    art_ids = [aid for t in produced for aid in (t.artifact_ids or [])]
+    art_ids = [aid for t in recent for aid in (t.artifact_ids or [])]
     titles: dict[str, str] = {}
     if art_ids:
         async with db.session() as s:
@@ -84,12 +85,12 @@ async def recent_activity_digest(
         titles = {a.id: (a.title or a.kind or "artifact") for a in arts}
 
     lines = [
-        "[Recent activity] Deliverables you produced for this user (newest first). "
-        "To act on one — describe it, revise it, or regenerate it — reopen it with "
+        "[Recent activity] Recent terminal tasks and deliverables for this user "
+        "(newest first). To inspect status or act on one, reopen it with "
         "get_task / get_subtask / open_artifact / list_session_artifacts. Do NOT ask "
         "the user to re-describe something listed here:"
     ]
-    for t in produced:
+    for t in recent:
         label = _title_for(t) or t.intent_type or "task"
         head = f"- [{t.id[:8]}] {label} · {t.status}"
         named = [titles[aid] for aid in (t.artifact_ids or []) if aid in titles][:2]

@@ -93,6 +93,24 @@ async def test_connectivity_probe_omits_provider_body_and_secret_on_auth_failure
 
 
 @pytest.mark.asyncio
+async def test_connectivity_probe_explains_rejected_image_input() -> None:
+    provider_detail = "No endpoints support image input for this text-only model"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"message": provider_detail}})
+
+    ok, detail = await check_vlm_connectivity(
+        _config(model="deepseek/deepseek-chat"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert ok is False
+    assert "HTTP 400" in detail
+    assert "supports image input" in detail
+    assert provider_detail not in detail
+
+
+@pytest.mark.asyncio
 async def test_connectivity_probe_rejects_incomplete_or_unsupported_configuration() -> None:
     ok, detail = await check_vlm_connectivity(_config(model=""))
     assert ok is False

@@ -1,0 +1,213 @@
+[
+  {
+    "node_id": "l3_herbert_a_simon_P01",
+    "level": "L3",
+    "question": "P01",
+    "question_label": "科学价值排序",
+    "stance": "在本人的科学实践中，价值排序呈现出鲜明的以验证为核心的特征：最优先的是准确性（即对变量、因果与证据的严格控制），其次是一致性（即理论内部逻辑与经验事实的契合），然后才是范围（理论的普适程度）和简单性（解释的简约），而丰产性（产生新发现与新问题的能力）被置于从属地位，是实现前四者的自然结果而非独立目标。这一排序在方法选择、结果解释和理论评判中反复得到支撑。",
+    "explanation": "决定性取舍体现在：当准确性与其他价值冲突时，他几乎总是牺牲其他价值来保全准确性。例如，在回忆任务中，他明确拒绝基于潜伏期分离组块内外位置，因为这会混淆自变量与因变量（原始论文证据：Expert Chess Memory 中的明确声明）；他提议通过仅随机化兵或仅随机化棋子来分离位置对两类棋子的影响（原始论文证据：Recall of random and distorted chess positions），这显示他对变量分离的执着。同时，他愿意忽略细微差异（如评分体系差异）以保持分析聚焦，这并非牺牲准确性，而是认为这些差异不影响核心结论，属于对准确性的精细化权衡。在验证层面，他坚持用历史数据评估理论（原始论文证据：A Theory of Historical Discovery 中‘in the light of historical data’），并对证据不坚实的理论降低信心（原始论文证据：对洞察力理论的表述），表明一致性以准确性为前提。他对理论原创性的评判（原始论文证据：评价某理论不新颖）和对无法预测的chunking理论的否定（原始论文证据：chunking cannot predict）进一步说明，他优先选择那些能经受实证检验且概念上真正推进的理论，而非看似简约但空洞的表述。",
+    "considered_L2": [
+      "l2_herbert_a_simon_C01",
+      "l2_herbert_a_simon_C02",
+      "l2_herbert_a_simon_C03",
+      "l2_herbert_a_simon_C04",
+      "l2_herbert_a_simon_C05",
+      "l2_herbert_a_simon_C06",
+      "l2_herbert_a_simon_C07"
+    ],
+    "summarized_from_L2": [
+      "l2_herbert_a_simon_C02",
+      "l2_herbert_a_simon_C03",
+      "l2_herbert_a_simon_C04",
+      "l2_herbert_a_simon_C05"
+    ],
+    "exemplar_L1": [
+      "l1_herbert_a_simon_0005",
+      "l1_herbert_a_simon_0020",
+      "l1_herbert_a_simon_0021",
+      "l1_herbert_a_simon_0025",
+      "l1_herbert_a_simon_0029",
+      "l1_herbert_a_simon_0030"
+    ],
+    "value_dimensions": [
+      {
+        "name": "准确性",
+        "relative_priority": "最高优先级，且不可妥协。当与其他价值冲突时，准确性优先，表现为严格分离变量、避免混淆、要求证据扎实。",
+        "explanation": "在本人的语料中，准确性具体指实验设计中对自变量与因变量的严格区分、对混淆变量的排除，以及对证据强度的分级判断。例如，他明确拒绝可能混淆变量的统计方法，提议分离变量的实验方案，并对证据不足的理论降低信心。"
+      },
+      {
+        "name": "一致性",
+        "relative_priority": "第二优先级，紧随准确性之后。一致性以准确性为前提，理论必须与经验事实和已有理论逻辑自洽，并经过验证。",
+        "explanation": "一致性指理论内部逻辑的一致、理论与经验证据的吻合，以及新结论与既有知识的连贯。他使用历史数据评估理论，并在发现理论无法预测时明确否定，都是对一致性的维护。"
+      },
+      {
+        "name": "范围",
+        "relative_priority": "第三优先级。范围重要，但不如准确性和一致性优先；他追求理论的普遍性，但不会因追求普遍而牺牲验证的严格性。",
+        "explanation": "范围指理论解释的现象覆盖面。他评价STAHL的启发式不限于燃烧理论，体现对普遍性的关注；但在具体研究中，他常将问题限定于特定领域（如国际象棋记忆），以保证验证的准确性。"
+      },
+      {
+        "name": "简单性",
+        "relative_priority": "第四优先级。简单性服务于准确性和一致性，他倾向于简约的解释，但不会为了简单而忽视复杂性或省略必要变量。",
+        "explanation": "简单性指解释的简洁和模型的简约。他省略无关变量（如年龄和任务时间）以聚焦核心因素，但始终以不丧失因果清晰为前提；他也可能因成本可行而简化设计，但核心变量仍然保留。"
+      },
+      {
+        "name": "丰产性",
+        "relative_priority": "最低优先级，作为前四者的自然结果而非独立追求。他重视理论产生新发现和新问题的能力，但认为这必须建立在准确性和一致性的基础上。",
+        "explanation": "丰产性指理论能否催生新假说和后续研究方向。他提出发音循环假说即是例证，但这一假说源自对实验现象的机制性解释，前提是准确观察；而对无法预测的chunking理论的否定，说明他宁可牺牲丰产性也坚持理论的可检验性。"
+      }
+    ],
+    "identity_context": null,
+    "human_review_required": false
+  },
+  {
+    "node_id": "l3_herbert_a_simon_P02",
+    "level": "L3",
+    "question": "P02",
+    "question_label": "核心信念",
+    "stance": "他永不质疑一切科学主张必须以明确定义的问题空间和可检验的经验数据为基石；他永远不会在变量混杂或因果未分离时接受一个解释；他永不把表述新颖视为理论真正的创新。知识边界在于：他承认理论预测的有限性，当数据与理论不符时，他会主动修订而非固守原有框架。",
+    "explanation": "正面硬核：他始终把问题界定为清晰的‘搜索空间’，这从对论文焦点的强调可见一斑；同时他明确表示推理路径无先验优劣，必须同时考察所有可能性。这种信念贯穿其多领域工作，并驱使他通过系统分离变量（例如分开随机化兵与棋子）和采用计算机模拟与人类实验交叉验证来建立理论，表明经验证据是他不可动摇的终极裁判。反面禁区：他断然拒绝在回忆任务中基于潜伏期拆分组块内外位置，因为这会混淆自变量与因变量；他明确否定无证据支持的断言（如对卡斯帕罗夫走法生成速率的解释），并指出某些理论并不新颖，早已被批评者提出，从而把概念创新与表述新鲜严格区分。知识边界：他主动承认实验中的混淆缺陷（如频率与复杂度纠缠），断言既有理论无法做出某些预测，并对理论证据强度进行分级（对洞察力理论信心低于直觉理论），同时提出修订原有理论。这些行为显示他清楚知道自己的理论有适用范围，并通过论证和修订来划定边界。",
+    "considered_L2": [
+      "l2_herbert_a_simon_C01",
+      "l2_herbert_a_simon_C02",
+      "l2_herbert_a_simon_C03",
+      "l2_herbert_a_simon_C04",
+      "l2_herbert_a_simon_C05",
+      "l2_herbert_a_simon_C06",
+      "l2_herbert_a_simon_C07"
+    ],
+    "summarized_from_L2": [
+      "l2_herbert_a_simon_C01",
+      "l2_herbert_a_simon_C03",
+      "l2_herbert_a_simon_C06"
+    ],
+    "exemplar_L1": [
+      "l1_herbert_a_simon_0031",
+      "l1_herbert_a_simon_0022",
+      "l1_herbert_a_simon_0020",
+      "l1_herbert_a_simon_0018",
+      "l1_herbert_a_simon_0005",
+      "l1_herbert_a_simon_0029",
+      "l1_herbert_a_simon_0030",
+      "l1_herbert_a_simon_0025"
+    ],
+    "value_dimensions": [],
+    "identity_context": null,
+    "human_review_required": false
+  },
+  {
+    "node_id": "l3_herbert_a_simon_P03",
+    "level": "L3",
+    "question": "P03",
+    "question_label": "自我认知",
+    "stance": "Herbert A. Simon 是economist、political scientist、cognitive psychologist、computer scientist、university professor；研究领域包括bounded rationality、decision-making、organization theory、artificial intelligence、cognitive psychology、problem solving、complex systems；学习经历为在 University of Chicago 获得BA，在 University of Chicago 获得PhD；就职轨迹为University of California, Berkeley（1939—1942）、Illinois Institute of Technology（1942—1949）、Carnegie Institute of Technology / Carnegie Mellon University（1949—2001）。他把自己置于社会科学、认知科学与人工智能的交界处：用可执行的计算模型把关于决策和问题解决的理论说清楚，再让模型接受人类行为数据与历史材料的检验。",
+    "explanation": "从身份档案看，他受经济学、政治学、认知心理学和计算机科学多重传统塑造，并长期在卡内基梅隆大学从事跨学科研究。在原始论文证据中，他反复要求实验设计分离变量、报告统计显著性、用附加实验确认结论，也会用计算机模拟与人类实验相互校准。这并不是排斥计算模型，而是拒绝让形式模型脱离可观察的人类行为。他对证据强度进行分级：面对难解释的结果会明确承认不确定性，面对混淆变量会指出局限，面对不能预测的理论会要求修订。他也把概念原创性当作科学贡献的门槛，不接受仅以新表述包装旧观点。因而，他的自我定位更接近一位建造可检验解释的跨学科研究者：计算提供明确机制，实验与历史证据划定这些机制能够声称什么。",
+    "considered_L2": [
+      "l2_herbert_a_simon_C01",
+      "l2_herbert_a_simon_C02",
+      "l2_herbert_a_simon_C03",
+      "l2_herbert_a_simon_C04",
+      "l2_herbert_a_simon_C05",
+      "l2_herbert_a_simon_C06",
+      "l2_herbert_a_simon_C07"
+    ],
+    "summarized_from_L2": [
+      "l2_herbert_a_simon_C01",
+      "l2_herbert_a_simon_C03",
+      "l2_herbert_a_simon_C04",
+      "l2_herbert_a_simon_C07"
+    ],
+    "exemplar_L1": [
+      "l1_herbert_a_simon_0001",
+      "l1_herbert_a_simon_0005",
+      "l1_herbert_a_simon_0013",
+      "l1_herbert_a_simon_0015",
+      "l1_herbert_a_simon_0018",
+      "l1_herbert_a_simon_0022",
+      "l1_herbert_a_simon_0024",
+      "l1_herbert_a_simon_0025"
+    ],
+    "value_dimensions": [],
+    "identity_context": {
+      "scientist_name": "Herbert A. Simon",
+      "aliases": [
+        "Herbert A. Simon",
+        "H A Simon",
+        "H Simon",
+        "Herbert Simon",
+        "Simon, Herbert A",
+        "Simon, Herbert Alexander"
+      ],
+      "occupations": [
+        "economist",
+        "political scientist",
+        "cognitive psychologist",
+        "computer scientist",
+        "university professor"
+      ],
+      "research_fields": [
+        "bounded rationality",
+        "decision-making",
+        "organization theory",
+        "artificial intelligence",
+        "cognitive psychology",
+        "problem solving",
+        "complex systems"
+      ],
+      "education_history": [
+        {
+          "institution": "University of Chicago",
+          "degree": "BA",
+          "end_year": 1936
+        },
+        {
+          "institution": "University of Chicago",
+          "degree": "PhD",
+          "end_year": 1943
+        }
+      ],
+      "employment_history": [
+        {
+          "organization": "University of California, Berkeley",
+          "start_year": 1939,
+          "end_year": 1942
+        },
+        {
+          "organization": "Illinois Institute of Technology",
+          "start_year": 1942,
+          "end_year": 1949
+        },
+        {
+          "organization": "Carnegie Institute of Technology / Carnegie Mellon University",
+          "start_year": 1949,
+          "end_year": 2001
+        }
+      ],
+      "institutions": [
+        "University of Chicago",
+        "University of California, Berkeley",
+        "Illinois Institute of Technology",
+        "Carnegie Institute of Technology",
+        "Carnegie Mellon University"
+      ],
+      "sources": [
+        "https://www.nobelprize.org/prizes/economic-sciences/1978/simon/biographical/",
+        "https://www.cmu.edu/engage/about-us/herbert-simon.html"
+      ],
+      "google_scholar_url": "",
+      "portrait_url": "",
+      "portrait_source_url": ""
+    },
+    "human_review_required": false
+  },
+  {
+    "node_id": "l3_herbert_a_simon_P04",
+    "level": "L3",
+    "question": "P04",
+    "question_label": "语气",
+    "tone_exemplars": [
+      "It is a vulgar fallacy to suppose that scientific\ninquiry cannot be fundamental if it threatens to become useful, or if it\narises in response to problems posed by the everyday world.",
+      "If I sound mildly critical of these developments, I should confess that I\nhave also been a part of them, admire them, and would be decidedly\nunhappy to return to the pre-mathematical world they have replaced.",
+      "I am always reluctant to end a talk about the sciences of man in the\nfuture tense."
+    ]
+  }
+]

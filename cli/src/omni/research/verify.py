@@ -39,6 +39,10 @@ class VerifyReport:
     # Semantic citation support (annotate-only): among structurally-supported
     # claims, how many are actually entailed by their cited evidence text.
     citation_support: CitationSupportReport | None = None
+    # Host-recorded inventory so a compute turn is not "empty" just because
+    # the model never called record_claim.
+    run_count: int = 0
+    source_count: int = 0
 
     @property
     def issues(self) -> int:
@@ -130,6 +134,8 @@ async def verify_session(
         report.memory_total = mem_total
     if audit_citations:
         report.citation_support = await audit_citation_support(store, claims=claims)
+    report.run_count = len(await store.list_runs(limit=2000, session_id=session_id))
+    report.source_count = int((await store.counts()).get("sources") or 0)
     return report
 
 

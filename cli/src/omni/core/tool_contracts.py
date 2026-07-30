@@ -16,6 +16,7 @@ from omni.core.field_contract import (
     contract_text,
     field_binding_owner,
     field_resolver,
+    instruction_field,
 )
 from omni.core.field_resolvers import has_resolver, resolve_field
 
@@ -69,6 +70,39 @@ class ProviderInputCompiler:
             ),
         )
 
+    def _resolve_declared_fields(
+        self,
+        arguments: dict[str, Any],
+        *,
+        properties: dict[str, dict[str, Any]],
+        semantic: dict[str, Any],
+        raw_message: str,
+    ) -> set[str]:
+        """Fill root-declared fields that own a resolver; return keys consumed."""
+        consumed: set[str] = set()
+        for name, field_schema in properties.items():
+            resolver_name = field_resolver(field_schema)
+            if not resolver_name or not has_resolver(resolver_name):
+                continue
+            candidates = dict(semantic)
+            if raw_message:
+                candidates.setdefault("input", raw_message)
+            if name in arguments:
+                candidates[name] = arguments[name]
+            resolution = resolve_field(resolver_name, candidates)
+            if not resolution.resolved:
+                continue
+            arguments[name] = resolution.value
+            consumed.update(
+                _resolver_consumed_keys(
+                    semantic,
+                    declared=set(properties),
+                    resolved_value=resolution.value,
+                    label=resolution.label,
+                )
+            )
+        return consumed
+
     def compile_schema(
         self,
         schema: Any,
@@ -92,10 +126,20 @@ class ProviderInputCompiler:
         properties = _properties(schema_object)
         required = _required_fields(schema_object)
         if not declared_object:
-            # A composed or unconstrained root has no safe projection surface:
-            # preserve the proposed instance and let the complete JSON Schema
-            # decide whether it is valid.
+            # A composed or unconstrained root has no safe *projection* surface:
+            # composed schemas may declare their properties inside branches, so
+            # filtering by the root would destroy a JSON-Schema-valid instance.
+            # Resolving is a different act — it only fills a field the root
+            # itself declares — so a provider that composes its schema still gets
+            # its `@attachment` turned into a real path instead of receiving the
+            # raw user message as a filename.
             arguments = semantic or ({"input": raw_message} if raw_message else {})
+            self._resolve_declared_fields(
+                arguments,
+                properties=properties,
+                semantic=semantic,
+                raw_message=raw_message,
+            )
             errors = _nested_schema_errors(
                 schema,
                 arguments,
@@ -106,27 +150,14 @@ class ProviderInputCompiler:
 
         consumed_semantic = {name for name in properties if name in semantic}
         arguments = {name: semantic[name] for name in properties if name in semantic}
-
-        for name, field_schema in properties.items():
-            resolver_name = field_resolver(field_schema)
-            if not resolver_name or not has_resolver(resolver_name):
-                continue
-            candidates = dict(semantic)
-            if raw_message:
-                candidates.setdefault("input", raw_message)
-            if name in arguments:
-                candidates[name] = arguments[name]
-            resolution = resolve_field(resolver_name, candidates)
-            if resolution.resolved:
-                arguments[name] = resolution.value
-                consumed_semantic.update(
-                    _resolver_consumed_keys(
-                        semantic,
-                        declared=set(properties),
-                        resolved_value=resolution.value,
-                        label=resolution.label,
-                    )
-                )
+        consumed_semantic.update(
+            self._resolve_declared_fields(
+                arguments,
+                properties=properties,
+                semantic=semantic,
+                raw_message=raw_message,
+            )
+        )
 
         unresolved_text = [
             name
@@ -513,6 +544,62 @@ def _validation_error(
     return {"path": path or "$", "keyword": keyword, "message": message}
 
 
+def instruction_raw_message(
+    skill_or_entry: Any,
+    params: dict[str, Any],
+    *,
+    raw_message: str = "",
+) -> str:
+    """Return the free-text instruction a caller already supplied.
+
+    This does not invent schema aliases. ``goal`` / ``query`` are treated as
+    the same *instruction text* the planner already binds through
+    ``raw_message``, so an undeclared planner field can fill the declared
+    instruction slot instead of rejecting the invocation.
+    """
+    if str(raw_message or "").strip():
+        return str(raw_message)
+    slot = instruction_field(getattr(skill_or_entry, "input_schema", None))
+    for key in (slot, "input", "query", "goal"):
+        if not key:
+            continue
+        value = params.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return ""
+
+
+def admit_provider_arguments(
+    skill_or_entry: Any,
+    params: dict[str, Any],
+    *,
+    raw_message: str = "",
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Compile raw tool args, drop undeclared aliases, and return ``(args, error)``.
+
+    Plan validation already degrades unknown fields and continues. ReAct
+    ``run_skill`` used to fail closed on the same aliases (``domain``/``goal``),
+    which sent research-ideation back to a tool-budgeted ReAct loop.
+    """
+    compiled = ProviderInputCompiler().compile_entry(
+        skill_or_entry,
+        semantic_input=params,
+        raw_message=instruction_raw_message(
+            skill_or_entry, params, raw_message=raw_message
+        ),
+    )
+    blocking = [
+        error
+        for error in compiled.errors
+        if str(error.get("code") or "") != "unknown_provider_field"
+    ]
+    if blocking:
+        return dict(compiled.arguments), dict(blocking[0])
+    return dict(compiled.arguments), skill_input_contract_error(
+        skill_or_entry, dict(compiled.arguments)
+    )
+
+
 def skill_input_contract_error(skill_or_entry: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Return the first contract error for already-compiled provider arguments.
 
@@ -890,8 +977,10 @@ __all__ = [
     "PreparedJSONSchema",
     "ProviderInputCompilation",
     "ProviderInputCompiler",
+    "admit_provider_arguments",
     "input_contract_binding_owner",
     "input_contract_repair_capability",
+    "instruction_raw_message",
     "prepare_json_schema",
     "provider_schema_definition_errors",
     "skill_input_contract_error",

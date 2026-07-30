@@ -20,16 +20,21 @@ from sqlalchemy import select
 
 from omni.agent.artifact_revision_router import ArtifactRevisionRouter
 from omni.agent.artifact_targets import ArtifactTargetResolver
-from omni.agent.capabilities import CAPABILITY_ARTIFACT_REVISE
+from omni.agent.capabilities import CAPABILITY_ARTIFACT_REVISE, CAPABILITY_TASK_INSPECT
 from omni.agent.conversation_store import ConversationStore
 from omni.agent.cost import react_usage_limits, record_cost_event
 from omni.agent.intent_plan import IntentPlan, IntentType
 from omni.agent.interaction_lifecycle import (
     InteractionLifecycle,
     build_approval_gate,
+    react_tool_policy,
 )
 from omni.agent.persona_stoma import load_persona_overlay
 from omni.agent.plan_executor import PlanExecutor
+from omni.agent.plan_fallthrough import (
+    history_with_failed_attempt,
+    policy_after_failed_route,
+)
 from omni.agent.plan_pipeline import PlanPipeline
 from omni.agent.plan_recovery import (
     ACTION_NEEDS_INPUT,
@@ -41,6 +46,7 @@ from omni.agent.plan_revision import (
 )
 from omni.agent.plan_runner_utils import (
     approval_tools_for_plan,
+    assumption_block,
     emit_tool_event,
     loop_result_event,
     needs_input_text,
@@ -50,6 +56,7 @@ from omni.agent.plan_runner_utils import (
 from omni.agent.planner import IntentPlanner
 from omni.agent.recent_activity import recent_activity_digest
 from omni.agent.reviewer import review_and_correct
+from omni.agent.schedule_goal import goal_grounded_in_message
 from omni.agent.scheduled_goal_runner import ScheduledGoalRunner
 from omni.agent.session_compactor import _COMPACT_THRESHOLD, SessionCompactor
 from omni.agent.task_controller import TaskController
@@ -57,10 +64,21 @@ from omni.agent.tool_surface import ToolSurfaceBuilder
 from omni.agent.turn_context import ContextSnapshot, TurnContextAssembler
 from omni.agent.turn_execution import TurnCompletion, TurnExecution, TurnResult
 from omni.agent.turn_memory import TurnMemory
-from omni.channels.security import IM_CHANNELS
-from omni.config.settings import OmniSettings
+from omni.channels.security import is_im_channel
+from omni.config.settings import (
+    OmniSettings,
+    microcompact_token_budget,
+    resolve_max_output_tokens,
+    session_compact_token_budget,
+)
 from omni.core.action_contracts import ResolverContext
-from omni.core.approval import ApprovalGate, Approver
+from omni.core.approval import (
+    SENSITIVE_TOOLS,
+    ApprovalGate,
+    Approver,
+    sandbox_is_write_capable,
+)
+from omni.core.approval_rules import SessionApprovalStore
 from omni.core.execution_budget import ToolExecutionBudget
 from omni.core.execution_control import ExecutionControl
 from omni.core.llm import LLMClient, create_llm_client
@@ -73,7 +91,7 @@ from omni.core.tool_policy import (
     policy_max_tool_calls,
 )
 from omni.core.vlm import VlmGateway
-from omni.data import ROLE_FILE
+from omni.data import DEFAULT_ROLE
 from omni.memory.compiler import MemoryCompiler
 from omni.memory.files import load_curated_memory
 from omni.memory.notebook import read_recent
@@ -83,14 +101,16 @@ from omni.runtime.artifact_revisions import (
 )
 from omni.runtime.execution_policy import ToolResourceLockPool
 from omni.runtime.hooks import HookManager
+from omni.runtime.memory_maintenance import maintenance_tick
 from omni.runtime.notifications import InboxNotifier, Notifier
+from omni.runtime.remaining import plan_owes_scientific_outputs, remaining_retry_context
 from omni.runtime.scheduler import Scheduler
 from omni.runtime.session_focus import SessionFocusService
 from omni.runtime.subtask_runtime import SubtaskRuntime
 from omni.runtime.task_index import TaskIndex
 from omni.runtime.task_recorder import TaskRecorder
 from omni.runtime.tool_gateway import ToolGateway
-from omni.runtime.verification import VerificationRunner
+from omni.skills_runtime.builtin_tools.fs import output_roots_for, write_roots_for
 from omni.skills_runtime.context import ExecContext, Tool
 from omni.skills_runtime.registry import SkillRegistry
 from omni.storage.artifacts import ArtifactStore
@@ -115,6 +135,14 @@ def _artifact_mirror_dir(settings: OmniSettings) -> Path | None:
     if not base.is_absolute():
         base = Path.cwd() / base
     return base.resolve()
+
+
+def _react_on_token(plan: IntentPlan, on_token: Any) -> Any:
+    """Buffer model prose when the host must project authoritative task facts."""
+    if CAPABILITY_TASK_INSPECT in plan.capability_inputs:
+        return None
+    return on_token
+
 
 # Owner / CLI identity for memory isolation (see MemoryService.PRINCIPAL_OWNER).
 _PRINCIPAL_OWNER = "local"
@@ -173,8 +201,7 @@ class OmniAgent:
         self._tool_resource_locks = ToolResourceLockPool(
             lock_dir=self.paths.project_dir / ".resource-locks"
         )
-        self.verifier = VerificationRunner(self.tasks)
-        self.task_controller = TaskController(self.tasks, self.verifier)
+        self.task_controller = TaskController(self.tasks)
         self.interaction = InteractionLifecycle(settings, self.tasks, self.hooks, self.task_controller)
         self.plan_pipeline = PlanPipeline(
             settings=settings,
@@ -191,6 +218,9 @@ class OmniAgent:
             task_controller=self.task_controller,
             hooks=self.hooks,
             runtime=self.runtime,
+            artifacts=self.artifacts,
+            llm=self.llm,
+            registry=self.registry,
         )
         self.artifact_targets = ArtifactTargetResolver(
             db=self.db,
@@ -212,26 +242,24 @@ class OmniAgent:
             artifacts=self.artifacts,
         )
         self.tool_surface = ToolSurfaceBuilder(self.runtime, self.tasks, self.registry, self._load_mcp_tools)
-        # Cron/scheduled jobs (P2): the poller ticks the scheduler (no-op when
-        # disabled). A due *goal* schedule runs the full interactive pipeline via
-        # ``ScheduledGoalRunner`` (planner→workflow→verification), not a flat
-        # bounded ReAct loop — so a multi-deliverable goal is decomposed and each
-        # deliverable is separately budgeted and verified ("one brain, headless
-        # door"). Explicit-skill schedules keep the direct-enqueue path.
+        # Goal schedules use the full headless planner/workflow path;
+        # explicit-skill schedules retain the direct-enqueue path.
         self._scheduled_goals = ScheduledGoalRunner(self)
         self.scheduler = Scheduler(
             self.db, self.runtime, settings, goal_runner=self.run_scheduled_goal
         )
         self.runtime.add_tick_hook(self.scheduler.run_due)
+        # Inert in an interactive window, which never starts the runtime; a
+        # long-lived service is where parked memory work would otherwise pile up.
+        self.runtime.add_tick_hook(maintenance_tick(self))
         self._role = self._load_role()
         self._ready = False
-        # Human-in-the-loop approval (P0). The CLI wires an interactive approver
-        # when a TTY is present; daemon/IM/non-interactive leave it None so
-        # sensitive tool calls fail closed. Per-session allow set remembers
-        # "approve for session" answers across turns.
+        # Interactive CLI approvals use per-session stores; daemon/IM/headless
+        # calls fail closed without an approver.
         self.approver: Approver | None = None
-        self._session_tool_allow: dict[str, set[str]] = {}
+        self._session_tool_allow: dict[str, SessionApprovalStore] = {}
         self._approved_task_tools: dict[str, set[str]] = {}
+        self._workspace_auto_tasks: set[str] = set()
         # Runtime hosts may provide task-scoped tools (for example AstaBench's
         # date-pinned search and sandbox tools). They remain per-agent and still
         # traverse ToolGateway, approval, hooks, and resource serialization.
@@ -294,9 +322,21 @@ class OmniAgent:
             if p.is_file():
                 return p.read_text(encoding="utf-8")
             return cfg_role
-        if self.paths.role_file.is_file():
-            return self.paths.role_file.read_text(encoding="utf-8")
-        return ROLE_FILE.read_text(encoding="utf-8")
+        # Complete any incomplete SoulAgent persona unload before reading
+        # the base identity: if a backup file exists but state.json is gone,
+        # restore the original role.md from the backup so the agent does not
+        # start with a stale scientist persona as its base identity.
+        role_file = self.paths.role_file
+        backup = role_file.parent / (role_file.name + ".soulagent.bak")
+        if backup.is_file():
+            try:
+                role_file.write_bytes(backup.read_bytes())
+                backup.unlink()
+            except OSError:
+                pass
+        if role_file.is_file():
+            return role_file.read_text(encoding="utf-8")
+        return DEFAULT_ROLE
 
     # ── sessions ──
     async def ensure_session(
@@ -328,9 +368,6 @@ class OmniAgent:
 
     async def _visible_normal_messages(self, session_id: str) -> list[ConversationMessageORM]:
         return await self.conversations.visible_normal_messages(session_id)
-
-    def _compact_token_budget(self) -> int:
-        return self.compactor.token_budget()
 
     async def _maybe_compact(self, session_id: str, *, task_id: str = "") -> None:
         await self.compactor.maybe_compact(session_id, task_id=task_id)
@@ -385,10 +422,9 @@ class OmniAgent:
         origin: str = "interactive",
         user_message: str = "",
         deferred_goal: str = "",
+        receipt_time: Any = None,
     ) -> ExecContext:
-        # A scheduled headless run is unattended: it has no interactive approver
-        # (sensitive tools are cleared only by the owning task's pre-authorised
-        # grant, never a live prompt) and it must not create more schedules.
+        # Headless schedules have no live approver and cannot create schedules.
         autonomous = origin == "schedule"
         approver = None if autonomous else self.approver
         ctx = ExecContext(
@@ -407,6 +443,16 @@ class OmniAgent:
                 channel=source_channel,
                 session_id=source_session,
                 additional_sensitive_tools=sensitive,
+                writable_roots=write_roots_for(
+                    self.paths.project_dir,
+                    self._tool_working_dir(channel),
+                    self.settings.security.fs_write_allow,
+                    self.artifacts.managed_output_roots,
+                ),
+                output_roots=output_roots_for(self.paths, self.artifacts),
+                working_dir=self._tool_working_dir(channel),
+                workspace=self.paths.project_dir,
+                workspace_auto=task in self._workspace_auto_tasks,
             ),
             resource_locks=self._tool_resource_locks,
             working_dir=self._tool_working_dir(channel),
@@ -427,7 +473,7 @@ class OmniAgent:
             now = local_time_context()
             ctx.resolver_context = ResolverContext(
                 user_message=user_message or "",
-                reference_time=now.now,
+                reference_time=receipt_time if receipt_time is not None else now.now,
                 timezone=now.name or "",
                 timezone_source="host",
                 channel=channel,
@@ -443,17 +489,18 @@ class OmniAgent:
         a *distinct* one.
 
         Returns the planner's ``task_contract.deferred_goal.objective`` only when
-        it differs from the raw user message — i.e. a genuine clean goal, not the
-        full-message fallback (which still carries the time phrase). Empty otherwise,
-        so ``schedule_task`` keeps trusting the model's goal when there is nothing
-        authoritative to seal.
+        it differs from the raw user message *and* is grounded in that message —
+        a genuine clean goal, not the full-message fallback and not an Active-
+        target inference the user did not state this turn. Empty otherwise, so
+        ``schedule_task`` keeps trusting the model's goal or an open draft.
         """
         if getattr(plan, "intent_type", None) != IntentType.SCHEDULE:
             return ""
         contract = getattr(plan, "task_contract", None)
         deferred = contract.get("deferred_goal") if isinstance(contract, dict) else None
         objective = str(deferred.get("objective") or "").strip() if isinstance(deferred, dict) else ""
-        if objective and objective != str(getattr(plan, "user_message", "") or "").strip():
+        raw = str(getattr(plan, "user_message", "") or "").strip()
+        if objective and objective != raw and goal_grounded_in_message(objective, raw):
             return objective
         return ""
 
@@ -483,10 +530,15 @@ class OmniAgent:
             asked = str(resolution.get("raw_expression", "")).strip() or "a scheduled time"
             labels = [str(c.get("label", "")) for c in resolution.get("candidates", [])]
             options = ", ".join(label for label in labels if label) or "the offered options"
-            lines.append(f"- id {rec.id[:8]}: '{asked}' — options: {options}")
+            goal = str((rec.payload or {}).get("goal") or "").strip()
+            goal_bit = f" — goal: {goal}" if goal else ""
+            lines.append(f"- id {rec.id[:8]}: '{asked}' — options: {options}{goal_bit}")
         lines.append(
-            "If the user's message answers one, call resolve_action_checkpoint with that "
-            "id and their choice (a candidate id like am/pm, or run_now/cancel). Otherwise ignore this."
+            "If the user's message picks one of these listed readings, call resolve_action_checkpoint "
+            "with that id and their choice (a candidate id like am/pm, or run_now/cancel). If they "
+            "instead give a different or new time, call resolve_action_checkpoint with that id and "
+            "the new time in 'when' or 'at' — the draft's goal is kept. Do not call schedule_task "
+            "with a different goal. Otherwise ignore this."
         )
         return "\n".join(lines)
 
@@ -500,7 +552,7 @@ class OmniAgent:
         channel never widens its scope to an arbitrary launch directory (and
         sensitive tools remain blocked there without a local approver anyway).
         """
-        if channel in IM_CHANNELS:
+        if is_im_channel(channel):
             return self.paths.workspace_root
         return self.paths.local_ops_dir
 
@@ -641,33 +693,42 @@ class OmniAgent:
             external_authoritative=self._external_tools_authoritative,
         )
 
-    def _react_tool_policy(self, policy, *, task_id: str = ""):  # noqa: ANN001 - ToolPolicy
-        """Effective ReAct policy: offer approval-gated sensitive builtins when the
-        gate can actually clear them.
-        The planner keeps declaring bash/write_file/edit_file/run_compute blocked
-        (the plan record stays deny-by-default). At execution the approval gate
-        governs them, so we expose them to the model — giving the local owner
-        Claude-Code/Codex-style approval-gated shell + file access — *only* when
-        the gate can approve: autonomy mode (``require_approval`` off) or an
-        interactive approver is wired. For a daemon / IM / non-interactive caller
-        they stay out of the catalog (no tempting a tool that would just fail
-        closed); the gate is still the outermost guard, so a call that slips
-        through by name is denied regardless.
-        """
-        from omni.core.approval import SENSITIVE_TOOLS, resolve_policy
+    async def _bind_turn_approvals(
+        self, task_id: str, channel: str, *, workspace_auto: bool
+    ) -> None:
+        """Seed catalog + durable grants for this turn's approval envelope."""
+        if workspace_auto and not is_im_channel(channel):
+            self._workspace_auto_tasks.add(task_id)
+            # Never + read-only must not pre-grant writes. Codex exec in an
+            # untrusted folder still cannot edit; only a write-capable sandbox
+            # inherits the durable workspace-auto tool set.
+            if not sandbox_is_write_capable(self.settings):
+                return
+            granted = await self.tasks.grant_tools(
+                task_id, sorted(SENSITIVE_TOOLS), reason="workspace-auto"
+            )
+            self._approved_task_tools[task_id] = (
+                set(granted or SENSITIVE_TOOLS) & set(SENSITIVE_TOOLS)
+            )
+            return
+        task = await self.tasks.get_task(task_id)
+        existing = set(getattr(task, "approved_tools", None) or []) if task is not None else set()
+        if existing:
+            self._approved_task_tools[task_id] = existing & set(SENSITIVE_TOOLS)
 
-        blocked = getattr(policy, "blocked_tools", None) or []
-        if not any(t in blocked for t in SENSITIVE_TOOLS):
-            return policy
-        approved = self._approved_task_tools.get(task_id, set())
-        gate_can_clear = resolve_policy(self.settings) == "never" or self.approver is not None
-        if not gate_can_clear:
-            if not approved:
-                return policy
-            remaining = [t for t in blocked if t not in approved]
-            return replace(policy, blocked_tools=remaining)
-        remaining = [t for t in blocked if t not in SENSITIVE_TOOLS]
-        return replace(policy, blocked_tools=remaining)
+    def _react_tool_policy(  # noqa: ANN001 - ToolPolicy
+        self, policy, task_id: str = "", channel: str = "", execution_mode: str = ""
+    ):
+        """Effective ReAct policy: offer sensitive builtins the gate can clear."""
+        return react_tool_policy(
+            policy,
+            settings=self.settings,
+            approver=self.approver,
+            approved=self._approved_task_tools.get(task_id, set()),
+            channel=channel,
+            read_only=execution_mode == "review",
+            workspace_auto=task_id in getattr(self, "_workspace_auto_tasks", set()),
+        )
 
     def _approval_gate(
         self,
@@ -687,8 +748,17 @@ class OmniAgent:
             channel=channel,
             session_id=session_id,
             additional_sensitive_tools=additional_sensitive_tools,
+            writable_roots=write_roots_for(
+                self.paths.project_dir,
+                self._tool_working_dir(channel),
+                self.settings.security.fs_write_allow,
+                self.artifacts.managed_output_roots,
+            ),
+            output_roots=output_roots_for(self.paths, self.artifacts),
+            working_dir=self._tool_working_dir(channel),
+            workspace=self.paths.project_dir,
+            workspace_auto=task_id in getattr(self, "_workspace_auto_tasks", set()),
         )
-
     async def _record_cost(
         self,
         task_id: str,
@@ -706,8 +776,8 @@ class OmniAgent:
             component=component,
         )
 
-    async def _apply_verifier_outcome(self, task_id: str, result: Any) -> Any:
-        return await self.task_controller.apply_verifier_outcome(task_id, result)
+    async def _apply_settlement(self, task_id: str, result: Any) -> Any:
+        return await self.task_controller.apply_settlement(task_id, result)
 
     async def _self_review_correct(
         self, *, react, result, system: str, user_message: str,  # noqa: ANN001
@@ -757,13 +827,14 @@ class OmniAgent:
         execution_control: ExecutionControl | None = None,
         execution_authority: ExecutionAuthority | None = None,
         origin: str = "interactive",
+        receipt_time: Any = None,
     ):
         """Execute deterministic plan routes before falling back to wide ReAct."""
         if plan.intent_type not in {
             IntentType.QA_PLUS_ARTIFACT,
             IntentType.SINGLE_SKILL_TASK,
-            IntentType.WORKFLOW,
             IntentType.MEMORY_UPDATE,
+            IntentType.SCHEDULE,
         }:
             return None
         if plan.intent_type in {IntentType.QA_PLUS_ARTIFACT, IntentType.SINGLE_SKILL_TASK} and not plan.selected_skills:
@@ -778,6 +849,8 @@ class OmniAgent:
             execution_control=execution_control,
             origin=origin,
             user_message=user_message,
+            deferred_goal=self._plan_deferred_goal(plan),
+            receipt_time=receipt_time,
         )
         ctx.execution_authority = execution_authority
         if plan.intent_type == IntentType.MEMORY_UPDATE:
@@ -798,6 +871,7 @@ class OmniAgent:
             resource_scope=ctx.resource_scope,
             policy=plan.tool_policy,
         )
+        ctx.tool_gateway = gateway
         result = await PlanExecutor(self.runtime, self.tasks, self.registry, self.memory).execute(
             plan,
             ctx=ctx,
@@ -806,7 +880,10 @@ class OmniAgent:
             on_tool_event=gateway.emit,
             active_target=getattr(turn_context, "active_target", None),
         )
-        return result if result.handled else None
+        # An unhandled result is not always an empty one: a runner that tried and
+        # failed returns the attempt so the turn can carry it into ReAct instead
+        # of starting over blind. Callers decide on ``handled``.
+        return result if (result.handled or result.drained_results) else None
 
     # ── main turn ──
     async def handle_turn(
@@ -819,6 +896,7 @@ class OmniAgent:
         approved_authority: ExecutionAuthority | None = None,
         existing_task_id: str = "",
         origin: str = "interactive",
+        workspace_auto: bool = False,
     ) -> TurnResult:
         """Run one turn under the shared durable cancellation boundary."""
         return await TurnExecution(
@@ -841,6 +919,7 @@ class OmniAgent:
                 "approved_authority": approved_authority,
                 "existing_task_id": existing_task_id,
                 "origin": origin,
+                "workspace_auto": workspace_auto,
             },
         )
 
@@ -855,7 +934,12 @@ class OmniAgent:
         existing_task_id: str = "",
         execution_control: ExecutionControl | None = None,
         origin: str = "interactive",
+        workspace_auto: bool = False,
     ) -> TurnResult:
+        # Freeze "now" at message arrival — before compaction or planning can
+        # spend minutes — so a two-minute once-schedule is admitted against the
+        # time the user spoke, not the time the host finished thinking.
+        receipt_time = local_time_context().now
         await self.setup()
         start = await self.interaction.begin(
             user_message=user_message,
@@ -865,9 +949,13 @@ class OmniAgent:
             existing_task_id=existing_task_id,
             ensure_session=self.ensure_session,
             on_task_ack=on_task_ack,
+            file_uris=file_uris,
         )
         mode, session_id, channel = start.mode, start.session_id, start.channel
         user_message, task_id = start.user_message, start.task_id
+        await self._bind_turn_approvals(
+            task_id, channel, workspace_auto=workspace_auto
+        )
         principal = await self._principal_for_session(session_id)
         react_events = ToolGateway(
             task_id=task_id,
@@ -944,7 +1032,7 @@ class OmniAgent:
                 task_id=task_id,
                 kind="error",
                 terminated_reason="hook_denied",
-                verification_status="failed",
+                settlement_status="failed",
             )
 
         pipeline = await self.plan_pipeline.run(
@@ -996,7 +1084,7 @@ class OmniAgent:
                     *validation.warnings,
                     *validation.degraded_warnings,
                 ],
-                verification_status="failed",
+                settlement_status="failed",
             )
 
         if recovery.action == ACTION_NEEDS_INPUT or plan.intent_type == IntentType.NEEDS_INPUT:
@@ -1024,7 +1112,8 @@ class OmniAgent:
                 terminated_reason="needs_input",
                 plan_summary=plan_summary(plan),
                 degraded_warnings=list(plan.degraded_warnings),
-                verification_status="needs_input",
+                user_notices=list(plan.user_notices),
+                settlement_status="needs_input",
             )
 
         current_authority = pipeline.execution_authority
@@ -1099,7 +1188,7 @@ class OmniAgent:
                     submitted_subtask_ids=edit_result.submitted_subtask_ids,
                     drain_tasks=drain_tasks,
                 )
-                return await self._apply_verifier_outcome(task_id, edit_result)
+                return await self._apply_settlement(task_id, edit_result)
 
         direct_result = await self._execute_intent_plan(
             plan,
@@ -1113,8 +1202,9 @@ class OmniAgent:
             execution_control=execution_control,
             execution_authority=bound_execution_authority,
             origin=origin,
+            receipt_time=receipt_time,
         )
-        if direct_result is not None:
+        if direct_result is not None and direct_result.handled:
             return await self.turn_completion.complete_plan(
                 plan=plan,
                 result=direct_result,
@@ -1123,7 +1213,8 @@ class OmniAgent:
                 drain_tasks=drain_tasks,
                 persist_message=self._persist_message,
                 record_turn_memory=self._record_turn_memory,
-                apply_verifier_outcome=self._apply_verifier_outcome,
+                apply_settlement=self._apply_settlement,
+                channel=channel,
             )
 
         ctx = self._make_ctx(
@@ -1136,6 +1227,7 @@ class OmniAgent:
             origin=origin,
             user_message=user_message,
             deferred_goal=self._plan_deferred_goal(plan),
+            receipt_time=receipt_time,
         )
         # Turn-scoped async multi-agent control plane (Codex ``AgentControl``
         # analog). Present only when async delegation is enabled; the async
@@ -1152,9 +1244,10 @@ class OmniAgent:
         )
         # Sensitive builtins (bash/write/edit/compute) are declared blocked by the
         # planner but governed at execution by the approval gate (Claude Code /
-        # Codex parity): the model may propose them, the owner consents, and
-        # IM/non-interactive callers fail closed. See ``_react_tool_policy``.
-        react_policy = self._react_tool_policy(plan.tool_policy, task_id=task_id)
+        # Codex parity). With no owner to ask, a write can still be settled from
+        # its destination while a shell command cannot. See ``react_tool_policy``.
+        routed = policy_after_failed_route(plan.tool_policy, direct_result)
+        react_policy = self._react_tool_policy(routed, task_id, channel, plan.execution_mode)
         policy_tools = filter_tools_for_policy(tools, react_policy)
         react_tool_limit = policy_max_tool_calls(
             react_policy, self.settings.react.max_tool_calls
@@ -1172,7 +1265,7 @@ class OmniAgent:
             policy=replace(react_policy, max_tool_calls=None),
         )
         tool_specs = react_gateway.tool_specs
-        invoker = react_gateway.invoker()
+        invoker = react_gateway.react_invoker()
 
         compiled_memory = await MemoryCompiler(self.memory).compile_for_turn(
             plan,
@@ -1189,18 +1282,15 @@ class OmniAgent:
         turn_context_block = context_summary if plan.context_policy.include_referenced_tasks else ""
         recent_activity_block = recent_activity if plan.context_policy.include_recent_activity else ""
         recovery_block = react_context_block(recovery_react_notes)
-        # Surface any durable open schedule clarification for this requester so the
-        # model can resume it even if the asking turn was compacted out of history.
+        remaining_block = await remaining_retry_context(self.tasks, self.artifacts, task_id)
+        assumptions = assumption_block(plan.missing_inputs)
         clarification_block = await self._open_clarifications_block(ctx)
-        # Turn boundary for SoulAgent (see ``omni.agent.persona_stoma``): read the
-        # ready scientist-persona stoma in the working dir and overlay it on the
-        # sticky base role. No active persona → empty string → prompt unchanged.
         persona_overlay = load_persona_overlay(ctx.working_dir).render()
         system = build_system_prompt(
             role=self._role, tools=tool_specs, persona_overlay=persona_overlay,
             memory_block="\n\n".join(
                 x for x in (
-                    clarification_block, recovery_block, turn_context_block, referenced,
+                    clarification_block, recovery_block, remaining_block, assumptions, turn_context_block, referenced,
                     research_brief, domain_pack_brief, memory_block, skill_catalog,
                 ) if x
             ),
@@ -1210,24 +1300,32 @@ class OmniAgent:
             notebook_summary=read_recent(self.paths.notebook, max_chars=800),
             working_dir=ctx.working_dir,
         )
-        history = await self._history(session_id)
+        history = history_with_failed_attempt(await self._history(session_id), direct_result)
 
         turn_tool_budget = ToolExecutionBudget(react_tool_limit)
         react = ReActLoopAgent(
             self.llm, invoker,
             max_iterations=policy_max_iterations(plan.tool_policy, self.settings.react.max_iterations),
             max_tool_calls=react_tool_limit,
-            max_seconds=self.settings.react.max_seconds,
+            max_seconds=self._react_max_seconds(getattr(ctx, "origin", "interactive")),
+            stall_timeout_s=self.settings.react.stall_timeout_s,
+            soft_timeout_s=self.settings.react.foreground_soft_seconds,
             finalization_timeout_s=self.settings.react.finalization_timeout_s,
+            finalization_attempts=self.settings.react.finalization_attempts,
             temperature=self.settings.model.temperature,
-            max_tokens=self.settings.model.max_tokens,
-            soft_token_limit=self._compact_token_budget(),
+            max_tokens=resolve_max_output_tokens(self.settings.model),
+            soft_token_limit=microcompact_token_budget(self.settings),
+            context_rollover_token_limit=session_compact_token_budget(self.settings),
             microcompact_keep_tool_results=int(
                 getattr(self.settings.memory, "microcompact_keep_tool_results", 0) or 0
             ),
-            no_progress_synthesis=self.settings.react.no_progress_synthesis,
+            observation_max_chars=int(
+                getattr(self.settings.memory, "tool_observation_max_chars", 8000) or 0
+            ),
             no_progress_threshold=self.settings.react.no_progress_threshold,
             shared_tool_budget=turn_tool_budget,
+            require_opening_tool=plan.tool_policy.require_opening_tool,
+            owes_scientific_outputs=plan_owes_scientific_outputs(plan),
             **react_usage_limits(self.settings, self.llm),
         )
         try:
@@ -1236,7 +1334,7 @@ class OmniAgent:
                 history=history,
                 allow_escalation=plan.tool_policy.allows("escalate_run"),
                 on_tool_event=react_gateway.emit,
-                on_token=on_token,
+                on_token=_react_on_token(plan, on_token),
                 execution_control=execution_control,
             )
             execution_status, execution_payload = loop_result_event(result)
@@ -1285,16 +1383,11 @@ class OmniAgent:
             maybe_escalate=self._maybe_escalate,
             persist_message=self._persist_message,
             record_turn_memory=self._record_turn_memory,
-            apply_verifier_outcome=self._apply_verifier_outcome,
+            apply_settlement=self._apply_settlement,
         )
 
     async def run_scheduled_goal(self, **kwargs: Any) -> TurnResult | None:
-        """Run one due scheduled goal as a full headless orchestrator turn.
-
-        Thin delegate to :class:`ScheduledGoalRunner` (the scheduler's
-        ``goal_runner`` seam) so this coordinator stays thin; see that module for
-        the "one brain, headless door" flow.
-        """
+        """Delegate one due goal to the headless scheduled-goal runner."""
         return await self._scheduled_goals.run(**kwargs)
 
     async def approve_task(self, task_id: str, *, drain_tasks: bool = True) -> TurnResult:
@@ -1333,6 +1426,20 @@ class OmniAgent:
             before_execute=bind_plan_tools,
         )
 
+    def _react_max_seconds(self, origin: str) -> float:
+        """Overall wall-clock ceiling (layer 2) for a turn's ReAct loop.
+
+        Headless scheduled / long-running research turns (``origin="schedule"``)
+        get the larger ceiling so an autonomous multi-stage job is not clipped at
+        the interactive bound; the progress watchdog (layer 1) and the soft
+        foreground notice (layer 3) are shared. A time layer never fails the turn
+        — it forces a final synthesis and settles ``degraded`` with the best
+        answer gathered so far.
+        """
+        if origin == "schedule":
+            return self.settings.react.scheduled_max_seconds
+        return self.settings.react.max_seconds
+
     async def _maybe_escalate(self, goal: str, session_id: str, channel: str, *, task_id: str = "") -> str | None:
         del goal, session_id, channel, task_id
         return None
@@ -1352,8 +1459,25 @@ class OmniAgent:
         return await self.turn_memory.consolidate(session_id, task_id=task_id)
 
     async def end_session(self, session_id: str) -> list[str]:
-        """Consolidate + maintain durable memory (call on /new and REPL exit)."""
+        """Consolidate + maintain durable memory now (nobody is waiting)."""
         return await self.turn_memory.end_session(session_id)
+
+    async def enqueue_session_maintenance(self, session_id: str) -> str:
+        """Record that a session owes durable-memory maintenance, and return.
+
+        What interactive surfaces call when a session ends: parking costs one
+        database write, where performing the pass costs several model round
+        trips. See :meth:`drain_pending_maintenance`.
+        """
+        return await self.turn_memory.enqueue_session_maintenance(session_id)
+
+    async def drain_pending_maintenance(
+        self, *, limit: int = 5, stale_after_s: float = 1800.0
+    ) -> int:
+        """Run the maintenance passes earlier sessions parked. Best-effort."""
+        return await self.turn_memory.drain_pending_maintenance(
+            limit=limit, stale_after_s=stale_after_s
+        )
 
     async def context_snapshot(
         self,
@@ -1362,7 +1486,7 @@ class OmniAgent:
         include_injected: bool = True,
     ) -> ContextSnapshot:
         """Estimate the bounded context carried into the next model turn."""
-        from omni.config.settings import resolve_context_window_tokens
+        from omni.config.settings import resolve_max_input_tokens
 
         async with self.db.session() as s:
             rows = list((await s.execute(
@@ -1395,7 +1519,7 @@ class OmniAgent:
             prompt_history=history,
             compacted_messages=sum(bool((row.meta or {}).get("compacted")) for row in rows),
             injected_text=blocks,
-            context_window_tokens=resolve_context_window_tokens(self.settings),
+            context_window_tokens=resolve_max_input_tokens(self.settings),
             focus=focus,
         )
 
@@ -1407,9 +1531,7 @@ class OmniAgent:
         )
 
     async def aclose(self) -> None:
-        # Cancel/await any detached scheduled-goal turns first so a fire in
-        # flight never touches the DB after it closes (and no orphan asyncio task
-        # outlives the agent).
+        # Stop detached scheduled goals before their database closes.
         try:
             await self.scheduler.shutdown()
         except Exception:  # noqa: BLE001

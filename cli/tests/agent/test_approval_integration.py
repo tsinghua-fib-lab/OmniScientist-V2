@@ -1,9 +1,10 @@
 """Approval gate wired through the orchestrator ReAct loop (P0 security).
 
-End-to-end coverage of the four owner-facing outcomes: an interactive owner may
-approve or deny a shell command; a non-interactive/remote caller never sees the
-sensitive tool (and would fail closed); and full-autonomy mode runs it without a
-prompt. This is the integration-level twin of ``tests/core/test_approval.py``.
+End-to-end coverage of the owner-facing outcomes: an interactive owner may
+approve or deny a shell command; a daemon/IM caller never sees the shell (and
+would fail closed); ``omni exec`` workspace-auto offers and runs sandboxed
+bash; and full-autonomy mode runs it without a prompt. This is the
+integration-level twin of ``tests/core/test_approval.py``.
 """
 
 from __future__ import annotations
@@ -81,6 +82,75 @@ async def test_noninteractive_hides_sensitive_tool_from_catalog():
         assert "bash" not in agent.llm.tool_names
         kinds = await _event_kinds(agent, turn.task_id)
         assert not any(k.startswith("approval.") for k in kinds)
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_trusted_auto_runs_python_probe_without_prompt():
+    agent = await OmniAgent.create(load_settings(trusted=True))
+    agent.llm = PlanningLLM(_REACT_PLAN, script=_script_bash("python -c 'print(1)'"))
+    asked = {"n": 0}
+
+    async def approver(_req: ApprovalRequest) -> ApprovalDecision:
+        asked["n"] += 1
+        return ApprovalDecision(True, scope="once")
+
+    agent.approver = approver
+    try:
+        turn = await agent.handle_turn(
+            "在项目里运行 python -c 'print(1)'", channel="cli", drain_tasks=False
+        )
+        assert turn.text == "done"
+        assert asked["n"] == 0
+        kinds = await _event_kinds(agent, turn.task_id)
+        assert "approval.auto" in kinds
+        assert "approval.requested" not in kinds
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_workspace_auto_offers_and_runs_sandboxed_bash():
+    agent = await OmniAgent.create(load_settings())
+    agent.llm = PlanningLLM(_REACT_PLAN, script=_script_bash("python -c 'print(1)'"))
+    agent.approver = None
+    try:
+        turn = await agent.handle_turn(
+            "在项目里运行 python -c 'print(1)'",
+            channel="cli",
+            drain_tasks=False,
+            workspace_auto=True,
+        )
+        assert turn.text == "done"
+        assert "bash" in agent.llm.tool_names
+        stored = await agent.tasks.get_task(turn.task_id)
+        assert stored is not None
+        assert set(stored.approved_tools) >= {"bash", "write_file", "edit_file", "run_compute"}
+        kinds = await _event_kinds(agent, turn.task_id)
+        assert "approval.task.granted" in kinds
+        assert "approval.denied" not in kinds
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_workspace_auto_is_ignored_on_im():
+    agent = await OmniAgent.create(load_settings())
+    agent.llm = PlanningLLM(_REACT_PLAN, script=_script_bash("python -c 'print(1)'"))
+    agent.approver = None
+    try:
+        turn = await agent.handle_turn(
+            "在项目里运行 python -c 'print(1)'",
+            channel="wechat",
+            drain_tasks=False,
+            workspace_auto=True,
+        )
+        assert turn.text == "done"
+        assert "bash" not in agent.llm.tool_names
+        stored = await agent.tasks.get_task(turn.task_id)
+        assert stored is not None
+        assert "bash" not in set(stored.approved_tools or [])
     finally:
         await agent.aclose()
 

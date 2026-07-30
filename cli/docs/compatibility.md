@@ -44,6 +44,16 @@ For Claude Code, Codex, and OpenClaw users, use the lightest mode that fits:
 
    ```bash
    python3 scripts/run.py --json '{"identifier":"1706.03762"}'
+   python3 scripts/run.py --json-file payload.json
+   ```
+
+   On Windows PowerShell, prefer `--json-file` or UTF-8 stdin. `--json '{"..."}'`
+   loses quotes, and a non-UTF-8 console code page turns Chinese `output_dir`
+   values into `????`.
+
+   ```powershell
+   python3 scripts/run.py --json-file payload.json
+   Get-Content -Raw -Encoding utf8 payload.json | python3 scripts/run.py
    ```
 
    These runners do not import Omni. They print structured JSON, return
@@ -59,7 +69,7 @@ expects `ExecContext`, task state, artifact storage, and provenance services.
 
 ### LiveFigure exception: Omni-first VLM execution
 
-LiveFigure remains discoverable and copyable like the other five built-ins, but
+LiveFigure remains discoverable and copyable like the other built-ins, but
 its reliable first integration is Omni-first. Keep the multimodal model and API
 key in Omni, run `omni config vlm`, and expose the skill to Claude Code, Codex,
 or OpenClaw through `omni mcp serve`. This avoids weakening a host agent's secret
@@ -132,7 +142,7 @@ How discovered/imported skills run:
 
 - Engine/exec skills run via the executor (engines load from the skill's own folder).
 - Prompt skills (the common external case — only `name` + `description` + body) run through
-  `use_skill`, which spins up a focused ReAct sub-agent equipped with the Claude-Code-compatible
+  `run_skill`, which spins up a focused ReAct sub-agent equipped with the Claude-Code-compatible
   builtin tools (`read_file`, `write_file`, `edit_file`, `bash`, `grep`, `glob`, `web_fetch`),
   approximating the Claude Code execution environment.
 

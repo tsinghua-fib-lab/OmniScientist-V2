@@ -19,9 +19,12 @@ for software and paper citation metadata.
 For the full design and how it compares to Claude Code/Codex and other open-source research
 agents, see [`cli/docs/research-agent-design.md`](cli/docs/research-agent-design.md).
 
-The current source build reports package version `2.0.0rc1` (planned Git tag `v2.0.0rc1`). The
-build is published to a public index only when the release workflow
-(`cli/scripts/release.sh`) runs; until then, install from the source checkout.
+The current repository metadata reports package version `2.0.0rc3` (Git tag `v2.0.0rc3`). This is
+a temporary prerelease identity, not the stable release line: the first stable V2 release will be
+`2.0.0`, followed by compatible `2.0.x` patch releases. Once the stable release is published,
+normal installations and updates should not pin a version; the package manager resolves the latest
+stable release. Pin `==<version>` only for reproducibility, rollback, or release verification.
+Release artifacts are published to the public index by `cli/scripts/release.sh`.
 
 ## Install and initialize
 
@@ -30,7 +33,7 @@ build is published to a public index only when the release workflow
 - macOS, Linux, or Windows 10/11
 - Python 3.11 or newer
 - [`uv`](https://docs.astral.sh/uv/) or [`pipx`](https://pipx.pypa.io/) for an isolated installation
-- Node.js 20.9 or newer, including npm (required by the bundled research-pptx renderer)
+- Node.js 20.9 or newer to run the bundled research-pptx renderer; npm is required only for the first `omni skills setup research-pptx` (pnpm is not a substitute)
 - A model endpoint is optional for installation: the bundled `mock` provider supports offline
   setup and deterministic evaluation
 
@@ -39,16 +42,23 @@ build is published to a public index only when the release workflow
 PyPI is the stable package authority. Install one isolated copy, then launch Omni:
 
 ```bash
-uv tool install omniscientist
+uv tool install OmniScientist-V2
 # or
-pipx install omniscientist
+pip install OmniScientist-V2
+# or
+pipx install OmniScientist-V2
 
 omni
 ```
 
+These unpinned commands install the latest stable release. Until `2.0.0` is published, use the
+checkout installer below or intentionally select a prerelease for testing. An exact stable version
+is optional and should be used only when it is intentionally required, for example
+`pip install 'OmniScientist-V2==2.0.0'`.
+
 The first `omni` launch runs setup, prepares the lockfile-pinned Node runtime, and starts or repairs
 the single Home Service. Later launches are fast local checks. If a package manager replaces the
-package directly (`uv tool upgrade omniscientist` or `pipx upgrade omniscientist`), the next
+package directly (`uv tool upgrade OmniScientist-V2` or `pipx upgrade OmniScientist-V2`), the next
 `omni` detects the new installation fingerprint and completes runtime/config/service convergence
 without downloading the Python package again.
 
@@ -62,6 +72,15 @@ It delegates the Python package step to the owning package manager, then converg
 state, retires legacy daemons, refreshes the supervisor launcher, restores the Home Service, and
 verifies readiness. SQLite schema changes remain data-preserving and run with backups when each
 store is first opened by the new version.
+
+`omni update` updates to the latest stable release. If the installation is managed directly by a
+package manager, use its ordinary unpinned upgrade command instead:
+
+```bash
+uv tool upgrade OmniScientist-V2
+pip install --upgrade OmniScientist-V2
+pipx upgrade OmniScientist-V2
+```
 
 ### Install from a checkout
 
@@ -124,12 +143,12 @@ failed and prints `omni skills setup research-pptx`; configuration such as a
 missing LiveFigure VLM remains a separate `needs_input` condition.
 
 Git URL installs require an immutable semantic release tag or full commit hash; mutable branches
-are rejected except through the explicit development channel. Until the first PyPI artifact is
-published, use the checkout installer.
+are rejected except through the explicit development channel. Use the checkout installer for
+unpublished source changes.
 
 ### Maintainer release flow
 
-GitHub is the release authority and PyPI publication is tag-driven. Before the first release,
+GitHub is the release authority and PyPI publication is tag-driven. Before the first stable release,
 the canonical repository is
 [`tsinghua-fib-lab/OmniScientist-V2`](https://github.com/tsinghua-fib-lab/OmniScientist-V2).
 Create a GitHub environment named `pypi`, then configure the PyPI Trusted Publisher with these
@@ -138,7 +157,7 @@ exact values. If the environment restricts deployment branches and tags, allow t
 
 | PyPI field | Value |
 |---|---|
-| PyPI project name (pending publisher only) | `omniscientist` |
+| PyPI project name (pending publisher only) | `OmniScientist-V2` |
 | Owner | `tsinghua-fib-lab` |
 | Repository name | `OmniScientist-V2` |
 | Workflow name | `release.yml` |
@@ -146,8 +165,8 @@ exact values. If the environment restricts deployment branches and tags, allow t
 
 `Workflow name` is the filename only—not `.github/workflows/release.yml`. The workflow file must
 be committed at that path before a release tag is pushed. The workflow grants `id-token: write`
-only to the publish job and uses no persistent PyPI token. A pending publisher does not reserve
-the project name; the first successful `2.0.0rc1` publication creates the project and claims it.
+only to the publish job and uses no persistent PyPI token. The prerelease publication already
+created the PyPI project; the stable release reuses this Trusted Publisher configuration.
 
 For the first migration, push the source branch before creating any release tag, set it as the
 GitHub default branch, and enable private vulnerability reporting:
@@ -157,32 +176,40 @@ git push -u origin master
 ```
 
 Set `cli/src/omni/__init__.py` to the intended immutable version, commit a clean tree, then run
-`cli/scripts/release.sh`. Before tagging, require the exact candidate commit to pass the ordinary CI
+`cli/scripts/release.sh`. Before tagging, require the exact release commit to pass the ordinary CI
 matrix (Python 3.11–3.13 on Linux, macOS, and Windows), the reactive-binding evidence gate, the
 distribution check, and at least 80% coverage of changed executable lines under
 `cli/src/omni/**/*.py`. Pull requests compare with their base commit and ordinary pushes compare with
 the previous push commit. Tag builds compare with the nearest prior `v*` tag. The first `v*` release
 uses immutable bootstrap commit `2b7dfe46a0028fe643126f12ba83a5e8c4f9bb94`, the last `master`
-baseline before this control-plane change; the release candidate must descend from it. Once a prior
+baseline before this control-plane change; the release commit must descend from it. Once a prior
 release tag exists, the tag takes precedence and the bootstrap remains provenance only.
 
 The release script requires remote `master` to equal local `HEAD`, validates and pushes
 `v<version>`. The tag workflow reruns all nine OS/Python combinations (Linux/Python 3.12 in the
 coverage build), enforces the release gates, tests the built wheel on Linux/macOS/Windows, and
 publishes through OIDC. It never uploads to PyPI before the tag exists and never accepts a local
-PyPI token.
-For the first public release, validate `2.0.0rc1` on all three platforms before bumping and tagging
-`2.0.0`.
+PyPI token. Before setting `__version__` to `2.0.0`, validate the current source on all three
+platforms. After the version bump, rerun the release gates on the exact commit that will be tagged
+`v2.0.0`.
 
-After the release workflow publishes the candidate, test the exact prerelease explicitly:
+After the release workflow publishes a release, verify both user-facing paths:
 
 ```bash
-uv tool install 'omniscientist==2.0.0rc1'
-pipx install 'omniscientist==2.0.0rc1'
+# Normal installation/update resolves the latest stable release.
+uv tool install OmniScientist-V2
+pip install --upgrade OmniScientist-V2
+pipx install OmniScientist-V2
+
+# Release verification may intentionally pin the exact artifact under test.
+uv tool install 'OmniScientist-V2==2.0.0'
+pip install 'OmniScientist-V2==2.0.0'
+pipx install 'OmniScientist-V2==2.0.0'
 ```
 
-The unpinned `uv tool install omniscientist` and `pipx install omniscientist` commands remain the
-stable `2.0.0` user path after the candidate is promoted.
+For later `2.0.x` releases, replace the pinned maintainer-only example with the exact artifact being
+verified. User documentation and routine update instructions remain unpinned so they continue to
+resolve the latest stable version.
 
 ### Uninstall
 
@@ -256,8 +283,15 @@ move or delete it. `OMNI_HOME` remains the highest-priority per-process override
 
 ### Configure a real model
 
-The wizard is the easiest route. The equivalent one-line commands for OpenAI-compatible services
-are:
+Use `omni model` (or `/model` in the REPL) to open the guided main/VLM/embedding
+picker. `omni model status` shows the effective three-role stack, while
+`omni model explain [main|vision|embedding]` shows which environment, Home,
+profile, trusted-project, secrets, or explicit-override layer supplies each field.
+
+This does not change configuration scope: model changes remain persistent defaults
+inside the active `OMNI_HOME`. The existing root `--model <name>` option remains a
+non-persistent override for that launch. The equivalent advanced one-line commands
+for OpenAI-compatible services are:
 
 ```bash
 # DeepSeek
@@ -281,9 +315,12 @@ Keyword recall is the safe default and does not call an embedding endpoint. Enab
 only when a real `/embeddings` service is available:
 
 ```bash
+omni model embedding --enable \
+  -u https://api.openai.com/v1 -m text-embedding-3-small -k "$OPENAI_API_KEY"
+# Equivalent advanced form:
 omni config embeddings --enable \
   -u https://api.openai.com/v1 -m text-embedding-3-small -k "$OPENAI_API_KEY"
-omni config embeddings --disable       # return to offline keyword recall
+omni model embedding --disable          # return to offline keyword recall
 ```
 
 DeepSeek's chat endpoint is not an embedding service; configure a separate embedding endpoint when
@@ -420,7 +457,7 @@ anchor and channels, or `--all` to find lingering legacy daemons.
 The recommended transports need **no public callback URL** (Feishu WebSocket long connection, DingTalk
 Stream mode), so they work from a laptop behind NAT. The Feishu/DingTalk SDKs ship with the default
 installer's `channels` extra; for a plain source/venv install add them with
-`pip install "omniscientist[channels]"`.
+`pip install "OmniScientist-V2[channels]"`.
 
 ### What to prepare on each platform
 
@@ -428,56 +465,51 @@ installer's `channels` extra; for a plain source/venv install add them with
 |---|---|---|---|---|
 | Feishu / Lark | `feishu` | WebSocket long connection (no public URL) | A custom app; subscribe the bot to the `im.message.receive_v1` event over a **long connection**; copy its **App ID** and **App Secret** | `app_id`, `app_secret` |
 | DingTalk | `dingtalk` | Stream mode (no public webhook) | An enterprise robot with **Stream mode** enabled; copy its **Client ID** (AppKey) and **Client Secret** (AppSecret) | `client_id`, `client_secret` |
-| WeChat / WeCom | `wechat` | Operator-managed local gateway (default), or experimental iLink | Run a WeChat gateway reachable at e.g. `http://127.0.0.1:8088` (**Omni does not launch it**); *or* use `--method ilink` and scan the printed QR with WeChat | gateway: `gateway_url` · iLink: `bot_token` (obtained by scanning) |
+| WeChat | `wechat` | Official ClawBot bot API (`ilinkai.weixin.qq.com`) | Nothing — scan the QR printed in your terminal with WeChat | `bot_token` (obtained by scanning) |
 
 ### 1. Configure and start
 
 One command per platform stores the credentials, prints any QR/setup link, creates a short-lived
 `/pair <code>` for manual binding, enables the channel, and (`--start`) applies it to the always-on
-home service. Closing the REPL does not stop that service.
+home service. Closing the REPL does not stop that service. The same commands work unchanged on
+Linux, macOS, and Windows.
 
 ```bash
+# WeChat — scan the QR printed in the terminal; no gateway, port, or extra package
+omni channel login wechat --start
+
 # Feishu — App ID + App Secret from your custom app
 omni channel login feishu \
-  --app-id <FEISHU_APP_ID> --app-secret "$FEISHU_APP_SECRET" \
-  --credential-store file --start
+  --app-id <FEISHU_APP_ID> --app-secret "$FEISHU_APP_SECRET" --start
 
 # DingTalk — Client ID + Client Secret from a Stream-mode robot
 omni channel login dingtalk \
-  --client-id <DINGTALK_CLIENT_ID> --client-secret "$DINGTALK_CLIENT_SECRET" \
-  --credential-store file --start
-
-# WeChat — through an operator-managed local gateway (you run the gateway)
-omni channel login wechat --method gateway \
-  --gateway-url http://127.0.0.1:8088 --credential-store file --start
-
-# WeChat — experimental iLink / "WeChat ClawBot" flow (scan the QR)
-omni channel login wechat --method ilink --credential-store file --start
+  --client-id <DINGTALK_CLIENT_ID> --client-secret "$DINGTALK_CLIENT_SECRET" --start
 ```
 
 Inside a running `omni` REPL, use the slash forms. Feishu and DingTalk securely prompt for the
 omitted secret (the REPL does not expand shell variables such as `$FEISHU_APP_SECRET`):
 
 ```text
-/channel login feishu --app-id <FEISHU_APP_ID> --credential-store file --start
-/channel login dingtalk --client-id <DINGTALK_CLIENT_ID> --credential-store file --start
-/channel login wechat --method gateway --gateway-url http://127.0.0.1:8088 --credential-store file --start
-/channel login wechat --method ilink --credential-store file --start
+/channel login wechat --start
+/channel login feishu --app-id <FEISHU_APP_ID> --start
+/channel login dingtalk --client-id <DINGTALK_CLIENT_ID> --start
 ```
 
-On macOS, omit `--credential-store file` to store secrets in the Keychain. Linux and Windows must
-pass it because Omni provides no built-in encrypted OS credential backend there; secrets then go to
-`<OMNI_HOME>/secrets.toml`, which should remain user-only. The iLink connector is an experimental,
-explicit opt-in and may be restricted by the platform; prefer a managed gateway/WeCom path for a
-controlled deployment.
+Credentials are stored without any extra flag: the macOS Keychain where it exists, and
+`<OMNI_HOME>/secrets.toml` (mode 0600, keep it user-only) on Linux and Windows. WeChat
+speaks Tencent's official ClawBot bot API, so Tencent's ClawBot terms govern the paired account.
+Self-hosted `--method gateway` and `--method wecom` remain available for existing deployments.
 
 ### 2. Pair and verify
 
 External IM users are gated by an allowlist with pairing **on by default**: the account that scanned
 a WeChat QR is auto-bound, and anyone else self-binds by sending the short-lived `/pair <code>` (from
-`channel login`) in the bot conversation.
+`channel login`) in the bot conversation. That code is single-use and expires after 10 minutes;
+`omni channel pair <name>` issues a new one for an already configured Feishu or DingTalk channel.
 
 ```bash
+omni channel pair feishu    # fresh /pair code when the last one expired
 omni channel list           # enabled, configured, and runtime state
 omni channel test feishu    # local config/dependency check; not a live platform round trip
 omni serve status           # home service: desired state, runtime, anchor, channels
@@ -493,7 +525,7 @@ The equivalent REPL checks are `/channel list`, `/channel test feishu`, `/serve 
 
 - **Enablement** — `<OMNI_HOME>/config.toml` under `[channels] enabled = ["cli", "feishu", …]`.
 - **Per-channel settings** — `<OMNI_HOME>/channels/<name>.toml` (mode, endpoints, allowlist/pairing).
-- **Secrets** — macOS Keychain, or `<OMNI_HOME>/secrets.toml` when using `--credential-store file`.
+- **Secrets** — macOS Keychain where available, otherwise `<OMNI_HOME>/secrets.toml` (mode 0600).
 - Prefer `omni channel login` / `omni channel add` over hand-editing: they write secure
   allowlist/pairing defaults for you. `omni config path` prints the exact file locations.
 
@@ -506,6 +538,7 @@ Detailed platform setup, media/typing behavior, and cross-platform credential/QR
 |---|---|---|
 | Conversation | `omni "..."`, `omni`, `omni exec` | One-shot, REPL, and non-interactive execution |
 | Setup | `init`, `doctor`, `config`, `status` | Initialize and inspect the effective local setup |
+| External optimization | `autosota get/config/init/run/status` | Explicitly install and foreground-launch independent AutoSOTA experiments; AutoSOTA owns environments, GPUs, and long-running work |
 | Projects | `project`, `profile`, `session`, `resume`, `replay` | Isolate work and continue prior context |
 | Skills | `skills list/info/add/trust/remove/restore/export` | Manage built-in and third-party skill lifecycles |
 | Planning | `why`, `current`, `omni chat --mode plan`, `omni chat --mode review`, `/mode`, `/plan`, `/review` | Explain routing, resolve focus, and control execution mode |
@@ -612,7 +645,7 @@ Skills are wired into the whole agent loop, not just a flat tool list:
   capabilities and deliverables. The runtime then resolves those slots against trusted skill
   contracts. `trigger.phrases` remain optional catalog/search aliases; they do not form an automatic
   language-specific intent router. In the ReAct lane, `find_skill` searches the trusted catalogue
-  and `use_skill` loads a selected provider. A normal request may therefore discover a portable
+  and `run_skill` loads a selected provider. A normal request may therefore discover a portable
   prompt-only skill by description; `$skill-name` forces exact selection when required.
 - **Task planning** — sync skills (Python-engine / CLI-exec) are direct tools in the bounded ReAct
   loop; the model composes them and the builtin tools (`read_file`/`write_file`/`bash`/`web_fetch`/…).
@@ -657,7 +690,7 @@ The explicit active inventory is `arxiv-fetch`, `openalex-search`,
 - `figure.editable.pptx` → `livefigure` → one editable single-slide PPTX
 - `slides.generate` → `research-pptx` → a complete multi-slide deck
 - `poster.scientific` → `scientific-poster` → a complete HTML scientific poster
-- `review.paper` → `paper-review` → a venue-aware pre-submission review
+- `review.paper` → `paper-review` → a venue-aware complete review pipeline that starts MinerU immediately, begins full-manuscript structured understanding when text is ready, overlaps that work and Semantic Scholar retrieval with visual analysis, and validates the full conference form
 - `review.response` → `review-response` → reviewer/editor revision correspondence
 - `research.ideation` → `research-ideation` → pressure-tested research directions
 

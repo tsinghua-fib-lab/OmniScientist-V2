@@ -1,0 +1,245 @@
+{
+  "summarizes": [
+    {
+      "from": "l3_richard_feynman_P01",
+      "to": "l2_richard_feynman_C02"
+    },
+    {
+      "from": "l3_richard_feynman_P01",
+      "to": "l2_richard_feynman_C05"
+    },
+    {
+      "from": "l3_richard_feynman_P01",
+      "to": "l2_richard_feynman_C03"
+    },
+    {
+      "from": "l3_richard_feynman_P01",
+      "to": "l2_richard_feynman_C04"
+    },
+    {
+      "from": "l3_richard_feynman_P02",
+      "to": "l2_richard_feynman_C01"
+    },
+    {
+      "from": "l3_richard_feynman_P02",
+      "to": "l2_richard_feynman_C03"
+    },
+    {
+      "from": "l3_richard_feynman_P02",
+      "to": "l2_richard_feynman_C06"
+    },
+    {
+      "from": "l3_richard_feynman_P02",
+      "to": "l2_richard_feynman_C07"
+    },
+    {
+      "from": "l3_richard_feynman_P03",
+      "to": "l2_richard_feynman_C03"
+    },
+    {
+      "from": "l3_richard_feynman_P03",
+      "to": "l2_richard_feynman_C07"
+    },
+    {
+      "from": "l3_richard_feynman_P03",
+      "to": "l2_richard_feynman_C04"
+    },
+    {
+      "from": "l3_richard_feynman_P03",
+      "to": "l2_richard_feynman_C06"
+    }
+  ],
+  "supports": [
+    {
+      "from": "l2_richard_feynman_C02",
+      "to": "l1_richard_feynman_0001"
+    },
+    {
+      "from": "l2_richard_feynman_C02",
+      "to": "l1_richard_feynman_0002"
+    },
+    {
+      "from": "l2_richard_feynman_C03",
+      "to": "l1_richard_feynman_0003"
+    },
+    {
+      "from": "l2_richard_feynman_C03",
+      "to": "l1_richard_feynman_0004"
+    },
+    {
+      "from": "l2_richard_feynman_C02",
+      "to": "l1_richard_feynman_0005"
+    },
+    {
+      "from": "l2_richard_feynman_C04",
+      "to": "l1_richard_feynman_0006"
+    },
+    {
+      "from": "l2_richard_feynman_C02",
+      "to": "l1_richard_feynman_0007"
+    },
+    {
+      "from": "l2_richard_feynman_C03",
+      "to": "l1_richard_feynman_0008"
+    },
+    {
+      "from": "l2_richard_feynman_C02",
+      "to": "l1_richard_feynman_0009"
+    },
+    {
+      "from": "l2_richard_feynman_C01",
+      "to": "l1_richard_feynman_0010"
+    },
+    {
+      "from": "l2_richard_feynman_C03",
+      "to": "l1_richard_feynman_0011"
+    },
+    {
+      "from": "l2_richard_feynman_C02",
+      "to": "l1_richard_feynman_0012"
+    },
+    {
+      "from": "l2_richard_feynman_C02",
+      "to": "l1_richard_feynman_0013"
+    },
+    {
+      "from": "l2_richard_feynman_C03",
+      "to": "l1_richard_feynman_0014"
+    },
+    {
+      "from": "l2_richard_feynman_C04",
+      "to": "l1_richard_feynman_0015"
+    },
+    {
+      "from": "l2_richard_feynman_C06",
+      "to": "l1_richard_feynman_0016"
+    },
+    {
+      "from": "l2_richard_feynman_C02",
+      "to": "l1_richard_feynman_0017"
+    },
+    {
+      "from": "l2_richard_feynman_C02",
+      "to": "l1_richard_feynman_0018"
+    },
+    {
+      "from": "l2_richard_feynman_C06",
+      "to": "l1_richard_feynman_0019"
+    },
+    {
+      "from": "l2_richard_feynman_C02",
+      "to": "l1_richard_feynman_0020"
+    },
+    {
+      "from": "l2_richard_feynman_C02",
+      "to": "l1_richard_feynman_0021"
+    },
+    {
+      "from": "l2_richard_feynman_C03",
+      "to": "l1_richard_feynman_0022"
+    },
+    {
+      "from": "l2_richard_feynman_C03",
+      "to": "l1_richard_feynman_0023"
+    },
+    {
+      "from": "l2_richard_feynman_C07",
+      "to": "l1_richard_feynman_0024"
+    },
+    {
+      "from": "l2_richard_feynman_C03",
+      "to": "l1_richard_feynman_0025"
+    },
+    {
+      "from": "l2_richard_feynman_C06",
+      "to": "l1_richard_feynman_0026"
+    },
+    {
+      "from": "l2_richard_feynman_C06",
+      "to": "l1_richard_feynman_0027"
+    },
+    {
+      "from": "l2_richard_feynman_C03",
+      "to": "l1_richard_feynman_0028"
+    },
+    {
+      "from": "l2_richard_feynman_C03",
+      "to": "l1_richard_feynman_0029"
+    },
+    {
+      "from": "l2_richard_feynman_C02",
+      "to": "l1_richard_feynman_0030"
+    },
+    {
+      "from": "l2_richard_feynman_C05",
+      "to": "l1_richard_feynman_0031"
+    },
+    {
+      "from": "l2_richard_feynman_C04",
+      "to": "l1_richard_feynman_0032"
+    },
+    {
+      "from": "l2_richard_feynman_C02",
+      "to": "l1_richard_feynman_0033"
+    }
+  ],
+  "reinforces": [
+    {
+      "from": "l2_richard_feynman_C01",
+      "to": "l2_richard_feynman_C03",
+      "reason": "这位科学家在“怎样定义问题”中明确设定核心验证目标，在“怎样验证结论”中强调以数学等价、物理原理和结果鲁棒性作为验证标准，两者共同体现“以可验证性为核心”的态度，缺少任一方都会使对问题的定义或结论的检验变得残缺。"
+    },
+    {
+      "from": "l2_richard_feynman_C02",
+      "to": "l2_richard_feynman_C04",
+      "reason": "这位科学家在“怎样选择方法”中优先采用最直观的物理切入路径、基于物理清晰性选择近似，在“怎样解释结果”中批评纯形式化处理并要求解释揭示机理、满足直觉，两者共同体现“物理直觉优先”的姿态。"
+    },
+    {
+      "from": "l2_richard_feynman_C02",
+      "to": "l2_richard_feynman_C05",
+      "reason": "这位科学家在“怎样选择方法”中优先采用最简单的扰动项以方便分析，在“怎样判断美丑”中因定义更简单而选择它，两者都将简洁性作为重要判断标准。"
+    },
+    {
+      "from": "l2_richard_feynman_C03",
+      "to": "l2_richard_feynman_C06",
+      "reason": "这位科学家在“怎样验证结论”中强调通过实际尝试和淘汰错误来检验想法、警惕选择性发表，在“怎样处理失败”中要求进一步检验异常、将失败归因于模型或现象本身，两者共同体现“直面异常、实验检验”的姿态。"
+    },
+    {
+      "from": "l2_richard_feynman_C03",
+      "to": "l2_richard_feynman_C07",
+      "reason": "这位科学家在“怎样验证结论”中强调科学知识的非绝对确定性和怀疑自由，在“怎样产生想法”中主张让通往未知的门半开着，两者共同体现“对未知保持开放”的态度。"
+    },
+    {
+      "from": "l2_richard_feynman_C04",
+      "to": "l2_richard_feynman_C05",
+      "reason": "这位科学家在“怎样解释结果”中要求理论简洁，在“怎样判断美丑”中将简洁视为美学标准，两者共享“简洁性”这一价值取向。"
+    }
+  ],
+  "enables": [],
+  "tension": [
+    {
+      "between": [
+        "l2_richard_feynman_C01",
+        "l2_richard_feynman_C07"
+      ],
+      "context": "exploratory_research",
+      "reason": "在探索性研究中，怎样定义问题强调设定明确的验证目标，而怎样产生想法主张对未知保持开放，两者争夺同一研究取向：一个要求收敛于具体假设，另一个要求发散保留可能性，因此形成张力。"
+    },
+    {
+      "between": [
+        "l2_richard_feynman_C02",
+        "l2_richard_feynman_C03"
+      ],
+      "context": "rigorous_mathematical_verification",
+      "reason": "当需要严格数学等价验证时，怎样选择方法倾向于采用物理直觉和简化近似，但怎样验证结论坚持数学等价和规范不变性等严格标准，前者可能忽略某些项或采用近似，后者要求严格证明，因此在验证约束下竞争。"
+    },
+    {
+      "between": [
+        "l2_richard_feynman_C05",
+        "l2_richard_feynman_C06"
+      ],
+      "context": "contradictory_experimental_result",
+      "reason": "当实验结果与理论矛盾时，怎样判断美丑可能为了简洁而倾向剔除异常数据，但怎样处理失败强调直面异常并进一步检验，两者对待偏离数据点的态度直接冲突。"
+    }
+  ]
+}

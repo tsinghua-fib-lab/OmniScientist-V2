@@ -25,10 +25,39 @@ from omni.config.paths import OmniPaths
 
 logger = logging.getLogger(__name__)
 
-try:  # POSIX advisory locks; absent on Windows → degrade to a no-op lock.
+try:  # POSIX advisory locks.
     import fcntl as _fcntl
 except ImportError:  # pragma: no cover - platform dependent
     _fcntl = None  # type: ignore[assignment]
+
+try:  # Windows byte-range advisory locks.
+    import msvcrt as _msvcrt
+except ImportError:  # pragma: no cover - platform dependent
+    _msvcrt = None  # type: ignore[assignment]
+
+
+def _try_lock(handle) -> bool:  # noqa: ANN001
+    if _fcntl is not None:
+        _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+        return True
+    if _msvcrt is not None:
+        handle.seek(0, 2)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        _msvcrt.locking(handle.fileno(), _msvcrt.LK_NBLCK, 1)
+        return True
+    return False
+
+
+def _release_lock(handle) -> None:  # noqa: ANN001
+    if _fcntl is not None:
+        _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+        return
+    if _msvcrt is not None:
+        handle.seek(0)
+        _msvcrt.locking(handle.fileno(), _msvcrt.LK_UNLCK, 1)
 
 
 @contextlib.asynccontextmanager
@@ -39,15 +68,15 @@ async def global_memory_lock(
 
     Yields ``False`` (without blocking) when another process holds it past the
     timeout so the caller can skip. Always releases on exit. A no-op that yields
-    ``True`` when file locking is unavailable (Windows / locked-down FS).
+    ``True`` only when neither POSIX nor Windows file locking is available.
     """
-    if _fcntl is None:
+    if _fcntl is None and _msvcrt is None:
         yield True
         return
     lock_path = paths.memories_dir / ".consolidate.lock"
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        handle = lock_path.open("a", encoding="utf-8")
+        handle = lock_path.open("a+b")
     except OSError:
         # Can't even open the lock file — don't block memory maintenance on it.
         yield True
@@ -57,8 +86,7 @@ async def global_memory_lock(
     try:
         while True:
             try:
-                _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
-                acquired = True
+                acquired = _try_lock(handle)
                 break
             except OSError:
                 if time.monotonic() >= deadline:
@@ -68,7 +96,7 @@ async def global_memory_lock(
     finally:
         if acquired:
             try:
-                _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+                _release_lock(handle)
             except OSError:
                 logger.debug("global memory lock release failed", exc_info=True)
         handle.close()

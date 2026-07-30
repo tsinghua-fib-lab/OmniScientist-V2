@@ -42,8 +42,7 @@ def offline_css_issues(
         or _UNSUPPORTED_REFERENCE_RE.search(normalized)
         or len(url_matches) != len(_URL_START_RE.findall(normalized))
         or any(
-            not safe_reference(match.group(2).strip(" '\""))
-            for match in url_matches
+            not safe_reference(match.group(2).strip(" '\"")) for match in url_matches
         )
     ):
         issues.add("unsafe_reference")

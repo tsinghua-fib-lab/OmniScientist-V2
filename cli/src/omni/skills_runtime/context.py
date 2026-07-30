@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Any
 from omni.config.paths import OmniPaths
 from omni.config.settings import OmniSettings
 from omni.core.react_agent import ToolSpec
+from omni.core.tool_result import ToolCallOutcome
 from omni.skills_runtime.registry import SKILL_SOURCE_PARAM as SKILL_SOURCE_PARAM
 
 # Control key carried in a task's ``input_json`` to force a specific discovery
@@ -58,6 +60,9 @@ class ExecContext:
     # Agent/subagent isolation may override the repository working tree and
     # compute profile without mutating global settings.
     working_dir: Path | None = None
+    # Installed skill package root for the currently executing skill. Bash and
+    # ``read_file`` resolve bundled scripts/references against this, not cwd.
+    skill_root: Path | None = None
     compute_override: Any = None
     runtime_steer: list[str] = field(default_factory=list)
     execution_control: Any = None
@@ -94,11 +99,47 @@ class ExecContext:
     # module import-light; ``None`` on non-coordinator/headless surfaces.
     resolver_context: Any = None
     # Host-owned deferred goal for a SCHEDULE turn: the objective the planner
-    # extracted for future execution (``IntentPlan.task_contract.deferred_goal``).
-    # When set, ``schedule_task`` seals *this* goal into the schedule instead of a
-    # goal the ReAct model re-typed, so the model cannot silently rewrite it. Empty
-    # when the planner extracted no distinct goal (then the model's goal is used).
+    # extracted for future execution, *only when grounded in this user
+    # message*. ``schedule_task`` will not let an ungrounded host goal
+    # (typically Active target) replace an open draft or the model's goal.
     deferred_goal: str = ""
+
+    def __post_init__(self) -> None:
+        """Bind the host artifact store to this live execution context."""
+        if self.artifacts is None:
+            return
+        # Local import keeps the portable context module free of a storage import
+        # cycle and leaves test/third-party artifact adapters untouched.
+        from omni.storage.artifacts import ArtifactStore, ContextArtifactStore
+
+        if isinstance(self.artifacts, ContextArtifactStore):
+            self.artifacts = self.artifacts.for_context(self)
+        elif isinstance(self.artifacts, ArtifactStore):
+            self.artifacts = ContextArtifactStore(self.artifacts, self)
+
+    def for_execution(self, **identity: Any) -> ExecContext:
+        """Derive a context owned by one execution, leaving the caller's intact.
+
+        Which provider is executing — and the provider authority sealed for it —
+        is true for exactly one execution, but the caller's context is often
+        shared by a whole turn: ``run_skill`` hands the ReAct context straight
+        to the runtime. Assigning that identity onto the caller's context leaks
+        it into every later call on the same turn, which let one skill's sealed
+        authority be checked against an unrelated skill.
+
+        The copy is shallow on purpose: wiring the execution must keep sharing
+        (db, artifacts, control planes, steering) stays shared by reference,
+        while rebinding a field is private to this execution. ``copy`` rather
+        than ``dataclasses.replace`` because non-field attributes such as
+        ``subagent_depth`` gate delegation depth and must survive derivation.
+        """
+        derived = copy.copy(self)
+        for name, value in identity.items():
+            setattr(derived, name, value)
+        # Rebind lazily-context-reading collaborators (the artifact store reads
+        # ownership off whichever context it holds) to the derived context.
+        derived.__post_init__()
+        return derived
 
     def os_sandbox_prefix(self) -> tuple[str, ...]:
         """OS-level write-confinement argv prefix for subprocesses a skill spawns.
@@ -106,14 +147,13 @@ class ExecContext:
         Derived from owner security settings and workspace paths so a portable
         skill engine gets real kernel confinement (seatbelt / bwrap / firejail)
         without importing CLI internals or reading ``ctx.settings`` itself.
-        Empty when confinement is disabled or no backend is available.
+        Empty when confinement is explicitly disabled, or when ``auto`` has
+        no backend (stock Linux / Windows). Raises ``SandboxUnavailableError``
+        only when an explicit backend was requested and is unusable.
         """
-        try:
-            from omni.skills_runtime.sandbox import sandbox_prefix
+        from omni.skills_runtime.exec_io import confined_exec_prefix
 
-            return tuple(sandbox_prefix(self.settings.security, self.paths))
-        except Exception:  # noqa: BLE001 - confinement is best-effort, never fatal
-            return ()
+        return tuple(confined_exec_prefix(self))
 
     def approval_gate(self, *, sensitive_tools: set[str] | None = None) -> Any:
         """Build the run-scoped approval gate at invocation time."""
@@ -158,12 +198,10 @@ class Tool:
     # call but delegate runtime admission to a concrete target. The resolver is
     # host-only metadata: it never appears in the provider-facing tool schema.
     admission_target: Callable[[dict[str, Any]], str] | None = None
-    # Optional semantic-admission contract (``core.action_contracts.
-    # ActionContract``). When present, the tool's *proposal* arguments must be
-    # run through ``contract.prepare(...)`` to seal canonical arguments before
-    # the handler executes; tools without one keep today's direct behaviour.
-    # Typed ``Any`` to avoid importing the contracts module here.
-    action_contract: Any = None
+    # Optional host-owned adapter for a declared first-party result schema.
+    # Ordinary/provider JSON remains opaque domain data unless an adapter is
+    # explicitly attached at this trusted boundary.
+    outcome_resolver: Callable[[Any], ToolCallOutcome | None] | None = None
 
     def __post_init__(self) -> None:
         """Inherit host metadata from the spec while allowing explicit overrides."""

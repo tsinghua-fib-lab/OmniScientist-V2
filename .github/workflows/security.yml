@@ -9,11 +9,58 @@ on:
 jobs:
   secrets:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # Pin the official CLI and verify both its archive and detection behavior.
+    # Keep the synthetic token random-looking: predictable placeholders can match
+    # Gitleaks' global allowlist and make a healthy scanner look broken.
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+      GITLEAKS_LINUX_X64_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
+          persist-credentials: false
+      - name: Install pinned Gitleaks CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          destination="${RUNNER_TEMP}/${archive}"
+          curl --fail --location --proto '=https' --tlsv1.2 --retry 3 \
+            --output "${destination}" "${url}"
+          echo "${GITLEAKS_LINUX_X64_SHA256}  ${destination}" | sha256sum --check -
+          tar -xzf "${destination}" -C "${RUNNER_TEMP}" gitleaks
+          chmod +x "${RUNNER_TEMP}/gitleaks"
+          "${RUNNER_TEMP}/gitleaks" version
+      - name: Verify Gitleaks rejects a synthetic credential
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture_dir="${RUNNER_TEMP}/gitleaks-self-test"
+          mkdir -p "${fixture_dir}"
+          git -C "${fixture_dir}" init -q
+          git -C "${fixture_dir}" config user.name "Omni CI Test"
+          git -C "${fixture_dir}" config user.email "ci-test@example.invalid"
+          printf 'token = "%s%s"\n' "ghp_" "6bac3c67a4d928f6a371d7b621d019ab14e5" \
+            > "${fixture_dir}/fixture.txt"
+          git -C "${fixture_dir}" add fixture.txt
+          git -C "${fixture_dir}" commit -qm "add synthetic leak fixture"
+          set +e
+          "${RUNNER_TEMP}/gitleaks" git --redact --exit-code 42 "${fixture_dir}"
+          status=$?
+          set -e
+          if [[ "${status}" -ne 42 ]]; then
+            echo "::error::Gitleaks self-test expected leak exit 42, got ${status}"
+            exit 1
+          fi
+      - name: Scan full Git history for secrets
+        shell: bash
+        run: >-
+          "${RUNNER_TEMP}/gitleaks" git --redact --verbose --exit-code 1
+          --log-opts="--all" .
 
   codeql:
     runs-on: ubuntu-latest
@@ -21,7 +68,7 @@ jobs:
       security-events: write
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: github/codeql-action/init@v3
         with:
           languages: python

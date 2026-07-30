@@ -1,0 +1,450 @@
+{
+  "summarizes": [
+    {
+      "from": "l3_norbert_wiener_P01",
+      "to": "l2_norbert_wiener_C02"
+    },
+    {
+      "from": "l3_norbert_wiener_P01",
+      "to": "l2_norbert_wiener_C05"
+    },
+    {
+      "from": "l3_norbert_wiener_P02",
+      "to": "l2_norbert_wiener_C01"
+    },
+    {
+      "from": "l3_norbert_wiener_P02",
+      "to": "l2_norbert_wiener_C06"
+    },
+    {
+      "from": "l3_norbert_wiener_P03",
+      "to": "l2_norbert_wiener_C01"
+    },
+    {
+      "from": "l3_norbert_wiener_P03",
+      "to": "l2_norbert_wiener_C03"
+    },
+    {
+      "from": "l3_norbert_wiener_P03",
+      "to": "l2_norbert_wiener_C07"
+    }
+  ],
+  "supports": [
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0001"
+    },
+    {
+      "from": "l2_norbert_wiener_C03",
+      "to": "l1_norbert_wiener_0002"
+    },
+    {
+      "from": "l2_norbert_wiener_C03",
+      "to": "l1_norbert_wiener_0003"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0004"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0005"
+    },
+    {
+      "from": "l2_norbert_wiener_C03",
+      "to": "l1_norbert_wiener_0006"
+    },
+    {
+      "from": "l2_norbert_wiener_C03",
+      "to": "l1_norbert_wiener_0007"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0008"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0009"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0010"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0011"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0012"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0013"
+    },
+    {
+      "from": "l2_norbert_wiener_C06",
+      "to": "l1_norbert_wiener_0014"
+    },
+    {
+      "from": "l2_norbert_wiener_C06",
+      "to": "l1_norbert_wiener_0015"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0016"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0017"
+    },
+    {
+      "from": "l2_norbert_wiener_C04",
+      "to": "l1_norbert_wiener_0018"
+    },
+    {
+      "from": "l2_norbert_wiener_C01",
+      "to": "l1_norbert_wiener_0019"
+    },
+    {
+      "from": "l2_norbert_wiener_C03",
+      "to": "l1_norbert_wiener_0020"
+    },
+    {
+      "from": "l2_norbert_wiener_C01",
+      "to": "l1_norbert_wiener_0021"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0022"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0023"
+    },
+    {
+      "from": "l2_norbert_wiener_C01",
+      "to": "l1_norbert_wiener_0024"
+    },
+    {
+      "from": "l2_norbert_wiener_C07",
+      "to": "l1_norbert_wiener_0025"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0026"
+    },
+    {
+      "from": "l2_norbert_wiener_C04",
+      "to": "l1_norbert_wiener_0027"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0028"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0029"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0030"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0031"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0032"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0033"
+    },
+    {
+      "from": "l2_norbert_wiener_C01",
+      "to": "l1_norbert_wiener_0034"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0035"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0036"
+    },
+    {
+      "from": "l2_norbert_wiener_C03",
+      "to": "l1_norbert_wiener_0037"
+    },
+    {
+      "from": "l2_norbert_wiener_C03",
+      "to": "l1_norbert_wiener_0038"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0039"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0040"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0041"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0042"
+    },
+    {
+      "from": "l2_norbert_wiener_C06",
+      "to": "l1_norbert_wiener_0043"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0044"
+    },
+    {
+      "from": "l2_norbert_wiener_C03",
+      "to": "l1_norbert_wiener_0045"
+    },
+    {
+      "from": "l2_norbert_wiener_C03",
+      "to": "l1_norbert_wiener_0046"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0047"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0048"
+    },
+    {
+      "from": "l2_norbert_wiener_C06",
+      "to": "l1_norbert_wiener_0049"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0050"
+    },
+    {
+      "from": "l2_norbert_wiener_C06",
+      "to": "l1_norbert_wiener_0051"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0052"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0053"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0054"
+    },
+    {
+      "from": "l2_norbert_wiener_C03",
+      "to": "l1_norbert_wiener_0055"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0056"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0057"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0058"
+    },
+    {
+      "from": "l2_norbert_wiener_C06",
+      "to": "l1_norbert_wiener_0059"
+    },
+    {
+      "from": "l2_norbert_wiener_C06",
+      "to": "l1_norbert_wiener_0060"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0061"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0062"
+    },
+    {
+      "from": "l2_norbert_wiener_C01",
+      "to": "l1_norbert_wiener_0063"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0064"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0065"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0066"
+    },
+    {
+      "from": "l2_norbert_wiener_C01",
+      "to": "l1_norbert_wiener_0067"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0068"
+    },
+    {
+      "from": "l2_norbert_wiener_C03",
+      "to": "l1_norbert_wiener_0069"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0070"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0071"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0072"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0073"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0074"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0075"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0076"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0077"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0078"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0079"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0080"
+    },
+    {
+      "from": "l2_norbert_wiener_C04",
+      "to": "l1_norbert_wiener_0081"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0082"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0083"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l1_norbert_wiener_0084"
+    }
+  ],
+  "reinforces": [
+    {
+      "from": "l2_norbert_wiener_C01",
+      "to": "l2_norbert_wiener_C03",
+      "reason": "怎样定义问题与怎样验证结论都体现了对严谨性的执着：定义问题时先进行范畴界定和条件限定，验证结论时坚持严格证明、构造反例并审查他人证明，二者共同构成严谨的认知姿态，缺少任何一方都会让科学家的严谨性变得残缺。"
+    },
+    {
+      "from": "l2_norbert_wiener_C01",
+      "to": "l2_norbert_wiener_C06",
+      "reason": "怎样定义问题强调明确限定条件范围、确保问题边界清晰；怎样处理失败也主动界定研究边界、标示方法失效条件。两者都注重边界的清晰界定，是同一认知姿态的不同侧面，缺一不可。"
+    },
+    {
+      "from": "l2_norbert_wiener_C03",
+      "to": "l2_norbert_wiener_C06",
+      "reason": "怎样验证结论时会指出他人证明的不完整（如弗雷歇条件不充分、分解证明不完整），怎样处理失败时则坦然承认自己未能给出一般情况证明、方法在特定条件下失效。两者都高度关注证明的完整性与局限性，体现了对严谨性的一致追求。"
+    },
+    {
+      "from": "l2_norbert_wiener_C04",
+      "to": "l2_norbert_wiener_C06",
+      "reason": "怎样解释结果时承认命题的概率性和模型与现实的近似性（如“几乎总是成立，但并非总是”），怎样处理失败时则明确接受未解决问题和方法边界。两者都接纳认知的不确定性与局限，是同一认知态度的不同表现。"
+    }
+  ],
+  "enables": [
+    {
+      "from": "l2_norbert_wiener_C01",
+      "to": "l2_norbert_wiener_C02",
+      "reason": "选择方法时需依据问题的自然性和简便性，因此必须先理解如何定义问题，才能判断哪种方法更适合该问题。"
+    },
+    {
+      "from": "l2_norbert_wiener_C01",
+      "to": "l2_norbert_wiener_C03",
+      "reason": "验证结论时需构造反例否定不符合原有定义的概念，并审查定义的充分必要性，因此理解如何定义问题是验证的前提。"
+    },
+    {
+      "from": "l2_norbert_wiener_C01",
+      "to": "l2_norbert_wiener_C06",
+      "reason": "处理失败时明确承认未解决的证明问题并界定研究范围，这些失败总是针对特定问题而言，所以必须先理解如何定义问题。"
+    },
+    {
+      "from": "l2_norbert_wiener_C02",
+      "to": "l2_norbert_wiener_C06",
+      "reason": "处理失败时清楚标示方法在特定条件下失效并归因于数学结构，这依赖于对方法选择的理解，因为失败常是方法适配性问题。"
+    },
+    {
+      "from": "l2_norbert_wiener_C03",
+      "to": "l2_norbert_wiener_C04",
+      "reason": "解释结果时需判断模型或解释的充分性并强调概率性成立条件，这必须建立在结论已验证的基础上，因此理解验证结论先于解释结果。"
+    },
+    {
+      "from": "l2_norbert_wiener_C01",
+      "to": "l2_norbert_wiener_C07",
+      "reason": "产生想法时需审视学科现状中的理论盲区，例如物理学家未考虑的频谱可能性，这必须先理解现有问题是如何定义的，才能识别出未探索的边界。"
+    }
+  ],
+  "tension": [
+    {
+      "between": [
+        "l2_norbert_wiener_C02",
+        "l2_norbert_wiener_C03"
+      ],
+      "context": "proving_obvious_facts",
+      "reason": "在证明那些看似显然的事实这一场景下，怎样选择方法倾向于采用简便、构造性的途径以节省推导，并可能省略细节；而怎样验证结论则坚持即使明显的事实也需要严格证明，两者在如何分配时间和严密性上产生竞争。"
+    },
+    {
+      "between": [
+        "l2_norbert_wiener_C03",
+        "l2_norbert_wiener_C04"
+      ],
+      "context": "verifying_sufficiency_and_necessity",
+      "reason": "在验证系统成为某条件所需要的必要条件与充分条件时，怎样验证结论要求给出严格证明并主动审查他人工作的严密性；而怎样解释结果则接受概率性和近似性，认为命题“几乎总是成立但并非总是”，两者在处理精确性与近似性的标准上直接冲突。"
+    },
+    {
+      "between": [
+        "l2_norbert_wiener_C01",
+        "l2_norbert_wiener_C04"
+      ],
+      "context": "specifying_measurement_conditions",
+      "reason": "在明确测量条件或定义问题边界时，怎样定义问题强调精确分类和严格条件限制；而怎样解释结果则认可模型对现实的近似描述，并可能接受带条件的概率性陈述，这种对精确度要求的分歧导致在限定测量条件的场景下难以同时主导。"
+    }
+  ]
+}

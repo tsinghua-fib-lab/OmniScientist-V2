@@ -20,14 +20,24 @@ from omni.core.llm.client import (
 )
 from omni.core.llm.errors import (
     LLMErrorInfo,
+    LLMOutputTruncated,
     LLMProviderError,
     classify_llm_exception,
     from_http_status_error,
 )
+from omni.core.llm.idle import ActivityHook, emit_activity
+from omni.core.llm.native_tool_markup import (
+    NativeMarkupSplit,
+    NativeToolMarkupFilter,
+    split_native_tool_markup,
+)
+from omni.core.model_catalog import max_output_tokens_for
 from omni.core.tool_transcript import normalize_tool_transcript
 
 logger = logging.getLogger(__name__)
 _DISABLE_EMBEDDING_STATUSES = {400, 401, 403, 404, 405, 410, 422, 501}
+_MAX_TOOL_ARGUMENT_BYTES = 64 * 1024
+_MAX_TOOL_ARGUMENT_TRAILING_CHARS = 256
 
 
 def _merge_tool_call_fragment(frags: dict[int, dict[str, Any]], tc: dict[str, Any]) -> None:
@@ -43,22 +53,168 @@ def _merge_tool_call_fragment(frags: dict[int, dict[str, Any]], tc: dict[str, An
         slot["arguments"] += fn["arguments"]
 
 
-def _finalize_tool_calls(frags: dict[int, dict[str, Any]]) -> list[ToolCall]:
-    """Turn accumulated tool-call fragments into :class:`ToolCall`s (parsing args)."""
-    calls: list[ToolCall] = []
-    for _idx, slot in sorted(frags.items()):
-        if not slot.get("name"):
-            continue
+def _could_start_json_value(value: str) -> bool:
+    if not value:
+        return False
+    if value[0] in '"-0123456789':
+        return True
+    word = ""
+    for char in value:
+        if not char.isalpha():
+            break
+        word += char.lower()
+    return bool(word) and any(literal.startswith(word) for literal in ("true", "false", "null"))
+
+
+def _parse_tool_arguments(raw: Any) -> tuple[dict[str, Any], str | None, bool, str]:
+    """Parse one model tool object, with bounded syntax-only tail recovery."""
+    if isinstance(raw, dict):
+        return dict(raw), None, False, json.dumps(raw, ensure_ascii=False)
+    text = str(raw or "{}")
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as exc:
+        if len(text.encode("utf-8")) > _MAX_TOOL_ARGUMENT_BYTES:
+            return {}, f"{exc}; arguments exceed repair limit", False, text
+        stripped = text.strip()
+        if not stripped.startswith("{"):
+            return {}, str(exc), False, text
         try:
-            args = json.loads(slot.get("arguments") or "{}")
-            arg_err = None
-        except json.JSONDecodeError as exc:
-            args, arg_err = {}, str(exc)
-        calls.append(
-            ToolCall(
-                id=slot.get("id", ""), name=slot["name"], arguments=args, arguments_error=arg_err
-            )
+            value, end = json.JSONDecoder().raw_decode(stripped)
+        except json.JSONDecodeError:
+            return {}, str(exc), False, text
+        trailing = stripped[end:].strip()
+        try:
+            json.JSONDecoder().raw_decode(trailing)
+            trailing_starts_json = True
+        except json.JSONDecodeError:
+            trailing_starts_json = False
+        if (
+            not isinstance(value, dict)
+            or not trailing
+            or len(trailing) > _MAX_TOOL_ARGUMENT_TRAILING_CHARS
+            or any(char in trailing for char in "{}[]")
+            or trailing.startswith((",", ":"))
+            or trailing_starts_json
+            or _could_start_json_value(trailing)
+        ):
+            return {}, str(exc), False, text
+        return dict(value), None, True, text
+    if not isinstance(value, dict):
+        return {}, "tool arguments must be a JSON object", False, text
+    return dict(value), None, False, text
+
+
+def _tool_call_from_raw(
+    call_id: str, name: str, raw: Any, *, truncated: bool = False
+) -> ToolCall | None:
+    """Admit one model tool call, or ``None`` when it is structurally unusable.
+
+    A blank function name is *malformed transport*, not a tool the model chose:
+    there is no name to report back, so relaying it as ``unknown tool ''`` gives
+    the model nothing to correct and burns an iteration. Both the streaming and
+    non-streaming providers route through here so the admission rule cannot
+    drift between them.
+    """
+    if not str(name or "").strip():
+        logger.warning("[llm] dropped malformed tool call with blank name id=%s", call_id or "-")
+        return None
+    args, arg_err, repaired, raw_text = _parse_tool_arguments(raw)
+    if repaired:
+        digest = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()[:12]
+        logger.warning(
+            "[llm] repaired trailing tool-argument text tool=%s raw_length=%d raw_sha256=%s",
+            name,
+            len(raw_text),
+            digest,
         )
+    return ToolCall(
+        id=call_id,
+        name=name,
+        arguments=args,
+        arguments_error=arg_err,
+        raw_arguments=raw_text,
+        arguments_repaired=repaired,
+        arguments_truncated=bool(truncated and arg_err),
+    )
+
+
+def _merge_native_markup(
+    split: NativeMarkupSplit,
+    calls: list[ToolCall],
+    malformed: int,
+    *,
+    model: str,
+) -> tuple[str, list[ToolCall], int]:
+    """Fold a tool call encoded into *content* back into the structured result.
+
+    This is the boundary that owns provider wire format, so it is the only layer
+    that may know a provider's native encoding exists: everything above consumes
+    :class:`ChatWithToolsResult` and would need the same rule duplicated in the
+    loop, the recorder, the notebook and the TUI to keep the markup out of all of
+    them.
+
+    A structured ``tool_calls`` field stays authoritative — markup that arrives
+    beside it is a duplicate of a call already delivered properly, so it is only
+    dropped. Markup that could not be read back counts as a malformed call rather
+    than as silence, so the loop re-nudges the model instead of finishing the turn
+    on the empty string that stripping left behind.
+    """
+    if not split.stripped:
+        return split.content, calls, malformed
+    recovered: list[ToolCall] = []
+    if not calls:
+        for position, candidate in enumerate(split.recovered, start=1):
+            admitted = _tool_call_from_raw(
+                f"omni_recovered_call_{position}", candidate.name, candidate.arguments
+            )
+            if admitted is not None:
+                recovered.append(admitted)
+    logger.warning(
+        "[llm] provider-native tool-call markup arrived as assistant content "
+        "model=%s structured=%d recovered=%d",
+        model, len(calls), len(recovered),
+    )
+    if not calls and not recovered:
+        malformed += 1
+    return split.content, [*calls, *recovered], malformed
+
+
+def _strip_native_markup(text: str, *, model: str) -> str:
+    """Drop native tool markup from a plain-text answer, recovering nothing.
+
+    A ``chat`` turn offers no tools, so a call encoded into content cannot be
+    honoured here — but the text still becomes a summary, a review or a final
+    answer, so the sentinels must not survive into it.
+    """
+    split = split_native_tool_markup(text)
+    if split.stripped:
+        logger.warning(
+            "[llm] stripped provider-native tool-call markup from a text answer model=%s", model
+        )
+    return split.content
+
+
+def _finalize_tool_calls(
+    frags: dict[int, dict[str, Any]], *, truncated: bool = False
+) -> list[ToolCall]:
+    """Turn accumulated tool-call fragments into :class:`ToolCall`s (parsing args).
+
+    Only the last call in a response can be the one the output cap cut off; an
+    earlier call in the same batch was written and closed before the cap was
+    reached, so blaming truncation for its parse failure would misdirect the fix.
+    """
+    calls: list[ToolCall] = []
+    ordered = sorted(frags.items())
+    for position, (_idx, slot) in enumerate(ordered):
+        call = _tool_call_from_raw(
+            str(slot.get("id", "")),
+            str(slot.get("name") or ""),
+            slot.get("arguments") or "{}",
+            truncated=truncated and position == len(ordered) - 1,
+        )
+        if call is not None:
+            calls.append(call)
     return calls
 
 
@@ -104,7 +260,7 @@ class MockProvider(LLMClient):
                 "[Offline mock model] Request received:\n"
                 f"  “{last_user.strip()[:300]}”\n\n"
                 "This is an offline placeholder. The mock model does not invoke tools automatically. "
-                "Configure a real provider, for example `omni config set model.provider openai`; "
+                "Configure a real provider, for example `/config set model.provider openai`; "
                 "the API key is stored in secrets.toml under the active Omni data directory."
             )
         return ChatWithToolsResult(content=content)
@@ -133,7 +289,7 @@ class OpenAICompatibleProvider(LLMClient):
         base_url: str,
         api_key: str,
         model: str,
-        timeout_s: float = 120.0,
+        timeout_s: float | httpx.Timeout = 120.0,
         embedding_base_url: str = "",
         embedding_api_key: str = "",
         embedding_model: str = "text-embedding-3-small",
@@ -197,26 +353,34 @@ class OpenAICompatibleProvider(LLMClient):
             )
             self._check_chat_status(resp)
             data = resp.json()
-        msg = (data.get("choices") or [{}])[0].get("message", {})
+        choice = (data.get("choices") or [{}])[0]
+        msg = choice.get("message", {})
+        finish_reason = str(choice.get("finish_reason") or "")
+        raw_calls = msg.get("tool_calls") or []
         calls: list[ToolCall] = []
-        for tc in msg.get("tool_calls") or []:
+        for position, tc in enumerate(raw_calls):
             fn = tc.get("function", {})
-            try:
-                args = json.loads(fn.get("arguments") or "{}")
-                arg_err = None
-            except json.JSONDecodeError as exc:
-                args, arg_err = {}, str(exc)
-            calls.append(
-                ToolCall(
-                    id=tc.get("id", ""), name=fn.get("name", ""),
-                    arguments=args, arguments_error=arg_err,
-                )
+            call = _tool_call_from_raw(
+                str(tc.get("id", "")),
+                str(fn.get("name", "")),
+                fn.get("arguments") or "{}",
+                truncated=finish_reason == "length" and position == len(raw_calls) - 1,
             )
+            if call is not None:
+                calls.append(call)
+        content, calls, malformed = _merge_native_markup(
+            split_native_tool_markup(msg.get("content") or ""),
+            calls,
+            len(raw_calls) - len(calls),
+            model=self.model,
+        )
         return ChatWithToolsResult(
-            content=msg.get("content") or "",
+            content=content,
             tool_calls=calls,
             reasoning_content=msg.get("reasoning_content") or "",
             usage=data.get("usage") or {},
+            malformed_tool_calls=malformed,
+            finish_reason=finish_reason,
         )
 
     async def chat_with_tools_stream(
@@ -228,11 +392,14 @@ class OpenAICompatibleProvider(LLMClient):
         temperature: float = 0.2,
         max_tokens: int = 2048,
         on_delta: TokenSink | None = None,
+        on_activity: ActivityHook | None = None,
     ) -> ChatWithToolsResult:
         """Native SSE streaming: forward content deltas to ``on_delta`` while
         accumulating tool-call fragments and usage. Any streaming/transport
         failure degrades to the non-streaming chunked fallback (so a flaky SSE
-        never breaks a turn)."""
+        never breaks a turn). ``on_activity`` ticks on every ``data:`` line so
+        an idle watchdog sees reasoning and tool-call fragments, not only
+        visible answer text."""
         self._ensure_chat_available()
         payload: dict[str, Any] = {
             "model": self.model,
@@ -249,6 +416,11 @@ class OpenAICompatibleProvider(LLMClient):
         reasoning_parts: list[str] = []
         tool_frags: dict[int, dict[str, Any]] = {}
         usage: dict[str, int] = {}
+        finish_reason = ""
+        # A sentinel can straddle two deltas, so deltas are filtered before they
+        # are forwarded: what ``on_delta`` never receives cannot be rendered and
+        # then have to be un-rendered.
+        markup_filter = NativeToolMarkupFilter()
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as c:
                 async with c.stream(
@@ -259,6 +431,7 @@ class OpenAICompatibleProvider(LLMClient):
                     async for line in resp.aiter_lines():
                         if not line.startswith("data:"):
                             continue
+                        await emit_activity(on_activity)
                         chunk = line[len("data:"):].strip()
                         if chunk in ("", "[DONE]"):
                             continue
@@ -271,12 +444,16 @@ class OpenAICompatibleProvider(LLMClient):
                         choices = data.get("choices") or []
                         if not choices:
                             continue
+                        if choices[0].get("finish_reason"):
+                            finish_reason = str(choices[0]["finish_reason"])
                         delta = choices[0].get("delta") or {}
                         piece = delta.get("content")
                         if piece:
-                            content_parts.append(piece)
-                            if on_delta is not None:
-                                await _emit_delta(on_delta, piece)
+                            showable = markup_filter.push(piece)
+                            if showable:
+                                content_parts.append(showable)
+                                if on_delta is not None:
+                                    await _emit_delta(on_delta, showable)
                         if delta.get("reasoning_content"):
                             reasoning_parts.append(delta["reasoning_content"])
                         for tc in delta.get("tool_calls") or []:
@@ -289,45 +466,93 @@ class OpenAICompatibleProvider(LLMClient):
             return await super().chat_with_tools_stream(
                 messages, tools, tool_choice=tool_choice,
                 temperature=temperature, max_tokens=max_tokens, on_delta=on_delta,
+                on_activity=on_activity,
             )
+        tail = markup_filter.finish()
+        if tail:
+            content_parts.append(tail)
+            if on_delta is not None:
+                await _emit_delta(on_delta, tail)
+        admitted = _finalize_tool_calls(tool_frags, truncated=finish_reason == "length")
+        content, calls, malformed = _merge_native_markup(
+            markup_filter.split("".join(content_parts)),
+            admitted,
+            len(tool_frags) - len(admitted),
+            model=self.model,
+        )
         return ChatWithToolsResult(
-            content="".join(content_parts),
-            tool_calls=_finalize_tool_calls(tool_frags),
+            content=content,
+            tool_calls=calls,
+            malformed_tool_calls=malformed,
             reasoning_content="".join(reasoning_parts),
             usage=usage,
+            finish_reason=finish_reason,
         )
 
-    async def chat(self, system: str, user: str, *, temperature: float = 0.3) -> str:
-        self._ensure_chat_available()
-        payload = {
+    def _text_payload(self, system: str, user: str, temperature: float) -> dict[str, Any]:
+        """One request body for both text paths, sized by the model's own cap.
+
+        Omitting ``max_tokens`` does not mean "no limit" — it means the
+        provider's default, which is invisible from here and is what quietly cut
+        a long answer in half. Asking for the catalog value both raises the
+        ceiling to what the model actually allows and makes the resulting
+        ``finish_reason`` mean something we chose.
+        """
+        return {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
             "temperature": temperature,
+            "max_tokens": max_output_tokens_for(self.model),
         }
+
+    async def chat_result(
+        self, system: str, user: str, *, temperature: float = 0.3
+    ) -> ChatWithToolsResult:
+        self._ensure_chat_available()
         async with httpx.AsyncClient(timeout=self._timeout) as c:
             resp = await c.post(
-                f"{self._base}/chat/completions", json=payload, headers=self._headers()
+                f"{self._base}/chat/completions",
+                json=self._text_payload(system, user, temperature),
+                headers=self._headers(),
             )
             self._check_chat_status(resp)
             data = resp.json()
-        return (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+        choice = (data.get("choices") or [{}])[0]
+        raw = choice.get("message", {}).get("content") or ""
+        finish_reason = str(choice.get("finish_reason") or "")
+        if finish_reason == "length":
+            logger.warning(
+                "[llm] text answer stopped at the output cap model=%s chars=%d",
+                self.model, len(raw),
+            )
+        return ChatWithToolsResult(
+            content=_strip_native_markup(raw, model=self.model),
+            usage=data.get("usage") or {},
+            finish_reason=finish_reason,
+        )
+
+    async def chat(self, system: str, user: str, *, temperature: float = 0.3) -> str:
+        return (await self.chat_result(system, user, temperature=temperature)).content
 
     async def chat_stream(
         self, system: str, user: str, *, temperature: float = 0.3
     ) -> AsyncIterator[str]:
+        """Stream a tool-free answer, raising once it turns out to be a fragment.
+
+        A generator hands its consumer every delta and then ends; there is no
+        later value to carry a finish reason in. So the deltas are delivered
+        first — what arrived is real and worth showing — and the cap is reported
+        by raising afterwards, which is the only way an ``async for`` can learn
+        the answer it just consumed was cut off rather than finished.
+        """
         self._ensure_chat_available()
-        payload = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "temperature": temperature,
-            "stream": True,
-        }
+        payload = {**self._text_payload(system, user, temperature), "stream": True}
+        markup_filter = NativeToolMarkupFilter()
+        finish_reason = ""
+        produced = 0
         async with httpx.AsyncClient(timeout=self._timeout) as c:
             async with c.stream(
                 "POST", f"{self._base}/chat/completions", json=payload, headers=self._headers()
@@ -340,11 +565,27 @@ class OpenAICompatibleProvider(LLMClient):
                     if chunk in ("", "[DONE]"):
                         continue
                     try:
-                        delta = json.loads(chunk)["choices"][0]["delta"].get("content")
+                        choice = json.loads(chunk)["choices"][0]
                     except (json.JSONDecodeError, KeyError, IndexError):
                         continue
+                    if choice.get("finish_reason"):
+                        finish_reason = str(choice["finish_reason"])
+                    delta = (choice.get("delta") or {}).get("content")
                     if delta:
-                        yield delta
+                        showable = markup_filter.push(delta)
+                        if showable:
+                            produced += len(showable)
+                            yield showable
+        tail = markup_filter.finish()
+        if tail:
+            produced += len(tail)
+            yield tail
+        if finish_reason == "length":
+            logger.warning(
+                "[llm] streamed answer stopped at the output cap model=%s chars=%d",
+                self.model, produced,
+            )
+            raise LLMOutputTruncated(model=self.model, produced_chars=produced)
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         if self._emb_available is False:

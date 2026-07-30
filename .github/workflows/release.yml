@@ -1,5 +1,8 @@
 # PyPI Trusted Publisher binds this exact filename (`release.yml`) and the
 # `pypi` environment below to tsinghua-fib-lab/OmniScientist-V2.
+#
+# Preflight without publishing: Actions → Release preflight → Run workflow
+# on the SHA you intend to tag. CI green on that SHA is the same check.
 name: Release
 
 on:
@@ -106,9 +109,10 @@ jobs:
           OMNI_DIFF_COVERAGE_REPORT: ${{ runner.temp }}/changed-code-coverage.json
           OMNI_DIFF_COVERAGE_CANDIDATE: ${{ github.sha }}
           OMNI_DIFF_COVERAGE_TEST_OUTCOME: ${{ steps.coverage-tests.outcome }}
-          # Immutable bootstrap for the first v* release. Once a prior tag
-          # exists, the resolver always prefers that tag instead.
-          OMNI_DIFF_COVERAGE_BOOTSTRAP_BASE: 2b7dfe46a0028fe643126f12ba83a5e8c4f9bb94
+          # Immutable bootstrap for the first v* release on the GitHub
+          # canonical clone (tsinghua-fib-lab/OmniScientist-V2 root commit).
+          # Once a prior tag exists, the resolver always prefers that tag instead.
+          OMNI_DIFF_COVERAGE_BOOTSTRAP_BASE: 29732ef433cf76fad98dc796f9c6466d1d6ec292
         run: >-
           uv run --project cli python cli/scripts/check_diff_coverage.py
           --coverage-json "$OMNI_DIFF_COVERAGE_DATA"

@@ -1,0 +1,70 @@
+{
+  "scientist_name": "Herbert A. Simon",
+  "aliases": [
+    "Herbert A. Simon",
+    "H A Simon",
+    "H Simon",
+    "Herbert Simon",
+    "Simon, Herbert A",
+    "Simon, Herbert Alexander"
+  ],
+  "occupations": [
+    "economist",
+    "political scientist",
+    "cognitive psychologist",
+    "computer scientist",
+    "university professor"
+  ],
+  "research_fields": [
+    "bounded rationality",
+    "decision-making",
+    "organization theory",
+    "artificial intelligence",
+    "cognitive psychology",
+    "problem solving",
+    "complex systems"
+  ],
+  "education_history": [
+    {
+      "institution": "University of Chicago",
+      "degree": "BA",
+      "end_year": 1936
+    },
+    {
+      "institution": "University of Chicago",
+      "degree": "PhD",
+      "end_year": 1943
+    }
+  ],
+  "employment_history": [
+    {
+      "organization": "University of California, Berkeley",
+      "start_year": 1939,
+      "end_year": 1942
+    },
+    {
+      "organization": "Illinois Institute of Technology",
+      "start_year": 1942,
+      "end_year": 1949
+    },
+    {
+      "organization": "Carnegie Institute of Technology / Carnegie Mellon University",
+      "start_year": 1949,
+      "end_year": 2001
+    }
+  ],
+  "institutions": [
+    "University of Chicago",
+    "University of California, Berkeley",
+    "Illinois Institute of Technology",
+    "Carnegie Institute of Technology",
+    "Carnegie Mellon University"
+  ],
+  "sources": [
+    "https://www.nobelprize.org/prizes/economic-sciences/1978/simon/biographical/",
+    "https://www.cmu.edu/engage/about-us/herbert-simon.html"
+  ],
+  "google_scholar_url": "",
+  "portrait_url": "",
+  "portrait_source_url": ""
+}

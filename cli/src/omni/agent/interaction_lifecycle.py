@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 from omni.agent.intent_plan import IntentPlan, IntentType, ToolPolicy
@@ -13,7 +16,14 @@ from omni.agent.plan_revision import (
 )
 from omni.agent.plan_runner_utils import plan_summary
 from omni.agent.turn_execution import TurnResult
-from omni.core.approval import ApprovalGate
+from omni.channels.security import is_im_channel
+from omni.core.approval import (
+    SENSITIVE_TOOLS,
+    ApprovalGate,
+    reconcile_sensitive_visibility,
+    resolve_policy,
+)
+from omni.core.approval_rules import SessionApprovalStore
 
 _REVIEW_BLOCKED_TOOLS = {
     "bash",
@@ -37,10 +47,32 @@ def normalize_interaction_mode(value: str | None, default: str = "auto") -> str:
 
 
 def resolve_execution_mode(value: Any, *, wait_for_tasks: bool, is_async: bool) -> str:
-    """Resolve automatic skill delivery to inline, foreground, or background."""
+    """Resolve automatic skill delivery to inline, foreground, or background.
+
+    ``background`` defers a skill to the end-of-turn drain rather than running it
+    alongside the turn, so on a turn that drains, asking for it buys nothing and
+    costs the model its result: the work cannot start until the loop is over, so
+    every poll reports ``pending`` and the answer gets written as "still
+    generating" about something that finishes moments later. Task aac5b285 ends
+    exactly that way — a figure reported as in progress by prose sitting directly
+    above the finished figure's artifacts.
+
+    So the distinction is honoured where it is real. When nobody waits (daemon
+    and IM turns, ``wait_for_tasks`` false) a submission genuinely outlives the
+    turn — even if the model asked for ``foreground``. Waiting there holds the
+    WeChat outbound lock across ``process()``, and hop 2 then waits for the
+    same lock. When the turn does wait, the same work happens either way and
+    running it now is what lets the model describe what actually happened —
+    the shape Codex keeps by having a tool call return a real result unless
+    the process truly outlives it.
+    """
     mode = str(value or "auto").lower().strip()
     if mode not in {"auto", "inline", "foreground", "background"}:
         mode = "auto"
+    if mode == "background" and wait_for_tasks:
+        return "foreground"
+    if mode == "foreground" and not wait_for_tasks:
+        return "background"
     if mode != "auto":
         return mode
     if not is_async:
@@ -48,33 +80,67 @@ def resolve_execution_mode(value: Any, *, wait_for_tasks: bool, is_async: bool) 
     return "foreground" if wait_for_tasks else "background"
 
 
+def enqueue_notify_channel(channel: str, *, mode: str, wait_for_tasks: bool) -> str:
+    """Channel that must receive the completion notice after this enqueue.
+
+    Background always notifies. A detached turn coerces ``foreground`` to
+    ``background`` first, so hop 2 is the file card after the inbound send
+    lock drops. The leftover ``foreground and not wait`` branch is only a
+    guard if something bypasses that coerce. CLI foreground waits in-turn,
+    so the hop is the turn itself.
+    """
+    if mode == "background" or (mode == "foreground" and not wait_for_tasks):
+        return str(channel or "")
+    return ""
+
+
 def build_approval_gate(
     *,
     settings: Any,
     tasks: Any,
     approver: Any,
-    session_allow: dict[str, set[str]],
+    session_allow: dict[str, SessionApprovalStore],
     task_id: str,
     channel: str,
     session_id: str,
     additional_sensitive_tools: set[str] | None = None,
+    writable_roots: Sequence[Path] | None = None,
+    output_roots: Sequence[Path] | None = None,
+    working_dir: Path | None = None,
+    workspace: Path | None = None,
+    workspace_auto: bool = False,
 ) -> ApprovalGate:
     """Build a sensitive-tool gate whose decisions are persisted as task events."""
-    allow = session_allow.setdefault(session_id, set())
+    allow = session_allow.setdefault(session_id, SessionApprovalStore())
 
     async def on_event(kind: str, payload: dict[str, Any]) -> None:
-        try:
-            await tasks.append_event(
-                task_id,
-                event_type=kind,
-                status="succeeded",
-                name=str(payload.get("tool") or "approval"),
-                tool_name=str(payload.get("tool") or ""),
-                output_json=payload,
-                summary=str(payload.get("summary") or kind),
-            )
-        except Exception:  # noqa: BLE001 - approval remains authoritative if audit fails.
-            pass
+        # Let audit failures reach ApprovalGate._emit. Exact grants still
+        # publish; a wide workspace grant does not, because an unaudited
+        # "approve all" is worse than asking again.
+        await tasks.append_event(
+            task_id,
+            event_type=kind,
+            status="succeeded",
+            name=str(payload.get("tool") or "approval"),
+            tool_name=str(payload.get("tool") or ""),
+            output_json=payload,
+            summary=str(payload.get("summary") or kind),
+        )
+        if (
+            kind == "approval.granted"
+            and payload.get("approval_scope") == "task-bash-grant"
+        ):
+            grant = getattr(tasks, "grant_tools", None)
+            if grant is None:
+                return
+            try:
+                await grant(
+                    task_id,
+                    sorted(SENSITIVE_TOOLS),
+                    reason="task-workspace",
+                )
+            except Exception:  # noqa: BLE001 — live grant still publishes.
+                return
 
     async def preauthorizer(tool_name: str, _arguments: dict[str, Any]) -> bool:
         if not task_id:
@@ -94,7 +160,70 @@ def build_approval_gate(
         session_allow=allow,
         additional_sensitive_tools=additional_sensitive_tools,
         preauthorizer=preauthorizer,
+        writable_roots=writable_roots,
+        output_roots=output_roots,
+        working_dir=working_dir,
+        workspace=workspace,
+        task_id=task_id,
+        workspace_auto=workspace_auto and not is_im_channel(channel),
     )
+
+
+def react_tool_policy(
+    policy: ToolPolicy,
+    *,
+    settings: Any,
+    approver: Any,
+    approved: set[str] | frozenset[str] = frozenset(),
+    channel: str = "",
+    read_only: bool = False,
+    workspace_auto: bool = False,
+) -> ToolPolicy:
+    """Narrow a plan's deny-list to the sensitive tools the gate cannot clear.
+
+    The planner keeps declaring bash/write_file/edit_file/run_compute blocked
+    (the plan record stays deny-by-default); the approval gate governs them at
+    execution, so the catalog should carry exactly those the gate could actually
+    settle. This gathers the security facts and lets
+    ``reconcile_sensitive_visibility`` state the rule, so the decision lives in
+    one place instead of being kept in step in two.
+
+    A write is settleable without a human because it names its destination and
+    one inside the workspace auto-approves. That does not hold under ``always``,
+    which asks about everything.
+
+    An IM turn is not the exception it used to be. Withholding the write tools
+    from the catalog entirely, on the grounds that they refuse in their own body
+    anyway, left a chat request that needs to produce a document with nowhere to
+    put it: the model asked for ``write_file``, was told no such tool exists, and
+    delivered a whole paper as chat text. Codex settles a write by destination
+    (``assess_patch_safety``); generating a file inside the turn workspace is a
+    basic agent capability on CLI and IM alike. Escaping that workspace is still
+    refused. The catalog has to offer the tool for that distinction to be reached.
+
+    ``read_only`` short-circuits all of it. A deny-list mixes two reasons for the
+    same entry — "sensitive, pending consent" and "this turn does not get to
+    mutate anything" — and only the first is the gate's to reconsider. Review
+    mode means the second, so no amount of available consent may hand it a write.
+    """
+    blocked = list(getattr(policy, "blocked_tools", None) or [])
+    if read_only or not any(t in blocked for t in SENSITIVE_TOOLS):
+        return policy
+    effective = resolve_policy(settings)
+    remaining = reconcile_sensitive_visibility(
+        blocked,
+        gate_can_clear=(
+            effective == "never"
+            or approver is not None
+            or (workspace_auto and not is_im_channel(channel))
+        ),
+        approved=approved,
+        path_assessed_can_clear=effective != "always"
+        or (workspace_auto and not is_im_channel(channel)),
+    )
+    if remaining == blocked:
+        return policy
+    return replace(policy, blocked_tools=remaining)
 
 
 def apply_interaction_mode(plan: IntentPlan, mode: str) -> IntentPlan:
@@ -183,6 +312,7 @@ class InteractionLifecycle:
         existing_task_id: str,
         ensure_session: Any,
         on_task_ack: Any,
+        file_uris: list[str] | None = None,
     ) -> TurnStart:
         mode = normalize_interaction_mode(
             interaction_mode, self._settings.interaction.default_mode
@@ -205,6 +335,16 @@ class InteractionLifecycle:
                     task_id,
                     summary="approved plan execution started",
                 )
+            # Resumes (plan approval, /task attach, recovery) still surface the
+            # owning task id to the caller so the live display keeps it visible —
+            # a resumed turn must never look "id-less". Headless callers pass a
+            # ``None`` ack and are unaffected.
+            if on_task_ack is not None:
+                ack_result = on_task_ack(
+                    {"task_id": task_id, "session_id": session_id, "status": "resuming"}
+                )
+                if inspect.isawaitable(ack_result):
+                    await ack_result
             event_name = "run_resume"
         else:
             session_id = session_id or await ensure_session(channel=channel)
@@ -212,6 +352,7 @@ class InteractionLifecycle:
                 session_id=session_id,
                 channel=channel,
                 user_input=user_message,
+                file_uris=file_uris,
                 on_task_ack=on_task_ack,
             )
             event_name = "run_start"
@@ -336,7 +477,7 @@ class InteractionLifecycle:
             terminated_reason=reason,
             plan_summary=plan_summary(plan),
             degraded_warnings=list(plan.degraded_warnings),
-            verification_status="pending",
+            settlement_status="pending",
         )
 
     async def approve(
@@ -428,5 +569,6 @@ __all__ = [
     "build_approval_gate",
     "normalize_interaction_mode",
     "plan_mode_text",
+    "enqueue_notify_channel",
     "resolve_execution_mode",
 ]

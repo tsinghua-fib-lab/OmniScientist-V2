@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 from omni.cli.main import app
 from omni.config import load_settings
 from omni.runtime import daemon
+from tests.conftest import store_shaped_home
 
 runner = CliRunner()
 
@@ -538,6 +539,47 @@ def test_update_is_not_reported_complete_when_restored_service_never_ready(monke
     assert "Update completed" not in output
 
 
+def test_update_is_reported_complete_when_restored_service_still_starting(monkeypatch):
+    import omni.cli.commands.update_cmd as update_cmd
+    from omni.runtime import service_control
+
+    _patch_remote_version(monkeypatch, "9.9.9")
+    monkeypatch.setattr(
+        update_cmd, "_plan", lambda **_kw: ("pip", ["python"], "pip fake")
+    )
+    monkeypatch.setattr(
+        update_cmd.subprocess,
+        "run",
+        lambda _cmd, check=False: SimpleNamespace(returncode=0),
+    )
+    monkeypatch.setattr(update_cmd, "list_running_daemons", lambda _home: [])
+
+    class _UpdateGuard:
+        def __enter__(self):
+            return self
+
+        def restore(self):
+            return (
+                "restarted; still becoming ready (phase=starting). "
+                "Channels will reconnect. See `omni serve status`."
+            )
+
+        def __exit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(
+        service_control, "update_guard", lambda *_a, **_k: _UpdateGuard()
+    )
+
+    res = runner.invoke(app, ["update", "--yes"])
+    output = res.stdout + res.stderr
+
+    assert res.exit_code == 0, output
+    assert "Update completed" in output
+    assert "still becoming ready" in output
+    assert "Home service:" in output
+
+
 def test_pid_alive_handles_invalid_and_current_pid():
     assert daemon.pid_alive(0) is False
     assert daemon.pid_alive(-1) is False
@@ -654,7 +696,12 @@ def test_terminate_and_wait_graceful_stop_sends_only_sigterm(monkeypatch):
 def test_terminate_and_wait_escalates_to_sigkill_when_sigterm_ignored(monkeypatch):
     import signal
 
+    import pytest
+
     from omni.cli.commands import serve_cmd
+
+    if not hasattr(signal, "SIGKILL"):
+        pytest.skip("SIGKILL escalation is POSIX-only")
 
     # A daemon that ignores SIGTERM (e.g. blocked in slow channel teardown) must
     # be force-killed so restart can proceed rather than abort and leave the
@@ -747,9 +794,8 @@ def test_adopt_launch_dir_marks_serve_dir_trusted(monkeypatch, tmp_path):
     from omni.cli.commands.serve_cmd import _adopt_launch_dir_for_serve
     from omni.config import trust as trustmod
 
-    home = tmp_path / "trust_home"
+    home = store_shaped_home(tmp_path, "trust")
     launch = tmp_path / "svc"
-    home.mkdir(exist_ok=True)
     launch.mkdir(exist_ok=True)
     monkeypatch.setenv("OMNI_HOME", str(home))
     monkeypatch.chdir(launch)

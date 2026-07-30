@@ -22,6 +22,7 @@ from typing import Any
 from sqlalchemy import or_, select
 
 from omni.config.settings import OmniSettings
+from omni.core.llm.client import chat_result
 from omni.core.termination import is_bounded_termination
 from omni.core.timefmt import ensure_aware
 from omni.memory import policy
@@ -78,6 +79,7 @@ _DEGRADED_TERMINATED = frozenset(
         "max_tool_calls",
         "max_iterations",
         "timeout",
+        "stalled",
         "llm_error",
         "llm_transcript_invalid",
         "llm_auth_error",
@@ -142,9 +144,27 @@ class MemoryLayer(StrEnum):
     ARTIFACT = "M5"
 
 
-# Layers eligible for cross-session recall by default.
+# Layers whose entries may be recalled outside the session that wrote them.
+# Raw dialogue (M1) is deliberately absent: it is the transcript of one
+# conversation, and replaying it into another is how a passing remark ("no key,
+# try something else") becomes a standing instruction nobody issued. Knowledge
+# earns cross-session reach by being consolidated into M3/M4 first.
 _CROSS_SESSION_LAYERS = {MemoryLayer.EPISODIC.value, MemoryLayer.SEMANTIC.value,
                          MemoryLayer.ARTIFACT.value}
+
+
+def _cross_session_layers(requested: list[str]) -> list[str]:
+    """Which of ``requested`` may cross a session boundary.
+
+    A caller's layer filter narrows this set; it never widens it. Asking for
+    ``[SESSION, …]`` asks for *this* session's dialogue — admitting every other
+    session's transcript along with it is a different request, and one the
+    policy above declines to serve.
+    """
+    if not requested:
+        return sorted(_CROSS_SESSION_LAYERS)
+    return sorted(_CROSS_SESSION_LAYERS.intersection(requested))
+
 
 # The machine owner / CLI identity. Also the *shared baseline*: owner-curated and
 # project knowledge is visible to every principal this machine serves (mirrors
@@ -490,8 +510,9 @@ class MemoryService:
                 (MemoryEntryORM.scope == "task") & (MemoryEntryORM.scope_id.in_(subtask_ids))
             )
         if cross:
-            cross_layers = layer_values or list(_CROSS_SESSION_LAYERS)
-            scope_clauses.append(MemoryEntryORM.layer.in_(cross_layers))
+            eligible = _cross_session_layers(layer_values)
+            if eligible:
+                scope_clauses.append(MemoryEntryORM.layer.in_(eligible))
         if scope_values:
             scope_clauses.append(MemoryEntryORM.scope.in_(scope_values))
 
@@ -1215,15 +1236,25 @@ class MemoryService:
         )
         user = "\n".join(f"- {b}" for b in bullets)
         try:
-            out = await self._llm.chat(system, user)
+            answer = await chat_result(self._llm, system, user)
         except Exception as exc:  # noqa: BLE001
             logger.debug("MEMORY.md merge failed: %s", exc)
             return 0
+        out = answer.content
         if on_llm_call is not None:
             try:
                 await on_llm_call(system, user, out)
             except Exception:  # noqa: BLE001
                 logger.debug("MEMORY.md merge observer failed", exc_info=True)
+        # The merged list *replaces* the file, so an answer cut off partway
+        # through it is indistinguishable from a decision to forget everything
+        # after the cut. Keeping the oversized file costs a little prompt space;
+        # rewriting it from a fragment destroys preferences the user stated once.
+        if answer.truncated_by_output_cap:
+            logger.warning(
+                "[memory] MEMORY.md merge stopped at the output cap; keeping the existing file"
+            )
+            return 0
         merged: list[str] = []
         for raw in (out or "").splitlines():
             line = raw.lstrip("-•*· \t").strip()
@@ -1277,15 +1308,24 @@ class MemoryService:
         )
         user = f"Existing profile:\n{prior_block}\n\nNew observations:\n{cand_block}"
         try:
-            out = await self._llm.chat(system, user)
+            answer = await chat_result(self._llm, system, user)
         except Exception as exc:  # noqa: BLE001
             logger.debug("profile merge failed: %s", exc)
             return None
+        out = answer.content
         if on_llm_call is not None:
             try:
                 await on_llm_call(system, user, out)
             except Exception:  # noqa: BLE001
                 logger.debug("profile merge observer failed", exc_info=True)
+        # Same hazard as the MEMORY.md merge: the returned bullets become the
+        # whole profile, so a fragment silently forgets the rest. ``None`` hands
+        # the caller back to deterministic dedup, which keeps every item.
+        if answer.truncated_by_output_cap:
+            logger.warning(
+                "[memory] profile merge stopped at the output cap; using deterministic dedup"
+            )
+            return None
         bullets: list[str] = []
         for raw in (out or "").splitlines():
             line = raw.lstrip("-•*· \t").strip()

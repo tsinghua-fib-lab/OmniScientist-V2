@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import inspect
+
 from sqlalchemy import select
 from typer.testing import CliRunner
 
+from omni.cli.commands.tasks_cmd import (
+    _awaits_a_checkpoint,
+    _task_recommended_action,
+    resume_cmd,
+)
 from omni.cli.main import app
 from omni.cli.state import AppState, make_agent, run_async
 from omni.storage.models import (
     ConversationMessageORM,
     SubtaskORM,
+    TaskEventORM,
     TaskORM,
     WorkflowRunORM,
 )
@@ -240,3 +248,67 @@ def test_show_routes_skill_execution_prefix_across_workspaces():
     assert "object_kind skill_execution" in normalized
     assert f"task_id {task_id}" in normalized
     assert f"Full task: /task show {task_id[:8]}" in normalized
+
+
+def _waiting_task() -> TaskORM:
+    return TaskORM(
+        id="7d6b2b0a1f5c4e2b9a3d8c7f6e5d4c3b",
+        session_id="s",
+        project="p",
+        channel="cli",
+        kind="turn",
+        status="needs_input",
+        title="waiting",
+        user_input="waiting",
+    )
+
+
+def test_a_planner_question_is_not_pointed_at_a_resume_it_has_no_checkpoint_for():
+    """A question asked before any tool ran leaves nothing to resume."""
+    advice = _task_recommended_action(_waiting_task(), resumable=_awaits_a_checkpoint([]))
+
+    assert "resume" not in advice
+    assert advice == "answer in session"
+
+
+def test_a_suspended_action_offers_the_shortcut_that_resolves_it():
+    """A tool that suspended mid-run left a choice ``--input`` can carry."""
+    waiting = _waiting_task()
+    opened = [TaskEventORM(task_id=waiting.id, event_type="action.checkpoint.created")]
+
+    advice = _task_recommended_action(waiting, resumable=_awaits_a_checkpoint(opened))
+
+    assert advice == f"omni task resume {waiting.id[:8]} --input <choice>"
+
+
+def test_an_answered_question_stops_advertising_a_resume():
+    """A resolved checkpoint would refuse the resume it used to justify."""
+    waiting = _waiting_task()
+    settled = [
+        TaskEventORM(task_id=waiting.id, event_type="action.checkpoint.created"),
+        TaskEventORM(task_id=waiting.id, event_type="action.checkpoint.resolved"),
+    ]
+
+    assert _awaits_a_checkpoint(settled) is False
+
+
+def test_every_flag_the_advice_names_exists_on_the_command_it_names():
+    """Pin the recommendation against the real signature of ``resume``.
+
+    The advice once named ``--input`` for two years' worth of waiting tasks while
+    the command had no such option. Deriving the truth from the signature means
+    the next rename breaks this test rather than the user's next command.
+    """
+    accepted = {
+        option
+        for parameter in inspect.signature(resume_cmd).parameters.values()
+        for option in getattr(parameter.default, "param_decls", None) or ()
+    }
+    waiting = _waiting_task()
+    opened = [TaskEventORM(task_id=waiting.id, event_type="action.checkpoint.created")]
+
+    advice = _task_recommended_action(waiting, resumable=_awaits_a_checkpoint(opened))
+
+    named = {word for word in advice.split() if word.startswith("--")}
+    assert named
+    assert named <= accepted

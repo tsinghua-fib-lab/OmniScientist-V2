@@ -9,7 +9,6 @@ Format (Claude Code compatible + OmniScientist/HelixForge extensions):
     dependencies: ["python>=3.10"]
     metadata:
       helixforge:                         # ignored by Claude Code
-        tier: research
         delivery_mode: async_task         # sync_tool | async_task
         kind: python_engine               # prompt_only|python_engine|cli_exec|remote_mcp
         engine: {module: ..., class: ..., method: execute}
@@ -30,12 +29,40 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+logger = logging.getLogger(__name__)
+
+# A declared tool budget is only reachable if the loop is given enough turns to
+# spend it. Assuming a modest two tool calls per iteration, an iteration ceiling
+# below ``max_tool_calls / 2`` means the skill can never use the budget it
+# declares — it will always stop on iterations first. That mismatch is an
+# authoring defect, not a runtime condition, so it is reported at parse time.
+_ASSUMED_TOOL_CALLS_PER_ITERATION = 2
+
+# Tools whose call *is* the deliverable. A quota on one of these bounds nothing:
+# the cost was already paid by the work that produced the content, so the cap
+# only truncates the output, and the model cannot comply except by delivering
+# less than it was asked for. Acquisition and execution tools — search, fetch,
+# shell — are what a quota is for. Neither Codex, OpenClaw nor OpenCode caps
+# invocations of a named tool at all; they bound context and detect repetition.
+DELIVERABLE_TOOLS = frozenset(
+    {
+        "add_evidence",
+        "attach_provenance",
+        "cite_source",
+        "log_run",
+        "package_artifact",
+        "record_claim",
+        "write_file",
+    }
+)
 
 
 class SkillKind(StrEnum):
@@ -67,6 +94,20 @@ class ExecSpec:
     env_allowlist: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class LocalToolSpec:
+    """A Skill-private Python tool exposed only to its prompt sub-agent."""
+
+    name: str
+    description: str
+    module: str
+    class_name: str
+    method: str = "execute"
+    input_schema: dict[str, Any] = field(
+        default_factory=lambda: {"type": "object", "properties": {}}
+    )
+
+
 @dataclass
 class SkillEntry:
     name: str
@@ -77,7 +118,6 @@ class SkillEntry:
     sha256: str = ""
     kind: SkillKind = SkillKind.PROMPT_ONLY
     delivery_mode: DeliveryMode = DeliveryMode.SYNC_TOOL
-    tier: str = "agent"
     version: str = ""
     license: str = ""
     status: str = "stable"  # stable | deprecated | disabled
@@ -100,13 +140,12 @@ class SkillEntry:
     # Provider-owned deliverable acceptance contract. The host only aggregates
     # declared check ids and assessment envelopes; domain judgement stays in
     # the provider.
-    quality_contract: Any = field(default_factory=dict)
-    quality_contract_declared: bool | None = None
     # Optional provider-owned component vocabulary. The host preserves it in
     # authority snapshots but never uses it as a central semantic plan gate.
     template_signatures: dict[str, list[str]] = field(default_factory=dict)
     engine: EngineSpec | None = None
     exec_spec: ExecSpec | None = None
+    local_tools: list[LocalToolSpec] = field(default_factory=list)
     input_schema: Any = field(default_factory=lambda: {"type": "object", "properties": {}})
     output_schema: Any = field(default_factory=lambda: {"type": "object", "properties": {}})
     # ``None`` preserves compatibility for synthetic entries: infer whether the
@@ -124,6 +163,27 @@ class SkillEntry:
     # pre-execution availability gate so a structurally-unsatisfiable run asks
     # the owner to configure the service instead of failing mid-engine.
     requires_services: list[str] = field(default_factory=list)
+    # Importable Python modules the engine needs at run time (SKILL.md
+    # ``runtime_requirements.python_modules``), e.g. ``["pptx"]``. Preflighted with
+    # ``importlib.util.find_spec`` against omni's *own* interpreter so a declared
+    # dependency that is genuinely missing yields one actionable install prompt
+    # (``dependency_setup_command``) instead of a mid-engine ImportError or the
+    # model hand-rolling ``pip install`` across the wrong interpreter/venv. Fully
+    # generic: a skill declares its modules and the same host gate enforces them,
+    # so no per-format host code is ever added.
+    requires_python_modules: list[str] = field(default_factory=list)
+    # One-shot command surfaced to the owner when a declared python module (or
+    # bin) is missing. Kept declarative so the host never invents an installer.
+    dependency_setup_command: str = ""
+    # Domain error code reported when a declared dependency is missing.
+    dependency_error_code: str = "runtime_dependency_missing"
+    # Artifact content types this skill can *read/inspect* (SKILL.md
+    # ``runtime_requirements.reads``: ``extensions`` and/or ``mime``). This is what
+    # lets ``open_artifact`` route a binary artifact to the owning capability by
+    # declaration instead of the host hard-coding a per-format reader — add a new
+    # format by declaring it on a skill, never by editing host code.
+    reads_extensions: list[str] = field(default_factory=list)
+    reads_mime: list[str] = field(default_factory=list)
     when_to_use: str = ""
     trusted: bool = True
     origin: str = ""
@@ -199,6 +259,72 @@ class SkillEntry:
         return d[: limit - 1] + "…" if len(d) > limit else d
 
 
+def execution_budget_warnings(execution: Any, name: str = "") -> list[str]:
+    """Return authoring defects in a skill's declared execution budget."""
+    if not isinstance(execution, dict):
+        return []
+    try:
+        iterations = int(execution.get("max_iterations") or 0)
+        tool_calls = int(execution.get("max_tool_calls") or 0)
+        max_seconds = float(execution.get("max_seconds") or 0)
+        stall_seconds = float(execution.get("stall_seconds") or 0)
+    except (TypeError, ValueError):
+        return [f"skill '{name}' declares a non-numeric execution budget"]
+    warnings: list[str] = []
+    reachable = iterations * _ASSUMED_TOOL_CALLS_PER_ITERATION
+    if iterations > 0 and tool_calls > 0 and reachable < tool_calls:
+        warnings.append(
+            f"skill '{name}' declares max_tool_calls={tool_calls} but only "
+            f"max_iterations={iterations}; the run will stop on iterations long "
+            f"before that tool budget is reachable. Raise max_iterations to at "
+            f"least {-(-tool_calls // _ASSUMED_TOOL_CALLS_PER_ITERATION)} or lower "
+            f"max_tool_calls."
+        )
+    if stall_seconds > 0 and 0 < max_seconds <= stall_seconds:
+        warnings.append(
+            f"skill '{name}' declares stall_seconds={stall_seconds:g} but only "
+            f"max_seconds={max_seconds:g}; the deadline arrives before the progress "
+            f"watchdog can fire, so a stuck run is reported as a slow one. Put "
+            f"stall_seconds well under max_seconds — it is the primary guard, and "
+            f"max_seconds only the runaway backstop."
+        )
+    return warnings
+
+
+def tool_limit_warnings(limits: Any, name: str = "") -> list[str]:
+    """Return authoring defects in a skill's per-tool quotas."""
+    if not isinstance(limits, dict):
+        return []
+    return [
+        f"skill '{name}' caps its own deliverable with tool_limits.{tool}="
+        f"{limits[tool]}; the number of outputs is decided by the content, so "
+        f"this truncates the result instead of bounding the work. Cap the "
+        f"acquisition tools it uses instead."
+        for tool in sorted(set(limits) & DELIVERABLE_TOOLS)
+    ]
+
+
+def _execution_contract(value: Any, name: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    for warning in execution_budget_warnings(value, name):
+        logger.warning("[skills] %s", warning)
+    limits = value.get("tool_limits")
+    warnings = tool_limit_warnings(limits, name)
+    if not warnings:
+        return value
+    for warning in warnings:
+        logger.warning("[skills] %s", warning)
+    # Drop the offending caps rather than honouring them: a third-party skill
+    # must not be able to truncate its own output through a manifest typo.
+    return {
+        **value,
+        "tool_limits": {
+            tool: cap for tool, cap in limits.items() if tool not in DELIVERABLE_TOOLS
+        },
+    }
+
+
 def _coerce_bool(value: Any, *, default: bool) -> bool:
     if value is None:
         return default
@@ -227,6 +353,99 @@ def _coerce_signatures(value: Any) -> dict[str, list[str]]:
         for key, raw in value.items()
         if isinstance(raw, list)
     }
+
+
+def _coerce_local_tools(value: Any) -> list[LocalToolSpec]:
+    if not isinstance(value, list):
+        return []
+    tools: list[LocalToolSpec] = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("name") or "").strip()
+        module = str(raw.get("module") or "").strip()
+        class_name = str(raw.get("class") or raw.get("class_name") or "").strip()
+        if not name or not module or not class_name:
+            continue
+        schema = raw.get("input_schema")
+        tools.append(
+            LocalToolSpec(
+                name=name,
+                description=str(raw.get("description") or name).strip(),
+                module=module,
+                class_name=class_name,
+                method=str(raw.get("method") or "execute").strip(),
+                input_schema=(
+                    schema if isinstance(schema, dict) else {"type": "object", "properties": {}}
+                ),
+            )
+        )
+    return tools
+
+
+def _reads_block(runtime_reqs: dict[str, Any]) -> dict[str, Any]:
+    block = runtime_reqs.get("reads")
+    return block if isinstance(block, dict) else {}
+
+
+def _normalize_extension(value: Any) -> str:
+    """Normalize a declared reader extension to a lowercase ``.ext`` form."""
+    ext = str(value or "").strip().lower()
+    if ext and not ext.startswith("."):
+        ext = f".{ext}"
+    return ext
+
+
+def python_module_available(name: str) -> bool:
+    """True if ``name`` is importable / installed in omni's own interpreter.
+
+    Bridges the distribution/import spelling gap (``python-pptx`` ↔ ``pptx``) by
+    consulting distribution metadata *and* ``find_spec`` across hyphen/underscore
+    variants. This is the single availability oracle shared by the admission gate
+    (``missing_python_modules``), ``open_artifact``, and the shell install guard,
+    so a skill that declares a *distribution* name is never fail-closed at
+    admission while the same install is intercepted elsewhere as "already there".
+    """
+    import importlib.metadata
+    import importlib.util
+
+    token = str(name).strip()
+    if not token:
+        return False
+    for variant in {token, token.replace("-", "_"), token.replace("_", "-")}:
+        try:
+            importlib.metadata.version(variant)
+            return True
+        except importlib.metadata.PackageNotFoundError:
+            pass
+        except Exception:  # noqa: BLE001 — metadata backends vary; treat as "unknown"
+            pass
+    for variant in {token, token.replace("-", "_")}:
+        try:
+            if importlib.util.find_spec(variant) is not None:
+                return True
+        except (ImportError, ValueError):
+            pass
+    return False
+
+
+def missing_python_modules(entry: SkillEntry) -> list[str]:
+    """Declared Python modules that are NOT importable in omni's own interpreter.
+
+    Shared by the executor's admission gate and ``open_artifact`` so dependency
+    detection is one implementation (:func:`python_module_available`) against the
+    running interpreter — the same environment engines import from — and tolerant
+    of the distribution/import spelling gap so a declared ``python-pptx`` resolves
+    to the installed ``pptx``.
+    """
+    missing: list[str] = []
+    for module in entry.requires_python_modules:
+        name = str(module).strip()
+        if not name:
+            continue
+        if not python_module_available(name):
+            missing.append(name)
+    return missing
 
 
 def _split_frontmatter(text: str) -> tuple[dict[str, Any], str]:
@@ -316,7 +535,6 @@ def parse_skill_text(
         sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         kind=kind,
         delivery_mode=delivery,
-        tier=str(hf.get("tier", "agent")),
         version=str(hf.get("version") or meta.get("version", "")),
         license=str(meta.get("license", "")),
         status=str(hf.get("status", "stable")).lower(),
@@ -329,16 +547,15 @@ def parse_skill_text(
         allow_implicit=allow_implicit,
         allowed_tools=_coerce_list(meta.get("allowed-tools") or hf.get("allowed_tools")),
         dependencies=_coerce_list(hf.get("dependencies") or meta.get("dependencies")),
-        execution=hf.get("execution") if isinstance(hf.get("execution"), dict) else {},
+        execution=_execution_contract(hf.get("execution"), name),
         workflow=hf.get("workflow") if isinstance(hf.get("workflow"), dict) else {},
         artifact_revision=hf.get("artifact_revision")
         if isinstance(hf.get("artifact_revision"), dict)
         else {},
-        quality_contract=(hf.get("quality_contract") if "quality_contract" in hf else {}),
-        quality_contract_declared="quality_contract" in hf,
         template_signatures=_coerce_signatures(hf.get("template_signatures")),
         engine=engine,
         exec_spec=exec_spec,
+        local_tools=_coerce_local_tools(hf.get("local_tools")),
         input_schema=(
             hf.get("input_schema") if "input_schema" in hf else {"type": "object", "properties": {}}
         ),
@@ -354,6 +571,15 @@ def parse_skill_text(
         requires_bins=_coerce_list(requires.get("bins")),
         requires_env=_coerce_list(requires.get("env")),
         requires_services=_coerce_list(runtime_reqs.get("services")),
+        requires_python_modules=_coerce_list(runtime_reqs.get("python_modules")),
+        dependency_setup_command=str(runtime_reqs.get("dependency_setup_command") or ""),
+        dependency_error_code=str(
+            runtime_reqs.get("dependency_error_code") or "runtime_dependency_missing"
+        ),
+        reads_extensions=[
+            _normalize_extension(item) for item in _coerce_list(_reads_block(runtime_reqs).get("extensions"))
+        ],
+        reads_mime=[str(item).strip().lower() for item in _coerce_list(_reads_block(runtime_reqs).get("mime"))],
         when_to_use=str(trigger.get("when_to_use", "")) if isinstance(trigger, dict) else "",
         trusted=trust[0],
         origin=trust[1],
@@ -388,103 +614,6 @@ def _has_declared_schema(
     # presence bit, so a provider that intentionally declares either valid
     # schema is preserved.
     return schema not in ({}, {"type": "object", "properties": {}})
-
-
-def validate_quality_contract_definition(
-    value: Any,
-    *,
-    declared: bool | None = None,
-) -> tuple[dict[str, str], ...]:
-    """Return provider-owned quality contract definition errors.
-
-    The check is deliberately structural and domain-neutral. Both the typed
-    planner gate and direct workflow ingress call it before execution.
-    """
-    if declared is False or (declared is None and value == {}):
-        return ()
-    errors: list[dict[str, str]] = []
-    if not isinstance(value, dict):
-        return (
-            {
-                "path": "",
-                "message": "quality_contract must be an object",
-            },
-        )
-    checks = value.get("checks")
-    if (
-        not isinstance(checks, list)
-        or not checks
-        or any(not isinstance(item, str) or not item.strip() for item in checks)
-    ):
-        errors.append(
-            {
-                "path": "checks",
-                "message": (
-                    "quality_contract.checks must be a non-empty array of non-empty strings"
-                ),
-            }
-        )
-    if "assessment_required" in value and not isinstance(value["assessment_required"], bool):
-        errors.append(
-            {
-                "path": "assessment_required",
-                "message": "quality_contract.assessment_required must be a boolean",
-            }
-        )
-    if "assessment_schema" in value and (
-        not isinstance(value["assessment_schema"], str) or not value["assessment_schema"].strip()
-    ):
-        errors.append(
-            {
-                "path": "assessment_schema",
-                "message": "quality_contract.assessment_schema must be a non-empty string",
-            }
-        )
-    if "retry" in value and not isinstance(value["retry"], dict):
-        errors.append(
-            {
-                "path": "retry",
-                "message": "quality_contract.retry must be an object",
-            }
-        )
-    retry = value.get("retry") if isinstance(value.get("retry"), dict) else {}
-    if "max_attempts" in retry:
-        attempts = retry["max_attempts"]
-        if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 0:
-            errors.append(
-                {
-                    "path": "retry/max_attempts",
-                    "message": (
-                        "quality_contract.retry.max_attempts must be a non-negative integer"
-                    ),
-                }
-            )
-    if "provider_replay_safe_required" in retry and not isinstance(
-        retry["provider_replay_safe_required"], bool
-    ):
-        errors.append(
-            {
-                "path": "retry/provider_replay_safe_required",
-                "message": (
-                    "quality_contract.retry.provider_replay_safe_required must be a boolean"
-                ),
-            }
-        )
-    for field_name in (
-        "side_effect_policy",
-        "idempotency_key_field",
-        "feedback_field",
-    ):
-        if field_name in retry and (
-            not isinstance(retry[field_name], str) or not retry[field_name].strip()
-        ):
-            errors.append(
-                {
-                    "path": f"retry/{field_name}",
-                    "message": (f"quality_contract.retry.{field_name} must be a non-empty string"),
-                }
-            )
-    return tuple(errors)
 
 
 def _trust_metadata(path: Path | None, source: str) -> tuple[bool, str]:

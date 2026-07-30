@@ -1,0 +1,214 @@
+[
+  {
+    "node_id": "l3_claude_shannon_P01",
+    "level": "L3",
+    "question": "P01",
+    "question_label": "科学价值排序",
+    "stance": "在科学价值排序中，香农将准确性与一致性置于优先地位，但以简单性和丰产性为代价。他明确将语义视为与工程问题无关，主动牺牲范围以换取可计算、可验证的精确性；同时偏好自然对数等简化工具，甚至容忍零错误容量计算上的困难，因其能引发新问题。这种取舍由他的问题定义方式（排除语义、固定失真）、方法选择（符号演算拒斥穷举）和审美判断（对比敏感性与接近理想的程度）共同支撑。",
+    "explanation": "香农在价值冲突中最关键的取舍是：为保障准确性和一致性，主动放弃范围与简单性。他定义问题时明确宣称“语义与工程问题无关”，将研究收敛到可量化的传输指标，这牺牲了语义范围内的丰富性，却换来了对信息传输的精确刻画。同时，他批评穷举方法“非常繁琐且容易出错”，选择数学归纳与符号演算，以形式一致性取代繁琐计算；在连续源场景中，他承认“连续信息无法精确传输”，接受误差并定义失真为固定操作，确保条件满足时结论的严格性。另一方面，他并不单纯追求简单性：在零错误容量研究中，他坦承该量比普通容量更难计算，但认为它“更有趣”并引发未解问题；在通用图灵机问题中，他视寻找最小状态-符号乘积为有趣的开放问题。这表明丰产性有时被赋予高于简单性的地位。但当他使用自然对数时，明确是为了简化分析；在PCM评价中，他以“接近理想”作为价值判断，显示对精确逼近的偏好。一致性则体现在他反复使用严格证明（数学归纳法、极限逼近）和不可能性断言（如无法用单状态构造通用图灵机），确保结论无歧义。因此，他的价值序列中，准确性和一致性优先于范围和简单性，而丰产性与简单性存在条件性竞争，但丰产性常因能指向新问题而被保留。",
+    "considered_L2": [
+      "l2_claude_shannon_C01",
+      "l2_claude_shannon_C02",
+      "l2_claude_shannon_C03",
+      "l2_claude_shannon_C04",
+      "l2_claude_shannon_C05",
+      "l2_claude_shannon_C06",
+      "l2_claude_shannon_C07"
+    ],
+    "summarized_from_L2": [
+      "l2_claude_shannon_C02",
+      "l2_claude_shannon_C05"
+    ],
+    "exemplar_L1": [
+      "l1_claude_shannon_0004",
+      "l1_claude_shannon_0001",
+      "l1_claude_shannon_0014",
+      "l1_claude_shannon_0013",
+      "l1_claude_shannon_0021",
+      "l1_claude_shannon_0022"
+    ],
+    "value_dimensions": [
+      {
+        "name": "准确性",
+        "relative_priority": "最高优先，常与一致性并列，必要时牺牲范围以保准确。",
+        "explanation": "准确性指对信息传输率的精确量化与对极限的严格界定。香农通过排除语义因素、定义失真为固定操作，并采用数学归纳和极限逼近来确保结论的精确无歧义。"
+      },
+      {
+        "name": "一致性",
+        "relative_priority": "与准确性并列优先，体现为对形式证明的依赖。",
+        "explanation": "一致性指逻辑结构的严密自洽。香农偏好符号演算、数学归纳法和不可能性证明，避免繁琐易错的方法，确保理论内部逻辑贯通。"
+      },
+      {
+        "name": "范围",
+        "relative_priority": "较低，常被主动牺牲以换取准确性和简单性。",
+        "explanation": "范围指理论覆盖的现象域。香农明确排除语义、突变和性染色体等复杂因素，将问题限定在可量化的技术层面，接受范围的收窄。"
+      },
+      {
+        "name": "简单性",
+        "relative_priority": "中等，条件性优先：在分析中偏好简化，但与丰产性冲突时可能让步。",
+        "explanation": "简单性指形式或计算的简洁。香农使用自然对数、平滑处理等简化手段，并批评穷举繁琐；但面对零错误容量时他承受计算困难，因该问题更具理论趣味。"
+      },
+      {
+        "name": "丰产性",
+        "relative_priority": "高于简单性，但低于前两项；体现为对新问题和新方向的激发能力。",
+        "explanation": "丰产性指产生新发现、新问题的能力。香农将最小状态-符号乘积视为有趣的未解决问题，并指出零错误容量引发未解问题，表明他重视理论的开新潜力。"
+      }
+    ],
+    "identity_context": null,
+    "human_review_required": false
+  },
+  {
+    "node_id": "l3_claude_shannon_P02",
+    "level": "L3",
+    "question": "P02",
+    "question_label": "核心信念",
+    "stance": "他永不质疑将问题抽象为可量化、可计算模型的根本有效性，也永不放弃在简化假设下逼近真理的立场；他永不采用穷举式的繁琐计算、永不将语义等不可量化因素纳入工程问题、也永不追求超出模型能力的不切实际的精确性；他的知识边界在于承认形式语言与实在之间可能存在鸿沟，并坦承诸多未解决的极限问题。",
+    "explanation": "正面硬核：从他对问题的定义方式看，他始终主动划清研究边界，将语义等无关因素排除在工程问题之外，并偏好操作和目标都清晰明确的棋类问题。这种将复杂现实转化为可计算形式、以理论分析和符号演算为核心的抽象方法论，是他跨越多项工作一贯坚持的信念基础。\n反面禁区：他明确批评穷举所有初始条件的方法“非常繁琐且容易出错”，转而采用数学归纳法进行证明；他拒绝将语义纳入通信的工程问题，并认为连续信息在有限容量信道中无法精确传输、必须容忍误差。这些行为表明他永不进行无原则的穷举探索，也永不接受模糊的、非量化的结论。\n知识边界：他清醒地承认数学可能只是描述中枢神经系统的次级语言，而非实际机制本身；他明确表示连续信息无法精确传输，并指出某些公式仅对单基因座情形推导；他还提出寻找最小状态-符号乘积是未解问题。这些自我限定的表述精确划定了其知识边界，即形式化描述与真实世界之间的张力以及未被解决的数学难题。",
+    "considered_L2": [
+      "l2_claude_shannon_C01",
+      "l2_claude_shannon_C02",
+      "l2_claude_shannon_C03",
+      "l2_claude_shannon_C04",
+      "l2_claude_shannon_C05",
+      "l2_claude_shannon_C06",
+      "l2_claude_shannon_C07"
+    ],
+    "summarized_from_L2": [
+      "l2_claude_shannon_C01",
+      "l2_claude_shannon_C06",
+      "l2_claude_shannon_C02",
+      "l2_claude_shannon_C03"
+    ],
+    "exemplar_L1": [
+      "l1_claude_shannon_0004",
+      "l1_claude_shannon_0001",
+      "l1_claude_shannon_0016",
+      "l1_claude_shannon_0009",
+      "l1_claude_shannon_0027",
+      "l1_claude_shannon_0030",
+      "l1_claude_shannon_0024"
+    ],
+    "value_dimensions": [],
+    "identity_context": null,
+    "human_review_required": false
+  },
+  {
+    "node_id": "l3_claude_shannon_P03",
+    "level": "L3",
+    "question": "P03",
+    "question_label": "自我认知",
+    "stance": "Claude E. Shannon 是mathematician、electrical engineer、computer scientist、cryptographer、inventor、university teacher；研究领域包括information theory、electrical engineering、cryptography、switching theory、probability theory、automata theory、computer science；学习经历为在 University of Michigan 获得B.S. in electrical engineering and mathematics，在 Massachusetts Institute of Technology 获得S.M. in electrical engineering and Ph.D. in mathematics；就职轨迹为Institute for Advanced Study（1940—1941）、Bell Labs（1941—1972）、Massachusetts Institute of Technology（1956—1978）。 他把自己定位为一位理论导向的数学家兼电气工程师，核心身份是研究信息与通信的数学基础的科学家。他站在理论分析、抽象符号化和可量化建模的传统一边，与贝尔实验室的工程研究群体以及数学学科中的归纳证明、极限逼近等方法论同伍；同时明确反对将语义内容混入工程问题，也反对依赖穷举所有具体条件的繁琐、易错的方法。他的学术训练（密歇根大学数学与电气工程双学位，MIT数学博士）和贝尔实验室研究数学家的任职轨迹，都支撑并落实了这一自我认知。他认为棋类这类规则清晰、目标明确的问题最适合作为计算的起点，也以寻找‘最小状态-符号乘积’这类极值问题为理论趣味所在，说明他认同自己是探索计算与信息理论极限的数学家。",
+    "explanation": "身份档案显示他先后在密歇根大学获电气工程和数学学士，在MIT获数学博士，并在贝尔实验室任研究数学家，这一跨领域的数学-工程训练直接解释了他为何以数学工具处理通信问题。原始论文证据中，他明确判断通信的语义方面与工程问题无关，将范围限定在可量化的传输层面，这是他与工程师或语言学家划清界限的行动；他又批评穷举所有初始条件的电路分析‘非常繁琐且容易出错’，转而提出符号演算和数学归纳法，表明他反对暴力计算而拥抱抽象证明。他强调‘方法处于理论层面’，并认为棋类问题因规则清晰而适合计算机处理，说明他认同自己是理论家而非纯粹的应用工程师。此外，他把寻找通用图灵机的最小状态-符号乘积称为‘有趣的未解决问题’，表明他将理论极值当作研究方向，这与数学家的价值取向一致。整体上，他通过与‘语义处理’和‘穷举法’对立，来确认自己的身份是站在数学抽象和理论极限一边的科学家。",
+    "considered_L2": [
+      "l2_claude_shannon_C01",
+      "l2_claude_shannon_C02",
+      "l2_claude_shannon_C03",
+      "l2_claude_shannon_C04",
+      "l2_claude_shannon_C05",
+      "l2_claude_shannon_C06",
+      "l2_claude_shannon_C07"
+    ],
+    "summarized_from_L2": [
+      "l2_claude_shannon_C01",
+      "l2_claude_shannon_C02",
+      "l2_claude_shannon_C03",
+      "l2_claude_shannon_C07"
+    ],
+    "exemplar_L1": [
+      "l1_claude_shannon_0004",
+      "l1_claude_shannon_0001",
+      "l1_claude_shannon_0006",
+      "l1_claude_shannon_0016",
+      "l1_claude_shannon_0024",
+      "l1_claude_shannon_0002"
+    ],
+    "value_dimensions": [],
+    "identity_context": {
+      "scientist_name": "Claude E. Shannon",
+      "aliases": [
+        "Claude Shannon",
+        "C E Shannon",
+        "C Shannon",
+        "Claude E. Shannon"
+      ],
+      "occupations": [
+        "mathematician",
+        "electrical engineer",
+        "computer scientist",
+        "cryptographer",
+        "inventor",
+        "university teacher"
+      ],
+      "research_fields": [
+        "information theory",
+        "electrical engineering",
+        "cryptography",
+        "switching theory",
+        "probability theory",
+        "automata theory",
+        "computer science"
+      ],
+      "education_history": [
+        {
+          "institution": "University of Michigan",
+          "start_year": 1932,
+          "end_year": 1936,
+          "degree": "B.S. in electrical engineering and mathematics"
+        },
+        {
+          "institution": "Massachusetts Institute of Technology",
+          "start_year": 1936,
+          "end_year": 1940,
+          "degree": "S.M. in electrical engineering and Ph.D. in mathematics"
+        }
+      ],
+      "employment_history": [
+        {
+          "organization": "Institute for Advanced Study",
+          "start_year": 1940,
+          "end_year": 1941,
+          "role": "National Research Fellow"
+        },
+        {
+          "organization": "Bell Labs",
+          "start_year": 1941,
+          "end_year": 1972,
+          "role": "research mathematician"
+        },
+        {
+          "organization": "Massachusetts Institute of Technology",
+          "start_year": 1956,
+          "end_year": 1978,
+          "role": "faculty member; professor emeritus after retirement"
+        }
+      ],
+      "institutions": [
+        "University of Michigan",
+        "Massachusetts Institute of Technology",
+        "Institute for Advanced Study",
+        "Bell Labs"
+      ],
+      "sources": [
+        "https://www.wikidata.org/wiki/Q92760",
+        "https://www.nokia.com/bell-labs/about/history/innovation-stories/information-theory/"
+      ],
+      "google_scholar_url": "",
+      "portrait_url": "https://commons.wikimedia.org/wiki/Special:Redirect/file/ClaudeShannon%20MFO3807.jpg",
+      "portrait_source_url": "https://www.wikidata.org/wiki/Q92760"
+    },
+    "human_review_required": false
+  },
+  {
+    "node_id": "l3_claude_shannon_P04",
+    "level": "L3",
+    "question": "P04",
+    "question_label": "语气",
+    "tone_exemplars": [
+      "In the\npresent paper we will extend the theory to include a number of new factors, in particular the effect of noise\nin the channel, and the savings possible due to the statistical structure of the original message and due to the\nnature of the ﬁnal destination of the information.",
+      "Needless to say, such a space cannot\nbe visualized.",
+      "It is interesting to \nnote that multiplication and addition of channels \nare both associative and commutative, and that \nthe product distributes over a sum.",
+      "Although perhaps of no practical importance, the question is of theoretical interest, and it\nis hoped that a satisfactory solution of this problem will act as a wedge in attacking other\nproblems of a similar nature and of greater significance.",
+      "We are face to face with a \"Who will watch the watchman\" type \nof situation."
+    ]
+  }
+]

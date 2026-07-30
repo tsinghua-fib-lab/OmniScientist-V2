@@ -74,3 +74,16 @@ def test_library_add_dedup_and_export(tmp_path):
     csv_text = to_csv(entries)
     assert "arxiv_id" in csv_text.splitlines()[0]
     assert "2310.06825" in csv_text
+
+
+def test_library_keeps_explicit_year_and_openalex_origin(tmp_path):
+    lib = tmp_path / "library.jsonl"
+    assert add_papers(lib, [{
+        "title": "A Clinical RAG Study",
+        "year": 2024,
+        "origin": "openalex",
+        "doi": "10.1/rag",
+    }]) == 1
+    entry = load_library(lib)[0]
+    assert entry["year"] == "2024"
+    assert entry["source"] == "openalex"

@@ -63,11 +63,30 @@ def test_normal_rows_excludes_compacted_and_bridge_rows():
     rows = [
         ConversationMessageORM(session_id="s", role="user", content="keep"),
         ConversationMessageORM(session_id="s", role="assistant", content="hidden", meta={"compacted": True}),
-        ConversationMessageORM(session_id="s", role="assistant", content="bridge", content_type="compaction"),
+        ConversationMessageORM(session_id="s", role="user", content="bridge", content_type="compaction"),
         ConversationMessageORM(session_id="s", role="assistant", content="keep2"),
     ]
     visible = ConversationStore.normal_rows(rows)
     assert [r.content for r in visible] == ["keep", "keep2"]
+
+
+@pytest.mark.asyncio
+async def test_the_compaction_bridge_is_replayed_as_material_not_as_the_models_own_words():
+    """A summary in the assistant's voice is a claim the model will stand behind.
+
+    The bridge for one session said the research was done and both reports were
+    stored; turns later the model was still restating it, on a request that had
+    produced neither. Codex hands its summary over as the user's for this reason.
+    """
+    store = await _store()
+    session_id = await store.ensure_session(channel="wechat")
+    await store.persist_message(session_id, "user", "现在就执行吧")
+    await store.write_compaction_bridge(session_id, "[Earlier conversation summary]\n调研已完成", [])
+
+    history = await store.history(session_id)
+    bridge = [m for m in history if "调研已完成" in m["content"]]
+
+    assert [m["role"] for m in bridge] == ["user"]
 
 
 @pytest.mark.asyncio

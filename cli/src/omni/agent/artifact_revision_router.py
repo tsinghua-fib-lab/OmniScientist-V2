@@ -314,6 +314,7 @@ class ArtifactRevisionRouter:
                 f"Preserve its domain and source structure. User requirement: {user_message}"
             ),
             "source_task_id": source_task_id,
+            "revision_mode": "major",
         }
         if target.focus.workflow_run_id:
             params["workflow_run_id"] = str(target.focus.workflow_run_id)

@@ -59,7 +59,9 @@ def _as_utc(value: datetime | None) -> datetime | None:
 
 def fingerprint(payload: Any) -> str:
     blob = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    return hashlib.sha256(
+        blob.encode("utf-8", errors="backslashreplace")
+    ).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +73,7 @@ class CheckpointRecord:
     action_kind: str
     contract_version: str
     policy_version: str
+    task_id: str
     channel: str
     session_id: str
     actor_principal: str
@@ -94,6 +97,7 @@ class CheckpointRecord:
             action_kind=row.action_kind,
             contract_version=row.contract_version,
             policy_version=row.policy_version,
+            task_id=str(getattr(row, "task_id", "") or ""),
             channel=row.channel,
             session_id=row.session_id,
             actor_principal=row.actor_principal,
@@ -153,6 +157,7 @@ class ActionCheckpointStore:
         required_decider: str = "",
         origin_project_dir: str = "",
         project: str = "default",
+        task_id: str = "",
         payload: dict[str, Any],
         resolution: dict[str, Any],
         idempotency_key: str = "",
@@ -170,12 +175,19 @@ class ActionCheckpointStore:
         async with self._db.session() as s:
             existing = await self._find_open(s, decider, fp, idempotency_key, now)
             if existing is not None:
+                # Backfill task_id on a deduped live draft when the caller now
+                # knows the owner Task (pre-migration drafts may have been empty).
+                if task_id and not str(getattr(existing, "task_id", "") or ""):
+                    existing.task_id = task_id
+                    await s.commit()
+                    await s.refresh(existing)
                 return CheckpointRecord.of(existing)
             row = ActionCheckpointORM(
                 phase=PHASE_CLARIFICATION,
                 action_kind=action_kind,
                 contract_version=contract_version,
                 policy_version=policy_version,
+                task_id=task_id or "",
                 project=project,
                 origin_project_dir=origin_project_dir,
                 channel=channel,
@@ -237,6 +249,7 @@ class ActionCheckpointStore:
         *,
         principal: str | None = None,
         session_id: str = "",
+        task_id: str = "",
         now: datetime | None = None,
         limit: int = 20,
     ) -> list[CheckpointRecord]:
@@ -254,6 +267,8 @@ class ActionCheckpointStore:
             ]
             if principal is not None:
                 clauses.append(ActionCheckpointORM.required_decider == principal)
+            if task_id:
+                clauses.append(ActionCheckpointORM.task_id == task_id)
             q = (
                 select(ActionCheckpointORM)
                 .where(*clauses)
@@ -270,6 +285,18 @@ class ActionCheckpointStore:
                 if len(out) >= max(1, limit):
                     break
             return out
+
+    async def get_open_for_task(
+        self,
+        task_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> CheckpointRecord | None:
+        """Return the newest open checkpoint owned by ``task_id``, if any."""
+        if not task_id:
+            return None
+        rows = await self.list_open(principal=None, task_id=task_id, now=now, limit=1)
+        return rows[0] if rows else None
 
     async def resolve(
         self,

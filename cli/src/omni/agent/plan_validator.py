@@ -14,20 +14,15 @@ from typing import Any
 
 from omni.agent.intent_plan import IntentPlan, IntentType
 from omni.agent.provider_binding import materialize_provider_bindings
-from omni.agent.provider_quality_binding import materialize_selected_skill_quality
 from omni.agent.resolver_evidence import validate_resolver_evidence
-from omni.agent.task_contract import (
-    bind_task_contract_providers,
-    provider_quality_checks,
-)
 from omni.core.tool_contracts import (
     ProviderInputCompiler,
     input_contract_binding_owner,
     input_contract_repair_capability,
+    instruction_raw_message,
     provider_schema_definition_errors,
     skill_input_contract_error,
 )
-from omni.skills_runtime.manifest import validate_quality_contract_definition
 from omni.skills_runtime.registry import (
     SKILL_SOURCE_PARAM,
     SkillRegistry,
@@ -151,7 +146,7 @@ class PlanFinding:
             sort_keys=True,
             separators=(",", ":"),
             default=str,
-        ).encode()
+        ).encode("utf-8", errors="backslashreplace")
         self.finding_id = "finding-" + hashlib.sha256(encoded).hexdigest()[:20]
 
     def to_dict(self) -> dict[str, Any]:
@@ -235,36 +230,8 @@ class PlanValidator:
     def validate(self, plan: IntentPlan) -> PlanValidationResult:
         result = PlanValidationResult()
         # Resolve and seal the exact provider source + contract before any
-        # compiler, resolver-evidence, repair, or verification decision.
+        # compiler or resolver-evidence decision.
         materialize_provider_bindings(plan, self._registry)
-        if (
-            plan.intent_type in {IntentType.QA_PLUS_ARTIFACT, IntentType.SINGLE_SKILL_TASK}
-            and plan.plan_schema_version >= 2
-            and plan._plan_schema_version_present  # noqa: SLF001
-        ):
-            for issue in materialize_selected_skill_quality(
-                plan,
-                self._registry,
-            ):
-                result.error(
-                    "provider_quality_binding_missing",
-                    issue["message"],
-                    scope="plan",
-                    step_id=issue["step_id"],
-                    skill_name=issue["skill_name"],
-                    owner="host",
-                    repair_strategy="replan",
-                )
-        if (
-            plan.intent_type == IntentType.WORKFLOW
-            and plan.plan_schema_version >= 2
-            and plan._plan_schema_version_present  # noqa: SLF001
-        ):
-            plan.task_contract = bind_task_contract_providers(
-                plan.task_contract,
-                plan.workflow_steps,
-            )
-            plan.verification_plan.deliverable_checks = provider_quality_checks(plan.workflow_steps)
         self._compile_provider_inputs(plan)
         self._validate_compilation_errors(plan, result)
         for finding in validate_resolver_evidence(plan, self._registry):
@@ -365,9 +332,10 @@ class PlanValidator:
                 compiled = self._input_compiler.compile_entry(
                     entry,
                     semantic_input=semantic,
-                    # Workflow steps are typed contracts. The workflow goal is
-                    # context, not an implicit value for every child provider.
-                    raw_message="",
+                    # Bind only an instruction the step already carried under a
+                    # planner alias (goal/query). Do not copy the workflow goal
+                    # into every child provider.
+                    raw_message=instruction_raw_message(entry, semantic),
                 )
                 step["input"] = dict(compiled.arguments)
                 step["input_compiled"] = True
@@ -412,6 +380,14 @@ class PlanValidator:
             )
             keyword = str(error.get("keyword") or "")
             contract_definition_error = keyword in _PROVIDER_SCHEMA_DEFINITION_KEYWORDS
+            # A slot the provider never declared has no answer anyone can give:
+            # not the user, who cannot add a field to someone else's contract,
+            # and not the model, whose value the compiler already left out of
+            # ``arguments``. The remedy is therefore already applied by the time
+            # we get here, and the only thing left to do is say so. Reporting it
+            # as a blocker sent run 0db3d740 to the ask rung, which handed the
+            # user the finding text as though it were a question.
+            undeclared_field = str(error.get("code") or "") == "unknown_provider_field"
             objective_schema_error = bool(keyword and owner != "resolver")
             finding_owner = (
                 "provider"
@@ -441,6 +417,8 @@ class PlanValidator:
             message = str(
                 error.get("message") or error.get("reason") or "provider input is invalid"
             )
+            if undeclared_field:
+                message = f"{message}; the value was dropped and the run continued without it"
             binding = _provider_binding_for_error(
                 plan,
                 scope=scope,
@@ -468,7 +446,9 @@ class PlanValidator:
                 "schema_keyword": keyword,
                 "allowed_values": list(error.get("allowed_values") or []),
                 "repair_strategy": (
-                    "resolver"
+                    "drop_undeclared_input"
+                    if undeclared_field
+                    else "resolver"
                     if finding_owner == "resolver"
                     else (
                         "schema_model_patch"
@@ -490,7 +470,7 @@ class PlanValidator:
                 if objective_schema_error
                 else ("step_input_contract" if scope == "step" else "provider_input_contract")
             )
-            if (
+            if undeclared_field or (
                 not contract_definition_error
                 and scope == "step"
                 and _step_is_degradable(
@@ -547,7 +527,6 @@ class PlanValidator:
             )
             return
         _validate_provider_schema_contracts(entry, result)
-        _validate_provider_quality_contract(entry, result)
         if entry.is_deprecated and not explicit:
             result.error(
                 "skill_deprecated",
@@ -834,30 +813,6 @@ def _step_is_degradable(step: dict, entry: object | None) -> bool:
     return False
 
 
-def _validate_provider_quality_contract(
-    entry: object,
-    result: PlanValidationResult,
-) -> None:
-    """Fail closed on malformed provider-owned quality control data."""
-    raw = getattr(entry, "quality_contract", {})
-    declared = getattr(entry, "quality_contract_declared", None)
-    skill_name = str(getattr(entry, "name", "") or "")
-    provider_source = str(getattr(entry, "source", "") or "")
-    for error in validate_quality_contract_definition(raw, declared=declared):
-        relative_path = str(error.get("path") or "")
-        message = str(error.get("message") or "quality_contract is invalid")
-        result.error(
-            "provider_quality_contract_invalid",
-            f"skill '{skill_name}' has an invalid provider quality contract: {message}",
-            skill_name=skill_name,
-            owner="provider",
-            provider_source=provider_source,
-            field_path=(
-                f"/quality_contract/{relative_path}" if relative_path else "/quality_contract"
-            ),
-            repairable=False,
-            repair_strategy="provider_contract_fix",
-        )
 
 
 def _validate_provider_schema_contracts(

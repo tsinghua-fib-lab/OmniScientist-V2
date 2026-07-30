@@ -9,6 +9,7 @@ from __future__ import annotations
 import sys
 
 import pytest
+from click import unstyle
 from typer.testing import CliRunner
 
 from omni.cli.main import app
@@ -140,7 +141,10 @@ def test_serve_run_rejects_removed_legacy_service_id_option():
     )
 
     assert result.exit_code == 2
-    assert "No such option: --service-id" in result.output
+    # Rich may inject ANSI styles and wrap inside the option name on narrow CI
+    # terminals. Compare the semantic error after removing both.
+    compact = "".join(unstyle(result.output).split()).lower()
+    assert "nosuchoption:--service-id" in compact
 
 
 def test_serve_start_status_stop_roundtrip(fake_supervisor):

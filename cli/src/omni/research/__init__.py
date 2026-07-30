@@ -13,6 +13,15 @@ from typing import Any
 
 from omni.research.arxiv import ArxivError, fetch_by_id, normalize_arxiv_id, search
 from omni.research.corpus import search_corpus
+from omni.research.embedding_runtime import (
+    ConfiguredEmbeddingRuntime,
+    EmbeddingRuntimeError,
+    configured_embedding_runtime,
+    configured_embedding_space_id,
+    embedding_space_id,
+    specter2_embedding_space_id,
+)
+from omni.research.retrieval import search_literature
 from omni.research.store import ResearchStore
 
 
@@ -32,11 +41,18 @@ def add_papers_to_library(library_path: Any, papers: list[dict[str, Any]]) -> No
 
 __all__ = [
     "ArxivError",
+    "ConfiguredEmbeddingRuntime",
+    "EmbeddingRuntimeError",
     "ResearchStore",
     "add_papers_to_library",
     "capture_env_lock",
+    "configured_embedding_runtime",
+    "configured_embedding_space_id",
+    "embedding_space_id",
     "fetch_by_id",
     "normalize_arxiv_id",
     "search",
     "search_corpus",
+    "search_literature",
+    "specter2_embedding_space_id",
 ]

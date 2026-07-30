@@ -1,0 +1,228 @@
+[
+  {
+    "node_id": "l3_alan_turing_P01",
+    "level": "L3",
+    "question": "P01",
+    "question_label": "科学价值排序",
+    "stance": "在科学价值排序中，图灵将简单性和实用性置于首位，同时以准确性为底线，一致性和范围为条件性优先，丰产性作为引导研究方向的趣味判据。他经常为了便于数学处理或减少工作量而主动简化问题、限定范围，只要不造成大的精度损失（如《Rounding-Off Errors in Matrix Processes》中偏好更省事的消元形式，认为其“在所有方面都优于原始形式”）；在定义和逻辑中他要求一致性，如确保意义在转换下不变、乘积定义有效，但往往只证明必要的弱结果而搁置困难部分。他重视研究的“趣味性”和“生物应用”，将其作为新发现和新问题的来源，而将价值不高的结果明确判定为“无价值”。因此，当价值冲突时，图灵实际保留的是简单、可操作且足够准确的部分，牺牲的是范围的一般性和证明的彻底性。",
+    "explanation": "图灵的方法选择始终贯穿着实用主义倾向。证据显示，他明确表示“选择可计算数作为显式处理对象是因为其涉及的技术最不笨重”，这体现他以简单性作为定义对象的关键标准；在数值分析中，他要求误差估计“绝对确信误差在给定范围内，但不把范围说得过大”，既保证准确性又避免过度保守。同时，他频繁限定问题范围，如“只讨论自动机器”“只考虑化学与力学可分离的情形”，这种范围收窄是为了让问题可处理。当一致性与简单性冲突时，他倾向于放弃严格的一般性，例如在序数逻辑中，他承认无法证明一般的完备性，转而证明更简单情形的完备性，并明确判断某些完备性定理“如往常一样没有价值”。丰产性则体现在他对哪些情形“最令人感兴趣且最具生物应用”的审美判断上，这种判断引导后续研究方向，而他认为有些无量纲量“不值得详细计算”或某些情形“极端缺乏特征”。因此，他的价值排序是：简单性和实用性优先，准确性作为硬约束，一致性在条件性满足即可，范围常为简单而牺牲，丰产性作为研究选择的趣味导向。",
+    "considered_L2": [
+      "l2_alan_turing_C01",
+      "l2_alan_turing_C02",
+      "l2_alan_turing_C03",
+      "l2_alan_turing_C04",
+      "l2_alan_turing_C05",
+      "l2_alan_turing_C06",
+      "l2_alan_turing_C07"
+    ],
+    "summarized_from_L2": [
+      "l2_alan_turing_C02",
+      "l2_alan_turing_C05"
+    ],
+    "exemplar_L1": [
+      "l1_alan_turing_0005",
+      "l1_alan_turing_0132",
+      "l1_alan_turing_0030",
+      "l1_alan_turing_0056",
+      "l1_alan_turing_0221",
+      "l1_alan_turing_0235"
+    ],
+    "value_dimensions": [
+      {
+        "name": "准确性",
+        "relative_priority": "准确性是底线，但不是追求极致；只要不造成大的精度损失即可接受简化。在数值计算中要求误差界绝对可靠且尽量紧，在生物学建模中承认模型是简化理想化，但希望找到更精确的定律。",
+        "explanation": "图灵在验证结论时强调误差估计的可靠性与紧性，如要求“绝对确信误差在给定范围内，但不把范围说得过大”，并用构造实例证明误差界是best possible。在《化学形态发生的基础》中，他承认模型是“简化、理想化，因而是歪曲”，但认为只要不带来大的精度损失就可以简化，并明确表示“更倾向于找到更精确的定律”。"
+      },
+      {
+        "name": "一致性",
+        "relative_priority": "一致性是定义和理论的基础条件，但不必在所有情形下强求；他常证明较弱的或特定情形的一致性，而对复杂性较高的情形予以搁置。",
+        "explanation": "图灵在群论中要求乘积定义在代表元替换后保持等价，即一致性；在序数逻辑中要求“意义应在转换下保持不变”。但他也接受某些不一致或歧义，例如在编程手册中承认描述略有不准，但以“对程序员无实际差别”为由不修正；在无法证明完备性时转而证明更简单情形的对应性质。"
+      },
+      {
+        "name": "范围",
+        "relative_priority": "范围通常让位于简单性和可处理性；他主动限定研究范围以换取数学上的可操作性，但也会在条件允许时追求更一般的结论。",
+        "explanation": "图灵常明确限定研究对象，如在《可计算数》中“只讨论自动机器”，在形态发生中“将注意力限制在化学与力学可分离的情形”，或假设系统接近均匀以便数学处理。他承认“无法取得进展归因于系统数学复杂性，只能研究极简化情形”，但也努力证明更一般的定理，只是往往先证明弱结果“以说明方法”。"
+      },
+      {
+        "name": "简单性",
+        "relative_priority": "简单性是图灵最优先的价值之一，常在选择方法、定义和表达方式时直接决定取舍，甚至超过对范围一般性的追求。",
+        "explanation": "他明确表示选择可计算数“作为显式处理对象是因为其涉及的技术最不笨重”，采用Church的转换演算“使表达更清晰、更简单”，偏好工作量更少的消元方法并认为其“在所有方面都优于原始形式”。在编程中他推荐更省事的约定，如使用偶数线对等。"
+      },
+      {
+        "name": "丰产性",
+        "relative_priority": "丰产性作为研究方向的趣味导向，他判断哪些情形“最令人感兴趣且最具生物应用”，并指出某些结论“无价值”或“不值得详细计算”，以此决定后续研究的投入。",
+        "explanation": "图灵在形态发生中明确指出“有限波长稳态波是最令人感兴趣且最具生物应用”的案例，而认为某些情形“极端缺乏特征”或“最无趣”，并评价某些无量纲量“不值得详细计算”。在序数逻辑中，他称完备性定理“如往常一样没有价值”，因为其给出的序数难以直觉识别，这体现了他对理论产出果实的判断。"
+      }
+    ],
+    "identity_context": null,
+    "human_review_required": false
+  },
+  {
+    "node_id": "l3_alan_turing_P02",
+    "level": "L3",
+    "question": "P02",
+    "question_label": "核心信念",
+    "stance": "他永不质疑的核心信念是：科学概念必须拥有明确划定的边界，并辅以可操作的验证标准；由此他始终把“可计算”与“存在判定机器”视为同一件事，而把任何依赖直觉的论证判为数学上不令人满意。他永不做的则是：不界定范围就接受一个定义，把简化模型说成真实，或在缺乏严格证明时宣称已证明；他明确承认模型是简化、理想化因而是一种歪曲，承认非线性问题无法系统化只能用定性结论。他的知识边界在于：凡是他不能给出严格定义或可验证标准的领域，他都不当作已经知道；例如他承认无法定义实数变量的一般可计算函数，承认生物实例因现象复杂而有限，也承认某些完备性定理没有价值。",
+    "explanation": "原始论文证据显示，他在《论可计算数》中明确限定只讨论自动机器，并声明可计算数不包括所有可定义数，同时强调“存在一般过程”这一用语必须等价于“存在机器”，且只有在可计算定义得到证明时才可如此使用；他还指出所有这类论证归根结底是诉诸直觉，因此数学上不令人满意。这些行为说明他确立了一个不可动摇的硬核：知识的成立必须以严格的、可验证的定义为前提，而诉诸直觉不能构成证明。他从不质疑机器判定与可计算之间的等价性，因为这是他整个可计算性理论的基石。\n\n在反面禁区和知识边界上，他在《形态发生的化学基础》中明确说模型是简化、理想化和歪曲，并限定系统为不生长但发生反应与扩散的组织；在非线性情形他明确承认无法像线性那样系统化，只能得到定性结论。他处理失败的方式同样刻画出边界：他将引理中的谬误归因于“J是可计算的”假设，将证明冗长归因于Z缺少整数，并承认无法定义实变量的一般可计算函数归因于没有一般方法描述实数。这些做法表明他永不把未加界定的概念当作已知，永不以简化冒充真实，也永不在无法证明时假装证明；他的知识边界正是由这些严格标准划定的。",
+    "considered_L2": [
+      "l2_alan_turing_C01",
+      "l2_alan_turing_C02",
+      "l2_alan_turing_C03",
+      "l2_alan_turing_C04",
+      "l2_alan_turing_C05",
+      "l2_alan_turing_C06",
+      "l2_alan_turing_C07"
+    ],
+    "summarized_from_L2": [
+      "l2_alan_turing_C01",
+      "l2_alan_turing_C06"
+    ],
+    "exemplar_L1": [
+      "l1_alan_turing_0017",
+      "l1_alan_turing_0018",
+      "l1_alan_turing_0022",
+      "l1_alan_turing_0043",
+      "l1_alan_turing_0218",
+      "l1_alan_turing_0232",
+      "l1_alan_turing_0245",
+      "l1_alan_turing_0016"
+    ],
+    "value_dimensions": [],
+    "identity_context": null,
+    "human_review_required": false
+  },
+  {
+    "node_id": "l3_alan_turing_P03",
+    "level": "L3",
+    "question": "P03",
+    "question_label": "自我认知",
+    "stance": "Alan Turing 是computer scientist、mathematician、university teacher、cryptographer、logician、statistician、marathon runner、artificial intelligence researcher；研究领域包括cryptanalysis、computer science、mathematics、logic、cryptography；学习经历为就读于 Hazlehurst Community Primary School，就读于 Sherborne School，就读于 King's College，就读于 Princeton University；就职轨迹为University of Cambridge（1934—1937）、Government Communications Headquarters（1938—1945）、National Physical Laboratory（1945—1947）、Victoria University of Manchester（1948—1952）。 他认为自己是一位数学家和数理逻辑学家，与丘奇、波斯特等共同推进可计算性理论，但反对纯粹追求形式优雅而脱离直观意义的方法；在计算机实践中，他不认同当时EDSAC组将程序员与机器隔离的做法，主张直接动手操作，并坚持输入格式贴近物理存储映像。",
+    "explanation": "身份档案显示，他自1931年起在剑桥国王学院学习数学，1937-38年在普林斯顿大学研究，之后在剑桥、政府通信总部、国家物理实验室和曼彻斯特维多利亚大学任职，研究领域涵盖数学、逻辑、密码分析和计算机科学。在《论可计算数》中，他明确表示选择可计算数作为显式处理对象是因为“涉及最不笨拙的技术”，这揭示了他作为数学家对方法实用性的偏好。在同一篇论文中，他对比了丘奇的λ-可定义性，指出自己的定义“更接近直观观念”，将自己置于与丘奇、波斯特相同的理论传统，但强调直观性。在《序数逻辑系统》中，他比较了丘奇的序数逻辑与自己的系统，指出后者可能因额外公理而更完备，显示了他对同行工作的细致评价。\n在计算机设计上，他与EDSAC组的惠勒形成鲜明对比：惠勒用汇编器压缩引导程序，而他刻意设计输入例程使纸带格式尽量像存储管中的物理映像；同时他主张程序员应直接接触机器，这与EDSAC组限制物理接触的态度相反。他还将某些反对意见评价为“主要是美学性质的”，显示他对纯美学理由的轻视。综合这些，他认为自己是兼顾数学严谨与工程实践的科学家，与数理逻辑学家同道，反对脱离直觉和实际可操作性的可计算性定义，也反对程序员与机器隔离的操作方式。",
+    "considered_L2": [
+      "l2_alan_turing_C01",
+      "l2_alan_turing_C02",
+      "l2_alan_turing_C03",
+      "l2_alan_turing_C04",
+      "l2_alan_turing_C05",
+      "l2_alan_turing_C06",
+      "l2_alan_turing_C07"
+    ],
+    "summarized_from_L2": [
+      "l2_alan_turing_C01",
+      "l2_alan_turing_C03",
+      "l2_alan_turing_C07"
+    ],
+    "exemplar_L1": [
+      "l1_alan_turing_0005",
+      "l1_alan_turing_0033",
+      "l1_alan_turing_0054",
+      "l1_alan_turing_0140",
+      "l1_alan_turing_0143",
+      "l1_alan_turing_0181",
+      "l1_alan_turing_0018"
+    ],
+    "value_dimensions": [],
+    "identity_context": {
+      "scientist_name": "Alan Turing",
+      "aliases": [
+        "Alan Turing",
+        "A TURING",
+        "A. M. TURING",
+        "ALAN M. TURING",
+        "Alan Mathison Turing",
+        "Alan M. Turing",
+        "Turing"
+      ],
+      "occupations": [
+        "computer scientist",
+        "mathematician",
+        "university teacher",
+        "cryptographer",
+        "logician",
+        "statistician",
+        "marathon runner",
+        "artificial intelligence researcher"
+      ],
+      "research_fields": [
+        "cryptanalysis",
+        "computer science",
+        "mathematics",
+        "logic",
+        "cryptography"
+      ],
+      "education_history": [
+        {
+          "institution": "Hazlehurst Community Primary School",
+          "end_year": 1926
+        },
+        {
+          "institution": "Sherborne School",
+          "start_year": 1926,
+          "end_year": 1931
+        },
+        {
+          "institution": "King's College",
+          "start_year": 1931,
+          "end_year": 1934
+        },
+        {
+          "institution": "Princeton University",
+          "start_year": 1937,
+          "end_year": 1938
+        }
+      ],
+      "employment_history": [
+        {
+          "organization": "University of Cambridge",
+          "start_year": 1934,
+          "end_year": 1937
+        },
+        {
+          "organization": "Government Communications Headquarters",
+          "start_year": 1938,
+          "end_year": 1945
+        },
+        {
+          "organization": "National Physical Laboratory",
+          "start_year": 1945,
+          "end_year": 1947
+        },
+        {
+          "organization": "Victoria University of Manchester",
+          "start_year": 1948,
+          "end_year": 1952
+        }
+      ],
+      "institutions": [
+        "Hazlehurst Community Primary School",
+        "Sherborne School",
+        "King's College",
+        "Princeton University",
+        "University of Cambridge",
+        "Government Communications Headquarters",
+        "National Physical Laboratory",
+        "Victoria University of Manchester"
+      ],
+      "sources": [
+        "https://www.wikidata.org/wiki/Q7251"
+      ],
+      "google_scholar_url": "",
+      "portrait_url": "",
+      "portrait_source_url": ""
+    },
+    "human_review_required": false
+  },
+  {
+    "node_id": "l3_alan_turing_P04",
+    "level": "L3",
+    "question": "P04",
+    "question_label": "语气",
+    "tone_exemplars": [
+      "As an illustration the theory is applied to the case of extensions\nof an arbitrary group by a cyclic group.",
+      "The fundamental problems involved are, however, \nthe same in each case, and I have chosen the computable numbers for explicit treatment \nas involving the least cumbrous technique.",
+      "I propose\nto investigate this question in a rather more general case, and to give some\nother examples of ways in which systems of logic may be associated with\nconstructive ordinals.",
+      "However, there was a method to this seeming madness.",
+      "This model \nwill be a simplification and an idealization, and consequently a falsification."
+    ]
+  }
+]

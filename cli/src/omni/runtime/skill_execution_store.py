@@ -34,6 +34,7 @@ class SkillExecutionStore:
             row.error = ""
             row.trace_log = trace
             row.finished_at = _utcnow()
+            row.owner_pid = 0
             await session.commit()
 
     async def list(

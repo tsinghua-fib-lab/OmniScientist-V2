@@ -8,7 +8,7 @@ from contextlib import nullcontext
 
 import typer
 
-from omni.cli.render import console, data_table, error, info, success, warn
+from omni.cli.render import console, data_table, error, info, one_line, success, warn
 from omni.cli.state import AppState, make_agent, run_async
 from omni.memory.notebook import append_entry, read_recent
 from omni.memory.service import MemoryLayer
@@ -59,11 +59,6 @@ def help_cmd() -> None:
     render_memory_usage_help()
 
 
-def _clip(text: str, n: int = 72) -> str:
-    text = (text or "").strip().replace("\n", " ")
-    return text[:n] + "…" if len(text) > n else text
-
-
 @app.command("list")
 def list_cmd(
     ctx: typer.Context,
@@ -96,7 +91,7 @@ def list_cmd(
     with (console.pager(styles=True) if pager else nullcontext()):
         data_table(f"Recent memories (page {page})", ["id", "layer", "type", "pinned", "summary"],
                    [[r.id[:8], r.layer, r.memory_type, "📌" if r.pinned else "",
-                     _clip(r.summary)] for r in shown])
+                     one_line(r.summary, 72)] for r in shown])
     if shown:
         info(f"Showing {len(shown)} entries with truncated summaries. Use memory detail <id> or memory rm <id>.")
     if has_next:
@@ -125,9 +120,14 @@ def search_cmd(
     res = res[:limit]
     data_table(f"Recall for '{query}'", ["id", "score", "layer", "type", "summary"],
                [[m.entry.id[:8], f"{m.score:.2f}", m.entry.layer, m.entry.memory_type,
-                 _clip(m.entry.summary)] for m in res])
+                 one_line(m.entry.summary, 72)] for m in res])
     if res:
-        info("Summaries are truncated. Use memory detail <id> for full content or memory rm <id> to delete.")
+        info("Summaries are truncated. Use `/memory detail <id>` for full content or `/memory rm <id>` to delete.")
+    info(
+        "Search mirrors what the agent recalls, so it sees this session plus the "
+        "cross-session layers. `/memory list --layer M1` shows every entry, including "
+        "dialogue written by other sessions."
+    )
 
 
 @app.command("pin")
@@ -213,14 +213,14 @@ def graph_cmd(
     if row is None:
         error(f"Memory {mem_id} was not found.")
         raise typer.Exit(1)
-    console.print(f"[bold]{row.id[:8]}[/bold]  [{row.layer}/{row.memory_type}]  {_clip(row.summary, 60)}")
+    console.print(f"[bold]{row.id[:8]}[/bold]  [{row.layer}/{row.memory_type}]  {one_line(row.summary, 60)}")
     if not neigh:
         info("This memory has no graph neighbors yet. Add related memories or use memory link.")
         return
     data_table(
         f"Memory graph neighbors (depth <= {max(1, depth)})",
         ["id", "relation", "weight", "hop", "summary"],
-        [[n.id[:8], n.relation, f"{n.weight:.2f}", str(n.depth), _clip(n.summary, 56)] for n in neigh],
+        [[n.id[:8], n.relation, f"{n.weight:.2f}", str(n.depth), one_line(n.summary, 56)] for n in neigh],
     )
     info("Relations: related=semantic neighbor; same_topic=shared tag; derived_from/contradicts=manual annotations.")
 
@@ -306,7 +306,7 @@ def rm_cmd(
     if status == "pinned":
         warn(f"Memory {row.id[:8]} is pinned; add --force to delete it.")
         raise typer.Exit(1)
-    success(f"Deleted memory {row.id[:8]}: {_clip(row.summary, 48)}")
+    success(f"Deleted memory {row.id[:8]}: {one_line(row.summary, 48)}")
 
 
 @app.command("delete")

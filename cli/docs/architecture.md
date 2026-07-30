@@ -17,7 +17,7 @@ src/omni/
 │   └── commands/        #   config/skills/mcp/project/memory/task/session/profile/channel/cite +
 │                        #   status/resume/exec/replay/serve/init/doctor/update +
 │                        #   research: lit/verify/bench/hypo/claim/evidence/run/source
-├── agent/               # OmniAgent orchestrator — the single request entry point
+├── agent/               # OmniAgent orchestrator — turn execution, figure fill, revision router
 ├── core/                # Agent core
 │   ├── llm/             #   LLMClient + providers (mock, openai_compatible)
 │   ├── react_agent.py   #   bounded ReAct tool-loop
@@ -33,7 +33,7 @@ src/omni/
 ├── channels/            # Channel abstraction + CLI + optional WeChat/Feishu/DingTalk adapters
 ├── storage/             # SQLAlchemy async models + SQLite engine + file artifact store
 ├── config/              # layered TOML settings + path resolution
-└── data/                # default role.md (built-in SKILL.md packages live in the top-level skills/)
+└── data/                # packaged resources (built-in SKILL.md packages live in top-level skills/)
 ```
 
 > Built-in skill *content* lives in the top-level [`skills/`](../../skills/) directory (bundled into
@@ -47,25 +47,26 @@ src/omni/
 flowchart TD
   User["CLI / REPL / Feishu / WeChat / DingTalk / MCP"] --> Run["Create AgentRun + ack"]
   Run --> Context["Session + memory + ROM + domain packs + skill registry"]
-  Context --> Plan["IntentPlan + skill selection reasons + workflow DAG"]
+  Context --> Plan["IntentPlan + skill selection reasons"]
   Plan --> Validate["PlanValidator + recovery ladder"]
   Validate --> Input["needs_input"]
   Validate --> Contract["ExecutionContract + ToolPolicy + lifecycle hooks"]
   Contract --> Execute["PlanExecutor"]
   Execute --> Inline["inline synthesis / bounded ReAct"]
   Execute --> SkillExec["Skill Execution attempt"]
-  Execute --> DAG["WorkflowRun + stable WorkflowSteps"]
-  Execute --> Delegated["Child Task (delegated agent request)"]
   Execute --> Artifact["artifact transaction"]
+  Inline --> Tools["model tool calls: run_skill / run_workflow / spawn_subagents / update_plan"]
+  Tools --> DAG["WorkflowRun + stable WorkflowSteps"]
+  Tools --> Delegated["Child Task (delegated agent request)"]
   DAG --> Checkpoint["step result + checkpoint + partial state"]
   SkillExec --> Checkpoint
   Delegated --> Checkpoint
-  Checkpoint --> Verify["schema + artifact + provenance + presentation verification"]
-  Inline --> Verify
-  Artifact --> Verify
-  Verify --> Present["shared TurnPresentation"]
+  Checkpoint --> Settle["settlement: children · claimed events · required outputs"]
+  Inline --> Settle
+  Artifact --> Settle
+  Settle --> Present["shared TurnPresentation"]
   Present --> Render["CLI table / IM markdown-card-file fallback"]
-  Run -.-> Events["append-only planner + tool + hook + child + progress + verification + delivery events"]
+  Run -.-> Events["append-only planner + tool + hook + child + progress + task + delivery events"]
   Plan -.-> Events
   Execute -.-> Events
   Present -.-> Events
@@ -79,21 +80,27 @@ flowchart TD
 2. recall relevant memories (`memory.recall`), build a live **research brief** (open hypotheses /
    unsupported-claim count from the ROM) + intent-matched skill suggestions + the compact loaded
    skill catalog + enabled domain-pack guidance, and assemble the system prompt
-3. build and persist `IntentPlan`, `ExecutionContract`, `ExecutionPlan`, and `VerificationPlan`;
-   validate and route recoverable findings through repair, degradation, `needs_input`, or bounded
-   ReAct handoff
+3. build and persist the `IntentPlan` — route, context policy, tool policy, task contract, and
+   `VerificationPlan`; validate, then route a recoverable finding to `needs_input` or a bounded
+   ReAct handoff (only a safety finding stops the turn)
 4. build the policy-filtered tool surface: builtin tools (incl. the **research tools** `record_hypothesis` /
-   `record_claim` / `cite_source` / `add_evidence` / `search_corpus` / `log_run`) + engine/exec
-   sync skills + `find_skill` / `use_skill` / `run_skill` / `run_workflow`
-   (+ any external MCP tools)
-5. execute through `PlanExecutor`: direct synthesis, bounded ReAct, a subtask, a
-   dependency-ready workflow DAG, or an artifact transaction; lifecycle hooks and durable
-   steer/cancel controls apply at their safe boundaries
+   `record_claim` / `cite_source` / `add_evidence` / `search_corpus` / `log_run`, and the model's own
+   `update_plan` checklist) + engine/exec sync skills + `find_skill` / `run_skill` /
+   `run_workflow` (+ any external MCP tools)
+5. execute through `PlanExecutor` — a schedule registration, a capability runner, a memory write, or
+   (for everything else) the bounded ReAct turn, from which the model itself calls `run_skill`,
+   `run_workflow`, and `spawn_subagents`; lifecycle hooks and durable steer/cancel controls apply at
+   their safe boundaries
 6. persist step results/checkpoints, assistant output, artifacts, provenance, and session memory;
-   retry starts a linked child attempt while resume reuses a persisted checkpoint
-7. run verification, then render one shared `TurnPresentation` through the CLI or channel renderer
-8. append the full planner/tool/hook/task/verification/delivery chain to the run event stream and
-   drain inline tasks (one-shot CLI) or leave them for the `omni serve` daemon
+   retry starts a linked child attempt while resume reuses a persisted checkpoint. If the task
+   still owes `artifact.figure` (and on resume, only a figure and/or writing), the host may fill
+   those deliverables before a full retry
+7. settle the task against its durable record and render one shared `TurnPresentation` through the
+   CLI or channel renderer; on an outbound channel settlement stays `pending` and re-runs once the
+   delivery is durable
+8. append the full planner/tool/hook/task/delivery chain to the run event stream and
+   drain inline tasks (one-shot CLI) or leave them for `omni serve`. IM turns pass
+   `drain_tasks=False` and do not drain child skill work inline
 
 ### CLI live progress (Claude Code / Codex-style transcript)
 
@@ -104,7 +111,9 @@ arguments, result, duration), `task_start`/`task_progress`/`task_done` (subtasks
 `workflow.step.*` stages incl. nested tool calls), plus `budget`/`transcript` notices.
 
 `cli/live_display.py` (`TurnDisplay`) renders that stream as a running transcript: `◆ plan …` lines
-for intent/steps/warnings, `⚙ tool(args)` / `✓ tool · 1.2s · preview` lines with sensitive argument
+for intent/steps/warnings, a live `☐ / ▸ / ✔` checklist whenever the model calls `update_plan`
+(replaced wholesale on each call, since the model owns the steps), `⚙ tool(args)` /
+`✓ tool · 1.2s · preview` lines with sensitive argument
 values masked, `[2/5] skill ▸ start … ✓ done · 3.4s` step hierarchy, and a transient Rich status
 line (spinner · stage · elapsed · tool count) between events. Token streaming and the status line
 share the terminal cooperatively: the first streamed token stops the status line and event lines
@@ -121,21 +130,35 @@ The model remains the semantic planner. OmniScientist gives it a bounded catalog
 loaded capability contracts, descriptions, delivery modes, and output contracts. No lexical
 pre-filter chooses a subset from the user's language. The model proposes capabilities and
 deliverables without needing the full `SKILL.md`; the runtime resolves providers and validates the
-locked plan. The execution layer can then run:
+locked plan.
 
+**Multi-step work is sequenced by the model, not sealed by the planner.** There is no pre-execution
+DAG builder: `planner.plan_from_proposal` routes a multi-step proposal to the capable ReAct turn,
+which owns the ordering tools and revises them against live results. It can call:
+
+- `update_plan` to publish and keep updating a short checklist of the steps it intends to take. The
+  handler (`skills_runtime/builtin_tools/plan.py`) is deliberately inert — it normalizes the steps
+  and hands them back for display — so the next `update_plan` call *is* the repair when reality
+  disagrees with the previous list.
 - `run_skill` for one skill. `mode=auto` runs sync skills inline, waits for async skills in the
   foreground when the CLI is waiting, and returns a durable background Skill Execution when the
   caller detached or the channel should not block.
 - `run_workflow` for two or more skills, ordered dependencies, or cases where upstream results must
-  feed downstream steps. The user request is a `tasks` row, the DAG execution is a
+  feed downstream steps. The user request is a `tasks` row, the execution is a
   `workflow_runs` row, each logical node is a stable `workflow_steps` row, and every skill-backed
-  step creates its own retryable `subtasks` Skill Execution attempt.
+  step creates its own retryable `subtasks` Skill Execution attempt. A step may name a *capability*
+  instead of a provider; `runtime/workflow_plan._normalise_workflow_steps` resolves it against the
+  live `SkillRegistry` at this tool boundary, which is the last point before the work starts.
+- `spawn_subagents` (and the async `SubagentControl` surface) to delegate focused subtasks.
+
+Those durable records are a ledger of what the model did, not a contract it must follow: they are
+what makes `omni task show` show step-by-step progress and step-level retry work.
 
 The durable object graph is deliberately explicit:
 
 ```text
 Task (one user request)
-├── WorkflowRun (one validated DAG execution)
+├── WorkflowRun (one run_workflow call)
 │   ├── WorkflowStep (stable logical node)
 │   │   ├── Skill Execution attempt 1
 │   │   └── Skill Execution attempt 2 (retry_of attempt 1)
@@ -156,10 +179,13 @@ results, and recovery metadata. `task retry` creates a linked fresh attempt, whi
 continues the same child from its checkpoint. See
 [`agent-runtime-harness.md`](agent-runtime-harness.md) for the execution and recovery contract.
 
-The runtime applies deterministic guardrails after semantic planning. `SkillArbitrator` resolves a
-requested capability or deliverable from registry contracts and provider priority. It preserves a
-valid explicit provider, rejects unavailable or unsafe providers, and records selection rationale in
-the plan audit. The locked validated plan is not rewritten by the executor.
+Provider choice is deterministic wherever it happens. At plan time, `SkillArbitrator`
+(`agent/skill_arbitrator.py`) turns an explicitly requested skill or a single capability into an
+auditable `SkillSelection` — matched capabilities, contract level, and the rejected candidates and
+why — from registry contracts and provider priority. Inside a turn, a `run_workflow` step that names
+a capability instead of a provider is resolved the same way against the live registry, at the tool
+boundary (`runtime/workflow_plan.py`), because that is the earliest point where the choice is not a
+guess. The validated plan is not rewritten by the executor.
 
 ### Scheduling: one contract, durable approval, honest readiness
 
@@ -187,10 +213,10 @@ shape Codex uses):
   payload (never prose re-composed into a command), idempotently. Because the service owns consent,
   `schedule_task` is no longer a blanket-`sensitive` tool that the daemon flat-denies; it stays
   available on IM and routes to a proposal.
-- **Truthful outcome + verification (L5).** Every terminal result (created / awaiting-approval /
-  needs-input / rejected) is recorded as one `schedule.resolved` event, and the SCHEDULE plan's
-  verification *requires* that event — so a turn that claims success in prose without actually
-  scheduling fails verification instead of reporting a schedule that never existed.
+- **Truthful outcome (L5).** Every terminal result (created / awaiting-approval /
+  needs-input / rejected) is recorded as one `schedule.resolved` event, and the SCHEDULE plan lists
+  that event in `VerificationPlan.required_events` — so a turn that claims success in prose without
+  actually scheduling settles `failed` instead of reporting a schedule that never existed.
 - **Honest readiness (L6).** A schedule only fires when it is registered **and** `schedules.enabled`
   **and** a runner (`omni serve` / the home service) is live. `ScheduleCreateResult` keeps these as
   independent axes and the deterministic summary states them plainly ("no runner is active: start
@@ -204,9 +230,9 @@ abstract, draw a RAG figure, write a paper") hit that loop's iteration ceiling a
 and returned degraded — a completely different code path from the interactive orchestrator turn that
 would have decomposed it. The fix removes the second brain: a due **goal** schedule
 (`schedules.execution_mode="headless_turn"`, the default) fires a full **headless orchestrator turn**
-through the same `handle_turn` → planner → workflow → verification pipeline an interactive turn uses.
-A multi-deliverable goal is therefore decomposed into separately-budgeted, separately-verified steps
-instead of one flat loop. An explicit-skill schedule (`omni schedule add <skill>`) keeps the direct
+through the same `handle_turn` → planner → execution → settlement pipeline an interactive turn uses.
+A multi-deliverable goal is therefore decomposed by the model into separately-budgeted steps instead
+of one flat loop. An explicit-skill schedule (`omni schedule add <skill>`) keeps the direct
 durable enqueue.
 
 - **One door (`Orchestrator.run_scheduled_goal`), wired as the scheduler's `goal_runner`.** When
@@ -220,11 +246,11 @@ durable enqueue.
   via the approval-gate preauthorizer, exactly as a human "approve for this task") and
   `allow_scheduling=False` (the coordinator surface omits `schedule_task`, so a scheduled run cannot
   recursively spawn schedules).
-- **Verification-driven bounded auto-continuation (Phase 3).** If the turn finishes `degraded`/`failed`,
+- **Settlement-driven bounded auto-continuation (Phase 3).** If the turn finishes `degraded`/`failed`,
   up to `schedules.max_continuations` (default 1) follow-up turns are enqueued with a "finish only the
   missing deliverables, do not redo delivered work" directive carrying the outstanding items forward;
-  `needs_input`/`passed` are never continued (nobody is there to answer; done is done).
-- **Always accounted for.** The verified outcome — or, if the run crashes, an honest error note — is
+  `needs_input`/`succeeded` are never continued (nobody is there to answer; done is done).
+- **Always accounted for.** The settled outcome — or, if the run crashes, an honest error note — is
   delivered to the origin channel's inbox as a `scheduled_goal` `TaskNotification`; `run_scheduled_goal`
   never raises into the scheduler tick. Observability (`schedule show`/`list`) binds the schedule's
   "last run" to the turn's newest subtask so a headless run is not a black box.
@@ -236,10 +262,9 @@ durable enqueue.
 ### Reactive typed-plan control plane
 
 Omni's planner is semantic, but its output is not execution authority. The control plane turns the
-model proposal into a content-addressed typed plan, validates objective contracts, optionally
-repairs one bounded set of model-owned schema errors, and then binds approval and execution to the
-same accepted revision. It deliberately does not try to prove at planning time that a schema-valid
-choice is the user's intended semantic choice.
+model proposal into a content-addressed typed plan, validates objective contracts, and then binds
+approval and execution to the same accepted revision. It deliberately does not try to prove at
+planning time that a schema-valid choice is the user's intended semantic choice.
 
 ```mermaid
 flowchart LR
@@ -249,19 +274,14 @@ flowchart LR
   R0 --> B["Bind exact provider<br/>(source + version + contract hash)"]
   B --> X["Compile + validate detached candidate"]
   X --> V["JSON Schema + ResolverEvidence findings"]
-  V --> Q{"Repairable model-owned schema error?"}
-  Q -- "no" --> A["Accepted PlanRevision"]
-  Q -- "yes, policy permits" --> P["One bounded PlanPatch call"]
-  P --> G["Clone, recompile, revalidate,<br/>strict-improvement gate"]
-  G -- "accepted" --> A
-  G -- "rejected" --> F["Deterministic recovery / ReAct / needs_input"]
-  Q -- "repair disabled" --> F
+  V -- "clean" --> A["Accepted PlanRevision"]
+  V -- "open finding" --> F["Deterministic recovery ladder /<br/>ReAct / needs_input"]
   F --> A
   A --> H["Approval authority fingerprint,<br/>if plan mode"]
   H --> E["Plan + live contract snapshot check"]
   E --> T["ToolGateway contract + policy gate"]
-  T --> S["Provider execution + self-assessment"]
-  S --> D["Deliverable verifier"]
+  T --> S["Provider execution"]
+  S --> D["Settlement against the durable record"]
 ```
 
 #### One execution truth
@@ -270,18 +290,19 @@ flowchart LR
 plus exact `provider_bindings` and resolver-owned `resolver_evidence`. `PlanRevision`
 (`agent/plan_revision.py`) stores a detached full plan snapshot, parent hash, finding ids, and a
 deterministic diff. Its SHA-256 content hash covers provider and resolver provenance, workflow
-inputs, provider inputs, policies, verification, and the actual execution plan; the four revision
-metadata fields are excluded so the hash cannot refer to itself.
+inputs, provider inputs, policies, the verification plan, and the actual execution plan; the four
+revision metadata fields are excluded so the hash cannot refer to itself.
 
 Planning history is append-only:
 
-- `plan.revision.proposed` records the raw typed proposal.
-- `plan.revision.candidate` records compiler, resolver, deterministic-repair, model-repair, and
-  recovery candidates. Exactly one final `plan.revision.accepted` becomes authoritative.
-- `plan.revision.rejected` retains a malformed, stale, invariant-breaking, or non-improving model
+- `plan.revision.proposed` records the raw typed proposal (`source` is `planner`, or `approved` when
+  a stored plan is resumed).
+- `plan.revision.candidate` records the `compiler` candidate and, when recovery changed the plan, a
+  `recovery` candidate. Exactly one final `plan.revision.accepted` becomes authoritative.
+- `plan.revision.rejected` retains a malformed, stale, or invariant-breaking
   candidate without making it executable.
 - `plan.validated` is emitted once, after recovery selects the final accepted revision. It is not an
-  optimistic event emitted before repair.
+  optimistic event emitted before recovery.
 - `plan.execution.bound` records the final revision number and hash immediately before dispatch.
 
 The task's `plan_json` is the current full authoritative projection. Revision events retain a full
@@ -333,7 +354,8 @@ a re-plan/re-submit instruction. No queued operation silently acquires the new i
 an old approval. An explicit user `task retry` or `task resume` is a new reauthorization to the
 currently resolved provider: it preserves the immutable authority root and appends a
 content-addressed, hash-linked renewal. Retry creates a linked fresh execution attempt; resume
-continues the persisted attempt/checkpoint in place. Dispatch validates the root and every renewal
+continues the persisted attempt/checkpoint in place and may host-fill a remaining figure or
+writing deliverable before falling back to that checkpoint. Dispatch validates the root and every renewal
 link, resolves the latest applicable provider for the exact consumer, and requires both the logical
 workflow step and execution row to equal that renewal head before provider code can run.
 An explicit `skill_source` is authority rather than a lookup preference: planning, contract
@@ -346,18 +368,20 @@ No validator, resolver, or recovery rung is allowed to mutate an already-recorde
 on `deep_clone_plan(...)`; a successful change creates a child revision, and an unsuccessful change
 is only an audit event.
 
-#### Three judges, each at the boundary where it has evidence
+#### Two judges, each at the boundary where it has evidence
 
-The host no longer contains a central semantic constraint interpreter. Schema-valid preferences
-such as `figure_kind=generic` versus `figure_kind=rag` are not objectively decidable from a generic
-planning layer; adding host phrase detectors merely moves provider knowledge into an incomplete
-enumeration. Omni instead separates three kinds of judgement:
+The host contains no central semantic constraint interpreter, and no deliverable grader. Schema-valid
+preferences such as `figure_kind=generic` versus `figure_kind=rag` are not objectively decidable from
+a generic planning layer; adding host phrase detectors merely moves provider knowledge into an
+incomplete enumeration. Whether the *produced* output is any good is likewise not the host's call:
+the model can see the tool results, and re-grading them from outside only produced a verdict that
+could disagree with the answer the user was already shown. Omni therefore judges only what it has
+objective evidence for:
 
 | Question | Authority | Failure posture |
 |---|---|---|
 | Are provider arguments objectively legal? | Exact provider JSON Schema | Fail closed before execution |
 | Is a resolver-owned value grounded? | `ResolverEvidence` derived from that exact schema | Fail closed until matching evidence exists |
-| Does the produced deliverable satisfy its domain contract? | Provider self-assessment + task verifier | Missing/failed fails; unknown/degraded is explicit |
 
 **Objective provider schema.** The shortlisted exact provider's complete input schema is visible to
 the planner, including nested properties, enums, descriptions, and `x-omni` selection guidance.
@@ -374,51 +398,73 @@ belongs to a named paper. Evidence is rematerialized at validation and at the fi
 stale, mismatched, or absent evidence produces a blocking `grounded_binding_unverified` finding and
 cannot be repaired by the model.
 
-**Provider quality.** A provider may declare `metadata.helixforge.quality_contract` with required
-checks and assessment/retry policy. At execution it emits
-`omni.deliverable-assessment/v1`: effective inputs, per-criterion status, evidence references,
-feedback, and retryability. The host overwrites its identity fields from the sealed workflow step,
-binding the assessment to the exact source, version, provider contract hash, step, and deliverable;
-a provider cannot self-assert another provider's authority. The generic verifier matches those
-identities and aggregates the declared checks without knowing what “RAG”, “landscape”, or “strict”
-means.
+#### Settlement: bookkeeping, not grading
 
-Required quality has explicit failure semantics:
+`runtime/settlement.py` replaces the former host-side deliverable verifier. `settlement_for(store,
+task_id)` reads rows that already exist and answers four questions no single execution can answer
+for itself; it never reads the answer text or forms an opinion about quality.
 
-- a missing required assessment or criterion fails verification;
-- `failed` fails verification;
-- `unknown` and `degraded` produce a degraded verdict and remain visible in evidence;
-- `passed` counts only when the assessment identity matches the task contract;
-- no host fallback may manufacture a domain pass when a provider cannot evaluate a check.
+- **Are the children done?** A turn that submitted subtasks or workflow runs still in flight returns
+  `pending`, and the caller leaves the task running rather than publishing a status it has not
+  earned. An outbound channel also stays `pending` until a `presentation.sent|degraded|failed` event
+  shows the message actually left; CLI and REPL write to stdout inside the turn and record no send.
+- **What did the children come back with?** Failed, cancelled, interrupted, or unaccounted-for
+  children settle `failed`; `degraded` children settle `degraded`. `aggregate_outcome_status` takes
+  the strongest outcome, so one failed step cannot be averaged into a green run. An empty
+  literature funnel (`n_kept=0`) that a later retrieve on this task already superseded is leftover
+  churn — the same Codex rule as a retried tool — and does not paint the parent. Lost or failed
+  children still win.
+- **Did the claimed side effect happen?** `VerificationPlan.required_events` names the durable trace
+  a claim must leave. Over IM and in headless runs the user sees prose, not tool calls, so a turn
+  that says it created a schedule must have left a `schedule.resolved` event. A required event with
+  no matching row is an *unfounded claim* and settles `failed`.
+- **Are the named scientific outputs on this task?** `VerificationPlan.required_outputs` names
+  contract deliverables (`artifact.figure`, a manuscript, slides). After the turn has produced its
+  end event, `remaining_deliverables` looks at artifacts already on *this* task. A missing contract
+  output settles `degraded` (`undelivered_outputs`). A sidecar `.dot` or `.json` does not satisfy
+  `artifact.figure`; a PNG/SVG on a sibling task does not either. This is presence bookkeeping, not
+  quality grading.
 
-#### One bounded objective repair
+A budget-bounded stop reported on `execution.finished` / `react.finished` settles `degraded`.
 
-Healthy plans add zero model calls: the initial planner sees the selected contract and binds inputs
-in its normal call. Local compilation and resolver validation own offline, mock, and CI behavior.
+**Only the turn settles the turn, and only once.** The unfounded-claim check reads an absent row, and
+absence is ambiguous: a required event can be missing because the turn skipped it or because the turn
+has not got there yet. Three rules keep the second from being read as the first (incident `949be04f`,
+where a background Skill finishing mid-turn published `task.failed — the turn claimed work that left
+no record: react.finished` on a run that then completed normally):
 
-If an open finding is an objective JSON Schema error on a model-owned provider input, policy may
-permit exactly one `submit_plan_patch` call. The prompt contains the user request, minimal findings,
-current values, and sanitized complete schemas for only the exact selected providers. It does not
-receive the full plan, compiled caches, policy/approval state, secrets, or unrelated providers. The
-host derives the JSON-pointer allowlist from current findings; the model cannot add paths or grant
-itself ownership. Applying a patch:
+- **The reader declares which it is.** `settlement_for(..., turn_in_flight=True)` is a caller saying
+  "I am not the turn"; it gets `pending` instead of a verdict on a record still being written. A turn
+  settling itself has finished producing evidence and leaves the flag false.
+- **A child's completion is an observation, not a verdict.** `refresh_from_executions` skips a task
+  whose turn is still in flight — the durable execution epoch runs from `record_plan` to a turn-end
+  event — so a child can never settle a live parent. This is Codex `trigger_turn: false` applied to
+  Skill executions and workflow runs, matching what subagents already do. A drain arriving after the
+  turn, or a task whose work was enqueued with no turn at all, still settles here.
+- **A terminal status is reached once.** `_finish_task_unchecked` refuses to overwrite one terminal
+  status with a different one; moving off a terminal status goes through `reopen_task_for_recovery`,
+  so a correction is recorded rather than silently replacing what the user was already shown. This is
+  also what confines sealing steering and stamping `finished_at` to a decision that is actually final.
 
-1. rejects stale base hashes, unknown/duplicate findings, duplicate paths, unsupported operations,
-   resolver/host/runtime fields, and policy/identity/DAG/budget changes;
-2. applies operations to a clone and clears derived provider-input caches;
-3. rebinds the exact provider and reruns structural schema plus resolver validation;
-4. requires every targeted finding to disappear, no safety/blocking finding to remain, all
-   deliverables and step identities to survive, and the finding score to improve strictly;
-5. accepts a child revision or records `plan.revision.rejected` and uses normal recovery.
+`VerificationPlan` (`agent/intent_plan.py`) is what remains of the old eight-field acceptance
+contract, and it now has exactly two fields: `required_events` (enforced as unfounded claims, as
+above) and `required_outputs` (enforced as presence debts after the turn ends; also rendered in
+plan summaries).
 
-A schema-valid semantic preference never triggers this repair. The budget is fixed at one and the
-path is skipped for `mock`, `omni-mock`, offline, and scripted providers.
+`TaskRecorder.settle_task` calls `settlement_for` and commits
+`aggregate_outcome_status(proposed_status, settled.status)` — a `pending` settlement leaves the task
+`running` instead, and `needs_input` is a protected suspend that is never ranked on the
+success/degraded/failed axis. `OmniAgent._apply_settlement` copies the settled status onto
+`TurnResult.settlement_status` and, when the record contradicts a non-error answer, rewrites the
+turn to `kind="error"` with `terminated_reason="settlement_failed"` plus a warning naming what was
+missing (the unfounded claim, or how many background tasks never completed). The durable outcome is
+the `task.<status>` event and the task row status — there are no `verification.*` events. Terminal
+statuses are `succeeded`, `degraded`, `failed`, `needs_input`, `cancelled`, and `interrupted`.
 
-After execution, a failed/degraded provider assessment may request one quality retry. Admission is
-also host-controlled: the provider contract must opt in, the assessment must be retryable, the
-concrete provider must be replay-safe, and a side-effecting provider must supply an idempotency key.
-The persisted attempt count enforces `max_attempts=1` across process restarts. Feedback is passed only
-through the provider-declared feedback field; otherwise the result is verified as-is.
+Skill engines may still emit a `deliverable_assessment` object in their own output (the
+`scientific-figure`, `paper-review`, and `research-pptx` engines do, and so does native final
+synthesis). That is provider-local self-reporting for the *model* to read. There is no declared
+`quality_contract` for the host to match it against, and no host-driven quality retry.
 
 #### Execution gate and replay authority
 
@@ -463,7 +509,7 @@ not a provisional success emitted before output validation. Automatic retry auth
 Non-replay-safe calls get no automatic execution retry; replay-safe transient failures use the
 bounded retry policy.
 
-`run_skill` and `use_skill` are routing transports, not authority boundaries. The wrapper and its
+`run_skill` is a routing transport, not an authority boundary. The wrapper and its
 resolved concrete target must both pass allow/block policy; one logical call consumes budget once,
 while the concrete skill receives the owner hook, approval, resource lock, and schema checks. The
 model-facing trace still shows one lifecycle. Native final synthesis is also a typed gateway
@@ -482,16 +528,16 @@ an internal convenience method. Pre-execution rejection markers carry a module-p
 constructing the public compatibility mapping, or returning a dictionary that merely spells
 `approval_required` or `policy_violation`, conveys no rejection authority. Such values remain
 post-execution provider output and must pass the output contract. A sealed rejection from a nested
-concrete gateway retains its provenance through `run_skill`/`use_skill`.
+concrete gateway retains its provenance through `run_skill`.
 
 #### Codex-style interaction and low-noise presentation
 
-Normal mode presents the stable user lifecycle — planning, executing, verifying, terminal result —
-instead of exposing internal rung numbers or transient findings as failures. A successfully repaired
-objective input error is silent or a neutral progress replacement; rejected revisions and complete
+Normal mode presents the stable user lifecycle — planning, executing, terminal result — instead of
+exposing internal rung numbers or transient findings as failures. A finding a recovery rung absorbed
+is silent or a neutral progress replacement; rejected revisions and complete
 finding detail remain available in `--verbose`, `/verbose verbose`, task JSON, and the event stream.
 `needs_input` is a resumable pause with one actionable question, never a
-`verification_failed`-looking terminal error.
+`settlement_failed`-looking terminal error.
 
 The busy composer has an explicit destination contract:
 
@@ -528,50 +574,30 @@ The busy composer has an explicit destination contract:
 #### Operational controls and compatibility
 
 Objective validation and resolver evidence are always enforced; neither has an observe/legacy
-rollout mode. The remaining planner repair control is deliberately narrow:
-
-```toml
-[planner]
-model_repair = "auto"          # off | allowlist | auto
-model_repair_capabilities = ["artifact.figure"]  # consulted only in allowlist mode
-```
-
-- `off` removes the optional repair call while JSON Schema and resolver gates remain active.
-- `allowlist` permits one objective-schema repair for named capabilities.
-- `auto` permits one objective-schema repair for trusted exact full-contract providers.
-- No setting can make resolver-owned facts model-repairable or authorize a semantic detector.
+rollout mode, and neither is configurable.
 
 The compatibility boundary is one-way. Persisted v1 plans from the retired semantic-binding
 implementation may retain
 `requested_constraints` and `binding_records` keys so historical hashes and audit views remain
-stable. Deserialization preserves them as opaque read-only data; planning, validation, repair,
+stable. Deserialization preserves them as opaque read-only data; planning, validation,
 approval, recovery, and execution do not consume them. New v2 plans use `provider_bindings` and
 `resolver_evidence` and do not write the retired keys.
 
 The focused offline acceptance corpus is
-`cli/tests/eval/test_objective_provider_quality_offline_corpus.py`. It must exercise the full
-`ModelIntentPlanner -> IntentPlanner -> PlanPipeline` path and prove:
+`cli/tests/eval/test_objective_provider_quality_offline_corpus.py`. It runs `PlanValidator` against
+a registry-backed plan and proves:
 
-- exact shortlisted schemas are visible to the planner and exact source-qualified providers are
-  sealed into accepted, persisted, and execution-bound revisions;
-- nested type/enum/required/format/additional-property errors fail before provider execution and
-  expose patchable JSON Pointers without exposing unrelated contracts or policy state;
-- healthy plans make zero repair calls, an eligible objective error makes at most one, and
-  stale, resolver-owned, identity-changing, or non-improving patches are rejected and audited;
-- resolver evidence is exact-provider and exact-field scoped, survives accepted revisions, and
-  is rechecked at final execution binding; a plausible but ungrounded identifier never executes;
-- provider assessments are matched to their deliverable, step, provider binding, and contract
-  hash; missing/failed requirements fail while unknown/degraded requirements cannot become pass;
-- a quality retry occurs at most once and only for a retryable assessment from a replay-safe
-  provider, with an idempotency key whenever side effects may have committed;
-- legacy persisted fields remain readable but cannot create evidence, patch authority, a
-  provider binding, or a passing verification result;
-- accepted, persisted, approval-bound, and execution-bound plan hashes remain identical, and
-  non-replay-safe operations are never duplicated.
+- a schema-valid step validates clean, while a bad enum value or a misspelled property is a
+  `provider_schema_invalid` finding before any provider runs;
+- a schema-valid semantic *preference* (`figure_kind=generic` for a description that sounds like
+  RAG) is not a host execution blocker — the provider resolves its effective kind at execution;
+- every step of a realistic multi-provider plan — including the native synthesis step, which names
+  no skill — is sealed offline to one exact `(provider_name, provider_source,
+  provider_contract_hash)`, and `plan.provider_bindings` matches the step bindings one-for-one;
+- retired semantic-binding findings never reappear.
 
 Provider-authority, gateway, steering, persistence, and changed-code coverage gates remain
-independent. They are not counted as provider-quality accuracy and cannot be used to make an empty
-quality corpus pass.
+independent.
 
 ### Plan validation and the recovery ladder
 
@@ -581,25 +607,30 @@ structured `PlanFinding`s with a `severity` of `safety`, `blocking`, or `degrade
 (`agent/plan_recovery.py`) then *routes* to the next executable state, so a non-safety rejection is
 never a dead end (no more `plan_validation_failed` for recoverable causes) — matching how Claude
 Code / Codex / OpenClaw treat a skill failure as an observation to adapt to, not a terminal error.
-This ladder is the deterministic floor after objective schema/resolver validation and the optional
-one-patch phase; a repair that changes the plan is always sealed as a new accepted revision:
+This ladder is the deterministic floor after objective schema/resolver validation, and it is the
+only recovery path — nothing asks the model to patch a rejected plan before execution. It is
+deliberately short:
 
 - **Rung 0 — safety hard stop.** Over-privilege policy findings (a tool both allowed and blocked,
   negative limits) stop the turn and are never swallowed by degradation.
-- **Rung 1 — grounded repair (single-shot).** An identifier-bound capability
-  (`paper.fetch.arxiv`) given a *title* instead of an id is rerouted to a producer capability that
-  legitimately accepts free text (`literature.search`, via the data-driven
-  `capabilities.CAPABILITY_FALLBACK_PRODUCERS` map). The id is never invented; hits come from a real
-  search. The repaired plan is re-validated exactly once (`allow_repair=False`) to prevent loops.
-- **Rung 2 — degrade / prune.** A degradable step (a `support` role or `continue_with_partial`
-  skill, or an `optional`/non-required step) with unsatisfiable input is pruned and its dependents
-  are detached, so the remaining deliverables (e.g. the architecture figure) still run — the same
-  partial-completion policy the workflow runtime already applies at execution time.
 - **Rung 3 — needs_input.** When the only blocker is a single user-suppliable field (an arXiv
-  id/URL), the turn asks a concrete follow-up instead of failing.
+  id/URL), the turn asks a concrete follow-up instead of failing. Provider-owned contract failures
+  are never treated as user-suppliable.
 - **Rung 4 — ReAct handoff (the floor).** Any other recoverable case is handed to the capable,
-  safety-bounded assistant (the same default agent), with the findings injected as context. The
-  handoff stays under the normal `tool_policy` — no self-granted tools.
+  safety-bounded assistant (the same default agent), with the findings injected as context. A
+  step-input finding is rewritten into "look this value up — do not ask the user, do not invent it",
+  and retained provider obligations are restated so the floor calls `run_workflow`/`run_skill` with
+  the authorised providers rather than swapping in its own. The handoff stays under the normal
+  `tool_policy` — no self-granted tools.
+
+The numbering has a gap because rungs 1 and 2 are gone. They rewrote a rejected plan in place —
+reroute an unbindable identifier, swap a step to a producer capability, prune unsatisfiable steps
+and detach their dependents — and all three existed only to patch a DAG sealed before any tool ran.
+The model now sequences multi-step work itself against live results, so there is no pre-sealed DAG
+left to patch and a plan that will not execute goes straight to the floor that can look things up
+and re-sequence. One case skips the ladder's ordering: a `needs_input` plan whose text refers to
+prior work is downgraded to a tool-enabled lookup turn (`4_react_lookup`) rather than asking the
+user to re-clarify something the agent already produced.
 
 Each decision is recorded as a `plan.recovery` run event (`action`, `rung`, `findings`, `notes`),
 and the recovery notes are surfaced through `degraded_warnings` in every channel.
@@ -632,13 +663,15 @@ rather than flattening it away.
 - **The revision tool grounds, it does not route.** `revise_artifact` receives a normalized edit
   specification from the planner and resolves an exact artifact element purely to ground the DOT
   patch; it never consults an intent word list to decide minor/major. When it cannot ground a target it returns an *observation*
-  (no persisted `artifact_revision_failed`); `_apply_artifact_revision` then auto-escalates to a full
-  source-preserving redraw (`_maybe_route_attached_major_revision(force=True)`). Only if neither
+  (no persisted `artifact_revision_failed`); `_apply_artifact_revision` then auto-escalates through
+  `ArtifactRevisionRouter` to a full source-preserving redraw (`_route_major`). Only if neither
   applies does the turn fall through to normal planning / ReAct — never a dead end, never a double
-  message.
+  message. A host major revision always sends `revision_mode=major` plus `revision_constraints`; if
+  the figure engine sees constraints without a mode it treats the call as major.
 - **Workflow materialization and task refs are not semantic routers.** Ordered steps come from the
-  semantic proposal's `workflow_steps`; `WorkflowPlanBuilder` only resolves providers and builds the
-  DAG. `runtime/taskref` parses *explicit* signals only: `is_task_lookup` is a command
+  model's own `run_workflow` call; `runtime/workflow_plan` only normalizes them, resolves any
+  capability-named step against the live registry, and validates inputs.
+  `runtime/taskref` parses *explicit* signals only: `is_task_lookup` is a command
   alias that rewrites a bare status lookup to `/task show`, while `is_task_reference` merely enriches
   the model's context with a referenced task's output — the model still owns the turn.
 - **Runtime vs. test are separated.** Offline *testability* lives entirely in the test domain: the
@@ -647,30 +680,30 @@ rather than flattening it away.
   artifact contract modules are pure runtime (contracts + parsing + structured grounding);
   they carry no offline-degradation "brain" and no test scaffolding.
 
-### Single-pass healthy planning + objective contract repair
+### Single-pass healthy planning
 
 The healthy planning path is a **single model pass** (Codex-aligned): the planner binds each step's
 inputs itself, exactly as Codex/Claude Code let the model fill tool arguments in one decision stream
-rather than running a separate parameter-binding round-trip. There is no per-step binding LLM call.
-Three general mechanisms handle the failure classes a single pass can produce:
+rather than running a separate parameter-binding round-trip. There is no per-step binding LLM call,
+and no second model call to repair the plan before it runs. Three general mechanisms handle the
+failure classes a single pass can produce:
 
 - **Exact schema in context.** The semantic planner sees the shortlisted provider's complete input
   contract and chooses schema-valid values. The objective validator catches invalid values without
   trying to infer what a valid enum ought to mean.
 - **Provider-local semantic authority.** A portable provider can normalize or resolve its own
-  domain choice at execution and report the effective input in its assessment. The
+  domain choice at execution and report the effective input in its own result. The
   `scientific-figure` engine, for example, resolves its creation kind locally; Omni does not duplicate
-  that decision in a central plan-time template detector.
-- **Deliverable acceptance.** The provider's declared `quality_contract` and assessment judge the
-  produced output, while the verifier enforces identity and status generically. An admitted
-  replay-safe quality retry can use provider feedback once.
+  that decision in a central plan-time template detector. When the caller supplies
+  `source_artifact_dot` (or a task-owned unrendered `.dot`) *without* `revision_mode`, the engine
+  renders that graph instead of restamping the `_rag_dot` template.
 - **`missing_inputs` reconciliation (schema-driven).** A stale gap the model lists for a field it
   already bound is dropped deterministically (see below), so it cannot veto an executable plan.
 
 Genuinely missing required fields are still caught by the validator's step-input contract and handled
-by the recovery ladder (Rung 1 grounded repair before Rung 3 ask). An objective, model-owned schema
-finding may trigger the single bounded `PlanPatch` call described above, but a valid plan never pays
-for it. The result is one authoritative workflow DAG.
+by the recovery ladder: one user-suppliable field becomes a question, anything else goes to the ReAct
+floor to be looked up. Once the turn is running, the model corrects its own course by calling
+`update_plan` again and reordering the work it has left.
 
 ### Ask-last planning (a discoverable value is never a question)
 
@@ -698,9 +731,10 @@ only routing signal and demotes `missing_inputs` to advisory metadata:
 - **Ask-last routing.** `planner.plan_from_proposal` short-circuits to `needs_input` only when the
   model *explicitly* chose it (`intent_type == "needs_input"`) or when a gap remains with **no
   workflow to run** (`missing_inputs and not workflow_steps`). With steps present, the plan is built
-  and handed to validation + the recovery ladder, where **repair precedes ask**: a genuine gap becomes
-  a `step_input_contract` finding that Rung 1 reroutes to `literature.search`; Rung 3 `needs_input`
-  is reached only when the value is genuinely un-groundable.
+  and handed to validation + the recovery ladder, where **looking up precedes asking**: a genuine gap
+  becomes a `step_input_contract` finding, and Rung 3 `needs_input` is reached only when that one
+  field is the sole blocker. Anything else falls to the ReAct floor, which is told to resolve the
+  value with tools rather than ask.
 - **Observable.** Any reconciled-away gaps are recorded under `binding_audit.dropped_missing_inputs`
   on the `plan.model.proposed` run event, so the reconciliation is auditable from the event stream
   instead of reverse-engineered from the DB.
@@ -722,6 +756,33 @@ so the planner is given the full context it already retrieved and biased toward 
   with the recent-activity digest surfaced, so the agent looks the referent up before asking. Requests
   with no resolvable referent still ask (no regression).
 
+### Capability-preserving direct answers (never strip the tool the prompt asks for)
+
+`direct_answer` is an *eager-answer bias*, not a zero-tool turn. It once carried
+`ToolPolicy(allowed_tools=[], max_tool_calls=0, max_iterations=1)`, so whenever the model
+planner classified a tool-needing request as a short answer — a self-knowledge question
+("what is your storage architecture"), a file read, a task/corpus lookup — the ReAct turn started with an empty
+catalog. The self-knowledge case failed loudest: the system prompt still said "use
+`docs_search` first", so the model truthfully refused — it was told to use a tool that was
+not there. `build_assistant_plan` now gives `direct_answer` the same read-only floor as
+`react_fallback` (`allowed_tools=None`, `blocked_tools=ASSISTANT_BLOCKED_TOOLS`,
+`final_reserve_enabled=True`); only `execution_mode="direct"` marks it as the fast path.
+Trivial turns still answer in one shot because the model simply does not call a tool — the
+same choice Codex, Claude Code, and OpenClaw make by keeping tools available and letting the
+model decide, rather than clearing the catalog and then demanding a specific tool.
+
+This is a per-turn **tool-visibility** change only; it does not touch skill arbitration.
+"Built-in skills outrank imported ones" stays enforced by `_SOURCE_RANK` in the
+`SkillRegistry`, which every resolution path goes through, and `docs_search` is a host
+builtin *tool* (not a skill), so it never participates in that ranking.
+
+**Prompt-honesty invariant.** The `[About OmniScientist]` block is rendered from the turn's
+actual catalog (`render_self_knowledge(tools)`): with `docs_search` present it asks the model
+to ground in the bundled docs and name them; without it (a genuinely tool-less turn such as
+`memory_update`) it asks the model to answer from what it already knows and flag the
+unverified parts — never naming an absent tool and never forcing a refusal. The rule is
+general: never pair "no tools" with "you must use tool X".
+
 ### The universal executor ladder (writing as a deliverable)
 
 Writing is a deliverable, not a mandatory skill implementation. When no dedicated writing provider
@@ -740,22 +801,49 @@ is present but its rung fails (timeout, provider error, stub-length output), the
 in `synthesis_error` so a degraded draft is diagnosable; running with no model at all is the
 expected offline path and is not an error.
 
-### Provider-owned deliverable acceptance
+A written survey that is only `literature.search` plus `synthesis.final` stays on this host
+closer (the same carve-out `_qa_figure_pair` already has for answer-plus-figure). Codex keeps
+the produce path on the critical path (`apply_patch` in the current workspace). Omni's produce
+path for a survey is retrieval plus native synthesis onto **this** `task_id`. Sibling-task
+files inform a footnote; they do not settle the contract. ReAct may still sequence richer
+turns (figure + draft, ideation, third-party skills). A first lookup-only batch is orientation
+and is steered; a second lookup-only batch while a manuscript is owed is the empty loop. An
+empty literature funnel is not this-turn research: the host lifts `queries` / `n_kept` onto
+the `run_skill` observation (Codex `function_call_output`) and does not treat `n_kept=0` as
+evidence that the manuscript can be written.
 
-Procedural verification ("an artifact row exists") cannot see a placeholder shipped as a finished
-deliverable. `WorkflowPlanBuilder` therefore copies each selected provider's `quality_contract`
-checks into the structured task contract and binds them to the step's exact
-`provider_binding_id`/contract hash. Providers emit typed assessments after producing output; the
-host binds their identity from the sealed step, and `VerificationPlan.deliverable_checks` aggregates
-the declared criteria without domain-specific branches.
+### Provider-reported deliverable quality
 
-For example, the scientific-figure provider owns `figure_matches_instruction` and native synthesis
-owns `draft_content_present`. These are provider vocabulary, not special cases in the verifier.
-Missing required assessment/checks and `failed` criteria fail verification. `unknown` and
-`degraded` remain honest degraded outcomes. Only an identity-matched `passed` criterion satisfies
-the task contract. Those results flow into the ordinary failed/degraded lifecycle and the
-channel-visible verification summary, so acceptance measures the delivered artifact rather than
-merely the presence of a completed row.
+A provider knows things about its own output that the host cannot see from a completed row — that a
+figure matches the instruction, that a draft has real content rather than a skeleton. Engines
+therefore include a `deliverable_assessment` object in their result (`scientific-figure`,
+`paper-review`, `research-pptx`, and native final synthesis all do), alongside the honest lifecycle
+`status` that already downgrades a placeholder to `partial` → workflow step `degraded`.
+
+That assessment is self-reporting the **model** reads as one more tool observation. The host does not
+match it against a declared contract, does not aggregate its criteria into a verdict, and does not
+retry a step because of it — deciding whether the produced deliverable is good enough belongs to the
+turn that can see it.
+
+The figure engine also has a narrow **topology gate** (`_topology_gate`): if the instruction names a
+perceive/act/reflect loop (or equivalent loop-engineering wording) and the call has no authored
+Graphviz source, the engine does not stamp a linear RAG/generic template. It synthesizes a weaker
+control-loop schematic from the named stages (`status=partial`, `outcome.code=instruction_graph`)
+and still emits DOT/SVG/PNG. Authored DOT is rendered as-is. That vocabulary is an accident check,
+not a general "figure matches the instruction" grader. First-time creation is natural-language
+`input` only; `source_artifact_dot` is for an exact graph or a revision. Do not shell out to
+Graphviz after the engine returns.
+
+### Host figure fill
+
+When ReAct stops still owing `artifact.figure`, `turn_execution` calls `host_fill_figure`
+(`agent/figure_runner.py`) on *this* task only. A PNG already on the task skips the fill; a
+sibling-task file does not count. If the task owns an unrendered `.dot` (no sibling PNG/SVG), host
+fill passes it as `source_artifact_path` so the engine renders that graph.
+
+Resume of a retryable terminal status can do the same via
+`task_recovery._fill_remaining_deliverables` when the leftover debts are only a figure and/or
+writing. A leftover PPTX or poster is not host-fillable; that resume returns to a full retry.
 
 Workflow execution is durable, bounded, and composable:
 
@@ -791,15 +879,51 @@ Workflow execution is durable, bounded, and composable:
   make one independently timed no-tool salvage pass and return either a degraded
   `status: "partial"` contract with `warning`/`partial_outputs`, or a recoverable error contract
   when no useful partial answer can be formed
-- the interactive coordinator remains capped at 12 executed tools by default. Prompt skills,
-  Python engines, CLI skills, and specialist subagents have separate owner-controlled ceilings;
-  reviewer revisions share the original coordinator/subagent tool envelope instead of resetting it
+- the interactive coordinator is progress-driven by default: global `react.max_iterations=-1` and
+  `react.max_tool_calls=-1` mean no count ceiling. Positive values opt into hard coordinator
+  ceilings, while explicit zero remains an exact zero-work policy. A Plan/Skill value remains scoped and exact — including zero —
+  so disabling a global guard never widens a declared contract. Prompt
+  skills, workflows, and specialist subagents retain their separate owner-controlled envelopes
 - workflows add an aggregate step/tool/time envelope across their Skill Executions. A skill manifest may
   request a smaller allowance but cannot raise its trusted skill ceiling, and the workflow deadline is
   propagated into Python, CLI, and prompt execution
-- optional `cost.max_total_tokens` and `cost.max_cost_usd` limits are disabled at zero. When enabled,
+- optional `cost.max_total_tokens` and `cost.max_cost_usd` limits are disabled at zero (a negative
+  token value is also normalized to disabled). Accounting remains active. When a positive limit is enabled,
   provider-reported ReAct usage stops further tool admission, while workflow aggregation prevents a
   later prompt step from starting after the aggregate limit is reached
+- python-engine skills (`research-ideation`, `research-pptx`, …) go through a host-side
+  `UsageTrackingLLM` wrapper for the duration of `execute_skill`. Every real `chat` /
+  `chat_with_tools` call is aggregated into one `cost.usage` event (`component=engine:<name>`).
+  When the provider omits `usage`, the wrapper estimates from the request text and still
+  records the event as `estimated`. Throttled `usage` progress snapshots update the live
+  status line during the engine run. Portable adapters also forward provider `usage` in the
+  OpenAI-shaped response; they do not import CLI cost internals
+- `cost.warn_total_tokens` (default 200k) and `cost.warn_cost_usd` (default $0.50) emit a
+  one-time live notice and keep running — long-horizon research is not hard-stopped by default.
+  The live status line and the turn completion line show cumulative tokens and estimated USD
+- `memory.tool_observation_max_chars` (default 8000) projects the latest tool result into the
+  ReAct transcript. The full payload stays on the task event. Microcompact still trims *older*
+  observations; this cap is what stops a single huge skill dump from being re-billed every
+  later iteration
+
+### A budget stop still writes an answer
+
+Hitting a ceiling means "stop spending", not "stop talking". When the ReAct loop reaches
+`max_total_tokens`, `max_cost`, the iteration limit, the tool-call limit, the wall-clock/stall
+watchdogs, or a no-progress streak, `_terminate_or_synthesize` does not hand back a stub: for the
+token/cost stops it first microcompacts the bulkiest old tool observations (the stop *is* the
+context being too expensive), then makes one final call with tools disabled
+(`tool_choice="none"`) over the results it already has and returns that as the answer. The salvage
+stub survives only as the fallback for when that last call itself times out or comes back empty.
+
+Such a turn is labelled honestly. Its `terminated_reason` carries a `synthesized_` prefix
+(`synthesized_max_total_tokens`, `synthesized_max_iterations`, `synthesized_max_tool_calls`, …), and
+`core/termination.py` strips the prefix and classifies every one of those base reasons as a
+*bounded* stop — so the turn settles `degraded`, never `succeeded`. `TERMINATION_LABELS` and
+`termination_next_action` give each one a user-safe label and the single action that lifts it
+("re-run with a larger token budget"), because a bounded stop reported without that reads as "try
+again" under the same ceiling. Rejected overflow tool calls still receive a structured result first,
+so the transcript stays well-formed for the final call.
 
 ### Multi-agent delegation and async subagents (Codex AgentControl parity)
 
@@ -918,9 +1042,28 @@ A single SQLite file per workspace (`<workspace>/sessions.sqlite3`, WAL mode) ho
 tables: `sessions`, `conversation_messages`, `tasks`, `task_events`, `workflow_runs`,
 `workflow_steps`, `workflow_checkpoints`, `subtasks` (Skill Execution attempts),
 `memory_entries`, `artifacts`, plus the **Research Object Model** (`sources`, `source_chunks`,
-`hypotheses`, `claims`, `evidence`, `experiment_runs` — see below). Artifact *bytes* live on the filesystem under
-`<workspace>/artifacts/<kind>/<id>.<ext>` and are addressed by `artifact://<id>` URIs.
-No MySQL / Redis / MinIO / ChromaDB.
+`hypotheses`, `claims`, `evidence`, `experiment_runs` — see below). Artifact bytes always have a
+canonical `artifact://<id>` URI. In an untrusted or taskless execution they live in the durable
+`<workspace>/artifacts/<kind>/` store. A recorded task launched from a trusted workspace publishes
+directly into one task-scoped user directory instead:
+
+```text
+<trusted-output-root>/<collection>/<task-title>_<task8>/
+├── <semantic-name>-<task8>-<artifact8>.md
+├── <semantic-name>-<task8>-<artifact8>.svg
+├── <semantic-name>-<task8>-<artifact8>.json
+└── _omni-manifest.json
+```
+
+The first published artifact chooses the broad collection (`reports`, `figures`, `presentations`,
+`reviews`, `notebooks`, `datasets`, or `outputs`); every later format and producer for that task
+reuses the persisted scope. The title comes from `TaskORM`, so routing costs no model call. A live
+`ExecContext` facade supplies missing task/session/workflow ownership to every skill store call, and
+the filesystem tool sends only *new bare output names* through the same scope. Explicit paths and
+edits of existing source files remain in place. Scope metadata stores the trusted root used at
+publication time, allowing historical URIs to resolve after a later session changes its output
+root without weakening path containment. Turn completion lists paths from canonical artifact rows,
+not from model prose. No MySQL / Redis / MinIO / ChromaDB.
 
 ### Workspace identity (path-keyed, like Claude Code)
 
@@ -939,7 +1082,9 @@ Workspace resolution order:
 4. otherwise the resolved CWD, keyed the same way
 
 A best-effort registry (`<OMNI_HOME>/workspaces.json`, upserted on agent start) indexes every workspace
-so cross-workspace views (`omni task all`) and the daemon can enumerate them. Incompatible local
+so the daemon can find in-place projects. Cross-workspace views (`omni task all`) also scan
+`<OMNI_HOME>/workspaces/*/sessions.sqlite3` and named project DBs, so a missing registry cannot
+hide tasks that are still on disk. Incompatible local
 SQLite schemas are upgraded additively with a pre-migration snapshot and tracked by
 `PRAGMA user_version`; legacy default/home-edge data is moved only by the explicit project
 migration command.
@@ -953,11 +1098,11 @@ migration command.
 ├── skills_install.json         # built-in skill exports tracked for safe unexport
 ├── channels/                  # per-channel config (wechat.toml, feishu.toml, …)
 ├── logs/                      # daemon logs, e.g. serve-<project>.log
-├── workspaces.json            # registry of known workspaces (powers --all)
+├── workspaces.json            # registry of known workspaces (advisory; --all also scans disk)
 ├── projects/<name>/           # named (-P) projects
 └── workspaces/<slug>-<hash8>/ # path-keyed workspaces (auto)
     ├── sessions.sqlite3        # all structured data for the workspace
-    ├── artifacts/              # generated files (figures, reports, …)
+    ├── artifacts/              # durable fallback for untrusted/taskless output
     ├── inbox.jsonl             # task-completion notifications
     ├── library.jsonl           # project citation/reference library
     ├── channel_inbound_seen.json # IM inbound idempotency cache
@@ -967,9 +1112,9 @@ migration command.
 
 ### Identity: sticky base role vs. scientist-persona overlay
 
-Two files named `role.md` play distinct, non-overlapping roles:
+Runtime `role.md` files and the packaged default have distinct, non-overlapping roles:
 
-- **Base identity — `<OMNI_HOME>/role.md`** (or the bundled `data/role.md`, or `settings.role`).
+- **Base identity — `<OMNI_HOME>/role.md`** (or the built-in default, or `settings.role`).
   Loaded **once** at agent construction and cached in `self._role`; it defines "You are
   OmniScientist…" and stays constant for the process. This is the deliberate analogue of Codex's
   session-static `base_instructions` — a *sticky* identity, not hot-reloaded.
@@ -985,9 +1130,13 @@ Two files named `role.md` play distinct, non-overlapping roles:
 The overlay is presence-gated and fail-open: with no active persona (or a stoma still being
 written, or one committed for another host) nothing is injected and the prompt is byte-for-byte
 what it is today. The adapter only ever reads inside the project root — it never reads or writes
-`<OMNI_HOME>/role.md`. `/soul` reports the active persona and any loadable `scientist-kg/`
-personas; activation/switching/unloading go through the `soulagent` skill (e.g. "think like Kaiming
-He", `$soulagent`, or "restore yourself"), never by editing the base role.
+`<OMNI_HOME>/role.md`. The `omni soul` command group exposes this boundary without importing Skill
+internals: bare `soul`/`soul status` reports the active overlay, `soul list` inventories the exact
+project-local-first scanner root, and `soul create <scientist>` submits a focused
+`scientist-kg-distiller` task that installs a validated KG but deliberately leaves it inactive.
+The same read-only forms are available as `/soul` and `/soul list` in the REPL. Activation,
+switching, and unloading still go through the `soulagent` skill (e.g. "think like Kaiming He",
+`$soulagent`, or "restore yourself"), never by editing the base role.
 
 ### Local file & shell tools (working directory + approval)
 
@@ -1007,14 +1156,94 @@ prints the active *Tool working dir*.
 | `workspace-write` (default for interactive CLI) | allowed, approval-gated | blocked |
 | `full` | allowed | allowed |
 
-Mutating/executing calls (`bash`, `write_file`, `edit_file`, `run_compute`) still pass the
-human-in-the-loop **approval gate** before running, and destructive shell commands are classified
-`destructive` so the prompt defaults to *deny*. Permission modes mirror Claude Code / Codex:
-`security.require_approval=false` runs fully autonomously; `security.approval_allowlist` pre-approves
+Compute tools share one permission envelope with `write_file` (the turn working
+directory, the project store, and managed output roots). Codex `workspace-write`
+is the same shape — cwd + configured roots + persistent `/tmp`. Omni keeps a
+separate ArtifactStore, so `bash`, `run_compute`, and CLI skill processes also
+receive a durable `$OMNI_OUTPUT_DIR` (`<project>/artifacts/compute/<task_id>`)
+and a workspace-scoped `$TMPDIR`. Files written to `$OMNI_OUTPUT_DIR` are
+registered through `register_existing` and are what verification sees. Host
+`/tmp` stays writable for scratch but is not readable by `read_file` and is not
+an artifact sink. Linux bwrap bind-mounts the persistent exec tmp over `/tmp`
+instead of a fresh `--tmpfs`, so successive calls see the same scratch.
+
+Mutating/executing calls (`bash`, `write_file`, `edit_file`, `run_compute`) still enter the
+**approval gate**, and destructive shell commands are classified `destructive` so a prompt names
+their risk explicitly. The gate often auto-approves without a human: in-workspace writes clear via
+`_write_stays_inside` only when the sandbox is write-capable (`workspace-write` /
+`full`); known-safe reporting commands (`cd`, `pwd`, piped `head`, `git status`/
+`log`/`diff`/`show`) clear under `untrusted`. `dot` is not on that known-safe
+list. A trusted `on-request` turn auto-allows non-destructive `bash` (including
+`dot` / `python3 -c`) inside `workspace-write`.
+
+`security.approval_policy` (when `require_approval=true`) is:
+
+| policy | behaviour |
+|---|---|
+| `untrusted` | Codex UnlessTrusted: ask for every non-known-safe exec |
+| `on-request` | Codex OnRequest: `workspace-write` / `full` sandbox auto-allows non-destructive `bash` / `run_compute`; destructive and sandbox-escape still ask |
+| `always` | ask before every tool call |
+| `never` | auto-approve everything (same as `require_approval=false`) |
+
+Effective defaults follow Codex presets, not a single factory value:
+
+| surface | combination |
+|---|---|
+| Trusted interactive CLI (`omni`, `omni chat`) | `workspace-write` + `on-request` (Codex Auto) |
+| `omni exec` in a trusted directory | `workspace-write` + Never (`workspace_auto`) |
+| Untrusted directory | `read-only` + `on-request` — edits and commands ask or fail closed |
+| Library / tests (`trusted` unset) | factory `untrusted` + `workspace-write` |
+
+An explicit `security.approval_policy` in user config still wins on a trusted load. Untrusted always forces `bash_sandbox=readonly`; `omni trust` is the write gate.
+
+`security.require_approval=false` is full autonomy. `security.approval_allowlist` pre-approves
 entries such as `"bash:git "`, `"write_file"`, or `"*"` so those calls skip the prompt. Sensitive
-files (`.env`, secrets, SSH keys) stay hidden by the fs tools regardless of tier, and sensitive
-tools are absent from the catalog when no local approver is wired (IM/non-interactive), where they
-fail closed.
+files (`.env`, secrets, SSH keys) stay hidden by the fs tools regardless of tier. When no local
+approver is wired (IM/daemon), `write_file` / `edit_file` stay in the catalog if the destination
+can be assessed (policy ≠ `always`) and in-workspace writes auto-approve only in a
+write-capable sandbox; `bash` / `run_compute` stay blocked unless `workspace_auto`
+or a task grant is present. `require_sensitive_confirm` is enforced on `bash` /
+`run_compute` only.
+
+``omni exec`` is the Codex-``Never`` exception in a *trusted* write-capable
+sandbox: it is non-interactive even on a TTY, offers sandboxed ``bash`` /
+``run_compute``, auto-approves those calls plus in-workspace writes (including
+workspace-destructive commands the sandbox still confines), persists the grant
+on ``task.approved_tools`` so ``--detach`` / retry / recovery inherit it, and
+still fail-closes escapes and IM. An untrusted directory stays read-only — Never
+does not widen it. ``omni exec --ask`` restores the human prompt loop on a
+terminal; without a TTY it warns and still fail-closes.
+
+Interactive decisions use a separate, memory-only **session approval store**. Ordinary Bash prompts
+follow Codex's decision order: **Approve once**, an optional reviewed operation rule, then **Deny**;
+when the call belongs to a live CLI task a further **Approve this turn's workspace** choice is
+offered. That grant covers later ``bash`` / ``run_compute`` on *this task only* — including
+workspace-destructive commands such as ``git push`` / ``rm -rf`` — after a second confirmation
+whose default is Cancel. It is also written to ``task.approved_tools`` so a later process does
+not re-probe. It does not disable the sandbox, system hard-blocks, or tool policy, and it does
+not follow the owner onto IM / scheduled runs. The first item is selected by default while Esc/Ctrl+C
+always denies. Bash does not advertise its internal exact-command cache as a separate choice because
+parameterised commands make that choice indistinguishable from a one-off approval in normal use.
+Exact grants remain an internal compatibility surface and still bind the executed source to the
+working directory, workspace, channel, configured sandbox envelope, and risk class.
+
+For non-destructive command families, a shell call may propose an argv `prefix_rule`. The host offers
+it only when the source is plain and expansion-free, the proposed tokens are its literal prefix, and
+the family is narrowly reviewed. Destructive rules are never trusted from model metadata. The host
+may instead derive a closed semantic rule for `omni ... task rm|delete`: project, verb, `--force`,
+and `--yes` authority remain fixed, while only task ids vary. Every later match is parsed and checked
+again; wrappers, compound commands, unknown flags, `clear`, and `prune` remain one-off approvals.
+A redundant trailing `2>&1` is normalized because the Bash tool already merges stderr into stdout.
+The prompt shows the exact operation pattern being granted. Session rules remain context-bound and
+process-memory-only; they never alter `security.approval_allowlist` or bypass schema, policy, sandbox,
+hook, or resource-lock checks.
+
+Each session store serializes and re-checks its own requests, while the TUI approver serializes
+prompts across stores before they reach its single modal. The owner's actual decision latency stays
+outside turn/workflow clocks; a queued duplicate can inherit the preceding grant instead of being
+denied because a modal is already open. This changes consent coordination only: schema/policy admission
+still happens before it, while hooks, resource locks, provider execution, outcome recording,
+planning, ReAct, task lifecycle, and memory stay on their existing paths.
 
 ### Background tasks across windows
 
@@ -1030,6 +1259,20 @@ The installed `omni` command does not start a resident agent by itself. CLI and 
 the foreground; IM channels and cross-window background task execution need either `omni serve`
 (foreground), `omni serve start` (background daemon), or `omni channel login <name> --start`.
 Background daemon stdout/stderr is written to `<OMNI_HOME>/logs/serve-<project>.log`.
+
+The always-on **home service** (`omni serve`) is one OS-supervised process per `OMNI_HOME`. Its
+observed state lives in `<OMNI_HOME>/service/service.pid` and is three layers:
+
+1. **Liveness / STARTING** — the process holds the singleton lock and has published identity.
+2. **Control-plane READY** — hosted agents and task runtimes can accept schedules and inbound
+   tasks. Written *before* WeChat `notify_start`, Feishu, or DingTalk finish connecting.
+3. **Channel health** — each IM adapter is tracked separately in `channel_health`. A slow or
+   failed handshake degrades that channel; it does not mark the gateway down.
+
+`omni update` always restarts this process onto the newly installed code. Restore succeeds when
+the new process has claimed the singleton. A timeout that is still STARTING is a warning
+(exit 0), not an update failure. The process dying or never claiming is a hard failure and
+includes phase, pid, version, and a tail of `home-service.log`.
 
 ## Channels, QR login, and IM safety
 
@@ -1053,14 +1296,17 @@ Current channel behavior:
 
 Security defaults are deliberately conservative because IM messages enter the local agent loop:
 allowlist and pairing are enabled by default, pairing codes expire after 600 seconds, inbound events
-are deduplicated in `<workspace>/channel_inbound_seen.json`, and file writes/edits or shell commands
-from IM channels require local confirmation (`require_sensitive_confirm`). Channel secrets are stored
-in macOS Keychain when available; if no encrypted store exists, the user must explicitly pass
-`--credential-store file` to store them in `<OMNI_HOME>/secrets.toml`.
+are deduplicated in `<workspace>/channel_inbound_seen.json`. In-workspace file writes from IM
+auto-approve; `bash` and `run_compute` still require local confirmation
+(`require_sensitive_confirm`) and stay out of the catalog unless granted. IM turns pass
+`drain_tasks=False`, so child skill work is not drained inline. Channel secrets are stored
+in macOS Keychain when available; where no encrypted store exists, `channel login` reports the
+choice and stores them in `<OMNI_HOME>/secrets.toml` (mode 0600) instead.
 
 After pairing, IM input first passes a safe command router before normal agent chat. The current
-allowlist exposes `/task`, `/task show <id>`, `/task watch`, `/task attach <id>`, and `/inbox`
-plus `/verify --session` without invoking a shell. Strong task-lookup phrasing such as "show the
+allowlist exposes `/stop`, `/steer`, `/plan`, `/task` (including `show` / `watch` / `attach` /
+`retry` / `resume` / `approve` / `cancel` / `steer` / `subtask`), `/inbox`, and
+`/verify --session` without invoking a shell. Strong task-lookup phrasing such as "show the
 execution of task c98e4330" maps to `/task show c98e4330`; unclear or unsupported commands fall back to
 agent chat or a local-CLI prompt instead of silently executing sensitive operations.
 
@@ -1081,6 +1327,18 @@ One `SKILL.md` (Claude-Code compatible frontmatter) can be consumed as:
 runtime when the CLI is waiting, or in background when the user detached or the inbound channel
 should not block. Both paths use the same `execute_skill` contract, so prompt-only, python-engine
 and cli-exec skills can participate in workflows.
+
+`find_skill` is the coordinator's parameter lookup (Codex stage-2 analogue). A hit returns a
+compact `input_schema` and a `run_skill` example, with an exact name ranked above a neighbour
+that merely mentions it. After that card is returned, further `docs_search` / `glob` /
+`search_tasks` probes — or another `find_skill` that returns the same skill — count as
+no-progress (BUG-11). A second `find_skill` for a disjoint skill is setup for another
+consume, not a hunt: Codex keeps the tool channel open so the model can run both.
+A lone contracted capability
+(for example `slides.generate` labelled as a one-step workflow) stays on the host
+`single_skill_task` runner; settlement owes `artifact.slides` when the request or selected
+skill names a deck. The coordinator does not re-implement a `python_engine` pipeline by
+reading `SKILL.md` and calling bash.
 
 ## Memory (M1–M5)
 
@@ -1142,11 +1400,27 @@ Memory is **two-tier** (conclusion-level write-up: [`memory.md`](memory.md)):
   (`memory/policy.py`) keeps preferences persistent while empirical findings age and are marked stale;
   `dead_end`/`negative_result`/`idea_evolution` are first-class long-lived types.
 
-**Bounded prompt, unbounded session.** Folding is **model-aware**: the trigger is a fraction of the
-model's context window (`memory.autocompact_pct`, inferred from `model.model`) rather than a fixed
-char budget. A cheap first tier — `microcompact` — trims older tool observations in a long single
-ReAct turn (keeping the last N, `tool_call`↔`tool_result` linkage intact) before any conversation
-fold. When the transcript still exceeds budget, `compact_session` first *flushes* durable facts, then
+**Bounded context, progress-driven task.** Folding is model-aware: the trigger is a fraction
+(`memory.autocompact_pct`) of the model's active prompt capacity, inferred from `model.model` and
+reduced by the reply reservation. A shared window bounds prompt and response together: `o3` cannot
+send 180k of prompt while asking for 32,768 back against a 200k window. Where a model's output cap
+approaches its whole window (`gpt-4` at 8,192 for both), the window is split evenly. This per-request
+capacity is deliberately independent from `cost.max_total_tokens`, which is optional owner policy
+across the whole task and does not decide when context should compact. Provider windows are real
+token counts, so the transcript has to be measured in the same units: `tiktoken` is the optional
+`tokens` extra, and its absence is the normal case, so the offline estimator is calibrated to a real
+tokenizer per byte class (non-ASCII / ASCII word / ASCII punctuation) rather than dividing all bytes
+by one number — that single divisor ran 94% high on English research prose and 24% low on Chinese
+markdown, which fired every threshold that much early. A cheap first tier —
+`microcompact` (`memory.microcompact_pct`) — trims older tool observations in a long single
+ReAct turn (keeping the last N, `tool_call`↔`tool_result` linkage intact). If the closed active tool
+transcript still reaches the second tier, `RunContextWindow` asks the provider for a concise,
+tool-free continuation checkpoint and resumes the same objective in a fresh window. A deterministic
+tool-report ledger is the fallback if checkpoint synthesis fails; it remains explicitly untrusted
+model context, and raw task/tool events are never
+deleted. Checkpoint calls count toward usage but not an explicit semantic iteration allowance, and
+`*.context.compacted` makes the rollover auditable without adding a storage table. Between user
+turns, `compact_session` first *flushes* durable facts, then
 folds older turns into one `content_type=compaction` bridge (originals flagged `compacted`, still in
 `replay`); `_history` returns "bridge + last N turns". `/compact` forces it; `/context` reports the
 budget. Consolidation runs under a per-session single-flight lock — no new tables, no daemon.
@@ -1175,11 +1449,19 @@ per-workspace store + embedding surface (the design doc is
 - **Research tools (`research/tools.py`)** — `record_hypothesis`, `record_claim`, `cite_source`,
   `add_evidence`, `search_corpus`, `log_run`. Appended to the builtin tool surface (gated on
   `ctx.db`) so the main loop and native `omni lit` command get them. Each write feeds a memory entry + a NOTEBOOK line
-  (best-effort).
+  (best-effort). Source / Claim / Evidence stay model- or skill-owned; inventing them from ReAct
+  prose would fail the honesty pass.
+- **Host exec recording (`research/host_record.py`)** — Codex records every shell call in the
+  session transcript without a separate log step. Omni does the same for the ROM run ledger:
+  `ToolGateway` writes an `experiment_runs` row after `bash` / `run_compute` actually ran
+  (generic ReAct and skill bash share this boundary). Known-safe reporting commands stay off
+  the ledger. File artifacts are already registered from `write_file` / `$OMNI_OUTPUT_DIR`.
 - **Verify (`research/verify.py`)** — `verify_session` audits the claim/evidence graph for
   unsupported / contradicted / over-confident claims, and (P2.3) `audit_memory_findings` flags
   *memory* findings whose `payload_ref` doesn't resolve to a source/claim/run — the anti-hallucination
-  moat for "remembered facts". Surfaced by `omni verify` / `--verify`; it does **not** call the model.
+  moat for "remembered facts". It also reports run / source inventory so a compute turn is not
+  "empty" merely because no claim was recorded. Surfaced by `omni verify` / `--verify`; it does
+  **not** call the model.
 - **Threads (`research/threads.py`)** — `build_thread_brief` / `latest_thread_session` rebuild a
   hypothesis-keyed brief (claims + runs + sessions) across conversations for `omni resume --thread`.
 - **Bench (`research/bench.py`)** — `run_retrieval_bench` scores the real retrieval pipeline over a
@@ -1213,7 +1495,7 @@ source` groups (see [`commands.md`](commands.md)).
 - **Their skills → our agent**: discovery includes Omni-managed roots by default and, with `--all`
   or configured sources, `~/.claude/skills`, `~/.codex/skills`, `~/.agents/skills`,
   `~/.openclaw/skills`, plus project `.claude/skills` / `.agents/skills`; prompt skills run via
-  `use_skill` / a ReAct sub-agent using the CC-compatible builtin tools.
+  `run_skill` / a ReAct sub-agent using the CC-compatible builtin tools.
 
 See [`compatibility.md`](compatibility.md) for details.
 

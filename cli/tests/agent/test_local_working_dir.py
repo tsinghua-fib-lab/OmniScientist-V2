@@ -13,6 +13,7 @@ All tests are offline and deterministic (no network, no real LLM).
 
 from __future__ import annotations
 
+import sys
 import types
 from pathlib import Path
 
@@ -180,12 +181,15 @@ async def test_full_mode_bypasses_guard_for_workspace_destructive(tmp_path):
 @pytest.mark.asyncio
 async def test_bash_runs_in_the_bound_working_directory(tmp_path):
     bash = _bash_handler(tmp_path, mode="workspace-write")
-    out = await bash({"command": "pwd"})
+    out = await bash(
+        {"command": f'"{sys.executable}" -c "import os; print(os.getcwd())"'}
+    )
     # The bound working dir is the process cwd for the command.
-    assert str(tmp_path) in tool_observation(out)
+    reported = tool_observation(out).strip().splitlines()[-1]
+    assert Path(reported).resolve() == tmp_path.resolve()
 
 
-# ── approval: destructive shell stays destructive (prompt defaults to deny) ───
+# ── approval: destructive shell keeps its explicit high-risk classification ───
 
 
 def test_classify_bash_destructive_and_exec():
@@ -210,6 +214,10 @@ def test_local_environment_block_present_with_local_tools_and_workdir():
     assert "[Local environment]" in prompt
     assert "Working directory: /tmp/work" in prompt
     assert "Operating system:" in prompt
+    assert "required_outputs" in prompt
+    assert "another task" in prompt.lower()
+    assert "$OMNI_OUTPUT_DIR" in prompt
+    assert "do not rewrite quotation marks" in prompt.lower()
 
 
 def test_local_environment_block_absent_without_local_tools():
@@ -222,6 +230,16 @@ def test_local_environment_block_absent_without_local_tools():
     assert "[Local environment]" not in prompt
     # The working directory is still surfaced in session context.
     assert "Working directory: /tmp/work" in prompt
+    assert "required_outputs" in prompt
+    assert "this task_id" in prompt
+
+
+def test_write_file_guidance_is_omitted_when_write_file_is_unavailable():
+    tools = [ToolSpec("list_dir", "list", {"type": "object"})]
+    prompt = build_system_prompt(role="R", tools=tools, project_name="proj")
+    local = render_local_environment(tools, "/tmp/work")
+    assert "write_file" not in local
+    assert "the host writes the manuscript" in prompt.lower()
 
 
 def test_render_local_environment_empty_without_local_tools():
@@ -255,7 +273,10 @@ def test_react_tool_policy_unblocks_sensitive_tools_when_approver_present():
     s.security.require_approval = True
     s.security.approval_policy = "untrusted"
     agent = types.SimpleNamespace(
-        settings=s, approver=lambda _req: None, _approved_task_tools={}
+        settings=s,
+        approver=lambda _req: None,
+        _approved_task_tools={},
+        _workspace_auto_tasks=set(),
     )
     policy = ToolPolicy(
         allowed_tools=None,
@@ -273,7 +294,12 @@ def test_react_tool_policy_keeps_tools_blocked_without_approver():
     s = load_settings()
     s.security.require_approval = True
     s.security.approval_policy = "untrusted"
-    agent = types.SimpleNamespace(settings=s, approver=None, _approved_task_tools={})
+    agent = types.SimpleNamespace(
+        settings=s,
+        approver=None,
+        _approved_task_tools={},
+        _workspace_auto_tasks=set(),
+    )
     policy = ToolPolicy(
         allowed_tools=None,
         blocked_tools=["bash", "write_file", "edit_file", "run_compute"],

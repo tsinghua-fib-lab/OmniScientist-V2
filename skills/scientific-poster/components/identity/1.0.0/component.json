@@ -1,8 +1,0 @@
-{
-  "schema": "scientific-poster.component.v1",
-  "id": "identity",
-  "version": "1.0.0",
-  "level": "composite",
-  "purpose": "Organize the paper title, authors, affiliations, and venue identity.",
-  "semantic_roles": ["identity", "hero"]
-}

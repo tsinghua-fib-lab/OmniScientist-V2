@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from unittest.mock import AsyncMock
 
@@ -70,7 +69,7 @@ async def test_false_is_structured_from_react_through_sqlite_and_task_json(tmp_p
             ChatWithToolsResult(content="The command failed with exit code 1."),
         ]
     )
-    react = ReActLoopAgent(llm, gateway.invoker(), max_iterations=2)
+    react = ReActLoopAgent(llm, gateway.react_invoker(), max_iterations=2)
 
     result = await react.run(
         system_prompt="Use Bash and report its result.",
@@ -91,6 +90,8 @@ async def test_false_is_structured_from_react_through_sqlite_and_task_json(tmp_p
         if event.tool_name == "bash" and event.event_type == "react.tool.done"
     )
     assert shell_event.status == "succeeded"
+    assert shell_event.lifecycle_status == "completed"
+    assert shell_event.result_success is True
     assert shell_event.output_json["result_schema"] == "omni.command-result.v1"
     assert shell_event.output_json["command_status"] == "failed"
     assert shell_event.output_json["reason"] == "nonzero_exit"
@@ -107,6 +108,8 @@ async def test_false_is_structured_from_react_through_sqlite_and_task_json(tmp_p
         if event["tool_name"] == "bash" and event["event_type"] == "react.tool.done"
     )
     assert persisted["status"] == "succeeded"
+    assert persisted["lifecycle_status"] == "completed"
+    assert persisted["result_success"] is True
     assert persisted["output_json"]["command_status"] == "failed"
     assert persisted["output_json"]["exit_code"] == 1
 
@@ -162,8 +165,7 @@ async def test_escaped_long_output_keeps_command_fields_after_sqlite_storage(
     proc.communicate = AsyncMock(return_value=(raw_output, None))
     proc.returncode = 37
     monkeypatch.setattr(
-        asyncio,
-        "create_subprocess_shell",
+        "omni.skills_runtime.builtin_tools.shell.spawn_user_shell",
         AsyncMock(return_value=proc),
     )
     recorder, task, ctx = await _task_runtime(tmp_path)
@@ -185,7 +187,7 @@ async def test_escaped_long_output_keeps_command_fields_after_sqlite_storage(
                 ChatWithToolsResult(content="The command failed."),
             ]
         ),
-        gateway.invoker(),
+        gateway.react_invoker(),
         max_iterations=2,
     )
 

@@ -270,6 +270,66 @@ async def test_additive_reconcile_adds_task_authority_fingerprints() -> None:
 
 
 @pytest.mark.asyncio
+async def test_additive_reconcile_adds_tool_outcome_columns_without_losing_events() -> None:
+    """Existing stores gain typed lifecycle fields without rebuilding history."""
+    from sqlalchemy import select, text
+
+    from omni.storage.db import get_database, reset_databases
+    from omni.storage.models import TaskEventORM
+
+    settings = load_settings()
+    settings.paths.ensure_dirs()
+    db = get_database(settings.paths.project_db)
+    await db.init()
+    async with db.session() as session:
+        session.add(TaskORM(id="task-outcome-upgrade", status="succeeded"))
+        await session.commit()
+        session.add(
+            TaskEventORM(
+                task_id="task-outcome-upgrade",
+                seq=1,
+                event_type="react.tool.done",
+                status="succeeded",
+                tool_name="get_task",
+            )
+        )
+        await session.commit()
+
+    async with db.engine.begin() as conn:
+        await conn.execute(
+            text('ALTER TABLE "task_events" DROP COLUMN "lifecycle_status"')
+        )
+        await conn.execute(
+            text('ALTER TABLE "task_events" DROP COLUMN "result_success"')
+        )
+
+    await reset_databases()
+    upgraded = get_database(settings.paths.project_db)
+    await upgraded.init()
+
+    async with upgraded.engine.connect() as conn:
+        columns = {
+            row[1]
+            for row in (
+                await conn.execute(text('PRAGMA table_info("task_events")'))
+            ).fetchall()
+        }
+    assert {"lifecycle_status", "result_success"} <= columns
+    async with upgraded.session() as session:
+        event = (
+            await session.execute(
+                select(TaskEventORM).where(
+                    TaskEventORM.task_id == "task-outcome-upgrade"
+                )
+            )
+        ).scalar_one_or_none()
+    assert event is not None
+    assert event.tool_name == "get_task"
+    assert event.lifecycle_status == ""
+    assert event.result_success is None
+
+
+@pytest.mark.asyncio
 async def test_additive_reconcile_adds_async_provider_authority_columns() -> None:
     """Legacy workflow stores gain all fail-closed provider authority fields."""
     from sqlalchemy import text
@@ -453,6 +513,113 @@ async def test_additive_reconcile_backfills_artifact_owner_and_cleans_foreign_ca
         direct_artifact_id,
     ]
     assert polluted is not None and polluted.artifact_ids == []
+
+
+@pytest.mark.asyncio
+async def test_current_store_init_is_a_reader_while_another_writer_holds_the_lock():
+    """``/task show`` opens an already-current store; it must not UPDATE artifacts
+    (or otherwise take the write lock) while ``omni serve`` is writing.
+    """
+    import sqlite3
+    import time
+
+    from omni.storage.db import get_database, reset_databases
+
+    s = load_settings()
+    s.paths.ensure_dirs()
+    db_path = s.paths.project_db
+    db = get_database(db_path)
+    await db.init()
+    async with db.session() as session:
+        session.add(TaskORM(id="task-current-reader", status="succeeded", kind="turn"))
+        await session.commit()
+
+    await reset_databases()
+    holder = sqlite3.connect(str(db_path), timeout=0.1)
+    try:
+        holder.execute("BEGIN IMMEDIATE")
+        holder.execute("UPDATE tasks SET status = status")
+        db2 = get_database(db_path)
+        started = time.monotonic()
+        await db2.init()
+        assert time.monotonic() - started < 1.0
+        async with db2.session() as session:
+            task = await session.get(TaskORM, "task-current-reader")
+        assert task is not None and task.status == "succeeded"
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+
+
+@pytest.mark.asyncio
+async def test_current_store_reopen_does_not_rerun_artifact_owner_backfill(monkeypatch):
+    """Owner backfill is a one-shot for stores that just gained ``task_id``."""
+    from omni.storage import db as storage_db
+    from omni.storage.db import get_database, reset_databases
+
+    s = load_settings()
+    s.paths.ensure_dirs()
+    db = get_database(s.paths.project_db)
+    await db.init()
+
+    calls = {"n": 0}
+
+    async def boom(_conn):  # noqa: ANN001
+        calls["n"] += 1
+        raise AssertionError("artifact owner backfill must not run on a current store")
+
+    monkeypatch.setattr(storage_db, "_reconcile_artifact_task_ownership", boom)
+    await reset_databases()
+    db2 = get_database(s.paths.project_db)
+    await db2.init()
+    assert calls["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_locked_additive_migrate_does_not_drop_the_store():
+    """A busy lock during needed DDL is a queue, not a signal to wipe the file."""
+    import sqlite3
+
+    import pytest
+    from sqlalchemy.exc import OperationalError
+
+    from omni.storage.db import Database, get_database, reset_databases
+
+    s = load_settings()
+    s.paths.ensure_dirs()
+    db_path = s.paths.project_db
+    db = get_database(db_path)
+    await db.init()
+    async with db.session() as session:
+        session.add(TaskORM(id="task-keep-on-lock", status="succeeded", kind="turn"))
+        await session.commit()
+    async with db.engine.begin() as conn:
+        from sqlalchemy import text
+
+        await conn.execute(
+            text('ALTER TABLE "tasks" DROP COLUMN "current_authority_fingerprint"')
+        )
+
+    await reset_databases()
+    holder = sqlite3.connect(str(db_path), timeout=0.1)
+    try:
+        holder.execute("BEGIN IMMEDIATE")
+        holder.execute("UPDATE tasks SET status = status")
+        locked = Database(db_path, busy_timeout_ms=50)
+        with pytest.raises(OperationalError, match="locked|busy"):
+            await locked.init()
+        await locked.dispose()
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+
+    restored = get_database(db_path)
+    await restored.init()
+    async with restored.session() as session:
+        task = await session.get(TaskORM, "task-keep-on-lock")
+    assert task is not None
+    assert task.status == "succeeded"
+    assert task.current_authority_fingerprint == ""
 
 
 @pytest.mark.asyncio

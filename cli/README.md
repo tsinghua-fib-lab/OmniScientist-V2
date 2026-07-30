@@ -8,7 +8,7 @@ WeChat / Feishu / DingTalk channels.
 This CLI is the official next-generation implementation of the OmniScientist framework described
 in [Shao et al., *OmniScientist: Toward a Co-evolving Ecosystem of Human and AI
 Scientists*](https://doi.org/10.48550/arXiv.2511.16931). The current checkout reports package
-version `2.0.0rc1` (planned Git tag `v2.0.0rc1`).
+version `2.0.0rc3` (planned Git tag `v2.0.0rc3`).
 
 > This folder (`cli/`) is the Python application. The research **skills** are a
 > separate, independent top-level collection in
@@ -22,14 +22,17 @@ version `2.0.0rc1` (planned Git tag `v2.0.0rc1`).
 
 ## Install
 
-`omni` runs on macOS, Linux, and Windows. It requires Python ≥ 3.11 and Node.js ≥ 20.9 with npm
-for the bundled research-pptx renderer. PyPI is the stable package authority; install into one
-isolated tool environment:
+`omni` runs on macOS, Linux, and Windows. It requires Python ≥ 3.11 and Node.js ≥ 20.9
+to run the bundled research-pptx renderer; npm is needed only for the first
+`omni skills setup research-pptx` (pnpm is not a substitute). PyPI is the stable
+package authority; install into one isolated tool environment:
 
 ```bash
-uv tool install omniscientist
+uv tool install OmniScientist-V2
 # or
-pipx install omniscientist
+pip install OmniScientist-V2
+# or
+pipx install OmniScientist-V2
 
 omni
 ```
@@ -50,8 +53,8 @@ serialized lifecycle transaction. The public command is intentionally parameterl
 Direct manager updates are supported too:
 
 ```bash
-uv tool upgrade omniscientist
-pipx upgrade omniscientist
+uv tool upgrade OmniScientist-V2
+pipx upgrade OmniScientist-V2
 ```
 
 Those commands replace Python packages only. The next bare `omni` detects the changed package
@@ -99,14 +102,19 @@ platform table:
 ## First-run model setup
 
 `omni init` walks you through it (provider menu, default **openai**). `omni` otherwise defaults to an
-offline `mock` model so it runs with zero config. Point it at a real provider in one line (works on
-the shell *and* inside the REPL, where model changes take effect immediately):
+offline `mock` model so it runs with zero config. Run `omni model` (or `/model` in the REPL) for the
+guided main/VLM/embedding picker; `omni model status` and `omni model explain` show the effective
+values and their winning configuration layers. Point the main role at a real provider in one
+advanced command:
 
 ```bash
 omni config model -p deepseek -u https://api.deepseek.com/v1 \
   -m deepseek-chat -k "$DEEPSEEK_API_KEY" --test
 omni config list                              # provider / model / endpoint / key status
 ```
+
+These commands keep the existing persistent active-`OMNI_HOME` scope. Root `--model <name>` remains
+a non-persistent override for one launch.
 
 `-p` accepts `openai` / `deepseek` / `ollama` (all OpenAI-compatible; `base_url` picks the real
 service) or `mock`. Prefer files? Edit `~/.omni/config.toml` (`[model]`) and `~/.omni/secrets.toml`
@@ -123,6 +131,7 @@ omni config list              /config list
 omni task list               /task list
 omni channel list             /channel list
 omni serve status             /serve status
+omni autosota status          /autosota status
 ```
 
 In a capable TTY the REPL commits its transcript to the terminal's native scrollback above a bottom

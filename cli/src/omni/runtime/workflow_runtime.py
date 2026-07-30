@@ -8,12 +8,11 @@ from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Any
 
+from sqlalchemy.exc import OperationalError
+
 from omni.core.execution_budget import ToolExecutionBudget
 from omni.core.execution_control import ExecutionCancelled, ExecutionControl
 from omni.core.turn_clock import TurnClock, register_clock
-from omni.runtime.deliverable_assessment import (
-    bind_deliverable_assessment_identity,
-)
 from omni.runtime.final_synthesis import (
     NATIVE_SYNTHESIS_INPUT_SCHEMA,
     NATIVE_SYNTHESIS_OUTPUT_SCHEMA,
@@ -48,12 +47,13 @@ from omni.runtime.workflow_state import (
 )
 from omni.runtime.workflow_state_store import WorkflowStateStore
 from omni.runtime.workflow_step_outcomes import (
+    annotate_identifier_title_check,
     classify_workflow_outcome,
     execute_child_task,
 )
 from omni.skills_runtime.context import ExecContext
 from omni.skills_runtime.registry import SkillRegistry, resolve_step_entry
-from omni.storage.db import Database
+from omni.storage.db import Database, sqlite_busy
 
 Progress = Callable[..., Any]
 StepExecutor = Callable[
@@ -285,8 +285,16 @@ class WorkflowRuntime:
                     results_by_id[step_id] = result
                     terminal_ids.add(step_id)
                     failed_step_ids.add(step_id)
-                    await self._state_store.persist_step_outcome(workflow_run_id, record)
-                await persist_state("cancelled")
+                    try:
+                        await self._state_store.persist_step_outcome(workflow_run_id, record)
+                    except OperationalError as exc:
+                        if not sqlite_busy(exc):
+                            raise
+                try:
+                    await persist_state("cancelled")
+                except OperationalError as exc:
+                    if not sqlite_busy(exc):
+                        raise
                 break
 
             limit_reason = usage_limit_reason()
@@ -401,13 +409,17 @@ class WorkflowRuntime:
             except (ExecutionCancelled, asyncio.CancelledError):
                 execution_control.request_cancel()
                 cancelled = True
-                await settle_cancelled_wave(
-                    workflow_run_id=workflow_run_id, wave=wave, step_records=step_records,
-                    results_by_id=results_by_id, terminal_ids=terminal_ids,
-                    failed_step_ids=failed_step_ids, state_store=self._state_store,
-                    progress=progress, total=total,
-                )
-                await persist_state("cancelled")
+                try:
+                    await settle_cancelled_wave(
+                        workflow_run_id=workflow_run_id, wave=wave, step_records=step_records,
+                        results_by_id=results_by_id, terminal_ids=terminal_ids,
+                        failed_step_ids=failed_step_ids, state_store=self._state_store,
+                        progress=progress, total=total,
+                    )
+                    await persist_state("cancelled")
+                except OperationalError as exc:
+                    if not sqlite_busy(exc):
+                        raise
                 continue
             for step, outcome in sorted(
                 zip(wave, outcomes, strict=True),
@@ -553,7 +565,6 @@ class WorkflowRuntime:
                 input_schema=NATIVE_SYNTHESIS_INPUT_SCHEMA,
                 output_schema=NATIVE_SYNTHESIS_OUTPUT_SCHEMA,
             )
-            bind_deliverable_assessment_identity(result, step)
             result_status = str(result.get("status", "")).lower()
             failed = result_status in {"error", "failed"} or result.get("contract_violation") is True
             status = (
@@ -648,6 +659,7 @@ class WorkflowRuntime:
             child_ctx,
             step_progress,
         )
+        annotate_identifier_title_check(step, goal, outcome)
         return await classify_workflow_outcome(
             self._registry,
             step,

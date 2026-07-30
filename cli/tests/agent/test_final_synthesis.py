@@ -126,6 +126,18 @@ def test_final_synthesis_topic_prefers_step_title_over_goal_truncation():
     assert result["draft_markdown"].startswith("## Retrieval-Augmented Generation 系统综述")
 
 
+def test_final_synthesis_topic_from_a_long_goal_is_short() -> None:
+    result = execute_final_synthesis(
+        "为 智能体 系统综述准备材料：获取 Attention Is All You Need 摘要，并生成图和论文",
+        {"id": "final", "deliverable": "draft.manuscript"},
+        {"qa": {"summary": "Attention is all you need."}},
+    )
+
+    assert result["topic"] == "智能体 系统综述"
+    assert "Draft" not in result["topic"]
+    assert "Attention" not in result["topic"]
+
+
 @pytest.mark.asyncio
 async def test_native_synthesis_uses_llm_draft_with_full_upstream_material():
     long_abstract = (
@@ -150,9 +162,9 @@ async def test_native_synthesis_uses_llm_draft_with_full_upstream_material():
     assert result["draft_markdown"].startswith("# RAG 系统综述")
     assessment = result["deliverable_assessment"]
     assert assessment["deliverable_id"] == "draft.section"
+    assert assessment["provider"] == "synthesis.final"
     assert assessment["status"] == "passed"
-    assert assessment["criteria"][0]["criterion_id"] == "draft_content_present"
-    assert assessment["criteria"][0]["status"] == "passed"
+    assert assessment["effective_inputs"]["synthesis_mode"] == "llm"
     # The writing prompt received the full abstract, not the 240-char teaser.
     assert "UNIQUE-TAIL-MARKER" in llm.user
     assert "research writing executor" in llm.system
@@ -171,11 +183,12 @@ async def test_native_synthesis_without_llm_degrades_honestly():
     assert result["status"] == "partial"  # → workflow records the step degraded
     assert "degraded" in result["warning"]
     assert result["draft_markdown"]  # the template draft is still delivered
-    assert result["deliverable_assessment"]["status"] == "degraded"
-    assert (
-        result["deliverable_assessment"]["criteria"][0]["status"]
-        == "degraded"
-    )
+    assessment = result["deliverable_assessment"]
+    assert assessment["status"] == "degraded"
+    assert assessment["effective_inputs"]["synthesis_mode"] == "template_fallback"
+    # No model rung failed, so replaying the step would produce the same
+    # template: the caller must not be told a retry could improve it.
+    assert assessment["retryable"] is False
     # Running without a model is the expected offline rung, not a failure.
     assert "synthesis_error" not in result
 
@@ -232,6 +245,45 @@ async def test_native_synthesis_persists_report_artifact():
     call = store.calls[0]
     assert call["kind"] == "report"
     assert call["ext"] == "md"
+    assert call["title"] == "RAG 综述"
+    assert "Draft" not in call["title"]
     assert call["session_id"] == "sess-1"
     assert call["subtask_id"] == "task-1"
     assert call["meta"]["synthesis_mode"] == "llm"
+
+
+@pytest.mark.asyncio
+async def test_native_synthesis_prefers_a_bare_task_output_name(tmp_path) -> None:
+    dest = tmp_path / "智能体-系统综述.md"
+
+    class _PathStore:
+        def __init__(self) -> None:
+            self.registered: list[Any] = []
+
+        async def task_output_path(self, filename: str, *, task_id: str, kind: str = "document"):
+            assert filename == "智能体-系统综述.md"
+            assert kind == "report"
+            return dest
+
+        async def register_existing(self, src, **kwargs: Any) -> _FakeStored:
+            self.registered.append({"src": src, **kwargs})
+            return _FakeStored()
+
+        async def put_bytes(self, data: bytes, **kwargs: Any) -> _FakeStored:
+            raise AssertionError("put_bytes should not run when task_output_path works")
+
+    store = _PathStore()
+    result = await run_native_synthesis(
+        "为 智能体 系统综述准备材料：获取摘要并写论文",
+        {"id": "final", "deliverable": "draft.manuscript", "depends_on": ["qa"]},
+        {"qa": {"summary": "Attention is all you need."}},
+        llm=_DraftLLM("# 智能体系统综述\n\n" + "正文。" * 40),
+        artifacts=store,
+        session_id="sess-1",
+        task_id="eda313e1" + "0" * 24,
+    )
+
+    assert dest.is_file()
+    assert result["artifacts"][0]["title"] == "智能体 系统综述"
+    assert store.registered[0]["title"] == "智能体 系统综述"
+    assert "Draft" not in result["artifacts"][0]["title"]

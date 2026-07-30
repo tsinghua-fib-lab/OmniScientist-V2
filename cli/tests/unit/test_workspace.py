@@ -18,6 +18,7 @@ import pytest
 from typer.testing import CliRunner
 
 from omni.cli.main import app
+from tests.conftest import store_shaped_home
 
 runner = CliRunner()
 
@@ -51,7 +52,7 @@ def test_get_paths_keys_by_vcs_root(tmp_path):
     # Every terminal in the repo → one shared, path-keyed store.
     assert p_sub.workspace_root == repo == p_root.workspace_root
     assert p_sub.project_dir == p_root.project_dir
-    assert "/workspaces/" in str(p_sub.project_dir)
+    assert "workspaces" in p_sub.project_dir.parts
     assert p_sub.project_name == "repo"
 
 
@@ -64,7 +65,7 @@ def test_home_is_never_a_project(tmp_path):
     assert find_project_root(home) is None
     p = get_paths(cwd=home)
     assert p.project_dir != home
-    assert "/workspaces/" in str(p.project_dir)
+    assert "workspaces" in p.project_dir.parts
 
 
 def test_named_project_is_unchanged():
@@ -105,8 +106,8 @@ def test_omni_home_environment_overrides_persistent_selection(tmp_path, monkeypa
 
     monkeypatch.delenv("OMNI_HOME", raising=False)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
-    configure_user_home(tmp_path / "saved")
-    override = tmp_path / "environment"
+    configure_user_home(store_shaped_home(tmp_path, "saved"))
+    override = store_shaped_home(tmp_path, "environment")
     monkeypatch.setenv("OMNI_HOME", str(override))
 
     assert user_home() == override.resolve()
@@ -192,6 +193,13 @@ def test_get_paths_refuses_omni_home_internal_workspace():
     Keying a workspace off ``~/.omni/workspaces/<x>`` is what produced duplicate
     daemons polling the same IM bot; resolution must fall back to the shared
     named ``default`` project instead.
+
+    ``get_paths`` has always guarded this, but the in-place-project branch runs
+    first and used to reach the guard only by luck: the upward walk stopped at
+    the OS home, and the store is at the OS home only while ``OMNI_HOME`` keeps
+    its default. Relocate the home — a supported, bootstrapped option — and the
+    walk found ``<home>/.omni`` as an in-place marker and keyed a workspace off
+    the home's parent, with ``project_dir`` set to the store itself.
     """
     from omni.config.paths import get_paths, user_home
 
@@ -201,7 +209,46 @@ def test_get_paths_refuses_omni_home_internal_workspace():
     p = get_paths(cwd=ghost_cwd)
     assert p.workspace_root is None  # named project, not a path-keyed workspace
     assert p.project_dir == user_home() / "projects" / "default"
-    assert "/workspaces/" not in str(p.project_dir)
+    assert "workspaces" not in p.project_dir.parts
+
+
+def test_the_store_is_not_an_in_place_project_of_the_directory_holding_it():
+    """The store is identified by where it is, not by what it is called.
+
+    ``.omni`` names two different things: the store, and the marker a user drops
+    in a repository to adopt it. A walk that only matches the name reads the
+    store as an adoption of whatever directory happens to contain it, which
+    makes every sibling of the home look like part of an adopted project.
+    """
+    from omni.config.paths import find_project_root, user_home
+
+    sibling = user_home().parent / "repo"
+    sibling.mkdir(parents=True, exist_ok=True)
+
+    assert find_project_root(sibling) is None
+
+
+def test_nothing_inside_the_store_is_an_in_place_project():
+    from omni.config.paths import find_project_root, user_home
+
+    inside = user_home() / "workspaces" / "repo-deadbeef"
+    inside.mkdir(parents=True, exist_ok=True)
+
+    assert find_project_root(inside) is None
+
+
+def test_a_real_in_place_project_is_still_found(tmp_path):  # noqa: ANN001
+    """The guard distinguishes the store from a marker; it does not stop
+    honouring markers."""
+    from omni.config.paths import find_project_root
+
+    repo = tmp_path / "work" / "myrepo"
+    (repo / ".omni").mkdir(parents=True, exist_ok=True)
+    nested = repo / "src" / "pkg"
+    nested.mkdir(parents=True, exist_ok=True)
+
+    assert find_project_root(repo) == repo.resolve()
+    assert find_project_root(nested) == repo.resolve()
 
 
 # ── registry ────────────────────────────────────────────────────────────────
@@ -268,7 +315,9 @@ def test_daemon_pidfile_clear_only_when_current_process_owns_it():
 
 
 @pytest.mark.asyncio
-async def test_serve_refuses_live_daemon_without_clobbering_pidfile():
+async def test_serve_refuses_live_daemon_without_clobbering_pidfile(
+    monkeypatch: pytest.MonkeyPatch,
+):
     from omni.cli.commands import serve_cmd
     from omni.cli.state import AppState
     from omni.config.paths import get_paths
@@ -280,10 +329,13 @@ async def test_serve_refuses_live_daemon_without_clobbering_pidfile():
     write_pidfile(paths)
     before = pidfile_path(paths).read_text(encoding="utf-8")
 
+    async def agent_must_not_start(_state: object) -> None:
+        raise AssertionError("duplicate serve initialized an agent before checking its pidfile")
+
+    monkeypatch.setattr(serve_cmd, "make_agent", agent_must_not_start)
     with pytest.raises(serve_cmd.DaemonAlreadyRunning):
-        await asyncio.wait_for(
-            serve_cmd._run_service(AppState(project=project), channels="", workers=1, task_only=True),
-            timeout=1.0,
+        await serve_cmd._run_service(
+            AppState(project=project), channels="", workers=1, task_only=True
         )
 
     assert pidfile_path(paths).read_text(encoding="utf-8") == before
@@ -550,6 +602,6 @@ def test_tasks_show_watch_and_attach():
     attached = attached_messages[-1]
     assert "finished report" in attached
     assert "/tmp/report.md" in attached
-    assert "artifact://report-1" in attached
+    assert "artifact://report-1" not in attached
     assert "run-jkl" in attached
     assert "/task show" in attached

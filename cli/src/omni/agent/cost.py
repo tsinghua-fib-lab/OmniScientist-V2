@@ -31,8 +31,13 @@ PRICING: dict[str, tuple[float, float]] = {
     "o4-mini": (1.10, 4.40),
     "o3-mini": (1.10, 4.40),
     "o3": (2.0, 8.0),
-    "deepseek-chat": (0.27, 1.10),
-    "deepseek-reasoner": (0.55, 2.19),
+    # DeepSeek V4 (2026-04). The legacy deepseek-chat / deepseek-reasoner ids
+    # were retired 2026-07-24 and now route to v4-flash, so they are priced as
+    # v4-flash rather than at V3's rates.
+    "deepseek-v4-pro": (0.435, 0.87),
+    "deepseek-v4-flash": (0.14, 0.28),
+    "deepseek-chat": (0.14, 0.28),
+    "deepseek-reasoner": (0.14, 0.28),
     "claude-3-5-haiku": (0.80, 4.0),
     "claude-3-5-sonnet": (3.0, 15.0),
     "claude-3-7-sonnet": (3.0, 15.0),
@@ -168,6 +173,104 @@ async def record_cost_event(
         pass
 
 
+async def record_usage_cost_event(
+    tasks: Any,
+    settings: Any,
+    llm: Any,
+    task_id: str,
+    usage: dict[str, int] | None,
+    *,
+    component: str,
+    estimated: bool = False,
+    calls: int = 0,
+) -> None:
+    """Persist aggregated usage from a host-side meter (engine / adapter calls)."""
+    cfg = getattr(settings, "cost", None)
+    if (cfg is not None and not getattr(cfg, "enabled", True)) or not task_id:
+        return
+    counts = usage if isinstance(usage, dict) else {}
+    if not any(int(counts.get(key) or 0) for key in ("prompt_tokens", "completion_tokens", "total_tokens")):
+        return
+    model = getattr(llm, "model", "") or getattr(settings.model, "model", "")
+    estimate = estimate_cost(model, counts, cost_cfg=cfg)
+    if estimated:
+        estimate.estimated = True
+    currency = getattr(cfg, "currency", "USD") if cfg is not None else "USD"
+    payload = {**estimate.to_dict(), "currency": currency, "component": component}
+    if calls:
+        payload["calls"] = int(calls)
+    try:
+        await tasks.append_event(
+            task_id,
+            event_type="cost.usage",
+            status="succeeded",
+            name=component,
+            output_json=payload,
+            summary=(
+                f"{component}: cost ~{estimate.cost_usd:.4f} {currency} · tokens {estimate.total_tokens}"
+                + (" (est)" if estimate.estimated else "")
+            ),
+        )
+    except Exception:  # noqa: BLE001 - metering must never block a turn.
+        pass
+
+
+def format_tokens(count: int) -> str:
+    """Compact token count for status lines (Codex-style 12.4k / 2.2M)."""
+    value = max(0, int(count or 0))
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    if value >= 1000:
+        return f"{value / 1000:.1f}k"
+    return str(value)
+
+
+def summarize_cost_events(events: Any) -> dict[str, Any]:
+    """Aggregate already-loaded ``cost.usage`` events (task show, no extra query)."""
+    components: dict[str, dict[str, Any]] = {}
+    totals = {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "cost_usd": 0.0,
+    }
+    estimated_events = 0
+    calls = 0
+    for event in events or []:
+        event_type = getattr(event, "event_type", "cost.usage")
+        if event_type != "cost.usage":
+            continue
+        payload = getattr(event, "output_json", event)
+        payload = payload if isinstance(payload, dict) else {}
+        component = str(payload.get("component") or getattr(event, "name", "") or "unknown")
+        bucket = components.setdefault(
+            component,
+            {
+                "calls": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "cost_usd": 0.0,
+            },
+        )
+        bucket["calls"] += 1
+        calls += 1
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            value = int(payload.get(key) or 0)
+            bucket[key] += value
+            totals[key] += value
+        value = float(payload.get("cost_usd") or 0.0)
+        bucket["cost_usd"] = round(float(bucket["cost_usd"]) + value, 6)
+        totals["cost_usd"] = round(float(totals["cost_usd"]) + value, 6)
+        estimated_events += int(bool(payload.get("estimated")))
+    return {
+        **totals,
+        "calls": calls,
+        "estimated_calls": estimated_events,
+        "components": components,
+    }
+
+
 async def record_text_cost_event(
     tasks: Any,
     settings: Any,
@@ -204,6 +307,8 @@ def react_usage_limits(settings: Any, llm: Any) -> dict[str, int | float]:
         return {
             "max_total_tokens": 0,
             "max_cost_usd": 0.0,
+            "warn_total_tokens": 0,
+            "warn_cost_usd": 0.0,
             "input_cost_per_mtok": 0.0,
             "output_cost_per_mtok": 0.0,
         }
@@ -212,6 +317,8 @@ def react_usage_limits(settings: Any, llm: Any) -> dict[str, int | float]:
     return {
         "max_total_tokens": max(0, int(getattr(cfg, "max_total_tokens", 0) or 0)),
         "max_cost_usd": max(0.0, float(getattr(cfg, "max_cost_usd", 0.0) or 0.0)),
+        "warn_total_tokens": max(0, int(getattr(cfg, "warn_total_tokens", 0) or 0)),
+        "warn_cost_usd": max(0.0, float(getattr(cfg, "warn_cost_usd", 0.0) or 0.0)),
         "input_cost_per_mtok": input_rate,
         "output_cost_per_mtok": output_rate,
     }
@@ -240,9 +347,12 @@ __all__ = [
     "CostEstimate",
     "estimate_cost",
     "estimate_tokens",
+    "format_tokens",
     "rate_for",
     "react_usage_limits",
     "record_cost_event",
     "record_text_cost_event",
+    "record_usage_cost_event",
+    "summarize_cost_events",
     "usage_budget_exhausted",
 ]

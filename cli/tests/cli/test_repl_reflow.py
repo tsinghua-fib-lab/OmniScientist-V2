@@ -66,6 +66,39 @@ def _activity_event() -> TranscriptEvent:
     )
 
 
+def _plan_activity_event() -> TranscriptEvent:
+    """The shape ``/task show`` publishes: a plan locator rather than an ordinal."""
+    return TranscriptEvent(
+        kind=TranscriptKind.DATA_TABLE,
+        payload=DataTableData(
+            title="activity",
+            columns=("step", "type", "actor", "status", "workflow", "execution", "pct", "note"),
+            rows=(
+                ("2/4", "subtask.done", "research-pptx", "succeeded", "wf01", "ex01", "1.0", "ok"),
+                ("·", "assistant.message", "assistant", "needs_input", "", "", "", "asked"),
+            ),
+            layout="activity",
+        ),
+    )
+
+
+def test_activity_cards_label_a_plan_locator_as_a_step_not_a_row_number():
+    """``#2/4`` reads as neither an ordinal nor a step, so the prefix follows the
+    column the table actually carries."""
+    model = TranscriptModel()
+    model.publish(_plan_activity_event())
+
+    narrow = model.render(60).text
+    medium = model.render(80).text
+
+    assert "step 2/4 · subtask.done · succeeded" in narrow
+    assert "#2/4" not in narrow
+    # A task-level record has no place in the plan and simply omits the locator.
+    assert "assistant.message · needs_input" in narrow
+    header = next(line for line in medium.splitlines() if "status" in line)
+    assert "step" in header and "#" not in header
+
+
 def test_plain_paths_remain_one_logical_line_at_every_viewport_width():
     path = "/Users/antonio/.omni/workspaces/demo/artifacts/figure/RAG系统架构图：Query、Retriever、Reranker、LLM.png"
     model = TranscriptModel()
@@ -433,6 +466,15 @@ async def test_live_plan_updates_collapse_to_one_summary_in_the_user_turn() -> N
             },
         )
 
+    # Replace-key updates stay provisional in the live dock; recording the first
+    # frame in durable history would pin the final checklist above later tool
+    # events after a resize reflow.
+    assert not [
+        event
+        for event in tui.transcript.entries
+        if event.turn_id == submission.turn_id and event.replace_key == "plan.summary"
+    ]
+    tui.set_busy(False)
     summaries = [
         event
         for event in tui.transcript.entries
@@ -441,6 +483,48 @@ async def test_live_plan_updates_collapse_to_one_summary_in_the_user_turn() -> N
     assert len(summaries) == 1
     assert "literature.search" in str(summaries[0].payload)
     assert "multi-stage request" not in tui.transcript.text
+
+
+@pytest.mark.asyncio
+async def test_trace_commit_does_not_flush_the_answer_slot() -> None:
+    """Codex flush_active_cell commits only the process cell."""
+    from omni.cli.repl_transcript import ANSWER_REPLACE_KEY, TRACE_REPLACE_KEY
+
+    tui = ReplTui(commands=())
+    display = TurnDisplay(verbosity="normal", status_line=False)
+    with use_output_sink(tui), use_output_turn("turn-trace"):
+        display.token("partial answer")
+        display.tool_event("done", {"name": "http_fetch", "error": "timeout after 30s"})
+        display.end()
+
+    live_keys = {key[1] for key in tui._live}
+    assert ANSWER_REPLACE_KEY in live_keys
+    assert TRACE_REPLACE_KEY not in live_keys
+    cards = [event for event in tui.transcript.entries if event.kind == TranscriptKind.TOOL_CARD]
+    assert cards
+    assert "http_fetch" in str(cards[-1].payload)
+
+
+def test_verbose_large_write_diff_is_a_collapsed_semantic_block() -> None:
+    sink = _EventSink([])
+    display = TurnDisplay(verbosity="verbose", status_line=False)
+    contents = "\n".join(f"line {index}" for index in range(80))
+
+    with use_output_sink(sink), use_output_turn("turn-large-write"):
+        display.tool_event(
+            "done",
+            {
+                "name": "write_file",
+                "status": "ok",
+                "result": "OK: wrote report.md",
+                "arguments": {"path": "report.md", "contents": contents},
+            },
+        )
+
+    folded = [event for event in sink.events if event.foldable]
+    assert len(folded) == 1
+    assert folded[0].initially_collapsed is True
+    assert folded[0].turn_id == "turn-large-write"
 
 
 @pytest.mark.asyncio

@@ -82,21 +82,43 @@ def test_sandbox_prefix_seatbelt(monkeypatch):
     assert prefix[:2] == ["sandbox-exec", "-p"]
     profile = prefix[2]
     assert "(deny file-write*)" in profile
-    assert str(s.paths.project_dir) in profile
+    assert str(s.paths.home) not in profile
+    assert str(s.paths.project_dir) not in profile
+    assert ".git" in profile and ".omni" in profile and ".codex" in profile
+    # Codex denies the metadata name even when the directory does not exist yet.
+    assert "require-not (regex" in profile
 
 
-def test_sandbox_prefix_bwrap(monkeypatch):
+def test_sandbox_prefix_bwrap(monkeypatch, tmp_path):
     monkeypatch.setattr(sandbox, "resolve_sandbox", lambda _s: "bwrap")
     s = load_settings()
     s.paths.ensure_dirs()
-    prefix = sandbox.sandbox_prefix(s.security, s.paths)
+    persist = tmp_path / "exec-tmp"
+    persist.mkdir()
+    prefix = sandbox.sandbox_prefix(
+        s.security,
+        s.paths,
+        writable_roots=[str(tmp_path / "work"), "/tmp"],
+        persist_tmp=persist,
+    )
     assert prefix[0] == "bwrap"
     assert "--ro-bind" in prefix
+    assert "--tmpfs" not in prefix
+    assert "--bind" in prefix
+    assert str(persist.resolve()) in prefix
 
 
 def test_sandbox_prefix_none_when_unavailable(monkeypatch):
     monkeypatch.setattr(sandbox, "resolve_sandbox", lambda _s: "")
     s = load_settings()
+    s.security.os_sandbox = "off"
+    assert sandbox.sandbox_prefix(s.security, s.paths) == []
+
+
+def test_sandbox_prefix_auto_runs_unconfined_when_unavailable(monkeypatch):
+    monkeypatch.setattr(sandbox, "resolve_sandbox", lambda _s: "")
+    s = load_settings()
+    s.security.os_sandbox = "auto"
     assert sandbox.sandbox_prefix(s.security, s.paths) == []
 
 
@@ -123,26 +145,24 @@ def test_sandbox_network_deny_bwrap_and_firejail(monkeypatch):
     assert "--net=none" in sandbox.sandbox_prefix(s.security, s.paths)
 
 
-def test_auto_fallback_warns_once_but_off_is_silent(monkeypatch, caplog):
+def test_auto_warns_and_off_is_silent(monkeypatch, caplog):
     import logging
 
     monkeypatch.setattr(sandbox, "resolve_sandbox", lambda _s: "")
     s = load_settings()
 
-    # os_sandbox="auto" + no backend → warn exactly once (never silent).
     sandbox._UNSANDBOXED_WARNED = False
     s.security.os_sandbox = "auto"
+    caplog.clear()
     with caplog.at_level(logging.WARNING, logger="omni.skills_runtime.sandbox"):
-        sandbox.sandbox_prefix(s.security, s.paths, warn_on_fallback=True)
-        sandbox.sandbox_prefix(s.security, s.paths, warn_on_fallback=True)
-    assert sum("WITHOUT kernel confinement" in r.message for r in caplog.records) == 1
+        assert sandbox.sandbox_prefix(s.security, s.paths, warn_on_fallback=True) == []
+    assert caplog.records
 
-    # Explicit opt-out (off) is deliberate → no warning.
     sandbox._UNSANDBOXED_WARNED = False
     s.security.os_sandbox = "off"
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="omni.skills_runtime.sandbox"):
-        sandbox.sandbox_prefix(s.security, s.paths, warn_on_fallback=True)
+        assert sandbox.sandbox_prefix(s.security, s.paths, warn_on_fallback=True) == []
     assert not caplog.records
 
 
@@ -158,6 +178,9 @@ async def test_bash_sandbox_denies_out_of_workspace_write(tmp_path, monkeypatch)
     # the pytest tmp tree (which otherwise lives under an allowed TMPDIR root).
     project = str(s.paths.project_dir)
     monkeypatch.setattr(sandbox, "_write_roots", lambda _p: [project])
+    from omni.skills_runtime import exec_io
+
+    monkeypatch.setattr(exec_io, "kernel_write_roots", lambda *_a, **_k: [project])
     ctx = ExecContext(settings=s, paths=s.paths, channel="cli")
     bash = build_shell_tools(ctx)[0].handler
 

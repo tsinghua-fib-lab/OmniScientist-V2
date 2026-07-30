@@ -273,7 +273,7 @@ async def retry_subtask(
     """Create one idempotent fresh execution from an immutable input snapshot."""
     if original.workflow_run_id:
         raise ValueError("workflow skill executions must be retried through their stable step")
-    terminal_statuses = {"failed", "degraded", "cancelled", "succeeded"}
+    terminal_statuses = {"failed", "degraded", "cancelled", "succeeded", "interrupted"}
     claim_token = ""
     retry_id = ""
     previous_policy = ""
@@ -809,7 +809,7 @@ async def resume_workflow_step(
     return True
 
 
-async def resume_subtask(
+async def requeue_subtask(
     *,
     db: Database,
     registry: Any,
@@ -818,7 +818,11 @@ async def resume_subtask(
     enqueue_local: EnqueueLocal,
     worker_running: bool,
 ) -> bool:
-    """Move a failed standalone skill execution back to the recovery queue."""
+    """Put a failed standalone skill execution back on the recovery queue.
+
+    This is operational requeue, not checkpoint resume: the same row is mutated
+    in place and prior result/error fields are cleared for a new attempt.
+    """
     async with db.session() as session:
         claim = await session.execute(
             update(SubtaskORM)
@@ -829,7 +833,7 @@ async def resume_subtask(
                     SubtaskORM.workflow_run_id == "",
                 ),
                 SubtaskORM.status.in_(
-                    {"failed", "cancelled", "degraded"}
+                    {"failed", "cancelled", "degraded", "interrupted"}
                 ),
             )
             .values(status="recovery_claimed")
@@ -848,13 +852,13 @@ async def resume_subtask(
         task.provider_authority_json = _standalone_renewed_authority(
             runtime_provider_authority_snapshot(registry, entry),
             prior_authority=prior_authority,
-            action=f"resume_subtask:{task.id}",
+            action=f"requeue_subtask:{task.id}",
         )
         task.resume_of = task.id
         if task.error and not task.original_error:
             task.original_error = task.error
         task.recovery_attempt = int(task.recovery_attempt or 0) + 1
-        task.recovery_policy = "resume_in_place"
+        task.recovery_policy = "requeue_in_place"
         task.status = "recovering"
         task.error = ""
         task.finished_at = None
@@ -867,11 +871,11 @@ async def resume_subtask(
         await task_recorder.reopen_task_for_recovery(
             task_id,
             subtask_id=subtask_id,
-            reason=f"resume {subtask_id[:8]}",
+            reason=f"requeue {subtask_id[:8]}",
         )
         await task_recorder.append_event(
             task_id,
-            event_type="subtask.resume",
+            event_type="subtask.requeue",
             status="pending",
             name=skill_name,
             skill_name=skill_name,
@@ -879,16 +883,37 @@ async def resume_subtask(
             output_json={
                 "resume_of": subtask_id,
                 "recovery_attempt": recovery_attempt,
-                "recovery_policy": "resume_in_place",
+                "recovery_policy": "requeue_in_place",
             },
-            summary=f"resume {subtask_id[:8]}",
+            summary=f"requeue {subtask_id[:8]}",
         )
     if worker_running:
         await enqueue_local(subtask_id, kind="subtask")
     return True
 
 
+async def resume_subtask(
+    *,
+    db: Database,
+    registry: Any,
+    subtask_id: str,
+    task_recorder: Any,
+    enqueue_local: EnqueueLocal,
+    worker_running: bool,
+) -> bool:
+    """Deprecated alias for :func:`requeue_subtask` (kept for internal callers)."""
+    return await requeue_subtask(
+        db=db,
+        registry=registry,
+        subtask_id=subtask_id,
+        task_recorder=task_recorder,
+        enqueue_local=enqueue_local,
+        worker_running=worker_running,
+    )
+
+
 __all__ = [
+    "requeue_subtask",
     "resolve_workflow_step",
     "resume_subtask",
     "resume_workflow_step",

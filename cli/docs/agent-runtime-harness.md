@@ -1,8 +1,8 @@
 # Agent runtime and research harness
 
 This is the authoritative guide to Omni's interaction modes, execution boundaries, recovery,
-research-quality checks, and domain extensions. It documents behavior implemented in the runtime,
-not a future roadmap.
+research-quality evaluation, and domain extensions. It documents behavior implemented in the
+runtime, not a future roadmap.
 
 ## Runtime invariants
 
@@ -10,21 +10,30 @@ Every CLI, REPL, Feishu, WeChat, and DingTalk turn follows the same harness:
 
 1. Create an `AgentRun` before planning and emit the acknowledgement with its `run_id`.
 2. Build and persist an `IntentPlan`, including selected skills, reasons, rejected candidates,
-   execution mode, tool policy, workflow DAG, and verification plan.
-3. Validate the plan and recover by repair, degradation, `needs_input`, or bounded ReAct handoff.
-4. Enforce the `ExecutionContract` in code: allowed tools, phase budgets, context, provenance,
+   execution mode, tool policy, and the events the turn's claims must leave behind.
+3. Validate the plan and recover by `needs_input` or bounded ReAct handoff; a safety finding is the
+   only hard stop.
+4. Enforce the execution contract in code: allowed tools, phase budgets, context, provenance,
    failure policy, lifecycle hooks, and interaction mode.
-5. Execute inline, as a Skill Execution, as a WorkflowRun dependency DAG, as a Child Task, or as an artifact transaction.
-6. Append planner, tool, workflow, step, Skill Execution, Child Task, artifact, hook, verification, and presentation events
-   to the same task event stream.
-7. Verify the result and render one `TurnPresentation` through the channel-specific renderer.
-8. Finish as `succeeded`, `degraded`, `needs_input`, `failed`, or `cancelled`; a usable partial
-   result is not converted into a bare exception.
+5. Execute inline, as a Skill Execution, as a WorkflowRun the model submitted, as a Child Task, or
+   as an artifact transaction.
+6. Append planner, tool, workflow, step, Skill Execution, Child Task, artifact, hook, and
+   presentation events to the same task event stream.
+7. Render one `TurnPresentation` through the channel-specific renderer, then settle the task against
+   the durable record.
+8. Finish as `succeeded`, `degraded`, `needs_input`, `failed`, `cancelled`, or `interrupted`; a
+   usable partial result is not converted into a bare exception.
 
 `/task` lists Tasks (user requests). `/task show <task-id>` shows the readable chain and
 `/task show <task-id> --json` returns the Task, plan, events, WorkflowRuns, WorkflowSteps, Skill
 Executions, and Child Tasks. Each object is independently inspectable; retryable skill attempts are
 stored separately from stable workflow nodes.
+
+Step sequencing inside a turn belongs to the model. It publishes a checklist with the `update_plan`
+tool — a list of `{step, status}` items, where `status` is `pending`, `in_progress`, or `completed` —
+and replaces it wholesale whenever it learns something new. The tool asks for one `in_progress` step
+at a time, but the host only normalizes and renders the list; it enforces nothing, so a revised
+checklist needs no validation or repair pass. Trivial single-step requests skip it.
 
 ## Interaction modes
 
@@ -90,9 +99,11 @@ follow-up hint, while the foreground composer transfers an unapplied instruction
 next-turn queue. An already-running external engine or compute call reaches its next coordinator
 boundary before cancellation takes effect.
 
-## Workflow DAG and recovery
+## Workflow steps and recovery
 
-A workflow step can declare:
+Multi-step work is sequenced by the model: it calls `run_workflow` with an ordered step list, and
+that call creates the WorkflowRun. Nothing computes a sealed DAG before the turn starts. A step can
+declare:
 
 ```json
 {
@@ -126,7 +137,10 @@ omni task resume <workflow-run-id> --step <step-id>
 ```
 
 `retry` creates a new attempt linked by `retry_of`; `resume` keeps the child id and starts from the
-persisted checkpoint. Completed upstream steps are reused for step-level recovery.
+persisted checkpoint. Completed upstream steps are reused for step-level recovery. A parent-task
+resume that still owes only `artifact.figure` and/or writing may host-fill those deliverables
+instead of replaying the checkpoint; a leftover PPTX or poster is not host-fillable and falls
+through to a full retry.
 
 ## Multi-agent delegation (coordinating → specialist → reviewer)
 

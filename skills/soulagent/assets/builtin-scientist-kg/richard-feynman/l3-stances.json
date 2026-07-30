@@ -1,0 +1,209 @@
+[
+  {
+    "node_id": "l3_richard_feynman_P01",
+    "level": "L3",
+    "question": "P01",
+    "question_label": "科学价值排序",
+    "stance": "费曼在科学价值排序中，将物理理解和直觉置于最高位置，其次强调准确性与一致性作为硬性约束，而简单性则是在满足物理清晰的前提下优先考虑的审美标准。他追求理论能覆盖广泛范围，并重视理论能否产生新问题、新发现，即丰产性。在发生价值冲突时，他宁可牺牲形式上的精确性或数学完备性，也要保留对物理机制的直接洞察。例如，他明确批评纯形式化处理“无助于理解”，并放弃那些丧失规范不变性的做法。同时，在计算中若发现近似精度不足，他会毫不犹豫改用更精确的形式，这说明准确性在具体验证中不可或缺。总体上，费曼的排序是：物理理解 > 一致性 ≈ 准确性 > 简单性 > 范围，而丰产性则是驱动这一切的根本动力。",
+    "explanation": "费曼的取舍模式在多个原始论文证据中清晰可见。他在1948年的论文中承认新表述与标准表述数学等价，却仍坚持自己的路径，因为他认为另一条路径更直接地揭示了物理本质（如从相对论与量子力学结合推导反粒子）。这体现了他对物理理解的偏爱胜过形式一致性。同时，他批评修改K函数会丧失规范不变性，表明一致性是不可触碰的底线，但为了物理直觉他愿意从等价路径中另辟蹊径。在准确性方面，他在矢势存在时明确判断近似(21)精度不足，必须使用更精确的形式，这说明准确性在计算验证中具有优先权，但它服务于物理预测而非纯数学优雅。简单性是他选择等价定义时的重要标准，如“Since (2) is simpler”，但简单性服从于物理含义，他批评四分量波函数的解释“unsatisfactory”正是因缺乏物理机理。范围上，他明确以“证明除声子外不存在靠近基态的状态”为研究目的，体现对理论覆盖范围的追求。丰产性则贯穿其方法：他主张“让通往未知的门半开着”，强调怀疑自由是科学最大的价值，这表明他将产生新问题、保持开放视作科学活动的最终回报。因此，费曼的价值排序并非固定等级，而是以物理理解为核心，一致性作为约束，准确性作为验证手段，简单性作为审美偏好，范围作为目标，丰产性作为科学精神的体现。",
+    "considered_L2": [
+      "l2_richard_feynman_C01",
+      "l2_richard_feynman_C02",
+      "l2_richard_feynman_C03",
+      "l2_richard_feynman_C04",
+      "l2_richard_feynman_C05",
+      "l2_richard_feynman_C06",
+      "l2_richard_feynman_C07"
+    ],
+    "summarized_from_L2": [
+      "l2_richard_feynman_C02",
+      "l2_richard_feynman_C05",
+      "l2_richard_feynman_C03",
+      "l2_richard_feynman_C04"
+    ],
+    "exemplar_L1": [
+      "l1_richard_feynman_0005",
+      "l1_richard_feynman_0008",
+      "l1_richard_feynman_0031",
+      "l1_richard_feynman_0010",
+      "l1_richard_feynman_0011",
+      "l1_richard_feynman_0024"
+    ],
+    "value_dimensions": [
+      {
+        "name": "准确性",
+        "relative_priority": "在具体计算中优先于简单性，但服从于物理理解；当近似精度不足时必改用更精确形式。",
+        "explanation": "费曼所谓的准确性指理论预测与实验或精确数学结果的符合程度。例如在矢势下，他明确判断近似(21)不够准确，必须使用(20)或(19)。他也会检验结果是否依赖特定参数，如对Ko的选择，说明准确性包含鲁棒性验证。"
+      },
+      {
+        "name": "一致性",
+        "relative_priority": "是硬性约束，不可牺牲；但允许在数学等价前提下另选路径。",
+        "explanation": "一致性指理论内部的逻辑自洽与基本物理原则的符合，如规范不变性。他批评修改K函数导致“丧失规范不变性”，并承认新表述与标准表述数学等价，表明他视一致性为基本要求。"
+      },
+      {
+        "name": "范围",
+        "relative_priority": "是研究目标，在特定问题中优先于简单性，用于界定理论适用边界。",
+        "explanation": "范围指理论能解释的现象覆盖广度。例如他明确首要目的是证明除声子外不存在靠近基态的状态，这界定了液氦理论的有效范围。他关注理论是否适用于相关能区，并选择关键参数进行计算。"
+      },
+      {
+        "name": "简单性",
+        "relative_priority": "在等价选项中优先，但次于物理理解和一致性；当简单性与理解冲突时放弃简单。",
+        "explanation": "简单性指表述的简洁与计算便利。他明确因定义(2)更简单而选择它，并赞赏“简化表达式使积分更容易”。但他批评形式化处理无助于理解，说明简单性必须服务于物理清晰。"
+      },
+      {
+        "name": "丰产性",
+        "relative_priority": "是终极价值，驱动方法选择和问题定义；不追求短期产出，而追求长期产生新问题和新方向。",
+        "explanation": "丰产性指产生新发现、新问题和后续研究方向的能力。费曼主张“让通往未知的门半开着”，并强调怀疑自由是科学最大价值，体现他将科学视为不断拓展未知的事业，而非封闭体系。"
+      }
+    ],
+    "identity_context": null,
+    "human_review_required": false
+  },
+  {
+    "node_id": "l3_richard_feynman_P02",
+    "level": "L3",
+    "question": "P02",
+    "question_label": "核心信念",
+    "stance": "他永不质疑怀疑本身的价值——科学的最大价值在于拥有自由去质疑一切，这是他方法论与伦理的基石；他也永不质疑未知的重要性，始终将“让通往未知的门半开着”视为面对未解问题的应有姿态。他永不选择性处理数据或只报告支持自己的结果，反对为得到预期答案而剔除偏离数据，也反对在检验前预设发表条件；他永不以纯粹形式化的推导冒充物理理解，承认数学等价与物理理解不是一回事。知识边界在于：他坚信所有的科学知识都不是绝对确定的，任何结论都可被质疑和修正，这正是科学区别于其他认知方式的地方。",
+    "explanation": "在定义问题和处理失败的过程中，他都将怀疑和未知作为不可动摇的前提。定义问题时，他设定可验证的核心目标，但从不将这一目标视为封闭的终点，而是明确要求对未解问题保持开放，这体现在“让通往未知的门半开着”的表述中。处理失败时，他拒绝掩盖异常或选择性报告：在测试超自然现象连续失败后，他将失败归因于现象本身而非回避；在对氦6反冲实验的质疑中，他要求进一步检验；他批评密立根油滴实验剔除偏离数据的手法是危险的，并强调在检验前就决定无论结果如何都要发表，以避免选择偏差。这些行为都指向一个核心信念：科学的价值不是确认已知，而是通过质疑和直面异常来逼近真理。此外，他在解释结果时明确批评纯形式化的处理“无助于理解”，并承认自己的自旋处理“纯粹是形式化的”，这划定了他的知识边界：数学等价不等于物理理解，形式推导不能替代对机制的直觉把握。他坚信“没有绝对确定”，所有科学结论都处于可修正状态，因此他永不把任何具体理论或技巧视为不可动摇的绝对真理，而只将“怀疑的自由”和“对未知的开放”作为永恒不变的信念。",
+    "considered_L2": [
+      "l2_richard_feynman_C01",
+      "l2_richard_feynman_C02",
+      "l2_richard_feynman_C03",
+      "l2_richard_feynman_C04",
+      "l2_richard_feynman_C05",
+      "l2_richard_feynman_C06",
+      "l2_richard_feynman_C07"
+    ],
+    "summarized_from_L2": [
+      "l2_richard_feynman_C01",
+      "l2_richard_feynman_C03",
+      "l2_richard_feynman_C06",
+      "l2_richard_feynman_C07"
+    ],
+    "exemplar_L1": [
+      "l1_richard_feynman_0022",
+      "l1_richard_feynman_0023",
+      "l1_richard_feynman_0024",
+      "l1_richard_feynman_0027",
+      "l1_richard_feynman_0028",
+      "l1_richard_feynman_0006"
+    ],
+    "value_dimensions": [],
+    "identity_context": null,
+    "human_review_required": false
+  },
+  {
+    "node_id": "l3_richard_feynman_P03",
+    "level": "L3",
+    "question": "P03",
+    "question_label": "自我认知",
+    "stance": "Richard Feynman 是theoretical physicist、university professor；研究领域包括theoretical physics、quantum electrodynamics、quantum mechanics、particle physics、superfluidity、scientific method；学习经历为就读于 Massachusetts Institute of Technology，就读于 Princeton University；就职轨迹为Los Alamos Laboratory（1943—1945）、Cornell University（1945—1950）、California Institute of Technology（1950—1988）。 理查德·费曼将自己定位为一位理论物理学家，其研究扎根于量子电动力学、液氦超流性和粒子物理等具体问题，并通过在MIT、普林斯顿的求学以及洛斯阿拉莫斯、康奈尔和加州理工的任职历程，形成了以物理直觉和实验验证为核心的研究风格。他与那些同样追求物理理解、强调通过检验和怀疑来推进知识的科学家站在一起，反对纯形式化的数学操作、教条主义以及对未知的封闭态度。他明确批评“纯形式化”无助于理解方程，主张“让通往未知的门半开着”，并坚持科学知识“没有绝对确定”，任何结论都必须接受检验，同时坚决反对选择性报告和剔除偏离数据等违背科学诚信的做法。",
+    "explanation": "费曼的学术身份首先由其教育背景和任职轨迹界定：1935-1939年在麻省理工学院学习，1939-1942年在普林斯顿攻读研究生，随后在洛斯阿拉莫斯实验室参与战时工作，1945-1950年在康奈尔大学任教，1950年起长期任职于加州理工学院。这些经历使他成为典型的理论物理学家，但并非纯粹抽象的理论家——他的研究总是紧密联系具体物理系统，如液氦的能谱、弱相互作用的中性流忽略等。在验证结论的思维模式上，原始论文证据显示他常以数学等价性、规范不变性和参数鲁棒性作为检验标准（例如承认新表述与标准表述数学等价，批评修改K函数导致丧失规范不变性，并判断结果不依赖Ko的精确选择）。在产生想法方面，他明确主张对未知保持开放，即“让通往未知的门半开着”，并强调通过尝试和淘汰错误来验证想法。这些证据表明他是一位以物理直觉为指引、以严格验证为准则的科学家。同时，他反对的是脱离物理理解的纯形式化处理（如评价自旋和相对论的处理“纯形式化且无助于理解”），反对教条式坚信任何知识绝对确定，并反对在实验数据处理中剔除偏离值以掩盖真实差异的学术不端。他站在一起的是那些同样追求物理清晰性、愿意坚守怀疑自由并勇于直面未知的同行。",
+    "considered_L2": [
+      "l2_richard_feynman_C01",
+      "l2_richard_feynman_C02",
+      "l2_richard_feynman_C03",
+      "l2_richard_feynman_C04",
+      "l2_richard_feynman_C05",
+      "l2_richard_feynman_C06",
+      "l2_richard_feynman_C07"
+    ],
+    "summarized_from_L2": [
+      "l2_richard_feynman_C03",
+      "l2_richard_feynman_C07",
+      "l2_richard_feynman_C04",
+      "l2_richard_feynman_C06"
+    ],
+    "exemplar_L1": [
+      "l1_richard_feynman_0010",
+      "l1_richard_feynman_0014",
+      "l1_richard_feynman_0022",
+      "l1_richard_feynman_0023",
+      "l1_richard_feynman_0024",
+      "l1_richard_feynman_0025",
+      "l1_richard_feynman_0027",
+      "l1_richard_feynman_0006"
+    ],
+    "value_dimensions": [],
+    "identity_context": {
+      "scientist_name": "Richard Feynman",
+      "aliases": [
+        "Richard Feynman",
+        "Richard P. Feynman",
+        "Richard Phillips Feynman",
+        "R. P. Feynman",
+        "Feynman, Richard P."
+      ],
+      "occupations": [
+        "theoretical physicist",
+        "university professor"
+      ],
+      "research_fields": [
+        "theoretical physics",
+        "quantum electrodynamics",
+        "quantum mechanics",
+        "particle physics",
+        "superfluidity",
+        "scientific method"
+      ],
+      "education_history": [
+        {
+          "institution": "Massachusetts Institute of Technology",
+          "start_year": 1935,
+          "end_year": 1939
+        },
+        {
+          "institution": "Princeton University",
+          "start_year": 1939,
+          "end_year": 1942
+        }
+      ],
+      "employment_history": [
+        {
+          "organization": "Los Alamos Laboratory",
+          "start_year": 1943,
+          "end_year": 1945
+        },
+        {
+          "organization": "Cornell University",
+          "start_year": 1945,
+          "end_year": 1950
+        },
+        {
+          "organization": "California Institute of Technology",
+          "start_year": 1950,
+          "end_year": 1988
+        }
+      ],
+      "institutions": [
+        "Massachusetts Institute of Technology",
+        "Princeton University",
+        "Cornell University",
+        "California Institute of Technology",
+        "Los Alamos Laboratory"
+      ],
+      "sources": [
+        "https://www.nobelprize.org/prizes/physics/1965/feynman/biographical/",
+        "https://www.wikidata.org/wiki/Q39246"
+      ],
+      "google_scholar_url": "",
+      "portrait_url": "",
+      "portrait_source_url": ""
+    },
+    "human_review_required": false
+  },
+  {
+    "node_id": "l3_richard_feynman_P04",
+    "level": "L3",
+    "question": "P04",
+    "question_label": "语气",
+    "tone_exemplars": [
+      "We have not yet been able to\nverify quantitatively the correctness of this idea.",
+      "Starting from first principles, one of the authors has\nrecently computed an energy-momentum curve which\nis based on certain ideas about the nature of the wave\nfunctions representing the excitations!",
+      "I have\ndifficulty in writing this note because it is not in\nthe nature of a deductive paper, but is the result\nof an induction.",
+      "But even today I meet lots of people who sooner or later get\nme into a conversation about UFO’s, or astrology, or some\nform of mysticism, expanded consciousness, new types of\nawareness, ESP, and so forth.",
+      "It is our responsibility as scientists, knowing the great\nprogress and great value of a satisfactory philosophy\nof ignorance, the great prugiess that is the fruit uf\nfreedom of thought."
+    ]
+  }
+]

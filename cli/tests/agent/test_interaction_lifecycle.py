@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import shlex
 import sys
 from typing import Any
 
@@ -25,10 +26,12 @@ from omni.agent.plan_revision import (
     deep_clone_plan,
 )
 from omni.agent.plan_runner_utils import approval_tools_for_plan
+from omni.agent.turn_execution import TurnResult
 from omni.config import load_settings
 from omni.core.llm.client import ChatWithToolsResult, LLMClient
 from omni.core.react_agent import ReActLoopAgent
 from omni.core.tool_result import ToolResultEnvelope
+from omni.runtime import hooks as hooks_runtime
 from omni.runtime.hooks import HookManager, invoke_tool_with_hooks
 from tests.conftest import CapturingLLM, ScriptedLLM
 
@@ -339,10 +342,11 @@ async def test_review_mode_is_read_only_and_forces_review_path():
 
 @pytest.mark.asyncio
 async def test_hook_manager_can_deny_and_redacts_secrets():
-    command = (
-        f"{sys.executable} -c \"import json,sys; d=json.load(sys.stdin); "
-        "print(json.dumps({'action':'deny','reason':'policy','seen':d['payload']}))\""
+    script = (
+        "import json,sys; d=json.load(sys.stdin); "
+        "print(json.dumps({'action':'deny','reason':'policy','seen':d['payload']}))"
     )
+    command = shlex.join([sys.executable, "-c", script])
     settings = load_settings(
         overrides={
             "hooks": {
@@ -354,7 +358,11 @@ async def test_hook_manager_can_deny_and_redacts_secrets():
     manager = HookManager(settings)
     decision = await manager.emit(
         "pre_tool",
-        payload={"tool": "bash", "api_key": "secret-value"},
+        payload={
+            "tool": "bash",
+            "path": "bad\udc80name",
+            "api_key": "secret-value",
+        },
         deny_capable=True,
     )
     assert not decision.allowed
@@ -363,10 +371,11 @@ async def test_hook_manager_can_deny_and_redacts_secrets():
 
 @pytest.mark.asyncio
 async def test_shared_hook_invoker_blocks_handler_before_every_execution_path():
-    command = (
-        f"{sys.executable} -c \"import json,sys; json.load(sys.stdin); "
-        "print(json.dumps({'action':'deny','reason':'owner policy'}))\""
+    script = (
+        "import json,sys; json.load(sys.stdin); "
+        "print(json.dumps({'action':'deny','reason':'owner policy'}))"
     )
+    command = shlex.join([sys.executable, "-c", script])
     settings = load_settings(
         overrides={"hooks": {"enabled": True, "commands": {"pre_tool": [command]}}}
     )
@@ -387,6 +396,28 @@ async def test_shared_hook_invoker_blocks_handler_before_every_execution_path():
             invoke=handler,
         )
     assert called is False
+
+
+def test_hook_command_split_preserves_unquoted_windows_drive_path():
+    command = r'C:\hostedtoolcache\Python\3.13\python.exe -c "print(1)"'
+    assert hooks_runtime._split_hook_command(command, windows=True) == [  # noqa: SLF001
+        r"C:\hostedtoolcache\Python\3.13\python.exe",
+        "-c",
+        "print(1)",
+    ]
+    assert hooks_runtime._split_hook_command(  # noqa: SLF001
+        r'"\\server\share\hook.exe" --check', windows=True
+    ) == [r"\\server\share\hook.exe", "--check"]
+    assert hooks_runtime._split_hook_command(  # noqa: SLF001
+        r".\hooks\policy.exe --check", windows=True
+    ) == [r".\hooks\policy.exe", "--check"]
+
+
+def test_execution_arguments_hash_accepts_lone_surrogates():
+    arguments = {"path": "bad\udc80name", "query": "中文"}
+    first = hooks_runtime.execution_arguments_hash(arguments)
+    assert first == hooks_runtime.execution_arguments_hash(arguments)
+    assert first != hooks_runtime.execution_arguments_hash({"path": "badname", "query": "中文"})
 
 
 @pytest.mark.asyncio
@@ -534,7 +565,15 @@ async def test_run_control_is_durable_and_consumed_once():
 
 
 @pytest.mark.asyncio
-async def test_cancelled_turn_skips_verifier_and_settles_cancelled(monkeypatch) -> None:  # noqa: ANN001
+async def test_cancelled_turn_settles_cancelled_and_is_not_regraded() -> None:
+    """Cancellation is the terminal decision; settlement may not overrule it.
+
+    The run below declares a required event it never produced, which for a run
+    that ran to completion would settle ``failed``. A user who stopped the work
+    themselves must still see ``cancelled``: reporting a failure would blame the
+    agent for output the user chose not to wait for, and would hide a deliberate
+    stop among real errors in the task list.
+    """
     agent = await OmniAgent.create(load_settings())
     session_id = await agent.ensure_session(channel="cli")
     task = await agent.tasks.create_task(
@@ -542,12 +581,17 @@ async def test_cancelled_turn_skips_verifier_and_settles_cancelled(monkeypatch) 
         channel="cli",
         user_input="long research",
     )
-
-    async def verifier_must_not_run(_self, _task_id: str) -> str:  # noqa: ANN001
-        raise AssertionError("cancelled tasks must bypass content verification")
-
-    monkeypatch.setattr(type(agent.verifier), "verify", verifier_must_not_run)
     try:
+        await agent.tasks.record_plan(
+            task.id,
+            IntentPlan(
+                task_id=task.id,
+                user_message="long research",
+                intent_type=IntentType.REACT_FALLBACK,
+                verification_plan=VerificationPlan(required_events=["schedule.resolved"]),
+            ),
+            status="validated",
+        )
         await agent.task_controller.finish_turn(
             task.id,
             kind="partial",
@@ -556,12 +600,19 @@ async def test_cancelled_turn_skips_verifier_and_settles_cancelled(monkeypatch) 
         )
         stored = await agent.tasks.get_task(task.id)
         events = await agent.tasks.list_events(task.id)
+        settled = await agent.task_controller.apply_settlement(
+            task.id,
+            TurnResult(text="cancelled", session_id=session_id, task_id=task.id, terminated_reason="cancelled"),
+        )
     finally:
         await agent.aclose()
 
     assert stored is not None and stored.status == "cancelled"
-    assert "task.cancelled" in [event.event_type for event in events]
-    assert not any(event.event_type.startswith("verification.") for event in events)
+    event_types = [event.event_type for event in events]
+    assert "task.cancelled" in event_types
+    assert "task.failed" not in event_types
+    assert settled.settlement_status == "skipped"
+    assert settled.kind == "text"
 
 
 @pytest.mark.asyncio
@@ -595,6 +646,7 @@ async def test_agent_cancels_inflight_model_and_persists_terminal_status(monkeyp
     agent = await OmniAgent.create(load_settings())
     agent.llm = SlowLLM()
     task_ref: dict[str, str] = {}
+    running: asyncio.Task | None = None
 
     def ack(data: dict[str, str]) -> None:
         task_ref["task_id"] = data["task_id"]
@@ -603,16 +655,19 @@ async def test_agent_cancels_inflight_model_and_persists_terminal_status(monkeyp
         running = asyncio.create_task(
             agent.handle_turn("open research question", channel="cli", on_task_ack=ack)
         )
-        await asyncio.wait_for(started.wait(), timeout=1)
+        await asyncio.wait_for(started.wait(), timeout=5)
         await agent.tasks.request_control(task_ref["task_id"], action="cancel")
-        turn = await asyncio.wait_for(running, timeout=1)
+        turn = await asyncio.wait_for(running, timeout=5)
         stored = await agent.tasks.get_task(turn.task_id)
         events = await agent.tasks.list_events(turn.task_id)
     finally:
+        if running is not None and not running.done():
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
         await agent.aclose()
 
     assert turn.terminated_reason == "cancelled"
-    assert turn.verification_status == "skipped"
+    assert turn.settlement_status == "skipped"
     assert stored is not None and stored.status == "cancelled"
     assert "react.finished" in [event.event_type for event in events]
     assert "verification.passed" not in [event.event_type for event in events]

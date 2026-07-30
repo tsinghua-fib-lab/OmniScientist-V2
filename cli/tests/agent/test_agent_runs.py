@@ -8,10 +8,41 @@ import sys
 import pytest
 
 from omni.agent import OmniAgent
+from omni.channels.base import Channel
 from omni.config import load_settings
 from omni.core.llm.client import ChatWithToolsResult, ToolCall
+from omni.runtime.presentation import TurnPresentation
 from omni.skills_runtime.manifest import DeliveryMode, ExecSpec, SkillEntry, SkillKind
 from tests.conftest import ScriptedLLM
+
+
+class _SilentOutboundChannel(Channel):
+    """A real outbound channel whose transport is a no-op."""
+
+    def __init__(self, settings, agent, name: str) -> None:  # noqa: ANN001
+        super().__init__(settings, agent)
+        self.name = name
+
+    async def start(self) -> None:  # pragma: no cover - no inbound loop under test
+        return None
+
+
+async def _deliver_answer(settings, agent, run) -> None:  # noqa: ANN001
+    """Hand a finished run's answer to its channel and record the receipt.
+
+    On CLI the answer is written to the terminal inside the turn. An outbound
+    channel hands off to a remote transport, so the run is only finished once
+    the send is durable; ``omni serve`` records that through the channel, and a
+    headless test has to do the same instead of settling on the channel's
+    behalf.
+    """
+    channel = _SilentOutboundChannel(settings, agent, run.channel)
+    await channel._send_task_presentation(  # noqa: SLF001
+        f"{run.channel}-conversation",
+        TurnPresentation(assistant_text=run.summary or "", task_id=run.id),
+        task_id=run.id,
+        kind="turn",
+    )
 
 
 def _echo_async_skill() -> SkillEntry:
@@ -56,7 +87,73 @@ def _recoverable_async_skill() -> SkillEntry:
 
 
 @pytest.mark.asyncio
+async def test_dispatching_one_skill_does_not_answer_a_three_part_request():
+    """Incident 599a725b: "abstract, diagram, and a paper" delivered the diagram.
+
+    Submitting background work used to end the ReAct loop, on the theory that
+    the submission message could serve as the turn's answer and save a model
+    round-trip. That holds only when the dispatch *is* the whole request. Here
+    the turn stopped at the first submission and still settled succeeded, so the
+    two remaining deliverables were dropped without anyone being told.
+    """
+    settings = load_settings()
+    agent = await OmniAgent.create(settings)
+    agent.registry.register(_echo_async_skill())
+    agent.llm = ScriptedLLM(
+        [
+            ChatWithToolsResult(
+                tool_calls=[
+                    ToolCall(
+                        "call-figure",
+                        "run_skill",
+                        {
+                            "skill_name": "echo-async",
+                            "mode": "background",
+                            "input": {"input": "architecture diagram"},
+                        },
+                    )
+                ]
+            ),
+            ChatWithToolsResult(
+                tool_calls=[
+                    ToolCall(
+                        "call-paper",
+                        "write_file",
+                        {"path": "survey.md", "contents": "# RAG survey\n"},
+                    )
+                ]
+            ),
+            ChatWithToolsResult(content="Diagram submitted; the survey is written."),
+        ]
+    )
+    try:
+        turn = await agent.handle_turn(
+            "Draw the architecture diagram and write the survey.", drain_tasks=False
+        )
+        events = await agent.tasks.list_events(turn.task_id)
+    finally:
+        await agent.aclose()
+
+    attempted = [event.name for event in events if event.event_type == "react.tool.start"]
+    assert attempted[0] == "run_skill"
+    assert len(attempted) > 1, "the turn ended at the dispatch, dropping what was left"
+    # The answer is the model's, composed once it had nothing left to do — not
+    # the submission receipt the dispatch handed back.
+    assert turn.text == "Diagram submitted; the survey is written."
+    assert any(artifact.path.endswith("survey.md") for artifact in turn.artifacts)
+    assert "Submitted background skill" not in turn.text
+
+
+@pytest.mark.asyncio
 async def test_user_turn_creates_parent_run_and_child_task_events():
+    """One turn owns one run, and the background child reports back into it.
+
+    The run row and its event log are the only record the user can inspect
+    afterwards (`omni task list` / `/task show`), so the submitted child has to
+    be linked to the parent while it is pending and its completion has to move
+    the parent to a terminal status. An outbound run additionally waits for the
+    answer to leave the host before it settles.
+    """
     from omni.cli.commands.tasks_cmd import render_task_list
     from omni.cli.render import console
 
@@ -112,12 +209,19 @@ async def test_user_turn_creates_parent_run_and_child_task_events():
         await agent.runtime.drain()
         task = await agent.runtime.get_subtask(task.id)
         assert task.status == "succeeded"
+        events = await agent.tasks.list_events(run.id)
+        assert "subtask.done" in [event.event_type for event in events]
+
+        run = await agent.tasks.get_task(run.id)
+        assert run is not None
+        assert run.status == "running"
+
+        await _deliver_answer(settings, agent, run)
         run = await agent.tasks.get_task(run.id)
         assert run is not None
         assert run.status == "succeeded"
         events = await agent.tasks.list_events(run.id)
-        assert "subtask.done" in [event.event_type for event in events]
-        assert "verification.passed" in [event.event_type for event in events]
+        assert [event.event_type for event in events][-1] == "task.succeeded"
     finally:
         await agent.aclose()
 
@@ -249,7 +353,14 @@ async def test_parent_run_rendering_json_child_lookup_and_progress():
 
 
 @pytest.mark.asyncio
-async def test_child_task_failure_degrades_deliverable_parent_run():
+async def test_child_task_failure_keeps_deliverable_parent_run_out_of_success():
+    """A child that failed cannot be averaged away by a sibling that worked.
+
+    The parent's status is the strongest outcome across its own execution and
+    its children, so a run that delivered half of what it submitted is never
+    reported as a clean success. The summary still has to name the split, so
+    the user can see what did land.
+    """
     settings = load_settings()
     agent = await OmniAgent.create(settings)
     agent.registry.register(_echo_async_skill())
@@ -267,10 +378,10 @@ async def test_child_task_failure_degrades_deliverable_parent_run():
 
         run = await agent.tasks.get_task(run.id)
         assert run is not None
-        assert run.status == "degraded"
+        assert run.status == "failed"
         assert "1/2" in run.summary
         events = await agent.tasks.list_events(run.id)
-        assert "task.degraded" in [event.event_type for event in events]
+        assert "task.failed" in [event.event_type for event in events]
     finally:
         await agent.aclose()
 
@@ -324,6 +435,14 @@ async def test_retry_reopens_parent_run_and_recalculates_after_child_success():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("channel", ["cli", "wechat", "feishu"])
 async def test_cli_wechat_feishu_entries_use_same_run_recorder(channel: str):
+    """Every entry point writes one shared run record with the same backbone.
+
+    Which channel a request arrived on decides how the answer is delivered, not
+    how the work is recorded: the same recorder acknowledges the turn, assembles
+    context, plans, validates, answers, and commits one terminal status. A
+    channel-specific record would make `omni task` mean something different
+    depending on where the user was sitting.
+    """
     settings = load_settings()
     agent = await OmniAgent.create(settings)
     agent.llm = ScriptedLLM([ChatWithToolsResult(content=f"answer from {channel}")])
@@ -333,6 +452,13 @@ async def test_cli_wechat_feishu_entries_use_same_run_recorder(channel: str):
         run = await agent.tasks.get_task(turn.task_id)
         assert run is not None
         assert run.channel == channel
+        if channel != "cli":
+            # Outbound answers are only durable once the transport confirms it,
+            # so an IM run stays open until its channel records the send.
+            assert run.status == "running"
+            await _deliver_answer(settings, agent, run)
+            run = await agent.tasks.get_task(run.id)
+            assert run is not None
         assert run.status == "succeeded"
         events = await agent.tasks.list_events(run.id)
         event_types = [event.event_type for event in events]
@@ -340,6 +466,8 @@ async def test_cli_wechat_feishu_entries_use_same_run_recorder(channel: str):
         assert event_types[1] == "task.ack"
         assert event_types.index("context.assembled") < event_types.index("plan.created")
         assert event_types.index("plan.created") < event_types.index("plan.validated")
-        assert event_types[-3:] == ["assistant.message", "verification.passed", "task.succeeded"]
+        assert event_types.index("plan.validated") < event_types.index("assistant.message")
+        assert event_types.index("assistant.message") < event_types.index("task.succeeded")
+        assert event_types[-1] == "task.succeeded"
     finally:
         await agent.aclose()

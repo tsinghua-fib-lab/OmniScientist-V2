@@ -31,11 +31,20 @@ from typing import Any
 
 from omni.agent.cost import react_usage_limits, usage_budget_exhausted
 from omni.agent.reviewer import gate, review_output
-from omni.config.settings import SubagentsCfg
+from omni.config.settings import (
+    SubagentsCfg,
+    microcompact_token_budget,
+    resolve_max_output_tokens,
+    session_compact_token_budget,
+)
 from omni.core.execution_budget import ToolExecutionBudget
 from omni.core.llm import create_llm_client
 from omni.core.termination import execution_outcome_status
-from omni.core.tool_result import tool_event_suffix, tool_transport_status
+from omni.core.tool_result import (
+    owned_result_outcome,
+    tool_event_suffix,
+    tool_transport_status,
+)
 from omni.runtime.execution_policy import skill_requires_approval
 from omni.runtime.isolation import IsolationError, prepare_subagent_context
 from omni.runtime.tool_gateway import ToolGateway
@@ -193,6 +202,7 @@ def _specialist_tools(
                     input_schema=sk.input_schema,
                     output_schema=sk.output_schema,
                     replay_safe=sk.replay_safe,
+                    outcome_resolver=owned_result_outcome,
                 ))
     if allowed:
         allow = set(allowed)
@@ -235,9 +245,10 @@ async def _record_reviewer_signal(
     """Persist a reviewer verdict as a ``reviewer.<verdict>`` event on the parent run.
 
     Reviewer verdicts are otherwise ephemeral (only embedded in the coordinator's
-    tool result). Recording them on the *parent* run makes them a durable, first
-    class signal the self-evolution loop can aggregate (see
-    :mod:`omni.skills_runtime.signals`). Best-effort — never blocks the specialist.
+    tool result), so a run that was sent back for revision looks identical
+    afterwards to one that passed first time. Recording the verdict on the
+    *parent* run keeps that visible in ``omni task show`` and the event log.
+    Best-effort — never blocks the specialist.
     """
     db = getattr(ctx, "db", None)
     task_id = getattr(ctx, "task_id", "") or ""
@@ -483,6 +494,8 @@ async def run_subagent(
             output_json=data.get("result") or {},
             error=error,
             duration_ms=float(data.get("duration_ms") or 0.0),
+            lifecycle_status=str(data.get("lifecycle_status") or ""),
+            result_success=data.get("result_success"),
         )
 
     gateway = ToolGateway.from_context(
@@ -490,7 +503,7 @@ async def run_subagent(
         event_family="subagent",
         tools=tools,
     )
-    invoker = gateway.invoker()
+    invoker = gateway.react_invoker()
 
     subagent_tool_budget = ToolExecutionBudget(cfg.max_tool_calls)
     react = ReActLoopAgent(
@@ -499,6 +512,18 @@ async def run_subagent(
         max_tool_calls=cfg.max_tool_calls,
         max_seconds=cfg.max_seconds,
         shared_tool_budget=subagent_tool_budget,
+        max_tokens=resolve_max_output_tokens(child_settings.model),
+        soft_token_limit=microcompact_token_budget(child_settings),
+        context_rollover_token_limit=session_compact_token_budget(child_settings),
+        microcompact_keep_tool_results=int(
+            child_settings.memory.microcompact_keep_tool_results or 0
+        ),
+        observation_max_chars=int(
+            getattr(child_settings.memory, "tool_observation_max_chars", 8000) or 0
+        ),
+        stall_timeout_s=float(
+            getattr(getattr(child_settings, "react", None), "stall_timeout_s", 0.0) or 0.0
+        ),
         **react_usage_limits(child_settings, child.llm),
     )
     system = _specialist_system(ctx.settings.role, spec)

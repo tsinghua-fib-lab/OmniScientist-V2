@@ -8,6 +8,7 @@ from pathlib import Path
 import tomli_w
 import typer
 
+from omni.cli.command_surface import spell_commands
 from omni.cli.render import (
     banner,
     confirm,
@@ -21,8 +22,13 @@ from omni.cli.render import (
     warn,
 )
 from omni.cli.state import AppState, make_agent, run_async
+from omni.config import resolve_settings
+from omni.config.model_discovery import discover_init_seed
+from omni.config.model_stack import MODEL_PROVIDER_CATALOG, ModelRole
 from omni.config.paths import configure_user_home, user_home_resolution
 from omni.config.secure_files import write_private_toml
+from omni.config.workspaces import prior_user_data_summary
+from omni.personas.installer import BuiltinPersonaInstallError, install_builtin_personas
 from omni.skills_runtime.runtime_setup import (
     SkillRuntimeSetupError,
     setup_research_pptx_runtime,
@@ -36,6 +42,18 @@ _SEMANTIC_SCHOLAR_API_URL = "https://www.semanticscholar.org/product/api"
 def _prepare_bundled_skill_runtimes(paths) -> None:  # noqa: ANN001
     """Prepare install-time Skill components before any task can select them."""
     info("Checking bundled Skill runtimes...")
+    try:
+        personas = install_builtin_personas(paths)
+    except BuiltinPersonaInstallError as exc:
+        error(str(exc))
+        raise typer.Exit(1) from exc
+    if personas.installed:
+        success(
+            f"Installed {len(personas.installed)} bundled scientist personas into "
+            f"{paths.scientist_kg_dir}."
+        )
+    else:
+        info("Bundled scientist personas are ready; existing directories were preserved.")
     try:
         changed = setup_research_pptx_runtime(paths)
     except SkillRuntimeSetupError as exc:
@@ -51,41 +69,45 @@ def _prepare_bundled_skill_runtimes(paths) -> None:  # noqa: ANN001
 # have to re-run the whole wizard to tweak one thing. Shared by ``/help`` (static
 # map) and ``omni init`` on an already-configured machine (live overview).
 _ADJUST_CMD: dict[str, str] = {
-    "model": "config model -p <provider> -u <BASE_URL> -m <MODEL> -k <API_KEY> (use config path to locate the files)",
-    "embeddings": "config embeddings --enable -u <EMBED_BASE_URL> -m <EMBED_MODEL> -k <API_KEY> (disable with config embeddings --disable)",
-    "semantic_scholar": "config set research.semantic_scholar_api_key <API_KEY> (remove with config unset research.semantic_scholar_api_key)",
-    "home": "config home [PATH] (restore ~/.omni with config home --reset)",
-    "project": "project new <name> / project list",
-    "skills": "skills add <source> to import; skills export to share built-ins with Claude, Codex, or OpenClaw",
-    "mcp": "mcp install both",
-    "channels": "channel login wechat|feishu|dingtalk",
+    "model": "/model <name> (advanced: /model main -p <provider> -u <BASE_URL> -m <MODEL> -k <API_KEY>)",
+    "embeddings": "/model embedding --enable -u <EMBED_BASE_URL> -m <EMBED_MODEL> -k <API_KEY> (disable with /model embedding --disable)",
+    "semantic_scholar": "/config set research.semantic_scholar_api_key <API_KEY> (remove with /config unset research.semantic_scholar_api_key)",
+    "home": "/config home [PATH] (restore ~/.omni with /config home --reset)",
+    "project": "/project new <name> / /project list",
+    "skills": "/skills add <source> to import; /skills export to share built-ins with Claude, Codex, or OpenClaw",
+    "mcp": "/mcp install both",
+    "channels": "/channel login wechat|feishu|dingtalk",
 }
 
 
-def init_config_map_rows() -> list[tuple[str, str, str]]:
+def _adjust_cmd(key: str, *, surface: str | None = None) -> str:
+    return spell_commands(_ADJUST_CMD[key], surface=surface)
+
+
+def init_config_map_rows(*, surface: str | None = None) -> list[tuple[str, str, str]]:
     """Return setup areas, descriptions, and adjustment commands."""
     return [
-        ("Model", "provider / base_url / model / api_key", _ADJUST_CMD["model"]),
-        ("Embedding recall", "semantic recall or offline keyword recall", _ADJUST_CMD["embeddings"]),
+        ("Model", "provider / base_url / model / api_key", _adjust_cmd("model", surface=surface)),
+        ("Embedding recall", "semantic recall or offline keyword recall", _adjust_cmd("embeddings", surface=surface)),
         (
             "Semantic Scholar",
             "optional API key for higher literature-search rate limits",
-            _ADJUST_CMD["semantic_scholar"],
+            _adjust_cmd("semantic_scholar", surface=surface),
         ),
-        ("Data directory", "sessions, memory, artifacts, and projects", _ADJUST_CMD["home"]),
-        ("Project workspace", "isolated data for each research project", _ADJUST_CMD["project"]),
-        ("Skill library", "built-in and imported external skills", _ADJUST_CMD["skills"]),
-        ("MCP registration", "expose Omni to Claude Code or Codex", _ADJUST_CMD["mcp"]),
-        ("Messaging channels", "connect messaging channels separately", _ADJUST_CMD["channels"]),
+        ("Data directory", "sessions, memory, artifacts, and projects", _adjust_cmd("home", surface=surface)),
+        ("Project workspace", "isolated data for each research project", _adjust_cmd("project", surface=surface)),
+        ("Skill library", "built-in and imported external skills", _adjust_cmd("skills", surface=surface)),
+        ("MCP registration", "expose Omni to Claude Code or Codex", _adjust_cmd("mcp", surface=surface)),
+        ("Messaging channels", "connect messaging channels separately", _adjust_cmd("channels", surface=surface)),
     ]
 
 
-def render_init_config_map() -> None:
+def render_init_config_map(*, surface: str | None = None) -> None:
     """Render the static /init → adjust-command map (used by ``/help``)."""
     data_table(
         "/init settings and later adjustment commands",
         ["setting", "description", "adjustment command"],
-        [list(r) for r in init_config_map_rows()],
+        [list(r) for r in init_config_map_rows(surface=surface)],
     )
 
 
@@ -147,18 +169,18 @@ def render_config_overview(settings) -> None:  # noqa: ANN001
     """Show the live current configuration alongside how to adjust each item."""
     paths = settings.paths
     rows = [
-        ["Model", _model_status_text(settings), _ADJUST_CMD["model"]],
-        ["Embedding recall", _embeddings_status_text(settings), _ADJUST_CMD["embeddings"]],
+        ["Model", _model_status_text(settings), _adjust_cmd("model")],
+        ["Embedding recall", _embeddings_status_text(settings), _adjust_cmd("embeddings")],
         [
             "Semantic Scholar",
             _semantic_scholar_status_text(settings),
-            _ADJUST_CMD["semantic_scholar"],
+            _adjust_cmd("semantic_scholar"),
         ],
-        ["Data directory", str(paths.home), _ADJUST_CMD["home"]],
-        ["Project workspace", paths.project_name, _ADJUST_CMD["project"]],
-        ["Skill library", _skills_count_text(settings), _ADJUST_CMD["skills"]],
-        ["MCP registration", _mcp_status_text(), _ADJUST_CMD["mcp"]],
-        ["Messaging channels", _channels_status_text(settings), _ADJUST_CMD["channels"]],
+        ["Data directory", str(paths.home), _adjust_cmd("home")],
+        ["Project workspace", paths.project_name, _adjust_cmd("project")],
+        ["Skill library", _skills_count_text(settings), _adjust_cmd("skills")],
+        ["MCP registration", _mcp_status_text(), _adjust_cmd("mcp")],
+        ["Messaging channels", _channels_status_text(settings), _adjust_cmd("channels")],
     ]
     data_table("Current configuration", ["setting", "status", "adjustment command"], rows)
 
@@ -178,11 +200,9 @@ def _write(target, data: dict) -> None:
 # the OpenAI-compatible protocol — only the ``base_url`` (and a sensible default
 # model) differ — so we prefill defaults and the user can just press Enter.
 _PROVIDER_PRESETS: list[tuple[str, str, str, str]] = [
-    # (provider, label, default_base_url, default_model)
-    ("openai", "OpenAI or any OpenAI-compatible service", "https://api.openai.com/v1", "gpt-4o-mini"),
-    ("deepseek", "DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat"),
-    ("ollama", "local Ollama without an API key", "http://localhost:11434/v1", "llama3.1"),
-    ("mock", "offline placeholder for testing flows", "", "omni-mock"),
+    (item.key, item.label, item.default_endpoint, item.default_model)
+    for item in MODEL_PROVIDER_CATALOG
+    if ModelRole.MAIN in item.roles
 ]
 
 
@@ -263,6 +283,17 @@ def first_run_setup_required(state: AppState) -> bool:
     )
 
 
+def first_run_setup_message(home: Path) -> str:
+    """Explain why setup is running — never imply a wipe when data is present."""
+    prior = prior_user_data_summary(home)
+    if prior:
+        return (
+            "Model configuration is missing; completing setup without deleting "
+            f"tasks or workspaces. {prior}"
+        )
+    return "No user configuration was found; starting first-time setup."
+
+
 def _select_data_home(requested: str, *, explicit: bool) -> None:
     """Persist a setup-time data directory without overriding ``OMNI_HOME``."""
     current, source = user_home_resolution()
@@ -322,7 +353,13 @@ def run_setup_wizard(
             info("Each setting can be changed independently with the commands shown above.")
             return
 
-    banner("OmniScientist setup")
+    prior = prior_user_data_summary(paths.home)
+    if prior:
+        banner("OmniScientist setup (existing data)")
+        info(prior)
+        info("This writes model settings only. Tasks, workspaces, and secrets are not deleted.")
+    else:
+        banner("OmniScientist setup")
     selected_home = home.strip()
     if not non_interactive and not selected_home:
         selected_home = prompt_text(
@@ -340,6 +377,33 @@ def run_setup_wizard(
     cfg: dict = {}
     secrets: dict = {}
 
+    # Isolated OMNI_HOME must not silently clobber a working environment stack
+    # with mock. Discover env (and, interactively, the host ~/.omni) first.
+    if not provider:
+        seed = discover_init_seed(
+            resolve_settings(
+                project=getattr(state, "project", None),
+                profile=getattr(state, "profile", None),
+                trusted=getattr(state, "trusted", None),
+            ),
+            allow_host=not non_interactive,
+        )
+        if seed is not None:
+            info(
+                f"Discovered {seed.provider} · {seed.model}"
+                + (f" @ {seed.base_url}" if seed.base_url else "")
+                + f" from {seed.origin}."
+            )
+            accept = non_interactive or confirm(
+                f"Use this model for this Omni Home ({paths.home})?",
+                default=True,
+            )
+            if accept:
+                provider = seed.provider
+                base_url = base_url or seed.base_url
+                model = model or seed.model
+                api_key = api_key or seed.api_key
+
     # Model provider — present recognizable providers (openai / deepseek / ollama)
     # and default to openai. They are all OpenAI-compatible (base_url is what
     # actually differs), so the choice is transparent; mock stays the offline
@@ -356,7 +420,10 @@ def run_setup_wizard(
     provider = _normalize_provider(provider)
     if provider == "mock":
         cfg["model"] = {"provider": "mock", "model": "omni-mock"}
-        warn("Using the offline mock model. Configure a real model later with `omni config model`.")
+        warn(
+            "Using the offline mock model. Configure a real model later with "
+            f"`{spell_commands('/model')}`."
+        )
     else:
         def_base, def_model = _provider_preset(provider)
         if not non_interactive:
@@ -377,7 +444,7 @@ def run_setup_wizard(
             cfg["model"] = {"provider": "mock", "model": "omni-mock"}
             warn(
                 "No base_url was provided; using offline mock. Configure a model later with "
-                "omni config model -p openai -u <BASE_URL> -m <MODEL> -k <API_KEY>"
+                f"{spell_commands('/model main -p openai -u <BASE_URL> -m <MODEL> -k <API_KEY>')}"
             )
         else:
             cfg["model"] = {"provider": provider, "base_url": base_url, "model": model or def_model}
@@ -531,7 +598,15 @@ def run_setup_wizard(
         f" @ {m['base_url']}" if m.get("base_url") else ""
     )
     kv_table("Setup complete", [
-        ("model", model_summary + ("" if secrets.get("model", {}).get("api_key") or provider == "mock" else " (API key missing; add it with omni config model -k)")),
+        (
+            "model",
+            model_summary
+            + (
+                ""
+                if secrets.get("model", {}).get("api_key") or provider == "mock"
+                else f" (API key missing; add it with {spell_commands('/model main -k')})"
+            ),
+        ),
         (
             "retrieval",
             f"semantic recall · {embedding_model} @ {embedding_base_url}"

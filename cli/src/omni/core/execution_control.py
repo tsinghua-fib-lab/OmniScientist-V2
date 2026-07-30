@@ -59,6 +59,7 @@ class ExecutionControl:
         self._acknowledge_controls = acknowledge_controls
         self._poll_interval = max(0.01, float(poll_interval))
         self._cancel_requested = False
+        self._durable_cancel = False
         self._steering: list[tuple[str, str]] = []
         self._pending_ack_ids: list[str] = []
         self._delivered_control_ids: list[str] = []
@@ -68,6 +69,15 @@ class ExecutionControl:
     @property
     def cancel_requested(self) -> bool:
         return self._cancel_requested
+
+    @property
+    def durable_cancel(self) -> bool:
+        """True when a stored cancel row reached this execution.
+
+        Local ``request_cancel`` (process teardown, nested interrupt) does not
+        set this. The outer turn uses it to tell user stop from serve restart.
+        """
+        return self._durable_cancel
 
     @property
     def delivered_control_ids(self) -> tuple[str, ...]:
@@ -121,6 +131,7 @@ class ExecutionControl:
                 control_id = str(item.get("id") or "")
                 if action == "cancel":
                     self._cancel_requested = True
+                    self._durable_cancel = True
                     if control_id:
                         self._pending_ack_ids.append(control_id)
                 elif action == "steer":

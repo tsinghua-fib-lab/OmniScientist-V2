@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from omni.research.corpus import ingest_many
+from omni.research.literature_select import format_literature_hits
 from omni.research.registry import ConnectorRegistry, ResolvedConnector
 from omni.research.store import ResearchStore
 
@@ -59,6 +60,15 @@ async def index_results(
     indexed = sum(1 for r in ingested if not r["deduped"])
     deduped = sum(1 for r in ingested if r["deduped"])
     _save_to_library(ctx, results)
+    hits = format_literature_hits(results)
+    summary = (
+        f"{origin}: indexed {indexed} new works ({deduped} duplicates removed)."
+    )
+    if hits:
+        summary = f"{summary}\n{hits}"
+    summary = (
+        f"{summary}\nUse omni lit or search_corpus for grounded citations."
+    )
     return {
         "status": "ok",
         "outcome": {"code": "indexed", "indexed": indexed, "deduped": deduped},
@@ -66,7 +76,7 @@ async def index_results(
         "results": results,
         "sources": [{"source_id": r["source_id"], "title": r["title"],
                      "chunks": r["chunks_added"]} for r in ingested],
-        "summary": f"{origin}: indexed {indexed} new works ({deduped} duplicates removed); use omni lit or search_corpus for grounded citations.",
+        "summary": summary,
     }
 
 

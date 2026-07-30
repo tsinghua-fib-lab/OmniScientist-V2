@@ -107,7 +107,6 @@ def workflow_step_record(
         "provider_source",
         "provider_version",
         "deliverable_id",
-        "quality_contract",
         "execution_id",
         "subtask_id",
         "child_task_id",
@@ -118,8 +117,6 @@ def workflow_step_record(
             value = step[field]
             if field == "optional_depends_on":
                 record[field] = list(value)
-            elif field == "quality_contract":
-                record[field] = dict(value)
             else:
                 record[field] = value
     if step.get("allow_failed_dependencies"):
@@ -271,9 +268,13 @@ def workflow_failure_message(step_records: list[dict[str, Any]]) -> str:
     ):
         for step in step_records:
             if step.get("status") == status:
+                detail = str(step.get(field) or fallback)
+                warning = str(step.get("warning") or "")
+                if status == "skipped" and step.get("skip_reason") == "workflow_timeout":
+                    detail = warning or "workflow execution envelope timed out"
                 return (
                     f"workflow step {step.get('id')} ({step.get('skill_name')}) {status}: "
-                    f"{step.get(field) or fallback}"
+                    f"{detail}"
                 )
     return "workflow failed"
 

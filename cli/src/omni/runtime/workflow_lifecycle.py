@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
+from sqlalchemy import select
+
 from omni.runtime.workflow_state import workflow_step_record
+from omni.storage.models import WorkflowRunORM, WorkflowStepORM, _utcnow
+
+_OPEN_STEP_STATUSES = frozenset({"pending", "scheduled", "running", "recovering"})
 
 
 class WorkflowExecutionError(RuntimeError):
@@ -40,6 +46,8 @@ async def settle_cancelled_wave(
     total: int,
 ) -> None:
     """Persist every in-flight step as recoverably cancelled."""
+    # Let cancelled step tasks finish session __aexit__ before we take the lock.
+    await asyncio.sleep(0)
     for step in wave:
         step_id = str(step["id"])
         result = {
@@ -69,8 +77,61 @@ async def settle_cancelled_wave(
         )
 
 
+async def close_open_steps_for_cancel(session: Any, workflow_run_id: str) -> None:
+    """Mark leftover open steps cancelled or skipped in the finish transaction.
+
+    In-wave persist can lose the SQLite lock after the asyncio task is gone.
+    The run still finishes cancelled; these rows must not stay pending/running.
+    """
+    rows = list(
+        (
+            await session.execute(
+                select(WorkflowStepORM).where(
+                    WorkflowStepORM.workflow_run_id == workflow_run_id
+                )
+            )
+        ).scalars().all()
+    )
+    now = _utcnow()
+    for row in rows:
+        if row.status not in _OPEN_STEP_STATUSES:
+            continue
+        row.status = "cancelled" if row.status == "running" else "skipped"
+        row.error = row.error or "cancelled"
+        row.warning = row.warning or "cancelled by user"
+        row.recoverable = True
+        row.finished_at = now
+
+
+async def write_workflow_finish(
+    db: Any,
+    workflow_run_id: str,
+    *,
+    status: str,
+    result: dict[str, Any],
+    error: str,
+    trace: list[dict[str, Any]],
+) -> None:
+    """Persist the run's terminal row, and close open steps on cancel."""
+    async with db.session() as session:
+        run = await session.get(WorkflowRunORM, workflow_run_id)
+        if run is None:
+            return
+        run.status = status
+        run.result_json = result
+        run.error = error
+        run.trace_log = trace
+        run.current_step_id = ""
+        run.finished_at = _utcnow()
+        if status == "cancelled":
+            await close_open_steps_for_cancel(session, workflow_run_id)
+        await session.commit()
+
+
 __all__ = [
     "WorkflowExecutionError",
+    "close_open_steps_for_cancel",
     "mark_workflow_cancelled",
     "settle_cancelled_wave",
+    "write_workflow_finish",
 ]

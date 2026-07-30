@@ -12,6 +12,8 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
+import time
 
 import pytest
 
@@ -39,6 +41,9 @@ class FakeSupervisor:
         self.calls.append("start")
         service_state.write_runtime(self.paths, {"ready": True, "version": "test"})
         return True, "started"
+
+    def definition_status(self):
+        return service_control.DefinitionStatus.MATCHES
 
     def activate(self):
         self.calls.append("activate")
@@ -82,6 +87,69 @@ def test_enable_persists_desired_and_starts(fake_supervisor):
     assert desired.configured is True
     assert desired.manager == "detached"
     assert service_state.service_is_running(settings.paths) is True
+    assert fake_supervisor[-1].calls == ["start"]
+    assert result.data.get("installed") is False
+
+
+def test_enable_reenables_with_start_not_reinstall(fake_supervisor):
+    settings = load_settings()
+    service_control.enable(settings, manager="detached")
+    service_control.disable(settings)
+    made_before = len(fake_supervisor)
+
+    result = service_control.enable(settings, manager="detached")
+
+    assert result.ok is True
+    assert result.data.get("installed") is False
+    # Re-enable on the same manager kicks start; it must not activate/install again.
+    assert fake_supervisor[-1].calls == ["start"]
+    assert len(fake_supervisor) == made_before + 1
+
+
+def test_enable_reinstalls_when_configured_unit_is_missing(
+    fake_supervisor, monkeypatch
+):
+    settings = load_settings()
+    service_state.write_desired(
+        settings.paths,
+        service_state.ServiceDesiredState(
+            enabled=False,
+            configured=True,
+            manager="detached",
+        ),
+    )
+    monkeypatch.setattr(FakeSupervisor, "status", lambda _self: "not-installed")
+
+    result = service_control.enable(settings, manager="detached")
+
+    assert result.ok is True
+    assert result.data.get("installed") is True
+    assert fake_supervisor[-1].calls == ["activate"]
+
+
+def test_enable_reinstalls_when_unit_definition_drifted(
+    fake_supervisor, monkeypatch
+):
+    settings = load_settings()
+    service_state.write_desired(
+        settings.paths,
+        service_state.ServiceDesiredState(
+            enabled=False,
+            configured=True,
+            manager="detached",
+        ),
+    )
+    monkeypatch.setattr(
+        FakeSupervisor,
+        "definition_status",
+        lambda _self: service_control.DefinitionStatus.MISMATCHED,
+        raising=False,
+    )
+
+    result = service_control.enable(settings, manager="detached")
+
+    assert result.ok is True
+    assert result.data.get("installed") is True
     assert fake_supervisor[-1].calls == ["activate"]
 
 
@@ -101,6 +169,48 @@ def test_start_requires_enabled(fake_supervisor):
     result = service_control.start(settings)
     assert result.ok is False
     assert "disabled" in result.detail.lower()
+
+
+def test_start_failure_does_not_reinstall_when_unit_is_still_present(
+    monkeypatch,
+):
+    settings = load_settings()
+    service_state.write_desired(
+        settings.paths,
+        service_state.ServiceDesiredState(
+            enabled=True,
+            configured=True,
+            manager="detached",
+        ),
+    )
+    calls: list[str] = []
+
+    class _FailingSupervisor(FakeSupervisor):
+        def status(self):
+            return "loaded"
+
+        def definition_status(self):
+            return service_control.DefinitionStatus.UNKNOWN
+
+        def start(self):
+            calls.append("start")
+            return False, "permission denied"
+
+        def activate(self):
+            calls.append("activate")
+            return True, "activated"
+
+    monkeypatch.setattr(
+        service_control,
+        "make_supervisor",
+        lambda spec, manager="auto": _FailingSupervisor(spec),
+    )
+
+    result = service_control.start(settings)
+
+    assert result.ok is False
+    assert "permission denied" in result.detail
+    assert calls == ["start"]
 
 
 def test_ensure_is_noop_when_disabled(fake_supervisor):
@@ -130,7 +240,7 @@ def test_ensure_repairs_enabled_but_down(fake_supervisor):
     assert service_state.service_is_running(settings.paths) is True
 
 
-def test_ensure_activates_the_refreshed_launcher(fake_supervisor):
+def test_ensure_starts_the_refreshed_launcher_without_reinstall(fake_supervisor):
     settings = load_settings()
     service_state.write_desired(
         settings.paths,
@@ -145,7 +255,8 @@ def test_ensure_activates_the_refreshed_launcher(fake_supervisor):
     result = service_control.ensure(settings, wait_s=1.0)
 
     assert result.ok is True
-    assert fake_supervisor[-1].calls == ["activate"]
+    # Repair kicks the existing unit — it must not call activate/install.
+    assert fake_supervisor[-1].calls == ["start"]
     assert fake_supervisor[-1].argv == service_state.default_launcher(
         settings.paths
     )
@@ -170,7 +281,7 @@ def test_ensure_replaces_an_unhealthy_owner(fake_supervisor):
     assert service_state.observe_service(settings.paths).phase == "ready"
     assert [call for supervisor in fake_supervisor for call in supervisor.calls] == [
         "stop",
-        "activate",
+        "start",
     ]
 
 
@@ -266,11 +377,12 @@ def test_enable_is_idempotent_when_already_running(fake_supervisor):
     """
     settings = load_settings()
     service_control.enable(settings)
-    assert fake_supervisor[-1].calls == ["activate"]
+    assert fake_supervisor[-1].calls == ["start"]
 
     made_before = len(fake_supervisor)
     service_control.enable(settings)
-    assert len(fake_supervisor) == made_before
+    assert len(fake_supervisor) == made_before + 1
+    assert fake_supervisor[-1].calls == []
 
 
 def test_enable_treats_auto_as_the_resolved_running_manager(fake_supervisor):
@@ -286,7 +398,8 @@ def test_enable_treats_auto_as_the_resolved_running_manager(fake_supervisor):
     result = service_control.enable(settings, manager="auto", wait_s=1.0)
 
     assert result.ok is True
-    assert fake_supervisor == []
+    assert len(fake_supervisor) == 1
+    assert fake_supervisor[-1].calls == []
     assert service_state.read_desired(settings.paths).manager == "detached"
 
 
@@ -500,7 +613,16 @@ def test_bare_launch_records_intent_while_update_reserves_singleton(
 ):
     from omni.cli import main as cli_main
 
+    monkeypatch.setenv("OMNI_ALLOW_EPHEMERAL_HOST_SERVICE", "1")
     settings = load_settings()
+    service_state.write_desired(
+        settings.paths,
+        service_state.ServiceDesiredState(
+            enabled=True,
+            configured=True,
+            manager="detached",
+        ),
+    )
     worker_entered = False
 
     class _State:
@@ -739,7 +861,10 @@ def test_update_guard_preserves_update_error_and_records_restore_error(
     monkeypatch.setattr(
         service_control,
         "_activate_locked",
-        lambda *_args, **_kwargs: (False, "activation failed"),
+        lambda *_args, **_kwargs: service_control._LaunchOutcome(
+            False,
+            "activation failed",
+        ),
     )
 
     with pytest.raises(ValueError, match="install failed") as caught:
@@ -771,3 +896,212 @@ def test_doctor_and_status_flag_duplicate_serve_processes(fake_supervisor, monke
 
     doc = service_control.doctor(settings)
     assert any("processes are live" in f for f in doc["findings"])
+
+
+def test_update_restore_succeeds_while_control_plane_is_still_starting(
+    fake_supervisor, monkeypatch
+):
+    """Update must restart serve, but STARTING on new code is a successful restore."""
+    settings = load_settings()
+    service_state.write_desired(
+        settings.paths,
+        service_state.ServiceDesiredState(
+            enabled=True, configured=True, manager="detached"
+        ),
+    )
+    service_state.write_runtime(
+        settings.paths, {"ready": True, "phase": "ready", "version": "old"}
+    )
+
+    def _activate(self):  # noqa: ANN001
+        self.calls.append("activate")
+        service_state.write_runtime(
+            self.paths,
+            {"ready": False, "phase": "starting", "version": "test"},
+        )
+        return True, "activated"
+
+    monkeypatch.setattr(FakeSupervisor, "activate", _activate)
+
+    with service_control.update_guard(
+        settings, restart_serve=True, ready_wait_s=0.3
+    ) as guard:
+        assert guard.was_active is True
+        detail = guard.restore()
+
+    assert "still becoming ready" in detail
+    assert "restarted" in detail
+    assert fake_supervisor[-1].calls == ["activate"]
+
+
+def test_update_restore_succeeds_when_ready_arrives_within_wait(
+    fake_supervisor, monkeypatch
+):
+    settings = load_settings()
+    service_state.write_desired(
+        settings.paths,
+        service_state.ServiceDesiredState(
+            enabled=True, configured=True, manager="detached"
+        ),
+    )
+    service_state.write_runtime(
+        settings.paths, {"ready": True, "phase": "ready"}
+    )
+
+    def _activate(self):  # noqa: ANN001
+        self.calls.append("activate")
+        service_state.write_runtime(
+            self.paths, {"ready": False, "phase": "starting", "version": "test"}
+        )
+
+        def _flip() -> None:
+            service_state.write_runtime(
+                self.paths,
+                {"ready": True, "phase": "ready", "version": "test"},
+            )
+
+        threading.Timer(0.15, _flip).start()
+        return True, "activated"
+
+    monkeypatch.setattr(FakeSupervisor, "activate", _activate)
+
+    with service_control.update_guard(
+        settings, restart_serve=True, ready_wait_s=2.0
+    ) as guard:
+        detail = guard.restore()
+
+    assert detail == "restarted on the updated code."
+    assert service_state.service_is_ready(settings.paths) is True
+
+
+def test_update_restore_fails_when_process_never_claims_singleton(
+    fake_supervisor, monkeypatch
+):
+    settings = load_settings()
+    service_state.write_desired(
+        settings.paths,
+        service_state.ServiceDesiredState(
+            enabled=True, configured=True, manager="detached"
+        ),
+    )
+    service_state.write_runtime(settings.paths, {"ready": True, "phase": "ready"})
+
+    def _activate(self):  # noqa: ANN001
+        self.calls.append("activate")
+        return True, "activated"
+
+    monkeypatch.setattr(FakeSupervisor, "activate", _activate)
+    monkeypatch.setattr(service_control, "_wait_active", lambda *_a, **_k: True)
+
+    with pytest.raises(RuntimeError, match="did not become ready") as caught:
+        with service_control.update_guard(
+            settings, restart_serve=True, ready_wait_s=0.3
+        ) as guard:
+            guard.restore()
+
+    assert "phase=" in str(caught.value)
+
+
+def test_update_restore_fails_when_starting_process_dies(
+    fake_supervisor, monkeypatch
+):
+    settings = load_settings()
+    service_state.write_desired(
+        settings.paths,
+        service_state.ServiceDesiredState(
+            enabled=True, configured=True, manager="detached"
+        ),
+    )
+    service_state.write_runtime(settings.paths, {"ready": True, "phase": "ready"})
+
+    def _activate(self):  # noqa: ANN001
+        self.calls.append("activate")
+        service_state.write_runtime(
+            self.paths, {"ready": False, "phase": "starting", "version": "test"}
+        )
+
+        def _die() -> None:
+            service_state.clear_runtime(self.paths)
+
+        threading.Timer(0.2, _die).start()
+        return True, "activated"
+
+    monkeypatch.setattr(FakeSupervisor, "activate", _activate)
+
+    with pytest.raises(RuntimeError, match="did not become ready") as caught:
+        with service_control.update_guard(
+            settings, restart_serve=True, ready_wait_s=1.0
+        ) as guard:
+            guard.restore()
+
+    text = str(caught.value)
+    assert "phase=" in text
+    assert "pid=" in text
+
+
+def test_restart_succeeds_while_control_plane_is_still_starting(
+    fake_supervisor, monkeypatch
+):
+    settings = load_settings()
+    service_control.enable(settings)
+
+    def _activate(self):  # noqa: ANN001
+        self.calls.append("activate")
+        service_state.write_runtime(
+            self.paths, {"ready": False, "phase": "starting", "version": "test"}
+        )
+        return True, "activated"
+
+    monkeypatch.setattr(FakeSupervisor, "activate", _activate)
+
+    result = service_control.restart(settings, wait_s=0.3)
+
+    assert result.ok is True
+    assert result.data.get("running") is False
+    assert result.data.get("phase") == "starting"
+    assert "still becoming ready" in result.detail
+
+
+def test_wait_restore_waits_through_initial_down(fake_supervisor, monkeypatch):
+    """launchd has not spawned yet — down is a wait, not an immediate failure."""
+    settings = load_settings()
+    phases = iter(["down", "down", "starting", "ready"])
+
+    def _observe(_paths):  # noqa: ANN001
+        phase = next(phases, "ready")
+        if phase == "down":
+            return service_state.ServiceObservation("down", None, None)
+        return service_state.ServiceObservation(
+            phase, 4242, {"phase": phase, "ready": phase == "ready", "pid": 4242}
+        )
+
+    monkeypatch.setattr(service_state, "observe_service", _observe)
+    monkeypatch.setattr(service_control, "_service_active", lambda _s: False)
+
+    claimed, ready, last = service_control._wait_restore(settings, 1.0)
+    assert claimed is True
+    assert ready is True
+    assert last.phase == "ready"
+
+
+def test_wait_restore_fails_fast_after_claim_then_death(fake_supervisor, monkeypatch):
+    settings = load_settings()
+    phases = iter(["starting", "down"])
+
+    def _observe(_paths):  # noqa: ANN001
+        phase = next(phases, "down")
+        if phase == "down":
+            return service_state.ServiceObservation("down", None, None)
+        return service_state.ServiceObservation(
+            phase, 4242, {"phase": phase, "ready": False, "pid": 4242}
+        )
+
+    monkeypatch.setattr(service_state, "observe_service", _observe)
+    monkeypatch.setattr(service_control, "_service_active", lambda _s: False)
+
+    started = time.time()
+    claimed, ready, last = service_control._wait_restore(settings, 2.0)
+    assert claimed is False
+    assert ready is False
+    assert last.phase == "down"
+    assert time.time() - started < 1.0

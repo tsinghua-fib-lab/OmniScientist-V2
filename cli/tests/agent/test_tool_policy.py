@@ -11,8 +11,13 @@ from omni.core.tool_policy import (
     ToolPolicyGuard,
     filter_tools_for_policy,
     policy_max_iterations,
+    policy_max_tool_calls,
 )
-from omni.core.tool_result import ToolResultEnvelope
+from omni.core.tool_result import (
+    ToolResultEnvelope,
+    owned_result_outcome,
+    tool_event_output,
+)
 from omni.runtime.tool_gateway import ToolGateway
 from omni.skills_runtime.context import Tool
 from tests.conftest import ScriptedLLM
@@ -89,6 +94,25 @@ def test_zero_tool_budget_is_real_zero_not_default():
     policy = ToolPolicy(max_tool_calls=0, max_iterations=0)
 
     assert policy_max_iterations(policy, default=6) == 0
+    assert policy_max_tool_calls(policy, default=12) == 0
+
+
+def test_global_negative_one_means_unbounded_but_zero_remains_exact():
+    assert policy_max_iterations(None, default=-1) is None
+    assert policy_max_tool_calls(None, default=-1) is None
+    assert policy_max_iterations(None, default=0) == 0
+    assert policy_max_tool_calls(None, default=0) == 0
+    assert policy_max_iterations(ToolPolicy(max_iterations=3), default=-1) == 3
+    assert policy_max_tool_calls(ToolPolicy(max_tool_calls=4), default=-1) == 4
+    assert policy_max_iterations(ToolPolicy(max_iterations=0), default=0) == 0
+    assert policy_max_tool_calls(ToolPolicy(max_tool_calls=0), default=0) == 0
+
+
+def test_explicit_global_and_plan_limits_use_the_tighter_boundary():
+    policy = ToolPolicy(max_tool_calls=4, max_iterations=3)
+
+    assert policy_max_tool_calls(policy, default=10) == 4
+    assert policy_max_iterations(policy, default=8) == 3
 
 
 @pytest.mark.asyncio
@@ -107,6 +131,29 @@ class _RunEvents:
 
     async def append_event(self, task_id: str, **kwargs):  # noqa: ANN003
         self.events.append({"task_id": task_id, **kwargs})
+
+
+@pytest.mark.asyncio
+async def test_context_rollover_notice_is_persisted_as_a_durable_event():
+    runs = _RunEvents()
+    gateway = ToolGateway(
+        task_id="run-context",
+        tools=[],
+        tasks=runs,
+        event_family="react",
+    )
+
+    await gateway.emit(
+        "notice",
+        {
+            "kind": "context_rollover",
+            "status": "compacted",
+            "context_window": {"rollovers": 1},
+        },
+    )
+
+    assert runs.events[0]["event_type"] == "react.context.compacted"
+    assert runs.events[0]["status"] == "succeeded"
 
 
 @pytest.mark.asyncio
@@ -302,6 +349,57 @@ async def test_nested_authority_is_exact_target_and_one_shot():
 
 
 @pytest.mark.asyncio
+async def test_a_nested_tool_event_records_which_step_it_ran_under():
+    """Run 138c7b6e: 40 of 130 records were tool calls with no attribution.
+
+    Every ``prompt_skill.tool.*`` row carried an empty ``workflow_step_id``,
+    ``workflow_run_id`` and ``subtask_id``, so the only records ``omni task show``
+    could place in the plan were the progress ticks — the least informative rows
+    in the stream. The execution knows where it is running; the events it writes
+    have to say so.
+    """
+
+    class _Ctx:
+        task_id = "run-1"
+        task_recorder = _RunEvents()
+        workflow_run_id = "wf-1"
+        workflow_step_id = "step-2"
+        subtask_id = "exec-9"
+
+    ctx = _Ctx()
+    gateway = ToolGateway.from_context(
+        ctx, event_family="prompt_skill", tools=[_tool("read_file")]
+    )
+
+    await gateway.emit("start", {"name": "read_file", "arguments": {}})
+    await gateway.emit("done", {"name": "read_file", "arguments": {}, "status": "succeeded"})
+
+    start, done = ctx.task_recorder.events
+    for event in (start, done):
+        assert event["workflow_run_id"] == "wf-1"
+        assert event["workflow_step_id"] == "step-2"
+        assert event["subtask_id"] == "exec-9"
+
+
+@pytest.mark.asyncio
+async def test_a_tool_event_outside_a_workflow_claims_no_position():
+    """A coordinator turn has no step, and must not invent one."""
+
+    class _Ctx:
+        task_id = "run-1"
+        task_recorder = _RunEvents()
+
+    ctx = _Ctx()
+    gateway = ToolGateway.from_context(
+        ctx, event_family="react", tools=[_tool("read_file")]
+    )
+
+    await gateway.emit("start", {"name": "read_file", "arguments": {}})
+
+    assert ctx.task_recorder.events[0].get("workflow_step_id", "") == ""
+
+
+@pytest.mark.asyncio
 async def test_tool_gateway_persists_budget_and_rejection_events():
     runs = _RunEvents()
     gateway = ToolGateway(
@@ -404,15 +502,50 @@ async def test_gateway_persists_explicit_domain_error_as_failed() -> None:
         invoke=lambda: _return(
             {"status": "error", "error": "source unavailable"}
         ),
+        outcome_resolver=owned_result_outcome,
     )
 
-    assert returned["status"] == "error"
+    assert tool_event_output(returned)["status"] == "error"
     assert [event["event_type"] for event in runs.events] == [
         "react.tool.start",
         "react.tool.failed",
     ]
     assert runs.events[-1]["status"] == "failed"
+    assert runs.events[-1]["lifecycle_status"] == "completed"
+    assert runs.events[-1]["result_success"] is False
     assert runs.events[-1]["error"] == "source unavailable"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "lifecycle"),
+    [
+        ("failed", "failed"),
+        ("rejected", "blocked"),
+        ("cancelled", "aborted"),
+        ("timed_out", "timed_out"),
+    ],
+)
+async def test_noncompleted_gateway_event_has_no_domain_result(
+    status: str,
+    lifecycle: str,
+) -> None:
+    runs = _RunEvents()
+    gateway = ToolGateway(
+        task_id="run-1",
+        tools=[],
+        tasks=runs,
+        event_family="react",
+    )
+
+    await gateway.emit(
+        "done",
+        {"name": "provider", "status": status, "error": "transport stopped"},
+    )
+
+    event = runs.events[-1]
+    assert event["lifecycle_status"] == lifecycle
+    assert event["result_success"] is None
 
 
 @pytest.mark.asyncio
@@ -524,9 +657,12 @@ async def test_gateway_policy_rejection_carries_reason_to_event_consumers():
     assert len(runs.events) == 1
     assert runs.events[0]["event_type"] == "react.tool.rejected"
     assert runs.events[0]["status"] == "rejected"
-    assert runs.events[0]["error"] == (
+    assert runs.events[0]["error"].startswith(
         "tool 'read_file' rejected by execution policy: max_tool_calls_exceeded:0"
     )
+    # The refusal must also carry a way forward, or the model's only move is to
+    # re-issue the same call until the run is gone.
+    assert returned["remedy"] in runs.events[0]["error"]
     assert "max_tool_calls_exceeded" in runs.events[0]["summary"]
     upstream_done = next(data for phase, data in upstream if phase == "done")
     assert upstream_done["status"] == "rejected"
@@ -601,7 +737,7 @@ async def test_react_records_gateway_policy_rejection_as_closed_tool_result():
         ChatWithToolsResult(tool_calls=[ToolCall("c1", "search_corpus", {})]),
         ChatWithToolsResult(content="policy explained"),
     ])
-    react = ReActLoopAgent(llm, gateway.invoker(), max_iterations=2)
+    react = ReActLoopAgent(llm, gateway.react_invoker(), max_iterations=2)
 
     result = await react.run(
         system_prompt="sys",

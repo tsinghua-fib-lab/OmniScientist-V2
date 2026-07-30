@@ -48,11 +48,11 @@ flowchart TD
   H --> J["PlanExecutor"]
   J --> K["ToolGateway + lifecycle hooks"]
   K --> L["TaskRuntime / WorkflowRuntime"]
-  L --> M["VerificationRunner"]
-  M --> N["PresentationController"]
-  N --> O["Channel-specific rendering and files"]
+  L --> M["PresentationController"]
+  M --> N["Channel-specific rendering and files"]
+  M --> R["Settlement"]
   L --> P["Research store"]
-  P --> Q["Source / claim / evidence / run / artifact / verification"]
+  P --> Q["Source / claim / evidence / run / artifact"]
 ```
 
 ### Responsibility boundaries
@@ -78,17 +78,23 @@ hard-code a skill name for an open-ended user intent.
 validate schemas and contracts, and lock the executable plan. Once validated,
 the executor cannot silently replan it.
 
-**PlanExecutor** executes the locked plan. Native synthesis, skill tasks, and
-workflow steps are selected before execution, not inside ad hoc branches.
+**PlanExecutor** executes the locked plan: a schedule registration, a capability
+runner, a memory write, or a bounded ReAct turn. Multi-step work is not sealed
+into the plan; inside that turn the model calls `run_skill`, `run_workflow`, and
+`spawn_subagents` and re-sequences against live results.
 
 **ToolGateway and hooks** apply policy, permission, audit, and lifecycle events
 to every tool, skill, native runner, and workflow action.
 
-**VerificationRunner** enforces completion contracts before presentation.
-
 **PresentationController** renders the same structured result for each medium.
 The CLI may show a concise trace; IM channels show user-facing progress, results,
 and files. Full trace data remains in run events.
+
+**Settlement** reads the durable record after the answer is written and decides
+the terminal task status. It is bookkeeping, not grading: it never re-judges the
+answer text, only whether children finished, claimed side effects actually
+happened, whether named contract outputs are present on this task, and whether
+the turn stopped on a budget bound.
 
 ## Capability-driven execution
 
@@ -162,8 +168,10 @@ automatic workflows; that stronger role requires a partial or full contract.
 
 ## Long-running workflows
 
-A multi-step request creates a `WorkflowRun` for the validated `WorkflowDAG`. Each stable
-`WorkflowStep` records:
+A multi-step request is sequenced by the model, not by a plan-time DAG. The model calls
+`run_workflow` with an ordered step list and that call creates a `WorkflowRun`. A step may name a
+capability instead of a provider; the tool boundary resolves it against the live registry. Each
+stable `WorkflowStep` records:
 
 - step id, capability, selected provider, and contract level;
 - structured input and expected output;
@@ -187,7 +195,6 @@ Research trust is represented as data, not presentation copy:
   mention.
 - **Run** records computation, environment, command, metrics, and outputs.
 - **Artifact** records a reviewable output and its ownership and version.
-- **Verification** records whether the expected evidence and outputs exist.
 
 A final synthesis labels content as grounded, contextual, degraded, or missing
 evidence. It must not turn an unsupported inference into a verified claim.
@@ -200,13 +207,14 @@ Artifacts are active collaboration objects. A revision should:
 2. create a new version rather than overwrite history;
 3. preserve source-task and source-artifact links;
 4. render derived formats;
-5. validate output and revision quality;
+5. validate output and revision quality in the **provider** (engine gates such as
+   figure topology); the host does not re-grade the file;
 6. record the render run and provenance;
 7. promote the successful new artifact to session focus.
 
-The review surface should expose versions, previews, diffs, and verification
-results. A revision-like request without a source artifact asks for input rather
-than generating a generic fallback.
+The review surface should expose versions, previews, diffs, and provenance. A
+revision-like request without a source artifact asks for input rather than
+generating a generic fallback.
 
 ## Research subsystems
 
@@ -222,11 +230,12 @@ Computation records the environment, command, seed where applicable, logs,
 metrics, and output artifacts. Future local notebook, container, HPC, or cloud
 providers must enter through the same permission and run-record boundary.
 
-### Verification
+### Honesty auditing
 
-Verification is deterministic where possible. It checks required events,
-forbidden tools, workflow completion, expected artifacts, source and evidence
-requirements, render success, revision versioning, and presentation delivery.
+`omni verify` audits the recorded claim/evidence graph on demand: unsupported
+claims, contradicted claims, overconfident-yet-thin claims, and memory findings
+that were never anchored to a source, claim, or run. It does not re-run the
+model and it does not grade a deliverable — it reports what the record supports.
 
 ### Memory
 
@@ -240,7 +249,7 @@ All channels call the same agent runtime. A turn normally has three phases:
 
 1. acknowledgement with run id;
 2. concise plan or progress updates appropriate to the medium;
-3. verified result, files, evidence status, and next actions.
+3. settled result, files, evidence status, and next actions.
 
 File-delivery failures enter a retry queue and are visible in the inbox and task
 detail. They do not erase the completed local result.

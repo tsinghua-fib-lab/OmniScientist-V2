@@ -1,11 +1,18 @@
 # Routing & intent-recognition scenarios: does the agent pick the right intent
 # and keep deterministic gates deterministic? Each turn supplies the planner JSON
 # the model *should* emit, so the run is offline and repeatable.
+#
+# A multi-deliverable request is routed, not compiled: the planner recognises it
+# as multi-step and hands the turn to the capable assistant, which sequences the
+# work by calling ``run_workflow`` (``tool_calls``). The guarantee such a
+# scenario pins is therefore the workflow run at the other end of that call —
+# it exists and its steps cover every capability the user asked for.
 
 - id: research_workflow_plan
-  title: "Multi-step research section routes to a workflow"
+  title: "Multi-step research section becomes one workflow covering every deliverable"
   channel: cli
   tags: [routing, capability_selection]
+  fixtures: [literature.search, paper.fetch.arxiv, artifact.figure]
   turns:
     - user: "写一个 Transformer/RAG 研究小节：先做文献检索，再获取 arXiv 1706.03762，生成架构图，最后输出论文段落。"
       plan:
@@ -20,9 +27,19 @@
         execution_mode: background
         provenance_mode: light
         rationale: "capability-level research workflow with final synthesis"
+      tool_calls:
+        - name: run_workflow
+          args:
+            goal: "文献检索、获取 arXiv 1706.03762、生成架构图，最后输出论文段落"
+            mode: foreground
+            steps:
+              - {id: lit, capability: literature.search, input: {query: "retrieval augmented generation"}}
+              - {id: paper, capability: paper.fetch.arxiv, depends_on: [lit], input: {identifier: "1706.03762"}}
+              - {id: fig, capability: artifact.figure, depends_on: [paper], input: {input: "RAG architecture figure"}}
+              - {id: final, capability: synthesis.final, depends_on: [fig], deliverable: draft.section, input: {}}
+      drain: true
       expect:
-        kind: workflow
-        capabilities_include: [literature.search, artifact.figure, synthesis.final]
+        capabilities_executed: [literature.search, paper.fetch.arxiv, artifact.figure, synthesis.final]
 
 - id: paper_title_needs_input
   title: "Title-only paper request asks for an identifier instead of fetching"
@@ -64,9 +81,10 @@
         skills_exclude: [arxiv-fetch, openalex-search]
 
 - id: wechat_research_workflow
-  title: "The same research request routes to a workflow on WeChat too"
+  title: "The same research request becomes the same workflow on WeChat too"
   channel: wechat
   tags: [routing]
+  fixtures: [literature.search, artifact.figure]
   turns:
     - user: "写一个 RAG 研究小节：先检索文献，再画一张系统架构图，最后写成论文段落。"
       plan:
@@ -79,5 +97,15 @@
         outputs: [draft.section]
         execution_mode: background
         rationale: "IM channel research workflow"
+      tool_calls:
+        - name: run_workflow
+          args:
+            goal: "检索文献、画一张系统架构图，最后写成论文段落"
+            mode: foreground
+            steps:
+              - {id: lit, capability: literature.search, input: {query: "retrieval augmented generation"}}
+              - {id: fig, capability: artifact.figure, depends_on: [lit], input: {input: "RAG architecture figure"}}
+              - {id: final, capability: synthesis.final, depends_on: [fig], deliverable: draft.section, input: {}}
+      drain: true
       expect:
-        kind: workflow
+        capabilities_executed: [literature.search, artifact.figure, synthesis.final]

@@ -1,8 +1,0 @@
-{
-  "schema": "scientific-poster.layout-policy.v1",
-  "id": "conference-balanced",
-  "version": "1.0.0",
-  "purpose": "Balanced conference composition for papers with comparable method and evidence depth.",
-  "page_modes": ["portrait", "landscape"],
-  "strategies": ["balanced", "adaptive-columns"]
-}

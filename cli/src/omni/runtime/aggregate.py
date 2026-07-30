@@ -23,6 +23,7 @@ from omni.config.paths import user_home
 from omni.config.workspaces import iter_catalog_workspaces
 from omni.runtime.action_checkpoints import ActionCheckpointStore, CheckpointRecord
 from omni.runtime.task_index import TaskIndex, settings_for_workspace
+from omni.runtime.task_recorder import repair_misfiled_chat
 from omni.storage.db import get_database
 from omni.storage.models import ScheduleORM, TaskORM
 
@@ -67,6 +68,10 @@ async def list_tasks_all_workspaces(
         try:
             db = get_database(db_path)
             await db.init()
+            # Same one-shot repair the per-workspace list runs, and for the same
+            # reason: the ``kind`` filter below is applied in SQL, so a turn
+            # still misfiled as ``chat`` would be dropped before anyone sees it.
+            await repair_misfiled_chat(db)
             async with db.session() as s:
                 q = (
                     select(TaskORM)

@@ -15,7 +15,7 @@ def test_v2_release_metadata_is_aligned() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     cli_readme = (REPO_ROOT / "cli" / "README.md").read_text(encoding="utf-8")
 
-    assert __version__ == "2.0.0rc1"
+    assert __version__ == "2.0.0rc3"
     assert citation["title"] == "OmniScientist V2"
     assert citation["version"] == __version__
     assert __version__ in changelog

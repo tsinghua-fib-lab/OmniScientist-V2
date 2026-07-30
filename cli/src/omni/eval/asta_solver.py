@@ -18,6 +18,7 @@ from omni.config import load_settings
 from omni.core.react_agent import ToolSpec
 from omni.eval.blackbox import isolated_eval_settings
 from omni.skills_runtime.context import Tool as OmniTool
+from omni.storage.db import dispose_databases_under
 
 
 def wrap_inspect_tools(tools: list[Any]) -> list[OmniTool]:
@@ -101,18 +102,22 @@ else:
         async def solve(state: TaskState, generate: Generate) -> TaskState:
             del generate  # Omni owns its model loop; usage is bridged explicitly.
             with tempfile.TemporaryDirectory(prefix="omni-astabench-") as raw_root:
+                root = Path(raw_root)
                 settings = isolated_eval_settings(
                     load_settings(),
-                    Path(raw_root),
+                    root,
                     f"asta-{state.sample_id}-{state.epoch}",
                 )
                 # Registry workflows could substitute unrestricted local tools.
                 # Official task tools are authoritative for comparable scoring.
                 settings.skills.sources = []
                 settings.security.require_approval = False
-                agent = await OmniAgent.create(settings)
-                agent.set_external_tools(wrap_inspect_tools(list(state.tools)), authoritative=True)
+                agent: OmniAgent | None = None
                 try:
+                    agent = await OmniAgent.create(settings)
+                    agent.set_external_tools(
+                        wrap_inspect_tools(list(state.tools)), authoritative=True
+                    )
                     result = await agent.handle_turn(
                         state.input_text,
                         channel="astabench",
@@ -120,7 +125,11 @@ else:
                     )
                     cost = await agent.tasks.cost_summary(result.task_id, include_child_tasks=True)
                 finally:
-                    await agent.aclose()
+                    try:
+                        if agent is not None:
+                            await agent.aclose()
+                    finally:
+                        await dispose_databases_under(root)
             _record_asta_usage(settings, cost)
             output = ModelOutput.from_content(
                 model=f"omni/{settings.model.model or settings.model.provider}",

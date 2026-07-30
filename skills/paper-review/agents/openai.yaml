@@ -1,4 +1,4 @@
 interface:
   display_name: "Paper Review"
-  short_description: "Balanced venue-aligned pre-submission reviews for AI papers."
-  default_prompt: "Use $paper-review to review this paper for the target AI venue and produce a balanced pre-submission review."
+  short_description: "Venue-aligned paper reviews focused on actionable author revisions."
+  default_prompt: "Use $paper-review to review this paper for the target AI venue. Use available historical-review and Arena memory to evidence-check and calibrate the formal assessment and score, keep the summary brief, then produce a separate Detailed Revision Plan as the final section."

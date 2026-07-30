@@ -62,7 +62,9 @@ Inside the REPL:
 ### Ready-to-copy built-in examples
 
 These natural-language requests exercise the recently added or updated built-in
-skills without naming them:
+skills without naming them. The full built-in set also includes `scientific-figure`,
+`livefigure`, `arxiv-fetch`, `openalex-search`, `research-ideation`,
+`scientist-kg-distiller`, and `soulagent`.
 
 ```bash
 omni exec "Review paper.pdf for NeurIPS submission readiness and prioritise revisions"
@@ -215,6 +217,8 @@ the intended skill or collection.
 | `omni skills list` | List Omni-managed built-ins, project skills, and imported skills |
 | `omni skills list --all` | Browse external Claude Code, Codex, and OpenClaw roots too; this does not import or trust them |
 | `omni skills search <query>` | Search visible skill metadata interactively |
+| `omni skills setup research-pptx` | Repair the lockfile-pinned Node renderer (currently the only setup target) |
+| `omni skills why <name>` | Explain why a skill was or was not selected |
 | `omni skills export [tool]` | Copy Omni built-ins out to another agent's skill roots |
 | Natural-language request | Let the planner/agent choose an eligible skill |
 | `$name ...` | Force a particular installed skill |
@@ -282,8 +286,8 @@ Built-ins and adapted skills may declare:
 The semantic planner describes the task in capability terms, such as
 `review.response` or `poster.scientific`. The registry then chooses an eligible
 provider using trust, contract strength, source priority, configured defaults,
-and role. This lane supports deterministic multi-step workflows, schema
-validation, artifacts, provenance, recovery, and verification.
+and role. This lane supports durable multi-step workflows, schema
+validation, artifacts, provenance, and recovery.
 
 ### Universal prompt-skill lane
 
@@ -292,7 +296,7 @@ instructions is imported as a prompt-only skill. After trust:
 
 - it is included in the selectable catalogue;
 - the normal ReAct tool surface can search it with `find_skill`;
-- the model can load and execute it with `use_skill` or `run_skill`;
+- the model can load and execute it with `run_skill`;
 - the user may force it with `$name`.
 
 This makes zero-adaptation, natural-language use possible. It is still a
@@ -335,7 +339,6 @@ these text aliases before semantic planning:
 $my-skill task description
 skill:my-skill task description
 run_skill my-skill task description
-use_skill my-skill task description
 ```
 
 The normal shell forms are:
@@ -357,7 +360,7 @@ Use explicit selection when:
 | Kind | How Omni executes it | Typical use |
 |---|---|---|
 | `prompt_only` | Focused ReAct execution using the skill instructions and allowed tools | Portable third-party procedure or writing workflow |
-| `python_engine` | Calls a class from the skill's own `engine.py` through the public runtime | Structured research or artifact generation |
+| `python_engine` | Calls a class from the skill's own `engine.py` through the public runtime | Structured research or artifact generation. Omni-enhanced figure skills generate and render DOT/SVG/PNG from natural-language `input`; pass `source_artifact_dot` only for an exact graph or a revision. Do not re-render with `bash dot` after the engine returns |
 | `cli_exec` | Runs a declared external executable and parses JSON/text output | Existing command-line tool |
 | `remote_mcp` | Calls a declared tool on an MCP server | Remote capability or service |
 
@@ -389,9 +392,9 @@ Add `metadata.helixforge` when the skill needs one or more of these guarantees:
 - preinstallation in Omni's built-in inventory;
 - deterministic capability selection;
 - structured and validated inputs or outputs;
-- use as a required step in an automatic multi-skill workflow;
+- use as a step in a durable multi-skill workflow;
 - durable foreground/background task semantics;
-- artifact registration, research provenance, recovery, or verification;
+- artifact registration, research provenance, or recovery;
 - an engine, CLI, MCP, or owner-controlled dependency setup binding.
 
 Keep Omni fields under `metadata.helixforge`; keep the main `SKILL.md`
@@ -408,7 +411,7 @@ they place the reliability boundary in different places.
 | [Claude Code](https://code.claude.com/docs/en/slash-commands) | Names/descriptions are available to Claude; matching tasks can load full skill content; `/name` forces invocation | Description quality controls matching; `disable-model-invocation` can make a skill user-only | Tool permissions, subagent context, dynamic context, plugins |
 | [Codex](https://developers.openai.com/codex/skills) | Starts with name/description/path, loads full `SKILL.md` when selected; `$name` forces invocation | Initial catalogue has a bounded context budget; `allow_implicit_invocation` defaults to true | `agents/openai.yaml` policy/dependencies and plugin distribution |
 | [OpenClaw](https://github.com/openclaw/openclaw/blob/main/docs/tools/skills.md) | Eligible skill identities/descriptions/locations are compiled into a compact system-prompt catalogue; slash commands can force a skill | Source precedence, agent allowlists, binary/env/config gates, prompt budget, session snapshots | `metadata.openclaw`, ClawHub, dependency/install hints |
-| OmniScientist | Trusted catalogues are available to capability planning and ReAct; `$name` forces a provider | Managed sources by default; quarantine/trust; contract strength and provider priority | Typed capabilities, workflow DAGs, artifacts, provenance, durable tasks, and verification |
+| OmniScientist | Trusted catalogues are available to capability planning and ReAct; `$name` forces a provider | Managed sources by default; quarantine/trust; contract strength and provider priority | Typed capabilities, durable workflow/step/attempt records, artifacts, provenance, and retryable tasks |
 
 Claude Code, Codex, and OpenClaw primarily rely on description-driven model
 selection for portable skills. Omni supports that portable lane and adds a

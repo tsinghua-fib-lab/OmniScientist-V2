@@ -12,7 +12,10 @@ import time
 import tomllib
 from pathlib import Path
 
+import pytest
 import yaml
+
+from tests.conftest import has_usable_bash
 
 ROOT = Path(__file__).resolve().parents[3]
 INSTALL_SH = ROOT / "cli" / "scripts" / "install.sh"
@@ -58,6 +61,8 @@ def _fake_uv(tmp_path: Path) -> tuple[Path, Path, Path]:
 
 
 def _installer_env(tmp_path: Path, bin_dir: Path, uv_bin: Path, uv_log: Path) -> dict[str, str]:
+    if not has_usable_bash():
+        pytest.skip("usable POSIX bash required (the bare Windows WSL shim is insufficient)")
     return {
         **os.environ,
         "HOME": str(tmp_path / "home"),
@@ -97,7 +102,7 @@ def test_shell_installer_defaults_to_uv_even_with_active_environments(tmp_path: 
     uv_calls = uv_log.read_text(encoding="utf-8")
     assert "tool install --force" in uv_calls
     assert f"--default-index {OFFICIAL_PYPI_INDEX}" in uv_calls
-    assert "--reinstall-package omniscientist" in uv_calls
+    assert "--reinstall-package OmniScientist-V2" in uv_calls
     assert not venv_python_log.exists()
     exact_calls = (tmp_path / "installed-omni.log").read_text(encoding="utf-8")
     assert "--version" in exact_calls
@@ -129,7 +134,7 @@ def test_standalone_shell_installer_defaults_to_pypi(tmp_path: Path) -> None:
         for line in uv_log.read_text(encoding="utf-8").splitlines()
         if line.startswith("tool install ")
     )
-    assert "omniscientist[mcp,vec,channels]" in install_call
+    assert "OmniScientist-V2[mcp,vec,channels]" in install_call
     assert "git+" not in install_call
 
 
@@ -288,7 +293,7 @@ def test_shell_installer_requires_a_duplicate_install_decision_when_noninteracti
 
 def test_shell_installer_automatically_reinstalls_the_same_uv_owner(tmp_path: Path) -> None:
     bin_dir, uv_bin, uv_log = _fake_uv(tmp_path)
-    uv_python = tmp_path / "uv" / "tools" / "omniscientist" / "bin" / "python"
+    uv_python = tmp_path / "uv" / "tools" / "omniscientist-v2" / "bin" / "python"
     uv_python.parent.mkdir(parents=True)
     uv_python.symlink_to("/bin/bash")
     _write_executable(
@@ -316,7 +321,7 @@ def test_shell_installer_automatically_reinstalls_the_same_uv_owner(tmp_path: Pa
 
 def test_shell_installer_deduplicates_uv_launcher_and_manifest_owner(tmp_path: Path) -> None:
     bin_dir, uv_bin, uv_log = _fake_uv(tmp_path)
-    uv_python = tmp_path / "uv" / "tools" / "omniscientist" / "bin" / "python"
+    uv_python = tmp_path / "uv" / "tools" / "omniscientist-v2" / "bin" / "python"
     uv_python.parent.mkdir(parents=True)
     uv_python.symlink_to("/bin/bash")
     internal_launcher = uv_python.parent / "omni"
@@ -393,7 +398,10 @@ def test_shell_installer_times_out_an_unresponsive_old_launcher(tmp_path: Path) 
     _write_executable(
         bin_dir / "omni",
         "#!/bin/sh\n"
-        "sleep 2\n"
+        # Keep the broken-path runtime far outside the allowed CI jitter. A
+        # failed timeout implementation now takes ~10s, while the working path
+        # remains ~1s plus installer overhead.
+        "sleep 10\n"
         'if [ "${1:-}" = "--version" ]; then printf "OmniScientist 1.0.0\\n"; fi\n',
     )
     env = _installer_env(tmp_path, bin_dir, uv_bin, uv_log)
@@ -413,7 +421,7 @@ def test_shell_installer_times_out_an_unresponsive_old_launcher(tmp_path: Path) 
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
     assert "timed out" in output
-    assert elapsed < 1.8
+    assert elapsed < 5.0
     assert "tool install --force" in uv_log.read_text(encoding="utf-8")
 
 
@@ -431,7 +439,7 @@ def test_shell_installer_ignores_a_stale_manifest_in_preserved_omni_home(tmp_pat
         / "share"
         / "uv"
         / "tools"
-        / "omniscientist"
+        / "omniscientist-v2"
         / "bin"
     )
     env["STALE_OMNI"] = str(removed_tool / "omni")
@@ -500,7 +508,7 @@ def test_shell_installer_migrates_a_verified_env_copy_to_uv(tmp_path: Path) -> N
     assert result.returncode == 0, result.stdout + result.stderr
     calls = uv_log.read_text(encoding="utf-8")
     assert "tool install --force" in calls
-    assert f"pip uninstall --python {old_python} omniscientist" in calls, (
+    assert f"pip uninstall --python {old_python} OmniScientist-V2" in calls, (
         result.stdout + result.stderr + calls
     )
     exact_calls = (tmp_path / "installed-omni.log").read_text(encoding="utf-8")
@@ -509,7 +517,7 @@ def test_shell_installer_migrates_a_verified_env_copy_to_uv(tmp_path: Path) -> N
 
 def _custom_pipx_install(tmp_path: Path, launcher_dir: Path) -> tuple[Path, Path]:
     pipx_home = tmp_path / "custom-pipx"
-    prefix = pipx_home / "venvs" / "omniscientist"
+    prefix = pipx_home / "venvs" / "omniscientist-v2"
     python = prefix / "bin" / "python"
     python.parent.mkdir(parents=True)
     python.symlink_to("/bin/bash")
@@ -526,7 +534,7 @@ def _custom_pipx_install(tmp_path: Path, launcher_dir: Path) -> tuple[Path, Path
 
 def _custom_uv_install(tmp_path: Path, launcher_dir: Path) -> tuple[Path, Path]:
     tool_dir = tmp_path / "custom-uv-tools"
-    prefix = tool_dir / "omniscientist"
+    prefix = tool_dir / "omniscientist-v2"
     python = prefix / "bin" / "python"
     python.parent.mkdir(parents=True)
     python.symlink_to("/bin/bash")
@@ -631,7 +639,7 @@ def test_shell_installer_migration_uninstalls_through_the_exact_pipx_owner(
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert pipx_log.read_text(encoding="utf-8").strip() == (
-        f"{pipx_home}|{old_launcher.parent}|uninstall omniscientist"
+        f"{pipx_home}|{old_launcher.parent}|uninstall OmniScientist-V2"
     )
 
 
@@ -702,7 +710,7 @@ def test_shell_installer_migration_cleans_pipx_when_launcher_path_is_reused(
     assert pipx_home_seen == str(pipx_home)
     assert bin_seen != str(old_launcher.parent)
     assert "omni-pipx-cleanup." in bin_seen
-    assert command == "uninstall omniscientist"
+    assert command == "uninstall OmniScientist-V2"
     assert old_launcher.is_file()
     assert "_record-install --method uv" in (
         tmp_path / "installed-omni.log"
@@ -739,7 +747,7 @@ def test_shell_installer_migration_removes_old_uv_through_its_registry(
 
     assert result.returncode == 0, result.stdout + result.stderr
     calls = uv_env_log.read_text(encoding="utf-8")
-    assert f"{tool_dir}|{custom_bin}|tool uninstall omniscientist" in calls
+    assert f"{tool_dir}|{custom_bin}|tool uninstall OmniScientist-V2" in calls
 
 
 def test_powershell_installer_has_the_same_ownership_guards() -> None:
@@ -773,9 +781,9 @@ def test_powershell_installer_has_the_same_ownership_guards() -> None:
     assert "this repository installer will not mutate its managed environment" in text
     assert "$env:PIPX_HOME = $pipxHome" in text
     assert '$env:PIPX_MAN_DIR = Join-Path $pipxHome "man"' in text
-    assert "& pipx uninstall omniscientist" in text
+    assert "& pipx uninstall OmniScientist-V2" in text
     assert "$env:UV_TOOL_DIR = $UvToolDirOverride" in text
-    assert "& uv tool uninstall omniscientist" in text
+    assert "& uv tool uninstall OmniScientist-V2" in text
     assert "omni-pipx-cleanup-" in text
     assert "Cannot safely migrate" in text
     assert "Migration is incomplete" in text
@@ -793,7 +801,16 @@ def test_release_is_tag_driven_and_pypi_publish_uses_github_oidc() -> None:
     assert "uv publish" not in release_script
     assert "PYPI_TOKEN" not in release_script
     assert "--no-publish" not in release_script
-    assert "uv build --no-sources" in release_script
+    assert 'RELEASE_PYTHON="${OMNI_RELEASE_PYTHON:-3.12}"' in release_script
+    assert 'UV_PROJECT_ENVIRONMENT="$GATE_DIR/venv"' in release_script
+    assert "does not touch cli/.venv" in release_script
+    assert 'OMNI_RELEASE_LOCAL_TESTS' in release_script
+    assert "--preflight" in release_script
+    assert 'pytest -q -m "not release_gate"' in release_script
+    assert "test_reactive_binding_release_gate.py" in release_script
+    assert "test_objective_provider_quality_offline_corpus.py" in release_script
+    assert 'uv run --python "$RELEASE_PYTHON" --all-extras pytest -q' not in release_script
+    assert 'uv build --python "$RELEASE_PYTHON" --no-sources' in release_script
     assert "github.com" in release_script
     assert "pyproject.toml" in release_script
     assert "git remote get-url --all origin" in release_script
@@ -852,6 +869,8 @@ def test_release_identity_is_the_canonical_github_repository() -> None:
 
 
 def test_release_help_works_when_invoked_from_repository_root() -> None:
+    if not has_usable_bash():
+        pytest.skip("usable POSIX bash required")
     result = subprocess.run(
         ["bash", str(ROOT / "cli" / "scripts" / "release.sh"), "--help"],
         cwd=ROOT,
@@ -862,9 +881,14 @@ def test_release_help_works_when_invoked_from_repository_root() -> None:
 
     assert result.returncode == 0, result.stderr
     assert "scripts/release.sh --dry-run" in result.stdout
+    assert "scripts/release.sh --preflight" in result.stdout
 
 
 def test_release_tag_gate_executes_and_rejects_a_mismatched_tag() -> None:
+    if not has_usable_bash():
+        pytest.skip("usable POSIX bash required")
+    bash = shutil.which("bash")
+    assert bash is not None
     workflow = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
@@ -883,19 +907,17 @@ def test_release_tag_gate_executes_and_rejects_a_mismatched_tag() -> None:
     env = {**os.environ, "RELEASE_TAG": f"v{version}"}
 
     accepted = subprocess.run(
-        step["run"],
+        [bash, "-c", step["run"]],
         cwd=ROOT,
         env=env,
-        shell=True,
         capture_output=True,
         text=True,
         check=False,
     )
     rejected = subprocess.run(
-        step["run"],
+        [bash, "-c", step["run"]],
         cwd=ROOT,
         env={**env, "RELEASE_TAG": "v9.9.9"},
-        shell=True,
         capture_output=True,
         text=True,
         check=False,
@@ -907,6 +929,10 @@ def test_release_tag_gate_executes_and_rejects_a_mismatched_tag() -> None:
 
 
 def test_release_authority_gate_executes_and_rejects_a_fork() -> None:
+    if not has_usable_bash():
+        pytest.skip("usable POSIX bash required")
+    bash = shutil.which("bash")
+    assert bash is not None
     workflow = yaml.safe_load(
         (ROOT / ".github" / "workflows" / "release.yml").read_text(
             encoding="utf-8"
@@ -924,19 +950,17 @@ def test_release_authority_gate_executes_and_rejects_a_fork() -> None:
     }
 
     accepted = subprocess.run(
-        step["run"],
+        [bash, "-c", step["run"]],
         cwd=ROOT,
         env=env,
-        shell=True,
         capture_output=True,
         text=True,
         check=False,
     )
     rejected = subprocess.run(
-        step["run"],
+        [bash, "-c", step["run"]],
         cwd=ROOT,
         env={**env, "RELEASE_REPOSITORY": "untrusted/fork"},
-        shell=True,
         capture_output=True,
         text=True,
         check=False,
@@ -948,6 +972,8 @@ def test_release_authority_gate_executes_and_rejects_a_fork() -> None:
 
 
 def test_release_script_rejects_a_noncanonical_push_url(tmp_path: Path) -> None:
+    if not has_usable_bash():
+        pytest.skip("usable POSIX bash required")
     repo = tmp_path / "repo"
     cli_dir = repo / "cli"
     script_dir = cli_dir / "scripts"

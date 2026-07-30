@@ -53,6 +53,12 @@ _WORD_RE = re.compile(r"[A-Za-z0-9]+")
 _MATCH_THRESHOLD = 0.72
 _MATCH_MARGIN = 0.12
 _MIN_INFORMATION_TOKENS = 2
+# Execution-time verify-by-fetch is deliberately lenient: it only flags a *gross*
+# title mismatch (a different paper), never a paraphrase, and never fails a step.
+_FETCH_TITLE_MISMATCH_FLOOR = 0.5
+# Id-like keys stripped before deriving the requested entity, so verify-by-fetch
+# compares the fetched title against the *title the user named*, not the id itself.
+_IDENTIFIER_ID_KEYS = ("identifier", "arxiv_id", "id", "doi")
 _TITLE_STOPWORDS = {
     "a",
     "all",
@@ -113,6 +119,56 @@ def extract_entity_query(step: dict, user_message: str) -> str:
     return _title_span(user_message or "")
 
 
+def fetched_identifier_title_warning(
+    step: dict,
+    goal: str,
+    result: dict,
+) -> str | None:
+    """Advisory when a fetched identifier's title clearly differs from the request.
+
+    Verify-by-fetch — the way Codex / Claude Code / OpenClaw trust a tool argument
+    and let the *result* prove it. After a ``paper.fetch`` step resolves a bound id
+    at execution, compare the fetched title against the entity the user actually
+    named (independent of the id). Returns a human-readable advisory on a gross
+    mismatch, else ``None``.
+
+    It is intentionally **non-blocking**: the caller attaches it as a warning and
+    never fails the step, so a valid-but-wrong id is *surfaced* rather than
+    silently swapped (which a plan-time search would have done, sometimes wrongly).
+    """
+    if not isinstance(result, dict) or str(result.get("status") or "") != "ok":
+        return None
+    fetched_title = str(result.get("title") or "").strip()
+    if not fetched_title:
+        return None
+    params = step.get("input") if isinstance(step.get("input"), dict) else {}
+    # The requested entity must be independent of the bound id, so strip id-like
+    # keys before extracting the query; otherwise the id would "verify" itself.
+    query_step = {
+        **step,
+        "input": {
+            key: value
+            for key, value in params.items()
+            if key not in _IDENTIFIER_ID_KEYS
+        },
+    }
+    entity = extract_entity_query(query_step, goal)
+    if not entity or len(_information_tokens(entity)) < _MIN_INFORMATION_TOKENS:
+        # No independent title to check against (e.g. the request only named an id).
+        return None
+    resolved_id = str(result.get("arxiv_id") or result.get("id") or "").strip()
+    if resolved_id and resolved_id.casefold() in entity.casefold():
+        # The "entity" is just the id-bearing phrase (the request named the id,
+        # not an independent title), so there is nothing to cross-check.
+        return None
+    if _title_overlap(entity, fetched_title) >= _FETCH_TITLE_MISMATCH_FLOOR:
+        return None
+    return (
+        f"fetched title '{fetched_title}' does not match the requested "
+        f"'{entity}' — the bound identifier may reference a different paper"
+    )
+
+
 async def resolve_identifier_fields(
     plan: IntentPlan,
     validation: PlanValidationResult,
@@ -142,22 +198,21 @@ async def resolve_identifier_fields(
         str(step.get("id") or ""): index
         for index, step in enumerate(plan.workflow_steps)
     }
-    targets: list[tuple[str, str, str]] = [
-        (finding.step_id, finding.skill_name, finding.missing_field)
-        for finding in findings
-    ]
-    # Ground already-bound identifiers too. A syntactically valid arXiv id can
-    # still name the wrong paper; when the same step carries a title/instruction,
-    # verify the id against a title search before execution.
-    for step in plan.workflow_steps:
-        step_id = str(step.get("id") or "")
-        skill_name = str(step.get("skill_name") or step.get("skill") or "")
-        entry = resolve_step_entry(registry, step) if skill_name else None
-        params = step.get("input") if isinstance(step.get("input"), dict) else {}
-        for field_name in _identifier_fields(entry):
-            if _has_value(params.get(field_name)):
-                targets.append((step_id, skill_name, field_name))
-    targets = list(dict.fromkeys(targets))
+    # Only resolve genuinely *missing/invalid* identifier fields (the ones that
+    # raised a ``step_input_contract`` finding). An already-bound, syntactically
+    # valid id is trusted at plan time — never re-searched or silently swapped
+    # here. A blocking, low-precision plan-time title search over bound ids was
+    # the regression that made "get <paper> and draw <figure>" tasks fail: arXiv
+    # search is slow (~tens of seconds) and imprecise, so it dead-ended good ids.
+    # A valid-but-wrong id is instead caught at execution by verify-by-fetch
+    # (``fetched_identifier_title_warning``), the way Codex/Claude Code let the
+    # tool result prove the argument.
+    targets: list[tuple[str, str, str]] = list(
+        dict.fromkeys(
+            (finding.step_id, finding.skill_name, finding.missing_field)
+            for finding in findings
+        )
+    )
     if not targets:
         return plan, validation, []
 
@@ -405,33 +460,12 @@ def _field_format(entry: object | None, field_name: str) -> str:
     return field_resolver(field_schema)
 
 
-def _identifier_fields(entry: object | None) -> list[str]:
-    schema = getattr(entry, "input_schema", None)
-    if not isinstance(schema, dict):
-        return []
-    properties = schema.get("properties")
-    if not isinstance(properties, dict):
-        return []
-    return [
-        str(name)
-        for name in properties
-        if has_searcher(_field_format(entry, str(name)))
-    ]
-
-
-def _has_value(value: Any) -> bool:
-    if value is None:
-        return False
-    if isinstance(value, str):
-        return bool(value.strip())
-    return True
-
-
 __all__ = [
     "ResolutionRecord",
     "Searcher",
     "apply_identifier_resolution",
     "extract_entity_query",
+    "fetched_identifier_title_warning",
     "is_identifier_field",
     "resolve_identifier_fields",
 ]

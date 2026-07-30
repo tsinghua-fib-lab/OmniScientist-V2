@@ -3,15 +3,27 @@
 from __future__ import annotations
 
 import copy
+import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from omni.agent.interaction_lifecycle import resolve_execution_mode
+from omni.agent.interaction_lifecycle import enqueue_notify_channel, resolve_execution_mode
 from omni.agent.plan_runner_utils import workflow_terminal_message
 from omni.agent.schedule_tools import build_schedule_tools
+from omni.agent.skill_lookup import (
+    FIND_SKILL_NEXT_ACTION,
+    rank_skill_matches,
+    skill_contract_card,
+)
+from omni.core.funnel_facts import project_skill_observation
 from omni.core.react_agent import ToolSpec
-from omni.core.tool_contracts import skill_input_contract_error
-from omni.core.tool_result import is_tool_rejection, tool_event_output
+from omni.core.tool_contracts import admit_provider_arguments
+from omni.core.tool_exposure import apply_default_exposure
+from omni.core.tool_result import (
+    is_tool_rejection,
+    owned_result_outcome,
+    tool_event_output,
+)
 from omni.runtime.execution_policy import skill_requires_approval
 from omni.runtime.subtask_runtime import WorkflowNeedsInput
 from omni.skills_runtime.builtin_tools import build_builtin_tools
@@ -48,10 +60,13 @@ class ToolSurfaceBuilder:
         for entry in self.registry.list_sync_tools():
             if entry.kind in (SkillKind.PYTHON_ENGINE, SkillKind.CLI_EXEC):
                 tools.append(self._sync_skill(entry, ctx))
+        # ``find_skill`` doubles as the lookup for tools whose schema this turn
+        # does not send. It is built before the deferred set is known, so it reads
+        # the list lazily; by the time the model can call it, the list is filled.
+        deferred_specs: list[ToolSpec] = []
         tools.extend(
             [
-                self._find_skill(),
-                self._use_skill(ctx),
+                self._find_skill(deferred_specs),
                 self._run_skill(ctx, wait_for_tasks=wait_for_tasks, on_tool_event=on_tool_event),
                 self._run_workflow(ctx, wait_for_tasks=wait_for_tasks, on_tool_event=on_tool_event),
             ]
@@ -63,41 +78,53 @@ class ToolSurfaceBuilder:
         # sets ``allow_scheduling=False`` for the same recursion guard.
         if getattr(ctx, "allow_scheduling", True):
             tools.extend(build_schedule_tools(self.runtime, ctx))
+        # Everything assembled so far is an Omni-owned result schema.
+        # External/MCP tools below retain their own explicit success channel.
+        for tool in tools:
+            if tool.outcome_resolver is None:
+                tool.outcome_resolver = owned_result_outcome
         tools.extend(await self.mcp_loader(ctx))
-        if not external:
-            return tools
-        by_name = {tool.spec.name: tool for tool in tools}
-        by_name.update({tool.spec.name: tool for tool in external})
-        return list(by_name.values())
+        if external:
+            by_name = {tool.spec.name: tool for tool in tools}
+            by_name.update({tool.spec.name: tool for tool in external})
+            tools = list(by_name.values())
+        apply_default_exposure(tools)
+        deferred_specs.extend(t.spec for t in tools if t.spec.exposure != "direct")
+        return tools
 
-    def _find_skill(self) -> Tool:
+    def _find_skill(self, deferred_specs: list[ToolSpec] | None = None) -> Tool:
         async def handler(args: dict[str, Any]) -> dict[str, Any]:
             query = str(args.get("query", "")).lower().strip()
-            hits: list[dict[str, Any]] = []
             selectable = self.registry.list_selectable()
-            for entry in selectable:
-                phrases = " ".join(entry.trigger.get("phrases", [])) if isinstance(entry.trigger, dict) else ""
-                haystack = f"{entry.name} {entry.description} {entry.when_to_use} {phrases}".lower()
-                if not query or all(word in haystack for word in query.split()):
-                    hits.append(
-                        {
-                            "name": entry.name,
-                            "description": entry.short_desc(160),
-                            "delivery": entry.delivery_mode.value,
-                            "kind": entry.kind.value,
-                            "status": entry.status,
-                            "replaced_by": entry.replaced_by,
-                            "when_to_use": entry.when_to_use[:160],
-                        }
-                    )
-                if len(hits) >= 15:
-                    break
-            return {"matches": hits, "total_skills": len(selectable)}
+            hits = [skill_contract_card(entry) for entry in rank_skill_matches(selectable, query)]
+            result: dict[str, Any] = {"matches": hits, "total_skills": len(selectable)}
+            if hits:
+                result["next_action"] = FIND_SKILL_NEXT_ACTION
+            # Tools whose schema this turn withheld are looked up here, so the
+            # model can read a parameter list it was not sent instead of guessing
+            # one. Matching is by name substring: the model already knows the
+            # names from the catalog block, it is the arguments it is missing.
+            unlisted = [
+                {
+                    "name": spec.name,
+                    "description": spec.description,
+                    "parameters": spec.parameters,
+                }
+                for spec in (deferred_specs or [])
+                if not query or query in spec.name.lower() or spec.name.lower() in query
+            ]
+            if unlisted:
+                result["unlisted_tools"] = unlisted[:10]
+            return result
 
         return Tool(
             ToolSpec(
                 "find_skill",
-                "Search the installed skill catalog by metadata and return names, descriptions, and usage guidance.",
+                (
+                    "Search the installed skill catalog and return each match's input_schema plus a "
+                    "run_skill example. Also looks up parameters of tools listed with their schema "
+                    "omitted. After a skill contract is returned, call run_skill — do not keep searching."
+                ),
                 {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
             ),
             handler,
@@ -154,7 +181,7 @@ class ToolSurfaceBuilder:
             return None, resolution, {"error": f"unknown skill '{name}'; use find_skill to search the catalog"}
         if entry.is_deprecated:
             return entry, resolution, {"error": f"skill '{entry.name}' is deprecated", "replaced_by": entry.replaced_by}
-        contract_error = skill_input_contract_error(entry, params)
+        admitted, contract_error = admit_provider_arguments(entry, params)
         if contract_error:
             await self.tasks.append_event(
                 ctx.task_id,
@@ -167,6 +194,7 @@ class ToolSurfaceBuilder:
                 summary=contract_error["message"],
             )
             return entry, resolution, {"status": "needs_input", "skill_name": entry.name, **contract_error}
+        resolution["admitted_input"] = admitted
         return entry, resolution, None
 
     @staticmethod
@@ -178,80 +206,6 @@ class ToolSurfaceBuilder:
             "planned_skill_name": resolution["planned_skill_name"],
             "capability_resolution": resolution["capability_resolution"],
         }
-
-    def _use_skill(self, ctx: ExecContext) -> Tool:
-        async def handler(args: dict[str, Any]) -> dict[str, Any]:
-            name = str(args.get("skill_name", "")).strip()
-            params = self._parameters(args, prefer_nonempty_input=True)
-            if params is None:
-                return {"error": "input/parameters must be an object or string"}
-            entry, resolution, error = await self._validate_choice(name, params, ctx)
-            if error:
-                return error
-            recovery_authority, authority_error = (
-                _recovery_selected_skill_authority(ctx, entry)
-            )
-            if authority_error:
-                return {
-                    "status": "rejected",
-                    "reason": "selected_skill_provider_authority_mismatch",
-                    "error": authority_error,
-                }
-            if recovery_authority is not None:
-                return {
-                    "status": "needs_input",
-                    "reason": "durable_recovery_execution_required",
-                    "error": (
-                        "Use run_skill with foreground or background mode so "
-                        "the recovered provider assessment is durable."
-                    ),
-                }
-            if entry.is_async:
-                params = self._with_resolution(params, resolution)
-                if resolution.get("skill_source"):
-                    params = {**params, SKILL_SOURCE_PARAM: resolution["skill_source"]}
-                subtask_id = await self.runtime.enqueue(
-                    entry.name,
-                    params,
-                    ctx.channel,
-                    session_id=ctx.session_id,
-                    task_id=ctx.task_id,
-                )
-                return {
-                    "status": "submitted",
-                    "subtask_id": subtask_id,
-                    "task_id": ctx.task_id,
-                    "object_kind": "skill_execution",
-                    "object_id": subtask_id,
-                    "skill_name": entry.name,
-                    "planned_skill_name": resolution["planned_skill_name"],
-                    "capability_resolution": resolution["capability_resolution"],
-                    "message": (
-                        f"{entry.name} is a long-running skill and was submitted as "
-                        f"execution {subtask_id}"
-                        + (f" under task {ctx.task_id}." if ctx.task_id else ".")
-                    ),
-                    "_omni_control": {"terminal": True},
-                }
-            return await execute_skill(entry, params, ctx)
-
-        return Tool(
-            ToolSpec(
-                "use_skill",
-                "Run a named skill. Synchronous skills execute inline; long-running skills become background tasks. "
-                "Use find_skill to discover names.",
-                {
-                    "type": "object",
-                    "properties": {
-                        "skill_name": {"type": "string"},
-                        "input": {"description": "Skill input as an object or string."},
-                    },
-                    "required": ["skill_name"],
-                },
-            ),
-            handler,
-            admission_target=self._skill_admission_target,
-        )
 
     def _run_skill(self, ctx: ExecContext, *, wait_for_tasks: bool, on_tool_event: Any) -> Tool:
         async def handler(args: dict[str, Any]) -> dict[str, Any]:
@@ -271,7 +225,10 @@ class ToolSurfaceBuilder:
                     "reason": "selected_skill_provider_authority_mismatch",
                     "error": authority_error,
                 }
-            params = self._with_resolution(params, resolution)
+            params = self._with_resolution(
+                dict(resolution.pop("admitted_input", params) or params),
+                resolution,
+            )
             if resolution.get("skill_source"):
                 params = {**params, SKILL_SOURCE_PARAM: resolution["skill_source"]}
             mode = resolve_execution_mode(
@@ -279,11 +236,14 @@ class ToolSurfaceBuilder:
             )
             if recovery_authority is not None and mode == "inline":
                 mode = "foreground" if wait_for_tasks else "background"
+            notify_channel = enqueue_notify_channel(
+                ctx.channel, mode=mode, wait_for_tasks=wait_for_tasks
+            )
             if mode == "background":
                 subtask_id = await self.runtime.enqueue(
                     entry.name,
                     params,
-                    ctx.channel,
+                    notify_channel,
                     session_id=ctx.session_id,
                     task_id=ctx.task_id,
                     **(
@@ -302,17 +262,26 @@ class ToolSurfaceBuilder:
                     "planned_skill_name": resolution["planned_skill_name"],
                     "capability_resolution": resolution["capability_resolution"],
                     "mode": mode,
+                    # Not terminal. Dispatching one skill is an action, not an
+                    # answer: "get the abstract, draw the diagram, and write the
+                    # paper" is three deliverables, and ending the turn on the
+                    # first submission silently dropped the other two while still
+                    # settling succeeded. run_workflow stays terminal because a
+                    # workflow *is* the whole plan for the request; one skill is
+                    # not. The model decides when it is done, as it does in Codex
+                    # and Claude Code.
                     "message": (
                         f"Submitted background skill {entry.name} as execution {subtask_id}"
                         + (f" under task {ctx.task_id}." if ctx.task_id else ".")
+                        + " It runs on its own; continue with any remaining work,"
+                        " and finish when nothing is left."
                     ),
-                    "_omni_control": {"terminal": True},
                 }
             if mode == "foreground":
                 subtask_id = await self.runtime.enqueue(
                     entry.name,
                     params,
-                    "",
+                    notify_channel,
                     session_id=ctx.session_id,
                     task_id=ctx.task_id,
                     **(
@@ -327,7 +296,8 @@ class ToolSurfaceBuilder:
                     ctx_override=ctx,
                 )
                 task = await self.runtime.get_subtask(subtask_id)
-                return {
+                body = task.result_json if task is not None else {}
+                extra = {
                     "status": task.status if task is not None else "unknown",
                     "subtask_id": subtask_id,
                     "task_id": ctx.task_id,
@@ -337,28 +307,36 @@ class ToolSurfaceBuilder:
                     "planned_skill_name": resolution["planned_skill_name"],
                     "capability_resolution": resolution["capability_resolution"],
                     "mode": mode,
-                    "result": task.result_json if task is not None else {},
-                    **({"error": task.error} if task is not None and task.error else {}),
                 }
-            result = await execute_skill(entry, params, ctx)
+                if task is not None and task.error:
+                    extra["error"] = task.error
+                return project_skill_observation(body, extra=extra)
+            result = await execute_skill(
+                entry,
+                params,
+                ctx,
+                progress_callback=_inline_usage_progress(on_tool_event),
+            )
             if _concrete_skill_failed(result):
                 return result
-            return {
-                "status": "succeeded",
-                "skill_name": entry.name,
-                "planned_skill_name": resolution["planned_skill_name"],
-                "capability_resolution": resolution["capability_resolution"],
-                "mode": "inline",
-                "result": result,
-            }
+            return project_skill_observation(
+                result,
+                extra={
+                    "skill_name": entry.name,
+                    "planned_skill_name": resolution["planned_skill_name"],
+                    "capability_resolution": resolution["capability_resolution"],
+                    "mode": "inline",
+                },
+            )
 
         return Tool(
             ToolSpec(
                 "run_skill",
                 (
-                    "Run one skill. inline waits in the current turn; foreground persists a skill execution "
-                    "and waits; background returns an execution id; auto chooses from skill duration and "
-                    "detach mode."
+                    "Run one skill. inline waits without persistence. foreground persists and waits "
+                    "only on a turn that drains (CLI). On IM or the daemon it detaches like "
+                    "background — the work outlives the turn and files arrive on hop 2. "
+                    "background returns an execution id. auto chooses from skill duration and detach mode."
                 ),
                 {
                     "type": "object",
@@ -396,7 +374,9 @@ class ToolSurfaceBuilder:
                     "error": authority_error,
                 }
             mode = resolve_execution_mode(args.get("mode"), wait_for_tasks=wait_for_tasks, is_async=True)
-            notify_channel = ctx.channel if mode == "background" else ""
+            notify_channel = enqueue_notify_channel(
+                ctx.channel, mode=mode, wait_for_tasks=wait_for_tasks
+            )
             try:
                 workflow_run_id = await self.runtime.enqueue_workflow(
                     goal,
@@ -671,6 +651,19 @@ def _submitted_workflow_provider_name(step: dict[str, Any]) -> str:
     if provider_type in {"child_task", "subagent", "agent"}:
         return "agent_delegate"
     return str(step.get("skill_name") or step.get("skill") or "").strip()
+
+
+def _inline_usage_progress(on_tool_event: Any) -> Any:
+    """Forward engine usage snapshots to the turn notice channel (status line)."""
+
+    async def _progress(stage: str, pct: float = 0.0, **data: Any) -> None:
+        if str(stage) != "usage" or on_tool_event is None:
+            return
+        result = on_tool_event("notice", {"kind": "usage", **data})
+        if inspect.isawaitable(result):
+            await result
+
+    return _progress
 
 
 def _concrete_skill_failed(result: Any) -> bool:

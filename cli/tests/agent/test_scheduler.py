@@ -22,6 +22,8 @@ def local_tz():
     set a fixed zone via ``TZ`` + ``time.tzset()`` and restore it on teardown,
     keeping the suite reproducible regardless of the machine it runs on.
     """
+    if not hasattr(time, "tzset"):
+        pytest.skip("process-local TZ switching requires POSIX time.tzset")
     original = os.environ.get("TZ")
 
     def _set(tz: str) -> None:

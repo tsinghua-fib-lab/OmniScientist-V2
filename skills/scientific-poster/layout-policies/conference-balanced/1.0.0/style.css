@@ -1,2 +1,0 @@
-:root { --sp-gutter: clamp(12mm, 1.8vw, 20mm); --sp-space-1: 2mm; --sp-space-2: 4mm; --sp-space-3: 7mm; --sp-space-4: 11mm; --sp-accent: #2457d6; --sp-muted: #526078; --sp-surface-muted: #eef2f7; --sp-line: #c8d0dc; --sp-rule: 0.35mm; --sp-rule-strong: 1.2mm; }
-.sp-layout { display: grid; gap: var(--sp-gutter); align-content: start; }

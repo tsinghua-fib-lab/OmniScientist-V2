@@ -305,7 +305,34 @@ def required_resolver_verification_mode(
         user_message=user_message,
     ):
         return "user_exact"
+    # A value that is *already* a canonical, self-verifying identifier — an arXiv
+    # id or a DOI that the resolver normalizes to itself — is a locally provable
+    # fact. Planning must not gate its admission behind a synchronous network
+    # title search: a bare id carries no independent title to search against, the
+    # search is slow and low-precision, and the provider proves the id exists the
+    # moment it fetches it. This mirrors how Codex / Claude Code / OpenClaw trust
+    # a well-formed identifier argument and let the tool validate it at call time.
+    # Free text that is *not* yet a canonical id (a title sitting in an id field)
+    # is not locally provable and still needs grounding below.
+    if value_is_canonical_identifier(resolver_name, value):
+        return "syntactic"
     return "grounded_search"
+
+
+def value_is_canonical_identifier(resolver_name: str, value: Any) -> bool:
+    """Whether ``value`` is already a canonical id the resolver resolves to itself.
+
+    Uses the same offline resolver the compiler uses, so "canonical" means
+    exactly "the resolver can normalize this on its own" (e.g. ``1706.03762`` for
+    ``arxiv_id``). Titles and other free text do not resolve and return ``False``.
+    """
+    if not resolver_name:
+        return False
+    resolution = resolve_field(
+        resolver_name,
+        {"identifier": value, "input": value},
+    )
+    return bool(resolution.resolved)
 
 
 def resolver_value_matches_user(
@@ -595,7 +622,7 @@ def _canonical_hash(payload: Any) -> str:
         sort_keys=True,
         separators=(",", ":"),
         default=str,
-    ).encode()
+    ).encode("utf-8", errors="backslashreplace")
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -630,5 +657,6 @@ __all__ = [
     "resolver_value_matches_user",
     "seal_resolver_evidence",
     "validate_resolver_evidence",
+    "value_is_canonical_identifier",
     "verification_satisfies",
 ]

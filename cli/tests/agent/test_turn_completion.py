@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -63,9 +64,9 @@ class _TaskController:
     async def finish_turn(self, *_args: Any, **_kwargs: Any) -> None:
         self._timeline.append("finish")
 
-    async def apply_verifier_outcome(self, _task_id: str, result: Any) -> Any:
-        self._timeline.append("verify")
-        result.verification_status = "passed"
+    async def apply_settlement(self, _task_id: str, result: Any) -> Any:
+        self._timeline.append("settle")
+        result.settlement_status = "succeeded"
         return result
 
 
@@ -103,13 +104,76 @@ def _completion(recorder: _Recorder) -> TurnCompletion:
     )
 
 
+class _Artifacts:
+    async def list_by_task(self, task_id: str) -> list[Any]:
+        return [
+            SimpleNamespace(
+                id="artifact-1",
+                uri="artifact://artifact-1",
+                title="Review",
+                kind="report",
+            )
+        ] if task_id == "task-output" else []
+
+    async def resolve_path(self, uri: str) -> Path | None:
+        return Path("/workspace/reports/review_task-out/Review.md") if uri else None
+
+
+class _RoleArtifacts:
+    def __init__(self) -> None:
+        self.rows = [
+            SimpleNamespace(
+                uri="artifact://survey",
+                title="Data Provenance Survey",
+                kind="report",
+                meta={},
+                mime="application/pdf",
+                size_bytes=10,
+            ),
+            SimpleNamespace(
+                uri="artifact://manifest-learning",
+                title="Manifest Learning Report",
+                kind="report",
+                meta={},
+                mime="text/markdown",
+                size_bytes=20,
+            ),
+            SimpleNamespace(
+                uri="artifact://provenance",
+                title="Figure provenance",
+                kind="figure",
+                meta={},
+                mime="application/json",
+                size_bytes=30,
+            ),
+            SimpleNamespace(
+                uri="artifact://declared-support",
+                title="Machine receipt",
+                kind="data",
+                meta={"presentation_role": "support"},
+                mime="application/json",
+                size_bytes=40,
+            ),
+        ]
+        self.paths = {
+            "artifact://survey": Path("/workspace/reports/data-provenance-survey.pdf"),
+            "artifact://manifest-learning": Path("/workspace/reports/manifest-learning.md"),
+            "artifact://provenance": Path("/workspace/figures/rag.provenance.json"),
+            "artifact://declared-support": Path("/workspace/data/receipt.json"),
+        }
+
+    async def list_by_task(self, _task_id: str) -> list[Any]:
+        return self.rows
+
+    async def resolve_path(self, uri: str) -> Path | None:
+        return self.paths.get(uri)
+
+
 def _completion_callbacks(recorder: _Recorder) -> dict[str, Any]:
     return {
         "persist_message": _Conversations(recorder.timeline).persist_message,
         "record_turn_memory": _TurnMemory(recorder.timeline).record,
-        "apply_verifier_outcome": _TaskController(
-            recorder.timeline
-        ).apply_verifier_outcome,
+        "apply_settlement": _TaskController(recorder.timeline).apply_settlement,
     }
 
 
@@ -142,11 +206,79 @@ async def test_complete_plan_preserves_settlement_order_and_warning_union() -> N
         "persist",
         "memory",
         "finish",
-        "verify",
+        "settle",
         "post_present",
     ]
-    assert result.verification_status == "passed"
+    assert result.settlement_status == "succeeded"
     assert result.degraded_warnings == ["shared", "plan-only", "executor-only"]
+
+
+@pytest.mark.asyncio
+async def test_complete_plan_returns_authoritative_outputs_separately_from_answer() -> None:
+    recorder = _Recorder()
+    completion = TurnCompletion(
+        tasks=recorder,
+        task_controller=_TaskController(recorder.timeline),
+        hooks=_Hooks(recorder.timeline),
+        runtime=_Runtime(recorder.timeline),
+        artifacts=_Artifacts(),
+    )
+    plan = IntentPlan(
+        task_id="task-output",
+        user_message="write a review",
+        intent_type=IntentType.REACT_FALLBACK,
+    )
+
+    result = await completion.complete_plan(
+        plan=plan,
+        result=PlanExecutionResult(handled=True, text="Done."),
+        session_id="session-output",
+        user_message="write a review",
+        drain_tasks=False,
+        **_completion_callbacks(recorder),
+    )
+
+    assert result.text == "Done."
+    assert len(result.artifacts) == 1
+    assert result.artifacts[0].title == "Review"
+    # Spelled through Path: the fixture hands in a Path, and completion reports
+    # it with str(), so the separator is the platform's rather than the literal's.
+    assert result.artifacts[0].path == str(
+        Path("/workspace/reports/review_task-out/Review.md")
+    )
+    assert result.artifacts[0].uri == "artifact://artifact-1"
+
+
+@pytest.mark.asyncio
+async def test_artifact_roles_use_declared_metadata_and_exact_legacy_suffixes() -> None:
+    recorder = _Recorder()
+    completion = TurnCompletion(
+        tasks=recorder,
+        task_controller=_TaskController(recorder.timeline),
+        hooks=_Hooks(recorder.timeline),
+        runtime=_Runtime(recorder.timeline),
+        artifacts=_RoleArtifacts(),
+    )
+    plan = IntentPlan(
+        task_id="task-output",
+        user_message="write reports",
+        intent_type=IntentType.REACT_FALLBACK,
+    )
+
+    result = await completion.complete_plan(
+        plan=plan,
+        result=PlanExecutionResult(handled=True, text="Done."),
+        session_id="session-output",
+        user_message="write reports",
+        drain_tasks=False,
+        **_completion_callbacks(recorder),
+    )
+
+    roles = {artifact.title: artifact.presentation_role for artifact in result.artifacts}
+    assert roles["Data Provenance Survey"] == "primary"
+    assert roles["Manifest Learning Report"] == "primary"
+    assert roles["Figure provenance"] == "support"
+    assert roles["Machine receipt"] == "support"
 
 
 @pytest.mark.asyncio
@@ -190,12 +322,12 @@ async def test_complete_react_records_terminal_event_and_drains_before_settlemen
 
     assert recorder.timeline == [
         "event:react.finished",
+        "drain",
         "pre_present",
         "persist",
         "memory",
-        "drain",
         "finish",
-        "verify",
+        "settle",
         "post_present",
     ]
     assert result.submitted_workflow_ids == ["workflow-1"]
@@ -216,6 +348,46 @@ async def test_complete_react_records_terminal_event_and_drains_before_settlemen
     assert execution["task_id"] == "task-2"
     assert execution["object_kind"] == "skill_execution"
     assert execution["object_id"] == "subtask-1"
+
+
+@pytest.mark.asyncio
+async def test_bounded_text_result_keeps_one_degraded_status_everywhere() -> None:
+    recorder = _Recorder()
+    plan = IntentPlan(
+        task_id="task-budget",
+        user_message="review",
+        intent_type=IntentType.REACT_FALLBACK,
+    )
+    loop_result = AgentLoopResult(
+        kind="text",
+        content="Best-effort review from gathered evidence.",
+        terminated_reason="synthesized_max_total_tokens",
+    )
+
+    async def no_escalation(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def preserve_settlement(_task_id: str, result: Any) -> Any:
+        recorder.timeline.append("settle")
+        return result
+
+    callbacks = _completion_callbacks(recorder)
+    callbacks["apply_settlement"] = preserve_settlement
+    result = await _completion(recorder).complete_react(
+        plan=plan,
+        result=loop_result,
+        session_id="session-budget",
+        user_message="review",
+        channel="cli",
+        drain_tasks=False,
+        emit_tool_event=None,
+        maybe_escalate=no_escalation,
+        **callbacks,
+    )
+
+    finished = next(event for event in recorder.events if event["event_type"] == "react.finished")
+    assert finished["status"] == "degraded"
+    assert result.settlement_status == "degraded"
 
 
 @pytest.mark.asyncio

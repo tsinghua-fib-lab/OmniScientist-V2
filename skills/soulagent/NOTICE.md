@@ -9,12 +9,8 @@ The Skill is licensed under the Apache License, Version 2.0. The complete terms
 are included in `LICENSE.txt`. Scientist KG evidence retains the terms of its
 underlying papers, code, datasets, and source services.
 
-The `soulagent` implementation and the bundled test KGs were contributed from
-`https://gitee.com/zgc-omni/omniscientistv2.git`, branch/path
-`hyw/academic-persona-complete-release`, commit
-`058107854735ebb46e467ea5fe80b3fd0d629cd5`.
-
-They were adapted into the top-level Omni Skill layout with external KG
-examples, standalone licensing, detailed installation/testing documentation,
-and explicit OmniScientist, Codex, Claude Code, OpenClaw, and WorkBuddy Host
-adaptation rules.
+The bundled scientist KG snapshot comes from the public registry at
+`https://gitee.com/cvYaowenHu/scientist-kg-registry`, commit
+`760d322401bde89ae2360e209db7695eb7ca6bf2`. Its evidence excerpts and other
+third-party source material retain their original rights and citation
+requirements; inclusion in this package does not relicense those materials.

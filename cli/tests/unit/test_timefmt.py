@@ -14,6 +14,8 @@ import time
 from contextlib import contextmanager
 from datetime import UTC, datetime
 
+import pytest
+
 from omni.core.system_prompt import build_system_prompt
 from omni.core.timefmt import (
     coerce_datetime,
@@ -29,6 +31,8 @@ from omni.storage.models import TaskORM
 @contextmanager
 def _tz(name: str):
     """Pin the process-local timezone for a deterministic assertion (POSIX)."""
+    if not hasattr(time, "tzset"):
+        pytest.skip("process-local TZ switching requires POSIX time.tzset")
     old = os.environ.get("TZ")
     os.environ["TZ"] = name
     time.tzset()

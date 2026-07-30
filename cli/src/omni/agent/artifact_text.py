@@ -77,6 +77,7 @@ def artifact_revision_source_payload(
         for left, right in re.findall(r"([A-Za-z_][\w]*)\s*->\s*([A-Za-z_][\w]*)", source_text or "")
     ]
     return {
+        "revision_mode": "major",
         "source_artifact_dot": source_text,
         "source_artifact_title": artifact_title_from_dot(source_text),
         "source_nodes": nodes[:80],

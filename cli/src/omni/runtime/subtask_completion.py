@@ -91,6 +91,7 @@ async def complete_subtask(
         )
         task.trace_log = trace
         task.finished_at = _utcnow()
+        task.owner_pid = 0
         await session.commit()
     summary = _result_summary(result)
     if memory is not None:
@@ -284,6 +285,7 @@ async def fail_subtask(
             task.result_json = result
         task.trace_log = trace
         task.finished_at = _utcnow()
+        task.owner_pid = 0
         skill_name = task.skill_name
         session_id = task.session_id
         task_id = str(task.task_id or "")

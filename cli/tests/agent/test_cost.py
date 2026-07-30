@@ -33,6 +33,33 @@ def test_rate_for_honours_explicit_override():
     assert rate_for("gpt-4o", _Cfg()) == (1.0, 3.0)
 
 
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [((7.0, 0.0), (7.0, 0.0)), ((0.0, 11.0), (0.0, 11.0))],
+    ids=["input only", "output only"],
+)
+def test_half_a_price_list_is_still_the_owner_s_price_list(
+    configured: tuple[float, float],
+    expected: tuple[float, float],
+) -> None:
+    """Naming one side of the price overrides both sides, and zero is a price.
+
+    Somebody who writes only ``input_per_mtok`` is describing a deployment where
+    the other direction costs nothing — a prepaid or self-hosted endpoint, the
+    reason per-deployment pricing exists. Treating the omission as "unspecified"
+    and reaching for the catalog would bill them the list price of whichever
+    public model their string happens to contain, which is both wrong and
+    invisible: the number looks plausible and the run still completes.
+
+    Every rate below is the configured one; the catalog's ``gpt-4o`` entry is
+    (2.50, 10.0) and must not appear on either side.
+    """
+    class _Cfg:
+        input_per_mtok, output_per_mtok = configured
+
+    assert rate_for("gpt-4o", _Cfg()) == expected
+
+
 def test_estimate_cost_uses_provider_usage_when_present():
     est = estimate_cost(
         "gpt-4o",

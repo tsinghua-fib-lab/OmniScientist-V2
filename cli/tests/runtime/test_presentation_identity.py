@@ -2,21 +2,43 @@
 
 from __future__ import annotations
 
+import sys
 from types import SimpleNamespace
 
 import pytest
 
-from omni.agent.intent_plan import IntentPlan, IntentType
-from omni.agent.plan_executor import PlanExecutor
+from omni.agent import OmniAgent
 from omni.channels.base import Channel
+from omni.config import load_settings
+from omni.core.llm.client import ChatWithToolsResult, ToolCall
 from omni.runtime.notifications import TaskNotification, task_notification_from_dict
 from omni.runtime.presentation import (
+    ArtifactRef,
     default_task_actions,
     task_presentation_from_notification,
     task_presentation_from_result,
     turn_presentation_from_result,
 )
-from omni.skills_runtime.context import ExecContext
+from omni.skills_runtime.manifest import DeliveryMode, ExecSpec, SkillEntry, SkillKind
+from tests.conftest import ScriptedLLM
+
+
+def _presentation_skill(name: str) -> SkillEntry:
+    """A trivial async skill so a model-submitted workflow step can bind."""
+    return SkillEntry(
+        name=name,
+        description=f"presentation fixture {name}",
+        source="project_omni",
+        kind=SkillKind.CLI_EXEC,
+        delivery_mode=DeliveryMode.ASYNC_TASK,
+        exec_spec=ExecSpec(
+            command=sys.executable,
+            args=["-c", "print('{\"status\":\"ok\"}')"],
+            stdout_format="json",
+        ),
+        input_schema={"type": "object", "properties": {"query": {"type": "string"}}},
+        output_schema={"type": "object", "properties": {"status": {"type": "string"}}},
+    )
 
 
 def _workflow_turn() -> SimpleNamespace:
@@ -39,8 +61,40 @@ def _workflow_turn() -> SimpleNamespace:
         terminated_reason="workflow",
         plan_summary="",
         degraded_warnings=[],
-        verification_status="passed",
+        settlement_status="passed",
     )
+
+
+def test_turn_presentation_projects_internal_artifact_uris_for_each_channel() -> None:
+    artifact = ArtifactRef(
+        title="RAG survey",
+        format="md",
+        uri="artifact://paper1",
+        path="/workspace/papers/rag.md",
+    )
+    turn = SimpleNamespace(
+        text="Paper: artifact://paper1",
+        task_id="task-1",
+        session_id="session-1",
+        kind="text",
+        terminated_reason="done",
+        plan_summary="",
+        degraded_warnings=[],
+        settlement_status="",
+        submitted_workflow_ids=[],
+        submitted_subtask_ids=[],
+        drained_results=[],
+        artifacts=[artifact],
+    )
+
+    cli = turn_presentation_from_result(turn, channel="cli")
+    im = turn_presentation_from_result(turn, channel="feishu")
+
+    assert cli.assistant_text == "Paper: /workspace/papers/rag.md"
+    assert im.assistant_text == "Paper: rag.md"
+    assert "artifact://" not in cli.to_markdown()
+    assert "artifact://" not in im.to_markdown(include_local_paths=False)
+    assert cli.to_markdown().count("**Outputs**") == 1
 
 
 def test_workflow_completion_keeps_object_identity_but_actions_use_owning_task() -> None:
@@ -108,6 +162,27 @@ def test_object_identity_without_owner_never_generates_task_navigation() -> None
     assert "`task=" not in markdown
     assert "/task show " not in markdown
     assert "/task attach " not in markdown
+
+
+def test_failed_result_surfaces_setup_action_and_explicit_artifact_absence() -> None:
+    presentation = task_presentation_from_result(
+        subtask_id="paper-review-execution",
+        task_id="paper-review-task",
+        skill="paper-review",
+        status="failed",
+        result={
+            "summary": "A Semantic Scholar API key is required.",
+            "setup_command": "omni config semantic-scholar -k <API_KEY> --test",
+            "next_actions": ["omni config semantic-scholar -k <API_KEY> --test"],
+        },
+        error="configuration missing",
+    )
+
+    markdown = presentation.to_markdown()
+
+    assert "No saved artifact was produced" in markdown
+    assert "omni config semantic-scholar -k <API_KEY> --test" in markdown
+    assert markdown.count("omni config semantic-scholar -k <API_KEY> --test") == 1
 
 
 def test_notification_round_trip_preserves_owner_and_old_json_still_loads() -> None:
@@ -219,44 +294,59 @@ async def test_channel_delivery_uses_notification_task_id_without_object_lookup(
 
 
 @pytest.mark.asyncio
-async def test_plan_executor_recommends_task_and_labels_workflow_drill_down(settings) -> None:
-    class _Runtime:
-        async def enqueue_workflow(self, *_args, **_kwargs) -> str:  # noqa: ANN002, ANN003
-            return "f4902f1686924dd9a74efa920bbc6626"
+async def test_model_submitted_workflow_keeps_task_identity_and_drill_down() -> None:
+    """A model-submitted run stays addressable by ``/task show``.
 
-    class _Tasks:
-        async def append_event(self, *_args, **_kwargs) -> None:  # noqa: ANN002, ANN003
-            return None
-
-    plan = IntentPlan(
-        task_id="05571218b61b4f1aab86fd83a660c75e",
-        user_message="Run a research workflow.",
-        intent_type=IntentType.WORKFLOW,
-        workflow_steps=[
-            {
-                "id": "search",
-                "skill_name": "literature-search",
-                "input": {"query": "RAG"},
-            }
-        ],
-        rationale="The request has multiple research stages.",
+    The model, not the planner, now decides the steps, so the identity contract
+    is carried by the ``run_workflow`` tool result. It must still name the
+    owning task and the workflow run, and the turn presentation must still
+    offer the owning-task actions plus the workflow drill-down that
+    ``/task show`` depends on.
+    """
+    agent = await OmniAgent.create(load_settings())
+    agent.registry.register(_presentation_skill("literature-search"))
+    agent.llm = ScriptedLLM(
+        [
+            ChatWithToolsResult(
+                tool_calls=[
+                    ToolCall(
+                        id="call_workflow",
+                        name="run_workflow",
+                        arguments={
+                            "goal": "Run a research workflow.",
+                            "mode": "background",
+                            "steps": [
+                                {
+                                    "id": "search",
+                                    "skill": "literature-search",
+                                    "input": {"query": "RAG"},
+                                }
+                            ],
+                        },
+                    )
+                ]
+            )
+        ]
     )
-    ctx = ExecContext(
-        settings=settings,
-        paths=settings.paths,
-        task_id=plan.task_id,
-        session_id="session-123",
-    )
 
-    result = await PlanExecutor(_Runtime(), _Tasks(), registry=None).execute(
-        plan,
-        ctx=ctx,
-        tools=[],
-        drain_tasks=False,
-    )
+    try:
+        turn = await agent.handle_turn("Run a research workflow.", drain_tasks=False)
+    finally:
+        await agent.aclose()
 
-    assert "/task show 05571218" in result.text
-    assert "Workflow details: `/task show f4902f16`" in result.text
-    assert result.tool_trace[0].result["task_id"] == plan.task_id
-    assert result.tool_trace[0].result["object_kind"] == "workflow_run"
-    assert result.tool_trace[0].result["object_id"] == "f4902f1686924dd9a74efa920bbc6626"
+    workflow_run_id = turn.submitted_workflow_ids[0]
+    submission = turn.tool_trace[0].result
+    assert submission["task_id"] == turn.task_id
+    assert submission["object_kind"] == "workflow_run"
+    assert submission["object_id"] == workflow_run_id
+
+    presentation = turn_presentation_from_result(turn)
+    assert presentation.submitted_workflow_ids == [workflow_run_id]
+    assert any(
+        action.startswith(f"/task show {turn.task_id[:8]}:")
+        for action in presentation.next_actions
+    )
+    assert (
+        f"/task show {workflow_run_id[:8]}: inspect this workflow run"
+        in presentation.next_actions
+    )

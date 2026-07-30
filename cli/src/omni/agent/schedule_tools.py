@@ -26,7 +26,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-from omni.core.action_contracts import ResolverContext
+from omni.agent.schedule_goal import seal_schedule_work
+from omni.core.action_contracts import ResolutionStatus, ResolverContext
 from omni.core.react_agent import ToolSpec
 from omni.core.timefmt import format_local_time, local_time_context
 from omni.runtime.action_checkpoints import ActionCheckpointStore, AmbiguousCheckpointId
@@ -48,21 +49,18 @@ from omni.skills_runtime.context import ExecContext, Tool
 
 _SCHEDULE_TASK_SPEC = ToolSpec(
     name="schedule_task",
+    # The time-grounding rules used to be restated here in full. They live on the
+    # 'when' / 'at' / 'cron' parameters instead, which is where the model reads
+    # them while filling the call, and which the provider sends anyway — so
+    # repeating them at tool level cost every iteration and taught nothing new.
     description=(
         "Create a recurring or one-time scheduled task that later runs an autonomous agent on a "
         "natural-language goal and delivers the result to the inbox. Use this whenever the user asks "
-        "to run something on a schedule — daily/weekly/hourly, at a specific time, or once in the "
-        "future (e.g. a daily research digest). Provide 'goal' plus exactly ONE trigger: 'cron' "
-        "(5-field, local time), 'every_seconds', or 'at' (ISO-8601 local datetime). Do not perform "
-        "the goal now; only register the schedule. Relay the tool's returned summary verbatim — it is "
-        "the truthful outcome (it may say the schedule was created, that it needs the owner's "
-        "approval first, that a time was in the past, or that the time of day is ambiguous and needs "
-        "confirmation).\n\n"
-        "TIME: when the user states the time in words (e.g. 'today 7:10', 'every day at 6pm'), pass it "
-        "as 'when' — copy the exact wording into when.raw_expression and fill when.constraints from what "
-        "the user actually said. Do NOT convert an ambiguous hour to 24-hour yourself: if the user did "
-        "not say morning/evening (AM/PM), leave constraints.clock.day_period null and let the system "
-        "confirm. Only use 'at'/'cron'/'every_seconds' when the user gave an exact machine value."
+        "to run something on a schedule (e.g. a daily research digest). Provide 'goal' plus exactly "
+        "ONE trigger: 'when' for a time stated in words, or 'cron'/'every_seconds'/'at' for an exact "
+        "machine value. Do not perform the goal now; only register the schedule. The tool result is "
+        "the truthful outcome (created, needs approval, time in the past, or ambiguous). Do not "
+        "recast that outcome as a different status."
     ),
     parameters={
         "type": "object",
@@ -113,18 +111,33 @@ _RESOLVE_CHECKPOINT_SPEC = ToolSpec(
     name="resolve_action_checkpoint",
     description=(
         "Answer a pending schedule-time clarification the system asked earlier (it returned a "
-        "'draft_id' and numbered choices because a worded time was ambiguous). Call this when the "
-        "user replies which one they meant. Pass 'checkpoint_id' (the draft_id) and 'choice' — a "
-        "candidate id like 'am'/'pm', a listed choice id (e.g. 'pick:pm', 'repair_next_day:am'), or "
-        "'run_now'/'cancel'. Only the original requester can answer. Relay the returned summary verbatim."
+        "'draft_id' and numbered choices because a worded time was ambiguous). If the user picks "
+        "one of the listed readings, pass that choice. If they give a different or new time, pass "
+        "it in 'when' (worded) or 'at' (ISO) — the draft's goal is kept; do not call schedule_task "
+        "with a different goal. Only the original requester can answer. The returned result is "
+        "the truthful outcome; do not recast it as a different status."
     ),
     parameters={
         "type": "object",
         "properties": {
             "checkpoint_id": {"type": "string", "description": "The draft_id from the earlier clarification."},
-            "choice": {"type": "string", "description": "am|pm, a listed choice id, or run_now|cancel."},
+            "choice": {
+                "type": "string",
+                "description": (
+                    "A candidate id ('am'/'pm'), a listed choice id (e.g. 'pick:pm', "
+                    "'repair_next_day:am'), or 'run_now'/'cancel'."
+                ),
+            },
+            "when": SCHEDULE_CREATE_CONTRACT.proposal_schema["properties"]["when"],
+            "at": {
+                "type": "string",
+                "description": (
+                    "Exact one-time ISO-8601 datetime when the user gave a new time instead of "
+                    "picking a listed reading. The draft goal is kept."
+                ),
+            },
         },
-        "required": ["checkpoint_id", "choice"],
+        "required": ["checkpoint_id"],
     },
 )
 
@@ -143,6 +156,63 @@ _CANCEL_SCHEDULE_SPEC = ToolSpec(
 
 def _needs_input(message: str, **extra: Any) -> dict[str, Any]:
     return {"status": "needs_input", "message": message, "error": message, **extra}
+
+
+def _repairable_by_model(resolution: Any) -> bool:
+    """Whether the *proposal*, not the user, is what needs fixing.
+
+    ``INVALID`` means the arguments contradict wording the user already gave —
+    quoting only the hour as evidence while proposing a minute, say. The model has
+    everything it needs to correct that. ``AMBIGUOUS`` and ``MISSING`` are the
+    opposite: what would settle them (a bare "7" — morning or evening?) exists only
+    in the user's head, and no amount of re-reading finds it there.
+    """
+    return getattr(resolution, "status", None) is ResolutionStatus.INVALID
+
+
+def _defect_signature(resolution: Any) -> str:
+    """Coarse key bounding repairs to one per unresolved field, per turn.
+
+    Deliberately excludes ``reason``: it names the offending value, so a model
+    that keeps proposing *different* wrong minutes would earn a fresh retry every
+    time and never reach the user.
+    """
+    status = getattr(getattr(resolution, "status", None), "value", "")
+    return f"{status}|{','.join(getattr(resolution, 'unresolved_fields', ()) or ())}"
+
+
+def _repair_payload(
+    resolution: Any, raw: str, *, user_message: str = ""
+) -> dict[str, Any]:
+    """A tool error the model can act on — the shape of Codex's ``RespondToModel``.
+
+    Carries no ``outcome``/``action_required`` key on purpose, so the ReAct loop's
+    :func:`_is_terminal_tool_result` keeps running and this lands as the model's
+    next observation instead of ending the turn.
+
+    Cite the *user's* wording, never the model's quote: echoing ``raw`` taught
+    one retry to keep a particle the user never wrote (2367d610).
+    """
+    reason = getattr(resolution, "reason", "") or "the proposed time did not check out"
+    written = (user_message or "").strip()
+    wording = (
+        f" The user wrote: '{written}'."
+        if written
+        else (f" The proposed quote was '{raw}'." if raw else "")
+    )
+    message = (
+        f"The schedule was not created: {reason}.{wording} Call schedule_task again, "
+        "copying the time from the user's wording into clock.evidence — hour and "
+        "minute together, plus the AM/PM word if the user gave one. Do not add or "
+        "drop words. Ask the user only if their wording genuinely does not say."
+    )
+    return {
+        "status": "error",
+        "error": message,
+        "summary": message,
+        "resolution_status": getattr(getattr(resolution, "status", None), "value", "invalid"),
+        "policy": POLICY_VERSION,
+    }
 
 
 def _positive_int(value: Any) -> int:
@@ -196,6 +266,9 @@ def build_schedule_tools(runtime: Any, ctx: ExecContext) -> list[Tool]:
         return []
 
     channel = ctx.channel or "cli"
+    # Defects already handed back to the model this turn (see ``_defect_signature``).
+    # Turn-scoped because the tool surface is rebuilt per turn.
+    repaired: set[str] = set()
 
     def _scheduler() -> Scheduler:
         return Scheduler(ctx.db, runtime, ctx.settings)
@@ -251,6 +324,27 @@ def build_schedule_tools(runtime: Any, ctx: ExecContext) -> list[Tool]:
         except Exception:  # noqa: BLE001 - durability is best-effort, never fatal
             return ""
 
+    async def _supersede_prior_drafts(exclude_id: str = "") -> None:
+        """Cancel this requester's other open schedule clarifications.
+
+        Once a fresh ``schedule_task`` resolves — a new schedule was created, or a
+        new clarification was posed — any earlier unanswered draft for the same
+        requester is stale. Cancel it so ``_open_clarifications_block`` does not
+        re-surface a question the user has already moved on from. Scoped to
+        (principal, session); best-effort and never fatal.
+        """
+        try:
+            store = _checkpoints()
+            rows = await store.list_open(
+                principal=_decider(), session_id=ctx.session_id, limit=20
+            )
+            for rec in rows:
+                if rec.id == exclude_id:
+                    continue
+                await store.cancel(rec.id, decider=_decider())
+        except Exception:  # noqa: BLE001 - draft hygiene must never break scheduling
+            pass
+
     async def _create_from_trigger(record: Any, trigger_value: dict[str, Any]) -> dict[str, Any]:
         payload = record.payload or {}
         request = ScheduleCreateRequest(
@@ -262,6 +356,8 @@ def build_schedule_tools(runtime: Any, ctx: ExecContext) -> list[Tool]:
                 session_id=record.session_id or ctx.session_id,
                 principal=record.actor_principal or _decider(),
             ),
+            reference_time=_resolver_context(ctx).reference_time,
+            already_clarified=True,
         )
         result = await _service().create(request)
         out = result.tool_result()
@@ -322,20 +418,22 @@ def build_schedule_tools(runtime: Any, ctx: ExecContext) -> list[Tool]:
         cands = getattr(resolution, "candidates", ()) or ()
         return [f"{c.label} [{c.validity}]" for c in cands]
 
-    async def schedule_task(args: dict[str, Any]) -> dict[str, Any]:
-        # Decision #3 — the goal is host-owned. When the planner extracted a
-        # distinct deferred goal for this turn, seal *that* instead of a goal the
-        # Schedule ReAct model may have re-typed, so the model cannot silently
-        # rewrite what will run. With no host goal, the model's goal is used.
-        host_goal = str(getattr(ctx, "deferred_goal", "") or "").strip()
-        if host_goal and str(args.get("goal", "")).strip() != host_goal:
-            args = {**args, "goal": host_goal}
-        goal = str(args.get("goal", "")).strip()
-        if not goal:
-            result = _needs_input("Provide the goal the scheduled task should perform each time it runs.")
-            await _record_outcome("needs_input", result)
-            return result
+    async def _latest_open_draft() -> Any | None:
+        """Newest open schedule clarification for this requester, if any."""
+        try:
+            rows = await _checkpoints().list_open(
+                principal=_decider(), session_id=ctx.session_id, limit=1
+            )
+        except Exception:  # noqa: BLE001 - draft lookup must never break scheduling
+            return None
+        return rows[0] if rows else None
 
+    async def _admit_and_create(
+        args: dict[str, Any],
+        *,
+        already_clarified: bool,
+        goal_source: str,
+    ) -> dict[str, Any]:
         raw = ""
         when = args.get("when")
         if isinstance(when, dict):
@@ -344,14 +442,15 @@ def build_schedule_tools(runtime: Any, ctx: ExecContext) -> list[Tool]:
             "action.proposed",
             {"raw_expression": raw, "has_when": isinstance(when, dict),
              "exact": [k for k in ("cron", "every_seconds", "at") if args.get(k)],
-             "goal_source": "host" if host_goal else "model"},
+             "goal_source": goal_source},
         )
 
         # Semantic admission: the model's proposal (a worded ``when`` and/or an
         # exact trigger) is bound to canonical arguments before anything is
         # created. An ambiguous/invalid critical time fails closed into a user
         # clarification — never a silently completed time.
-        decision = await prepare_schedule_create(args, _resolver_context(ctx))
+        resolver = _resolver_context(ctx)
+        decision = await prepare_schedule_create(args, resolver)
         # A READY decision (exact trigger or a uniquely-resolved time) carries no
         # ResolutionResult — report it as ``resolved`` rather than dereferencing None.
         res = decision.resolution
@@ -366,6 +465,24 @@ def build_schedule_tools(runtime: Any, ctx: ExecContext) -> list[Tool]:
             },
             status=res_status,
         )
+        # A defect in the model's *own* arguments is not a question for the user:
+        # it contradicts wording the user already gave. It goes back as an ordinary
+        # tool error and the loop continues — Codex's split, where everything the
+        # model can fix (245 of its tool-error sites, safety rejections included)
+        # returns through ``RespondToModel`` and only a fact the human holds
+        # suspends the turn. No ``schedule.resolved`` is written here: that event is
+        # the durable proof a schedule exists, and a repair request is not one.
+        if decision.needs_input and _repairable_by_model(res):
+            signature = _defect_signature(res)
+            if signature not in repaired:
+                repaired.add(signature)
+                await _emit_action(
+                    "action.repair_requested",
+                    {"raw_expression": raw, "reason": getattr(res, "reason", ""),
+                     "policy": POLICY_VERSION},
+                    status=res_status,
+                )
+                return _repair_payload(res, raw, user_message=resolver.user_message)
         if decision.needs_input:
             payload = temporal_clarification_payload(decision.resolution, raw)
             # Persist the ambiguity as a durable, resumable draft so the user can
@@ -380,6 +497,8 @@ def build_schedule_tools(runtime: Any, ctx: ExecContext) -> list[Tool]:
                     {"checkpoint_id": draft_id, "phase": "semantic_clarification",
                      "candidates": _candidate_labels(decision.resolution)},
                 )
+                # A new clarification supersedes any earlier unanswered one.
+                await _supersede_prior_drafts(exclude_id=draft_id)
             await _record_outcome("needs_input", payload)
             return payload
         if not decision.ready:  # defensive: rejected
@@ -392,13 +511,15 @@ def build_schedule_tools(runtime: Any, ctx: ExecContext) -> list[Tool]:
         canonical = decision.canonical_arguments or {}
         request = ScheduleCreateRequest(
             trigger=canonical_schedule_trigger(canonical.get("trigger") or {}),
-            goal=str(canonical.get("goal") or goal),
+            goal=str(canonical.get("goal") or args.get("goal") or ""),
             title=str(canonical.get("title") or ""),
             actor=ScheduleActor(
                 channel=channel,
                 session_id=ctx.session_id,
                 principal=getattr(ctx, "principal", "local") or "local",
             ),
+            reference_time=_resolver_context(ctx).reference_time,
+            already_clarified=already_clarified,
         )
         result = await _service().create(request)
         payload = result.tool_result()
@@ -411,8 +532,43 @@ def build_schedule_tools(runtime: Any, ctx: ExecContext) -> list[Tool]:
             },
             status=result.status,
         )
+        if result.status in {"created", "awaiting_approval"}:
+            # The user moved forward to a concrete time (or a durable proposal);
+            # drop any stale draft so a later time-only follow-up cannot reopen it.
+            await _supersede_prior_drafts()
         await _record_outcome(result.status, payload)
         return payload
+
+    async def schedule_task(args: dict[str, Any]) -> dict[str, Any]:
+        # Seal the work item *before* anything is stored or shown. This-turn
+        # user text still beats a drifted model goal (Decision #3). An open
+        # draft beats an ungrounded host goal (Active target must not replace
+        # a time-only follow-up). Display, storage, and fire share this object.
+        draft = await _latest_open_draft()
+        draft_payload = (draft.payload if draft is not None else None) or {}
+        resolver = _resolver_context(ctx)
+        sealed = seal_schedule_work(
+            model_goal=str(args.get("goal") or ""),
+            model_title=str(args.get("title") or ""),
+            host_goal=str(getattr(ctx, "deferred_goal", "") or ""),
+            user_message=str(getattr(resolver, "user_message", "") or ""),
+            draft_goal=str(draft_payload.get("goal") or ""),
+            draft_title=str(draft_payload.get("title") or ""),
+        )
+        if sealed.source == "conflict" or not sealed.goal:
+            result = _needs_input(
+                "Which work should I schedule? This turn only supplied a time, "
+                "and I have no pending draft to reuse. Name the goal, or refer "
+                "to a specific figure/report ('this figure', 'this report')."
+            )
+            await _record_outcome("needs_input", result)
+            return result
+        args = {**args, "goal": sealed.goal, "title": sealed.title}
+        return await _admit_and_create(
+            args,
+            already_clarified=sealed.source == "draft",
+            goal_source=sealed.source,
+        )
 
     async def list_schedules(args: dict[str, Any]) -> dict[str, Any]:
         limit = _positive_int(args.get("limit")) or 30
@@ -482,6 +638,29 @@ def build_schedule_tools(runtime: Any, ctx: ExecContext) -> list[Tool]:
         if record.required_decider and decider != record.required_decider:
             return {"status": "error", "error": "Only the original requester can answer this clarification."}
 
+        # A new time on the same draft keeps the sealed goal — do not re-enter
+        # schedule_task / full planning, which is how Active target replaced RAG.
+        when = args.get("when")
+        at = str(args.get("at") or "").strip()
+        if (isinstance(when, dict) and str(when.get("raw_expression") or "").strip()) or at:
+            payload = record.payload or {}
+            return await _admit_and_create(
+                {
+                    "goal": str(payload.get("goal") or ""),
+                    "title": str(payload.get("title") or ""),
+                    "when": when if isinstance(when, dict) else None,
+                    "at": at,
+                    "timezone": str(args.get("timezone") or ""),
+                },
+                already_clarified=True,
+                goal_source="draft",
+            )
+
+        if not choice:
+            return _needs_input(
+                "Pick one of the listed readings, or give a new time in 'when'/'at'."
+            )
+
         low = choice.lower()
         if low in {"cancel"}:
             await store.cancel(checkpoint_id, decider=decider)
@@ -492,11 +671,28 @@ def build_schedule_tools(runtime: Any, ctx: ExecContext) -> list[Tool]:
                 "Not scheduling anything this time; tell me the goal to run now instead.",
                 outcome="run_now",
             )
+        if low in {"other_time", "reschedule", "different_time"}:
+            # "None of these" — the user wants a time not among the offered
+            # readings. Leave the draft open (they can still pick one) and ask for
+            # the concrete time; the model reschedules by calling schedule_task
+            # with it, which then supersedes this draft.
+            return _needs_input(
+                "Sure — tell me the day and time you want (for example 'tomorrow 9am' "
+                "or 'Aug 5 3pm') and I'll reschedule, keeping the same goal.",
+                outcome="other_time",
+            )
 
         is_repair = choice.startswith("repair_next_day:")
         candidate_id = _map_choice_to_candidate(choice, record)
         if not candidate_id:
-            return _needs_input(f"Pick one of the offered candidates ({record.candidate_ids}), or reply cancel.")
+            # Not a listed reading and not a keyword: treat it as "none of these"
+            # rather than a dead end — invite a concrete time (the model reschedules
+            # via schedule_task) or a listed pick / cancel.
+            return _needs_input(
+                "That is not one of the offered readings. Tell me a concrete time "
+                "(for example 'tomorrow 9am') and I'll reschedule, pick one of "
+                f"{record.candidate_ids}, or reply cancel."
+            )
         candidate = record.candidate(candidate_id)
 
         if is_repair:
@@ -572,7 +768,7 @@ def build_schedule_tools(runtime: Any, ctx: ExecContext) -> list[Tool]:
     # generic approval gate instead would flatly deny the IM case before the
     # handler could persist a resumable proposal.
     return [
-        Tool(_SCHEDULE_TASK_SPEC, schedule_task, action_contract=SCHEDULE_CREATE_CONTRACT),
+        Tool(_SCHEDULE_TASK_SPEC, schedule_task),
         Tool(_RESOLVE_CHECKPOINT_SPEC, resolve_action_checkpoint),
         Tool(_LIST_SCHEDULES_SPEC, list_schedules),
         Tool(_CANCEL_SCHEDULE_SPEC, cancel_schedule),

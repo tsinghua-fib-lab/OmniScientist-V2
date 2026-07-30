@@ -1,8 +1,7 @@
 """Durable subtask runtime (distilled from HelixForge durable_runtime).
 
-Subtasks (skill executions from a task) persist in SQLite; the runtime drains them as
-a daemon worker (``omni serve``) or inline for a one-shot CLI, recovers crashed
-``running`` subtasks on startup, and records per subtask a trace, memory, and notice.
+Subtasks persist in SQLite; drained by ``omni serve`` or inline CLI, with crash
+recovery for ``running`` rows and per-subtask trace/memory/notice recording.
 """
 
 from __future__ import annotations
@@ -10,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -18,19 +18,22 @@ from typing import Any
 from sqlalchemy import select, update
 
 from omni.config.settings import OmniSettings
-from omni.core.tool_result import tool_result_failure
+from omni.core.tool_result import (
+    attach_tool_outcome,
+    owned_result_outcome,
+    tool_event_output,
+    tool_result_failure,
+)
 from omni.memory.service import MemoryService
 from omni.runtime import subtask_recovery
+from omni.runtime.execution_ownership import ReconcileReport, reconcile_lost_executors
 from omni.runtime.execution_policy import skill_requires_approval
 from omni.runtime.housekeeping import run_housekeeping
 from omni.runtime.notifications import InboxNotifier, Notifier
-from omni.runtime.provider_assessment_boundary import (
-    bind_execution_assessment_identity,
-    prepare_provider_assessment_execution,
-)
 from omni.runtime.provider_authority import (
     reject_subtask_provider_authority,
     submission_provider_authority,
+    workflow_subtask_authority_error,
 )
 from omni.runtime.skill_execution_store import SkillExecutionStore
 from omni.runtime.subtask_completion import (
@@ -58,7 +61,7 @@ from omni.runtime.tool_gateway import ToolGateway
 from omni.runtime.workflow_plan import WorkflowNeedsInput, _prepare_workflow_plan
 from omni.runtime.workflow_run_manager import WorkflowRunManager
 from omni.runtime.workflow_runtime import WorkflowExecutionError
-from omni.skills_runtime.context import ExecContext
+from omni.skills_runtime.context import SKILL_SOURCE_PARAM, ExecContext
 from omni.skills_runtime.executor import execute_skill
 from omni.skills_runtime.registry import SkillRegistry
 from omni.storage.db import Database
@@ -79,8 +82,7 @@ __all__ = [
 
 CtxFactory = Callable[[str, str], ExecContext]  # (session_id, channel) -> ExecContext
 
-# How often a long-lived poller re-runs housekeeping (stale-task reconcile +
-# retention). Coarse on purpose: reconciliation targets hours-dead processes.
+# Poller housekeeping cadence (stale-task reconcile + retention); hours-scale.
 _HOUSEKEEP_INTERVAL_S = 600.0
 
 
@@ -130,8 +132,7 @@ class SubtaskRuntime:
         self._poll_interval = 0.0
         self._enqueued: set[tuple[str, str]] = set()
         self._running = False
-        # Async callbacks run once per poller tick (e.g. the scheduler firing due jobs) so
-        # a long process picks up time-based work without a separate daemon; wired post-construction.
+        # Per-tick hooks (e.g. scheduler) so a long process picks up timed work.
         self._tick_hooks: list[Callable[[], Any]] = []
         self._last_housekeep = 0.0
 
@@ -317,25 +318,64 @@ class SubtaskRuntime:
                 await self.housekeep()
             await asyncio.sleep(self._poll_interval)
 
+    async def reconcile_lost_executors(
+        self,
+        *,
+        task_id: str | None = None,
+        execution_id: str | None = None,
+        explicit: bool = False,
+        requeue_workflow: bool | None = None,
+    ) -> ReconcileReport:
+        """Settle standalone executions whose foreground/background owner is gone."""
+        stale_after_s = float(
+            getattr(getattr(self._settings, "tasks", None), "interrupt_stale_after_s", 0.0)
+            or 0.0
+        )
+        return await reconcile_lost_executors(
+            db=self._db,
+            task_recorder=self._task_recorder,
+            stale_after_s=stale_after_s,
+            task_id=task_id,
+            execution_id=execution_id,
+            explicit=explicit,
+            requeue_workflow=explicit if requeue_workflow is None else requeue_workflow,
+        )
+
     async def recover(self) -> int:
-        async with self._db.session() as s:
-            subtasks = await s.execute(
-                update(SubtaskORM).where(SubtaskORM.status == "running").values(status="pending")
-            )
-            await s.commit()
-        n = int(subtasks.rowcount or 0) + await self._workflow_manager.recover_running()
+        """Take over this workspace after serve start or process replacement.
+
+        Dead ``owner_pid`` values settle as interrupted and workflows requeue
+        so WeChat/schedules continue on the new process. ``explicit=False``
+        keeps the stale lease for unstamped (``owner_pid=0``) rows — serve
+        restart must not treat a just-claimed skill as lost. User retry/requeue
+        still pass ``explicit=True``.
+        """
+        report = await self.reconcile_lost_executors(
+            explicit=False, requeue_workflow=True
+        )
+        n = (
+            len(report.settled_ids)
+            + len(report.requeued_workflow_ids)
+            + await self._workflow_manager.recover_running()
+        )
         if n:
-            logger.info("recovered %d orphaned subtask(s) → pending", n)
+            logger.info(
+                "recovered %d orphaned execution(s) (standalone=%d workflow=%d)",
+                n,
+                len(report.settled_ids),
+                len(report.requeued_workflow_ids),
+            )
         return n
 
     async def housekeep(self) -> dict[str, int]:
-        """Settle dead tasks + apply retention (see :mod:`omni.runtime.housekeeping`).
-
-        Runs at startup, then every ``_HOUSEKEEP_INTERVAL_S`` on the poller, and
-        once per one-shot ``drain``.
-        """
+        """Settle dead tasks + lost executors + retention."""
         self._last_housekeep = time.monotonic()
-        return await run_housekeeping(self._task_recorder, self._settings)
+        report = await self.reconcile_lost_executors(
+            explicit=False, requeue_workflow=True
+        )
+        hygiene = await run_housekeeping(self._task_recorder, self._settings)
+        hygiene["orphans"] = len(report.settled_ids) + len(report.requeued_workflow_ids)
+        return hygiene
 
     async def _worker_loop(self) -> None:
         while self._running:
@@ -374,7 +414,7 @@ class SubtaskRuntime:
                 .order_by(SubtaskORM.created_at).limit(limit)
             )).scalars().all()
         workflows = await self._workflow_manager.pending_ids(limit=limit)
-        # Workflows coordinate their scheduled children, so they precede unrelated direct executions.
+        # Workflows precede standalone executions (they own scheduled children).
         return ([('workflow', item) for item in workflows] + [
             ('subtask', item) for item in subtasks
         ])[:limit]
@@ -416,7 +456,13 @@ class SubtaskRuntime:
                     SubtaskORM.id == subtask_id,
                     SubtaskORM.status.in_(("scheduled", "pending", "recovering")),
                 )
-                .values(status="running", started_at=_utcnow(), attempt=SubtaskORM.attempt + 1)
+                .values(
+                    status="running",
+                    started_at=_utcnow(),
+                    finished_at=None,
+                    owner_pid=os.getpid(),
+                    attempt=SubtaskORM.attempt + 1,
+                )
             )
             if (res.rowcount or 0) == 0:
                 await s.commit()
@@ -472,6 +518,13 @@ class SubtaskRuntime:
             event = {"stage": stage, "pct": pct, "ts": datetime.now(UTC).isoformat(), **data}
             if step_key and nested_step_id and nested_step_id != step_key:
                 event["skill_step_id"] = nested_step_id
+            if stage == "usage":
+                await _emit_event(
+                    on_event,
+                    "task_progress",
+                    {"subtask_id": subtask_id, "skill": skill_name, **event},
+                )
+                return
             trace.append(event)
             await self._persist_trace(subtask_id, trace)
             if self._task_recorder is not None and task_id:
@@ -495,13 +548,16 @@ class SubtaskRuntime:
                 {"subtask_id": subtask_id, "skill": skill_name, **event},
             )
 
-        ctx = ctx_override or self._ctx_factory(session_id, notify_channel)
-        ctx.subtask_id = subtask_id
-        ctx.task_id = task_id
-        ctx.workflow_run_id = workflow_run_id
-        ctx.workflow_step_id = workflow_step_id
-        ctx.workflow_step_key = step_key
-        ctx.provider_authority = dict(expected_provider_authority or {})
+        ctx = (
+            ctx_override or self._ctx_factory(session_id, notify_channel)
+        ).for_execution(
+            subtask_id=subtask_id,
+            task_id=task_id,
+            workflow_run_id=workflow_run_id,
+            workflow_step_id=workflow_step_id,
+            workflow_step_key=step_key,
+            provider_authority=dict(expected_provider_authority or {}),
+        )
         if getattr(ctx, "registry", None) is None:
             ctx.registry = self._registry
         await _emit_event(
@@ -520,12 +576,13 @@ class SubtaskRuntime:
                 summary=f"running {skill_name}",
             )
 
-        entry, assessment_identity, authority_error = await (
-            prepare_provider_assessment_execution(
-                db=self._db, registry=self._registry, skill_name=skill_name,
-                input_data=input_data, expected=expected_provider_authority,
-                workflow_run_id=workflow_run_id, workflow_step_id=workflow_step_id,
-            )
+        entry = self._registry.resolve_ref(
+            skill_name, str(input_data.pop(SKILL_SOURCE_PARAM, "") or "")
+        )
+        authority_error = await workflow_subtask_authority_error(
+            db=self._db, registry=self._registry, entry=entry,
+            expected=expected_provider_authority,
+            workflow_run_id=workflow_run_id, workflow_step_id=workflow_step_id,
         )
         if authority_error:
             rejected = await self._fail_provider_authority(
@@ -582,21 +639,23 @@ class SubtaskRuntime:
                     await self._task_recorder.refresh_from_executions(task_id)
             return
 
-        # Only an explicitly replay-safe skill may auto-retry a transient failure;
-        # deterministic failures and undeclared side effects remain single-shot.
+        # Auto-retry only replay-safe skills on transient failure; else single-shot.
         max_retries = auto_retry_budget(self._settings) if entry.replay_safe else 0
         retries = 0
         while True:
             try:
                 gateway = ToolGateway.from_context(ctx, event_family="child_task")
-                result = await gateway.invoke_operation(
+                transport_result = await gateway.invoke_operation(
                     skill_name,
                     input_data,
                     invoke=lambda: execute_skill(
                         entry, input_data, ctx, progress_callback=progress
                     ),
-                    sensitive=skill_requires_approval(entry), contract=entry,
+                    sensitive=skill_requires_approval(entry),
+                    contract=entry,
+                    outcome_resolver=owned_result_outcome,
                 )
+                result = tool_event_output(transport_result)
             except asyncio.CancelledError:
                 await settle_subtask_cancellation(
                     store=self._execution_store, task_recorder=self._task_recorder,
@@ -638,13 +697,25 @@ class SubtaskRuntime:
                         await self._task_recorder.refresh_from_executions(task_id)
                 return
 
-            bind_execution_assessment_identity(result, assessment_identity)
-            result_failure = tool_result_failure(result)
+            result_failure = tool_result_failure(transport_result)
+            if result_failure is None:
+                # Contract violations are host-generated plain mappings rather
+                # than provider envelopes. Resolve the trusted skill schema at
+                # this boundary so they cannot fall through as success.
+                result_failure = tool_result_failure(
+                    attach_tool_outcome(result, owned_result_outcome(result))
+                )
             if result_failure is not None:
                 failure_status, result_error = result_failure
                 result_error = result_error or _result_error_message(result)
+                provider_status = (
+                    str(result.get("status") or "").strip().lower()
+                    if isinstance(result, dict)
+                    else ""
+                )
                 if (
-                    failure_status not in {"cancelled", "rejected"}
+                    provider_status not in {"cancelled", "blocked", "rejected", "invalid"}
+                    and failure_status not in {"cancelled", "rejected"}
                     and retries < max_retries
                     and is_transient_error(result_error)
                 ):
@@ -656,7 +727,9 @@ class SubtaskRuntime:
                     )
                     continue
                 durable_status = (
-                    "cancelled" if failure_status == "cancelled" else "failed"
+                    "cancelled"
+                    if provider_status == "cancelled" or failure_status == "cancelled"
+                    else "failed"
                 )
                 await self._fail(
                     subtask_id,
@@ -866,12 +939,7 @@ class SubtaskRuntime:
 
     @property
     def task_recorder(self) -> Any:
-        """Shared owning-task recorder (create/grant/settle), or None if unwired.
-
-        Exposed so the scheduler can materialise each fire as a first-class task
-        (visible in ``/task``) that carries the schedule's unattended-autonomy
-        grant, without reaching into a private attribute.
-        """
+        """Owning-task recorder for scheduler fires (create/grant/settle), or None."""
         return self._task_recorder
 
     async def get_subtask(self, subtask_id: str) -> SubtaskORM | None:
@@ -880,12 +948,7 @@ class SubtaskRuntime:
     async def get_workflow_run(self, workflow_run_id: str) -> WorkflowRunORM | None:
         return await self._workflow_manager.get(workflow_run_id)
 
-    async def list_workflow_runs(
-        self,
-        *,
-        task_id: str = "",
-        limit: int = 100,
-    ) -> list[WorkflowRunORM]:
+    async def list_workflow_runs(self, *, task_id: str = "", limit: int = 100) -> list[WorkflowRunORM]:
         return await self._workflow_manager.list_runs(task_id=task_id, limit=limit)
 
     async def list_workflow_steps(self, workflow_run_id: str) -> list[WorkflowStepORM]:
@@ -895,16 +958,10 @@ class SubtaskRuntime:
         return await self._workflow_manager.list_checkpoints(workflow_run_id)
 
     async def list_subtasks(
-        self,
-        *,
-        limit: int = 30,
-        status: str | None = None,
-        include_archived: bool = False,
+        self, *, limit: int = 30, status: str | None = None, include_archived: bool = False,
     ) -> list[SubtaskORM]:
         return await self._execution_store.list(
-            limit=limit,
-            status=status,
-            include_archived=include_archived,
+            limit=limit, status=status, include_archived=include_archived,
         )
 
     async def archive_subtask(self, subtask_id: str, *, reason: str = "") -> bool:
@@ -918,56 +975,64 @@ class SubtaskRuntime:
         original = await self.get_subtask(subtask_id)
         if original is None:
             return None
+        if original.status == "running":
+            await self.reconcile_lost_executors(
+                execution_id=original.id,
+                task_id=original.task_id or None,
+                explicit=True,
+            )
+            original = await self.get_subtask(subtask_id)
+            if original is None:
+                return None
         if original.workflow_run_id and original.workflow_step_id:
             step = await self._workflow_step(original.workflow_step_id)
             if step is None:
                 return None
             return await self.retry_workflow_step(
-                original.workflow_run_id,
-                step.step_key,
-                notify_channel=notify_channel,
+                original.workflow_run_id, step.step_key, notify_channel=notify_channel,
             )
         return await subtask_recovery.retry_subtask(
-            db=self._db,
-            original=original,
-            enqueue=self.enqueue,
-            task_recorder=self._task_recorder,
-            notify_channel=notify_channel,
+            db=self._db, original=original, enqueue=self.enqueue,
+            task_recorder=self._task_recorder, notify_channel=notify_channel,
         )
 
     async def retry_workflow_step(
-        self,
-        workflow_run_id: str,
-        step_id: str,
-        *,
-        notify_channel: str | None = None,
+        self, workflow_run_id: str, step_id: str, *, notify_channel: str | None = None,
     ) -> str | None:
         return await self._workflow_manager.retry_step(
-            workflow_run_id,
-            step_id,
-            notify_channel=notify_channel,
+            workflow_run_id, step_id, notify_channel=notify_channel,
         )
 
     async def resume_workflow_step(self, workflow_run_id: str, step_id: str) -> bool:
         return await self._workflow_manager.resume_step(workflow_run_id, step_id)
 
+    async def requeue_subtask(self, subtask_id: str) -> bool:
+        """Put a failed standalone skill execution back on the recovery queue."""
+        original = await self.get_subtask(subtask_id)
+        if original is not None and original.status == "running":
+            await self.reconcile_lost_executors(
+                execution_id=original.id,
+                task_id=original.task_id or None,
+                explicit=True,
+            )
+            original = await self.get_subtask(subtask_id)
+        if original is not None and original.workflow_run_id and original.workflow_step_id:
+            return False
+        return await subtask_recovery.requeue_subtask(
+            db=self._db, registry=self._registry, subtask_id=subtask_id,
+            task_recorder=self._task_recorder, enqueue_local=self._enqueue_local,
+            worker_running=self._running,
+        )
+
     async def resume_subtask(self, subtask_id: str) -> bool:
-        """Move a failed/recovering child task back to the pending queue."""
+        """Deprecated: workflow steps resume in place; standalone executions requeue."""
         original = await self.get_subtask(subtask_id)
         if original is not None and original.workflow_run_id and original.workflow_step_id:
             step = await self._workflow_step(original.workflow_step_id)
             return bool(
-                step
-                and await self.resume_workflow_step(original.workflow_run_id, step.step_key)
+                step and await self.resume_workflow_step(original.workflow_run_id, step.step_key)
             )
-        return await subtask_recovery.resume_subtask(
-            db=self._db,
-            registry=self._registry,
-            subtask_id=subtask_id,
-            task_recorder=self._task_recorder,
-            enqueue_local=self._enqueue_local,
-            worker_running=self._running,
-        )
+        return await self.requeue_subtask(subtask_id)
 
     async def _workflow_step(self, workflow_step_id: str) -> WorkflowStepORM | None:
         return await self._workflow_manager.get_step(workflow_step_id)
@@ -980,18 +1045,11 @@ class SubtaskRuntime:
         return await self._execution_store.delete(subtask_id)
 
     async def clear_subtasks(
-        self,
-        *,
-        status: str | None = None,
-        before: datetime | None = None,
-        protect: tuple[str, ...] = ("running", "succeeded"),
-        dry_run: bool = False,
+        self, *, status: str | None = None, before: datetime | None = None,
+        protect: tuple[str, ...] = ("running", "succeeded"), dry_run: bool = False,
     ) -> int:
         return await self._execution_store.clear(
-            status=status,
-            before=before,
-            protect=protect,
-            dry_run=dry_run,
+            status=status, before=before, protect=protect, dry_run=dry_run,
         )
 
     async def subtask_has_artifacts(self, task: SubtaskORM) -> bool:

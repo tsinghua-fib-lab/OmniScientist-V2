@@ -1,0 +1,583 @@
+{
+  "summarizes": [
+    {
+      "from": "l3_john_von_neumann_P01",
+      "to": "l2_john_von_neumann_C01"
+    },
+    {
+      "from": "l3_john_von_neumann_P01",
+      "to": "l2_john_von_neumann_C02"
+    },
+    {
+      "from": "l3_john_von_neumann_P01",
+      "to": "l2_john_von_neumann_C03"
+    },
+    {
+      "from": "l3_john_von_neumann_P01",
+      "to": "l2_john_von_neumann_C05"
+    },
+    {
+      "from": "l3_john_von_neumann_P02",
+      "to": "l2_john_von_neumann_C01"
+    },
+    {
+      "from": "l3_john_von_neumann_P02",
+      "to": "l2_john_von_neumann_C06"
+    },
+    {
+      "from": "l3_john_von_neumann_P02",
+      "to": "l2_john_von_neumann_C03"
+    },
+    {
+      "from": "l3_john_von_neumann_P02",
+      "to": "l2_john_von_neumann_C02"
+    },
+    {
+      "from": "l3_john_von_neumann_P03",
+      "to": "l2_john_von_neumann_C01"
+    },
+    {
+      "from": "l3_john_von_neumann_P03",
+      "to": "l2_john_von_neumann_C02"
+    },
+    {
+      "from": "l3_john_von_neumann_P03",
+      "to": "l2_john_von_neumann_C03"
+    },
+    {
+      "from": "l3_john_von_neumann_P03",
+      "to": "l2_john_von_neumann_C07"
+    }
+  ],
+  "supports": [
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0001"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0002"
+    },
+    {
+      "from": "l2_john_von_neumann_C04",
+      "to": "l1_john_von_neumann_0003"
+    },
+    {
+      "from": "l2_john_von_neumann_C03",
+      "to": "l1_john_von_neumann_0004"
+    },
+    {
+      "from": "l2_john_von_neumann_C01",
+      "to": "l1_john_von_neumann_0005"
+    },
+    {
+      "from": "l2_john_von_neumann_C03",
+      "to": "l1_john_von_neumann_0006"
+    },
+    {
+      "from": "l2_john_von_neumann_C03",
+      "to": "l1_john_von_neumann_0007"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0008"
+    },
+    {
+      "from": "l2_john_von_neumann_C01",
+      "to": "l1_john_von_neumann_0009"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0010"
+    },
+    {
+      "from": "l2_john_von_neumann_C01",
+      "to": "l1_john_von_neumann_0011"
+    },
+    {
+      "from": "l2_john_von_neumann_C01",
+      "to": "l1_john_von_neumann_0012"
+    },
+    {
+      "from": "l2_john_von_neumann_C03",
+      "to": "l1_john_von_neumann_0013"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0014"
+    },
+    {
+      "from": "l2_john_von_neumann_C01",
+      "to": "l1_john_von_neumann_0015"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0016"
+    },
+    {
+      "from": "l2_john_von_neumann_C04",
+      "to": "l1_john_von_neumann_0017"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0018"
+    },
+    {
+      "from": "l2_john_von_neumann_C01",
+      "to": "l1_john_von_neumann_0019"
+    },
+    {
+      "from": "l2_john_von_neumann_C03",
+      "to": "l1_john_von_neumann_0020"
+    },
+    {
+      "from": "l2_john_von_neumann_C03",
+      "to": "l1_john_von_neumann_0021"
+    },
+    {
+      "from": "l2_john_von_neumann_C03",
+      "to": "l1_john_von_neumann_0022"
+    },
+    {
+      "from": "l2_john_von_neumann_C03",
+      "to": "l1_john_von_neumann_0023"
+    },
+    {
+      "from": "l2_john_von_neumann_C03",
+      "to": "l1_john_von_neumann_0024"
+    },
+    {
+      "from": "l2_john_von_neumann_C01",
+      "to": "l1_john_von_neumann_0025"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0026"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0027"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0028"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0029"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0030"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0031"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0032"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0033"
+    },
+    {
+      "from": "l2_john_von_neumann_C03",
+      "to": "l1_john_von_neumann_0034"
+    },
+    {
+      "from": "l2_john_von_neumann_C04",
+      "to": "l1_john_von_neumann_0035"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0036"
+    },
+    {
+      "from": "l2_john_von_neumann_C03",
+      "to": "l1_john_von_neumann_0037"
+    },
+    {
+      "from": "l2_john_von_neumann_C03",
+      "to": "l1_john_von_neumann_0038"
+    },
+    {
+      "from": "l2_john_von_neumann_C01",
+      "to": "l1_john_von_neumann_0039"
+    },
+    {
+      "from": "l2_john_von_neumann_C03",
+      "to": "l1_john_von_neumann_0040"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0041"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0042"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0043"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0044"
+    },
+    {
+      "from": "l2_john_von_neumann_C03",
+      "to": "l1_john_von_neumann_0045"
+    },
+    {
+      "from": "l2_john_von_neumann_C01",
+      "to": "l1_john_von_neumann_0046"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0047"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0048"
+    },
+    {
+      "from": "l2_john_von_neumann_C01",
+      "to": "l1_john_von_neumann_0049"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0050"
+    },
+    {
+      "from": "l2_john_von_neumann_C01",
+      "to": "l1_john_von_neumann_0051"
+    },
+    {
+      "from": "l2_john_von_neumann_C01",
+      "to": "l1_john_von_neumann_0052"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0053"
+    },
+    {
+      "from": "l2_john_von_neumann_C01",
+      "to": "l1_john_von_neumann_0054"
+    },
+    {
+      "from": "l2_john_von_neumann_C01",
+      "to": "l1_john_von_neumann_0055"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0056"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0057"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0058"
+    },
+    {
+      "from": "l2_john_von_neumann_C04",
+      "to": "l1_john_von_neumann_0059"
+    },
+    {
+      "from": "l2_john_von_neumann_C05",
+      "to": "l1_john_von_neumann_0060"
+    },
+    {
+      "from": "l2_john_von_neumann_C03",
+      "to": "l1_john_von_neumann_0061"
+    },
+    {
+      "from": "l2_john_von_neumann_C04",
+      "to": "l1_john_von_neumann_0062"
+    },
+    {
+      "from": "l2_john_von_neumann_C03",
+      "to": "l1_john_von_neumann_0063"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0064"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0065"
+    },
+    {
+      "from": "l2_john_von_neumann_C04",
+      "to": "l1_john_von_neumann_0066"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0067"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0068"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0069"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0070"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0071"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0072"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0073"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0074"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0075"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0076"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0077"
+    },
+    {
+      "from": "l2_john_von_neumann_C04",
+      "to": "l1_john_von_neumann_0078"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0079"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0080"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0081"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0082"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0083"
+    },
+    {
+      "from": "l2_john_von_neumann_C01",
+      "to": "l1_john_von_neumann_0084"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0085"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0086"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0087"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0088"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0089"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0090"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0091"
+    },
+    {
+      "from": "l2_john_von_neumann_C01",
+      "to": "l1_john_von_neumann_0092"
+    },
+    {
+      "from": "l2_john_von_neumann_C01",
+      "to": "l1_john_von_neumann_0093"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0094"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0095"
+    },
+    {
+      "from": "l2_john_von_neumann_C03",
+      "to": "l1_john_von_neumann_0096"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0097"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0098"
+    },
+    {
+      "from": "l2_john_von_neumann_C06",
+      "to": "l1_john_von_neumann_0099"
+    },
+    {
+      "from": "l2_john_von_neumann_C01",
+      "to": "l1_john_von_neumann_0100"
+    },
+    {
+      "from": "l2_john_von_neumann_C06",
+      "to": "l1_john_von_neumann_0101"
+    },
+    {
+      "from": "l2_john_von_neumann_C06",
+      "to": "l1_john_von_neumann_0102"
+    },
+    {
+      "from": "l2_john_von_neumann_C03",
+      "to": "l1_john_von_neumann_0103"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0104"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0105"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0106"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0107"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0108"
+    },
+    {
+      "from": "l2_john_von_neumann_C03",
+      "to": "l1_john_von_neumann_0109"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0110"
+    },
+    {
+      "from": "l2_john_von_neumann_C06",
+      "to": "l1_john_von_neumann_0111"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0112"
+    },
+    {
+      "from": "l2_john_von_neumann_C03",
+      "to": "l1_john_von_neumann_0113"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l1_john_von_neumann_0114"
+    },
+    {
+      "from": "l2_john_von_neumann_C03",
+      "to": "l1_john_von_neumann_0115"
+    },
+    {
+      "from": "l2_john_von_neumann_C03",
+      "to": "l1_john_von_neumann_0116"
+    }
+  ],
+  "reinforces": [
+    {
+      "from": "l2_john_von_neumann_C01",
+      "to": "l2_john_von_neumann_C02",
+      "reason": "两者都体现主动权衡和简化的决策姿态。定义问题时会评估深入分析的性价比、明确设定必要条件；选择方法时会基于“更直接、更便利、更简单”比较方案并简化问题表述。缺少任一方的权衡，另一方的决策都会失去完整背景。"
+    },
+    {
+      "from": "l2_john_von_neumann_C01",
+      "to": "l2_john_von_neumann_C03",
+      "reason": "都强调对必要性和充分性的审视。定义问题时会明确指定保留或排除哪些公理、设定必要条件；验证结论时会判断公理或条件是否必要或可省略、评估验证的充分性。两者是同一严谨姿态的两个侧面。"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l2_john_von_neumann_C03",
+      "reason": "都体现对非核心步骤的取舍。选择方法时愿意省略非核心证明、只研究代表性情形；验证结论时主动识别可省略的验证步骤（如不需某些公理）。共同之处在于判断哪些内容可以精简而不损害核心。"
+    },
+    {
+      "from": "l2_john_von_neumann_C02",
+      "to": "l2_john_von_neumann_C05",
+      "reason": "都以“简洁”作为核心标准。选择方法时倾向于更简单、简化问题公式化；判断美丑时以“简单而优雅”为价值，偏好结构精炼、避免冗余。两者共同构成对简洁性的追求。"
+    }
+  ],
+  "enables": [
+    {
+      "from": "l2_john_von_neumann_C01",
+      "to": "l2_john_von_neumann_C02",
+      "reason": "理解怎样选择方法必须先理解怎样定义问题，因为选择方法时总是基于对问题的明确界定，例如为了隔离特定因素而刻意设计问题，这需要先理解定义问题中关于选择基本概念和明确假设的做法。"
+    },
+    {
+      "from": "l2_john_von_neumann_C01",
+      "to": "l2_john_von_neumann_C03",
+      "reason": "理解怎样验证结论必须先理解怎样定义问题，因为验证结论时要求结论具有普适性，并需要知道问题的参数和假设，这些都来自对问题的定义。"
+    },
+    {
+      "from": "l2_john_von_neumann_C01",
+      "to": "l2_john_von_neumann_C06",
+      "reason": "理解怎样处理失败必须先理解怎样定义问题，因为处理失败时面对的是理论建构中的失败，而理论建构的基础是定义问题，例如将失败归因于对称游戏中的联盟形成可能性或一般证明尚未完成，都需要先明确问题的定义和结构。"
+    }
+  ],
+  "tension": [
+    {
+      "between": [
+        "l2_john_von_neumann_C01",
+        "l2_john_von_neumann_C04"
+      ],
+      "context": "assessing_measurement_precision",
+      "reason": "在评估测量精度时，怎样定义问题强调严格区分精度等级并明确必要条件，而怎样解释结果则倾向于给出量级或适用条件的推测性判断，这种宽松估计无法满足前者对精度的严格界定，两者在精确与近似之间竞争。"
+    },
+    {
+      "between": [
+        "l2_john_von_neumann_C02",
+        "l2_john_von_neumann_C03"
+      ],
+      "context": "error_bound_estimation",
+      "reason": "在估计误差界限时，怎样选择方法会采用统计处理或简化问题的方式，而怎样验证结论坚持严格估计并拒绝概率性估计，这种对严格性的要求与选择方法中追求简化便利的倾向直接冲突，使得两者无法在同一约束下同时主导。"
+    },
+    {
+      "between": [
+        "l2_john_von_neumann_C03",
+        "l2_john_von_neumann_C04"
+      ],
+      "context": "evaluating_algorithm_precision",
+      "reason": "在评估算法精度时，怎样验证结论要求严格的误差界限和普适性证明，而怎样解释结果满足于给出数量级或条件性推测，这种宽松估计与严格验证的标准相悖，因此在需要精确验证的场景下两者无法兼顾。"
+    }
+  ]
+}

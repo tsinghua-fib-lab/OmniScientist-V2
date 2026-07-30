@@ -1,0 +1,234 @@
+{
+  "summarizes": [
+    {
+      "from": "l3_herbert_a_simon_P01",
+      "to": "l2_herbert_a_simon_C02"
+    },
+    {
+      "from": "l3_herbert_a_simon_P01",
+      "to": "l2_herbert_a_simon_C03"
+    },
+    {
+      "from": "l3_herbert_a_simon_P01",
+      "to": "l2_herbert_a_simon_C04"
+    },
+    {
+      "from": "l3_herbert_a_simon_P01",
+      "to": "l2_herbert_a_simon_C05"
+    },
+    {
+      "from": "l3_herbert_a_simon_P02",
+      "to": "l2_herbert_a_simon_C01"
+    },
+    {
+      "from": "l3_herbert_a_simon_P02",
+      "to": "l2_herbert_a_simon_C03"
+    },
+    {
+      "from": "l3_herbert_a_simon_P02",
+      "to": "l2_herbert_a_simon_C06"
+    },
+    {
+      "from": "l3_herbert_a_simon_P03",
+      "to": "l2_herbert_a_simon_C01"
+    },
+    {
+      "from": "l3_herbert_a_simon_P03",
+      "to": "l2_herbert_a_simon_C03"
+    },
+    {
+      "from": "l3_herbert_a_simon_P03",
+      "to": "l2_herbert_a_simon_C04"
+    },
+    {
+      "from": "l3_herbert_a_simon_P03",
+      "to": "l2_herbert_a_simon_C07"
+    }
+  ],
+  "supports": [
+    {
+      "from": "l2_herbert_a_simon_C06",
+      "to": "l1_herbert_a_simon_0001"
+    },
+    {
+      "from": "l2_herbert_a_simon_C02",
+      "to": "l1_herbert_a_simon_0002"
+    },
+    {
+      "from": "l2_herbert_a_simon_C02",
+      "to": "l1_herbert_a_simon_0003"
+    },
+    {
+      "from": "l2_herbert_a_simon_C06",
+      "to": "l1_herbert_a_simon_0004"
+    },
+    {
+      "from": "l2_herbert_a_simon_C02",
+      "to": "l1_herbert_a_simon_0005"
+    },
+    {
+      "from": "l2_herbert_a_simon_C04",
+      "to": "l1_herbert_a_simon_0006"
+    },
+    {
+      "from": "l2_herbert_a_simon_C03",
+      "to": "l1_herbert_a_simon_0007"
+    },
+    {
+      "from": "l2_herbert_a_simon_C02",
+      "to": "l1_herbert_a_simon_0008"
+    },
+    {
+      "from": "l2_herbert_a_simon_C07",
+      "to": "l1_herbert_a_simon_0009"
+    },
+    {
+      "from": "l2_herbert_a_simon_C02",
+      "to": "l1_herbert_a_simon_0010"
+    },
+    {
+      "from": "l2_herbert_a_simon_C04",
+      "to": "l1_herbert_a_simon_0011"
+    },
+    {
+      "from": "l2_herbert_a_simon_C04",
+      "to": "l1_herbert_a_simon_0012"
+    },
+    {
+      "from": "l2_herbert_a_simon_C03",
+      "to": "l1_herbert_a_simon_0013"
+    },
+    {
+      "from": "l2_herbert_a_simon_C02",
+      "to": "l1_herbert_a_simon_0014"
+    },
+    {
+      "from": "l2_herbert_a_simon_C04",
+      "to": "l1_herbert_a_simon_0015"
+    },
+    {
+      "from": "l2_herbert_a_simon_C02",
+      "to": "l1_herbert_a_simon_0016"
+    },
+    {
+      "from": "l2_herbert_a_simon_C04",
+      "to": "l1_herbert_a_simon_0017"
+    },
+    {
+      "from": "l2_herbert_a_simon_C03",
+      "to": "l1_herbert_a_simon_0018"
+    },
+    {
+      "from": "l2_herbert_a_simon_C02",
+      "to": "l1_herbert_a_simon_0019"
+    },
+    {
+      "from": "l2_herbert_a_simon_C02",
+      "to": "l1_herbert_a_simon_0020"
+    },
+    {
+      "from": "l2_herbert_a_simon_C03",
+      "to": "l1_herbert_a_simon_0021"
+    },
+    {
+      "from": "l2_herbert_a_simon_C02",
+      "to": "l1_herbert_a_simon_0022"
+    },
+    {
+      "from": "l2_herbert_a_simon_C04",
+      "to": "l1_herbert_a_simon_0023"
+    },
+    {
+      "from": "l2_herbert_a_simon_C02",
+      "to": "l1_herbert_a_simon_0024"
+    },
+    {
+      "from": "l2_herbert_a_simon_C03",
+      "to": "l1_herbert_a_simon_0025"
+    },
+    {
+      "from": "l2_herbert_a_simon_C03",
+      "to": "l1_herbert_a_simon_0026"
+    },
+    {
+      "from": "l2_herbert_a_simon_C06",
+      "to": "l1_herbert_a_simon_0027"
+    },
+    {
+      "from": "l2_herbert_a_simon_C03",
+      "to": "l1_herbert_a_simon_0028"
+    },
+    {
+      "from": "l2_herbert_a_simon_C05",
+      "to": "l1_herbert_a_simon_0029"
+    },
+    {
+      "from": "l2_herbert_a_simon_C06",
+      "to": "l1_herbert_a_simon_0030"
+    },
+    {
+      "from": "l2_herbert_a_simon_C01",
+      "to": "l1_herbert_a_simon_0031"
+    }
+  ],
+  "reinforces": [
+    {
+      "from": "l2_herbert_a_simon_C01",
+      "to": "l2_herbert_a_simon_C02",
+      "reason": "他会在明确问题空间后再选择方法，而在选择方法时也强调先把焦点限定为“搜索的空间”，两者共同体现对问题边界与方法取向的清晰界定，缺一不可，否则姿态会变得盲目。"
+    },
+    {
+      "from": "l2_herbert_a_simon_C03",
+      "to": "l2_herbert_a_simon_C04",
+      "reason": "他在验证结论时坚持多途径交叉验证与证据强度分级，在解释结果时也保持审慎的对比验证和普遍性评估，两者共同构成对结论的严谨求证与解读，缺少任一方都会使验证或解释失之偏颇。"
+    }
+  ],
+  "enables": [
+    {
+      "from": "l2_herbert_a_simon_C01",
+      "to": "l2_herbert_a_simon_C02",
+      "reason": "在“怎样定义问题”中，他“先明确研究真正处理的是哪一种问题空间，再选择后续方法”，说明必须先界定问题空间，才能进行方法选择；因此理解“怎样选择方法”必须先理解“怎样定义问题”。"
+    },
+    {
+      "from": "l2_herbert_a_simon_C02",
+      "to": "l2_herbert_a_simon_C03",
+      "reason": "在“怎样选择方法”中，他强调“变量分离与因果清晰性”并设计实验隔离变量；而“怎样验证结论”中的多途径交叉验证（如附加实验、模拟与人类对比）都依赖于这些实验设计，因此验证结论的前提是选择合适的方法。"
+    },
+    {
+      "from": "l2_herbert_a_simon_C03",
+      "to": "l2_herbert_a_simon_C04",
+      "reason": "在“怎样验证结论”中，他通过附加实验、模拟对比和统计显著性检验来分级证据强度；而“怎样解释结果”需要基于这些已验证的结论来比较假设、判断普遍性，因此解释结果必须建立在验证结论的基础上。"
+    },
+    {
+      "from": "l2_herbert_a_simon_C04",
+      "to": "l2_herbert_a_simon_C06",
+      "reason": "在“怎样解释结果”中，他审慎评估结论可解读性并比较不同解释权重；而在“怎样处理失败”中，他明确识别并归因问题，这需要先对异常结果进行合理解释，才能找到失败根源并修订理论，因此处理失败必须先理解怎样解释结果。"
+    }
+  ],
+  "tension": [
+    {
+      "between": [
+        "l2_herbert_a_simon_C02",
+        "l2_herbert_a_simon_C03"
+      ],
+      "context": "budget_limited_rigor",
+      "reason": "怎样选择方法在成本可行性的权衡下会忽略细微差异（如评分体系差异），但怎样验证结论需要通过实验间细微方法差异检验结果稳健性。当预算有限时，前者为节省资源选择忽略差异，后者却要求额外实验验证差异是否影响结论，两者在资源分配上直接竞争。"
+    },
+    {
+      "between": [
+        "l2_herbert_a_simon_C02",
+        "l2_herbert_a_simon_C06"
+      ],
+      "context": "confound_attribution_vs_efficiency",
+      "reason": "怎样选择方法在设计实验时可能出于成本考虑省略疑似混淆变量，但怎样处理失败要求明确识别并归因实验设计中的混淆问题。当实验结果出现异常时，前者倾向于简化变量以聚焦核心，后者则要求系统诊断混淆来源并修订理论，两者在如何处理潜在混淆变量上争夺主导权。"
+    },
+    {
+      "between": [
+        "l2_herbert_a_simon_C01",
+        "l2_herbert_a_simon_C02"
+      ],
+      "context": "undefined_problem_method_selection",
+      "reason": "怎样定义问题强调先确定问题空间与边界，避免在未界定的问题上堆叠方法；怎样选择方法在推理路径上明确表示无先验优劣，需同时考虑所有可能路径。当多种方法竞争且尚未明确各自解决的具体问题时，前者要求先界定问题，后者要求同时探索所有路径，两者在这一任务上无法同时主导。"
+    }
+  ]
+}

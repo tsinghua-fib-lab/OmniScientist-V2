@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -82,7 +83,7 @@ def delivery_key(
         ensure_ascii=False,
         separators=(",", ":"),
     )
-    return sha256(payload.encode("utf-8")).hexdigest()
+    return sha256(payload.encode("utf-8", errors="backslashreplace")).hexdigest()
 
 
 def task_notification_from_dict(data: dict[str, Any]) -> TaskNotification:
@@ -132,7 +133,7 @@ class InboxNotifier:
 
     async def notify(self, note: TaskNotification) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        with self._path.open("a", encoding="utf-8") as fh:
+        with self._path.open("a", encoding="utf-8", errors="backslashreplace") as fh:
             fh.write(json.dumps(asdict(note), ensure_ascii=False) + "\n")
         logger.info(
             "[notify] kind=%s object=%s provider=%s status=%s",
@@ -247,6 +248,96 @@ def record_delivery_status(
         )
 
 
+# A failed send is usually the far side refusing a burst for a few minutes, so
+# replays are spaced to outlast the window instead of spending every attempt
+# inside it: the first after a minute, then five, then fifteen. Past
+# ``_RETRY_MAX_AGE_SECONDS`` the queue gives up — a reader who asked half an hour
+# ago has moved on, and arriving late is its own kind of wrong answer.
+_RETRY_BACKOFF_SECONDS = (60.0, 300.0, 900.0)
+_RETRY_MAX_AGE_SECONDS = 1800.0
+
+
+def _retry_key(entry: Mapping[str, Any]) -> str:
+    """Return the delivery identity a queued row and its replays share."""
+    return delivery_key(
+        channel=str(entry.get("channel") or ""),
+        external_key=str(entry.get("external_key") or ""),
+        kind="task_notification",
+        task_id=str(entry.get("task_id") or ""),
+        object_kind=str(entry.get("object_kind") or ""),
+        object_id=str(entry.get("object_id") or entry.get("subtask_id") or ""),
+        state=str(entry.get("task_status") or ""),
+    )
+
+
+def _entry_moment(entry: Mapping[str, Any]) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(entry.get("created_at") or ""))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def pending_delivery_retries(
+    project_dir: Path,
+    *,
+    channel: str = "",
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Return queued deliveries whose next replay is due, oldest first.
+
+    The result is already durable, so a hard delivery failure means only that
+    the reader has not been handed it yet. Attempts are counted across replays
+    and never reset, so a delivery that keeps failing is abandoned to
+    ``/task show`` rather than retried forever.
+    """
+    moment = now or datetime.now(UTC)
+    queued: dict[str, dict[str, Any]] = {}
+    attempts: dict[str, int] = {}
+    resolved: set[str] = set()
+    last_seen: dict[str, datetime] = {}
+    for row in _read_jsonl(project_dir / "delivery_retry.jsonl"):
+        key = _retry_key(row)
+        status = str(row.get("retry_status") or "")
+        stamp = _entry_moment(row)
+        if stamp is not None:
+            last_seen[key] = stamp
+        if status == "pending":
+            queued.setdefault(key, row)
+        elif status == "attempted":
+            attempts[key] = attempts.get(key, 0) + 1
+        else:
+            resolved.add(key)
+    due: list[dict[str, Any]] = []
+    for key, row in queued.items():
+        tries = attempts.get(key, 0)
+        if key in resolved or tries >= len(_RETRY_BACKOFF_SECONDS):
+            continue
+        if channel and str(row.get("channel") or "") != channel:
+            continue
+        queued_at = _entry_moment(row)
+        if queued_at is None or (moment - queued_at).total_seconds() > _RETRY_MAX_AGE_SECONDS:
+            continue
+        waited = (moment - last_seen.get(key, queued_at)).total_seconds()
+        if waited < _RETRY_BACKOFF_SECONDS[tries]:
+            continue
+        due.append(row)
+    due.sort(key=lambda row: str(row.get("created_at") or ""))
+    return due
+
+
+def record_delivery_retry(project_dir: Path, entry: Mapping[str, Any], *, status: str) -> None:
+    """Log one replay of a queued delivery so the queue drains instead of looping."""
+    if status not in {"attempted", "sent", "abandoned"}:
+        raise ValueError(f"unsupported retry status: {status}")
+    payload = {
+        key: value for key, value in entry.items() if key not in {"notification", "report"}
+    }
+    payload["created_at"] = datetime.now(UTC).isoformat()
+    payload["retry_status"] = status
+    _append_jsonl(project_dir / "delivery_retry.jsonl", payload)
+
+
 def read_delivery_statuses(project_dir: Path, subtask_id: str | None = None) -> list[dict[str, Any]]:
     rows = _read_jsonl(project_dir / "delivery_status.jsonl")
     if subtask_id:
@@ -265,7 +356,7 @@ def latest_delivery_status(project_dir: Path, subtask_id: str) -> dict[str, Any]
 
 def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
+    with path.open("a", encoding="utf-8", errors="backslashreplace") as fh:
         fh.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
 
 

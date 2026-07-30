@@ -146,6 +146,7 @@ class ChannelManager:
         try:
             while not self._stopping:
                 await self.reconcile_once()
+                await self.replay_failed_deliveries()
                 await self._wait_next_cycle()
         except asyncio.CancelledError:
             raise
@@ -195,6 +196,48 @@ class ChannelManager:
             )
             return
         await channel.notify(note)
+
+    async def replay_failed_deliveries(self) -> int:
+        """Hand over notifications a channel failed to deliver, once it can.
+
+        A hard failure is rarely about the message: WeChat refuses a burst by
+        answering ``ret=-2`` to *every* send for a few minutes, including the
+        first message of an unrelated reply that follows. The task result is
+        already durable, so leaving the queue undrained is the difference
+        between a reader who gets their files a minute late and one who never
+        gets them at all.
+        """
+        from omni.runtime.notifications import (
+            pending_delivery_retries,
+            record_delivery_retry,
+            task_notification_from_dict,
+        )
+
+        project_dir = self.settings.paths.project_dir
+        replayed = 0
+        for entry in pending_delivery_retries(project_dir):
+            channel = self._channels.get(str(entry.get("channel") or ""))
+            if channel is None:
+                continue
+            note = task_notification_from_dict(dict(entry.get("notification") or {}))
+            if not note.external_key:
+                continue
+            record_delivery_retry(project_dir, entry, status="attempted")
+            try:
+                status = await channel.send_task_notification(note)
+            except Exception:  # noqa: BLE001
+                logger.debug("delivery replay raised for %s", note.channel, exc_info=True)
+                continue
+            if status in {"sent", "degraded"}:
+                record_delivery_retry(project_dir, entry, status="sent")
+                replayed += 1
+                logger.info(
+                    "replayed %s delivery for task %s (%s)",
+                    note.channel,
+                    note.task_id[:8],
+                    status,
+                )
+        return replayed
 
     async def reconcile_once(self) -> None:
         desired = set(self._desired_names())

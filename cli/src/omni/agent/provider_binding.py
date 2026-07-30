@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from copy import deepcopy
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -43,8 +42,6 @@ def provider_contract_hash(entry: Any) -> str:
             "input_schema_declared": getattr(entry, "input_schema_declared", None),
             "output_schema": _declared_contract_value(getattr(entry, "output_schema", None)),
             "output_schema_declared": getattr(entry, "output_schema_declared", None),
-            "quality_contract": _declared_contract_value(getattr(entry, "quality_contract", None)),
-            "quality_contract_declared": getattr(entry, "quality_contract_declared", None),
             "template_signatures": getattr(entry, "template_signatures", None) or {},
         }
     )
@@ -78,7 +75,7 @@ def native_provider_binding(
     """Bind a built-in native provider without pretending it is a skill."""
     consumer_id = str(step.get("id") or provider_name)
     capability = str(step.get("capability") or provider_name)
-    input_schema, output_schema, quality_contract = _native_synthesis_contract()
+    input_schema, output_schema = _native_synthesis_contract()
     contract_hash = _canonical_hash(
         {
             "name": provider_name,
@@ -86,7 +83,6 @@ def native_provider_binding(
             "version": provider_version,
             "input_schema": input_schema,
             "output_schema": output_schema,
-            "quality_contract": quality_contract,
         }
     )
     binding_id = (
@@ -201,18 +197,12 @@ def _step_provider_binding(
 ) -> ProviderBinding | None:
     if _is_native_step(step):
         binding = native_provider_binding(step)
-        _, _, quality_contract = _native_synthesis_contract()
     else:
         if entry is None:
             return None
         binding = _binding_for_step(step, entry)
-        quality_contract = getattr(entry, "quality_contract", None) or {}
     if seal:
-        _seal_step_binding(
-            step,
-            binding,
-            quality_contract=quality_contract,
-        )
+        _seal_step_binding(step, binding)
     return binding
 
 
@@ -232,26 +222,12 @@ def _binding_for_step(step: dict[str, Any], entry: Any) -> ProviderBinding:
     )
 
 
-def _seal_step_binding(
-    step: dict[str, Any],
-    binding: ProviderBinding,
-    *,
-    quality_contract: Any,
-) -> None:
+def _seal_step_binding(step: dict[str, Any], binding: ProviderBinding) -> None:
     step["provider_binding_id"] = binding.provider_binding_id
     step["provider_contract_hash"] = binding.contract_hash
     step["provider_name"] = binding.provider_name
     step["provider_source"] = binding.provider_source
     step["provider_version"] = binding.provider_version
-    if quality_contract:
-        step["quality_contract"] = deepcopy(quality_contract)
-        if (
-            isinstance(quality_contract, dict)
-            and quality_contract.get("assessment_required") is True
-        ):
-            step.setdefault("deliverable_id", binding.step_id)
-    else:
-        step.pop("quality_contract", None)
 
 
 def _is_native_step(step: dict[str, Any]) -> bool:
@@ -264,24 +240,15 @@ def _is_native_step(step: dict[str, Any]) -> bool:
     }
 
 
-def _native_synthesis_contract() -> tuple[
-    dict[str, Any],
-    dict[str, Any],
-    dict[str, Any],
-]:
+def _native_synthesis_contract() -> tuple[dict[str, Any], dict[str, Any]]:
     # Local import avoids loading the runtime executor during ordinary skill
     # discovery while keeping planning and execution on one native contract.
     from omni.runtime.final_synthesis import (
         NATIVE_SYNTHESIS_INPUT_SCHEMA,
         NATIVE_SYNTHESIS_OUTPUT_SCHEMA,
-        NATIVE_SYNTHESIS_QUALITY_CONTRACT,
     )
 
-    return (
-        NATIVE_SYNTHESIS_INPUT_SCHEMA,
-        NATIVE_SYNTHESIS_OUTPUT_SCHEMA,
-        NATIVE_SYNTHESIS_QUALITY_CONTRACT,
-    )
+    return NATIVE_SYNTHESIS_INPUT_SCHEMA, NATIVE_SYNTHESIS_OUTPUT_SCHEMA
 
 
 def _canonical_hash(payload: Any) -> str:
@@ -291,7 +258,7 @@ def _canonical_hash(payload: Any) -> str:
         sort_keys=True,
         separators=(",", ":"),
         default=str,
-    ).encode()
+    ).encode("utf-8", errors="backslashreplace")
     return hashlib.sha256(encoded).hexdigest()
 
 

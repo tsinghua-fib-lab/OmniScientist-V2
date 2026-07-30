@@ -21,6 +21,7 @@ figure↔bullet inconsistencies it cannot fix geometrically.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import importlib.util as _ilu
 import json
@@ -66,6 +67,67 @@ build_telemetry = _telemetry.build_telemetry
 
 logger = logging.getLogger(__name__)
 
+# ── Localization map for Chinese (zh) output ──
+# Keys are dot-separated paths. Values are the zh string; English is the
+# default literal used inline.
+_L10N_ZH = {
+    # Progress messages
+    "progress.parsing_pdf":                 "\u89e3\u6790PDF\u5185\u5bb9\u2026",
+    "progress.processing_inputs":           "\u5904\u7406\u8f93\u5165\u2026",
+    "progress.source_done":                 "\u6765\u6e90\u89e3\u6790\u5b8c\u6210",
+    "progress.deciding_strategy":           "\u51b3\u5b9a\u6f14\u793a\u7b56\u7565\u2026",
+    "progress.planning_structure":          "\u89c4\u5212\u5e7b\u706f\u7247\u7ed3\u6784\u2026",
+    "progress.structure_ready":             "\u6f14\u793a\u7ed3\u6784\u5b8c\u6210",
+    "progress.resuming_render":             "\u6062\u590d\u5e7b\u706f\u7247\u6e32\u67d3\u2026",
+    "progress.rendering_eq":                "\u6e32\u67d3\u516c\u5f0f",
+    "progress.resolving_figs":              "\u89e3\u6790\u56fe\u8868",
+    "progress.rendering_slides":            "\u6e32\u67d3\u5e7b\u706f\u7247",
+    "progress.render_done":                 "\u5e7b\u706f\u7247\u6e32\u67d3\u5b8c\u6210",
+    "progress.quality_check":               "\u8d28\u91cf\u68c0\u67e5",
+    "progress.quality_done":                "\u8d28\u91cf\u68c0\u67e5\u901a\u8fc7",
+    "progress.visual_review":               "\u89c6\u89c9\u5ba1\u9605",
+    "progress.visual_done":                 "\u89c6\u89c9\u5ba1\u9605\u5b8c\u6210",
+    "progress.storing":                     "\u5b58\u50a8\u6587\u4ef6",
+    # Milestone labels
+    "milestone.source_parsing":             "\u6765\u6e90\u89e3\u6790",
+    "milestone.slide_structure":            "\u6f14\u793a\u7ed3\u6784",
+    "milestone.slide_render":               "\u5e7b\u706f\u7247\u6e32\u67d3",
+    "milestone.quality_check":              "\u8d28\u91cf\u68c0\u67e5",
+    "milestone.visual_review":              "\u89c6\u89c9\u5ba1\u9605",
+    # Milestone / deliverable detail fragments
+    "detail.pages":                         "\u9875",
+    "detail.figures":                       "\u5f20\u56fe",
+    "detail.tables":                        "\u4e2a\u8868\u683c",
+    "detail.slides":                        "\u9875",
+    "detail.no_overflow":                   "\u65e0\u6587\u5b57\u6ea2\u51fa",
+    "detail.warnings_fixed":                "\u4fee\u590d {count} \u5904\u8b66\u544a",
+    "detail.edits":                         "{count} \u5904\u4fee\u6539",
+    "detail.figures_used":                  "\u4f7f\u7528\u56fe\u8868 {} \u5f20",
+    "detail.file_size":                     "{} MB",
+    # Deliverable block
+    "deliverable.slides":                   "\u5e7b\u706f\u7247 {} \u9875",
+    "deliverable.figures_used":             "\u4f7f\u7528\u56fe\u8868 {} \u5f20",
+    "deliverable.file_size":                "{} MB",
+    # Completion
+    "completion.saved":                     "PPT \u751f\u6210\u5b8c\u6210 · {} MB · {}",
+    "completion.saved_no_size":             "PPT \u751f\u6210\u5b8c\u6210 · {}",
+    # Summary
+    "summary.generated":                    "\u5df2\u751f\u6210 {n_slides} \u9875 '{title}' \u6f14\u793a\u6587\u7a3f\uff0c\u5305\u542b {figures} \u5f20\u56fe\u8868",
+    # Source detail template
+    "source_detail.with_pages":             "{pages} \u9875 · {figures} \u5f20\u56fe · {tables} \u4e2a\u8868\u683c",
+    "source_detail.no_pages":               "{figures} \u5f20\u56fe · {tables} \u4e2a\u8868\u683c",
+    "source_detail.title":                  "\u79d1\u7814\u6f14\u793a\u6587\u7a3f",
+    "source_detail.source_label":           "\u6765\u6e90",
+    "source_detail.format_label":           "\u7c7b\u578b",
+}
+
+
+def _l10n(language: str, key: str, **kwargs: Any) -> str:
+    """Return the localized string for *key* when *language* is 'zh', otherwise empty.
+    Currently all output is English-only; the L10N dict is reserved for future use.
+    Callers use: ``_l10n(lang, "key", **fmt) or f"english {fallback}"``."""
+    return ""
+
 _VALID_THEMES = ("midnight_executive", "teal_trust", "forest_moss", "charcoal_minimal")
 _VALID_TALKS = ("conference", "seminar", "group_meeting", "defense")
 # In-process store of paused plans awaiting user review (token -> plan dict).
@@ -78,6 +140,61 @@ def _normalize_language(value: Any) -> str:
 
 def _normalize_talk_type(value: Any) -> str:
     return _models.normalize_talk_type(value)
+
+
+def _has_presentation_source(values: dict[str, Any]) -> bool:
+    """Return whether an invocation contains any supported deck source."""
+
+    scalar_fields = (
+        "topic",
+        "outline",
+        "markdown_uri",
+        "pdf_uri",
+        "reference_text",
+        "corpus_query",
+    )
+    collection_fields = ("paper_uris", "file_uris", "source_ids")
+    return any(str(values.get(key, "")).strip() for key in scalar_fields) or any(
+        bool(values.get(key)) for key in collection_fields
+    )
+
+
+def _slide_count_mismatch_result(
+    *,
+    target: int,
+    actual: int,
+    phase: str,
+    resume_token: str = "",
+) -> dict[str, Any]:
+    """Build the recoverable error used by every exact-count gate."""
+
+    remediation = (
+        "Adjust plan_edits or pass a complete approved_plan with the exact count, "
+        "then resume with the same resume_token."
+        if resume_token
+        else "Re-plan the deck with exactly the requested slide count."
+    )
+    result = {
+        "status": "error",
+        "outcome": {"code": "slide_count_mismatch"},
+        "phase": phase,
+        "error": (
+            f"The presentation plan has {actual} slides, but target_slides requires "
+            f"exactly {target}. {remediation}"
+        ),
+        "recoverable": True,
+        "blocking": False,
+        "target_slides": target,
+        "actual_slides": actual,
+        "error_info": {
+            "code": "slide_count_mismatch",
+            "retryable": True,
+            "workflow_recoverable": True,
+        },
+    }
+    if resume_token:
+        result["resume_token"] = resume_token
+    return result
 
 
 def _pptx_assessment(
@@ -102,22 +219,46 @@ def _pptx_assessment(
     if pptx_uri and pptx_uri not in evidence_refs:
         evidence_refs.append(pptx_uri)
 
+    # Grounding signal (C2): a delivered deck built from *no* input figures and
+    # *no* cited sources has model-generated specifics (numbers, architecture,
+    # roadmap). That is a quality note to surface for review — not a delivery
+    # failure — so it rides the same advisory channel as layout warnings.
+    figures_used = max(0, int(result.get("figures_used") or 0))
+    research = result.get("research")
+    source_ids = research.get("source_ids") if isinstance(research, dict) else None
+    source_count = len(source_ids) if isinstance(source_ids, list) else 0
+
+    # Delivery (was a real deck produced?) is separate from quality (residual
+    # layout warnings / ungrounded content). A delivered deck with quality notes
+    # is "succeeded with quality notes", not a failure-shaped degrade — so the
+    # notes ride an *advisory* criterion the host surfaces without downgrading.
     complete = bool(slide_count and pptx_uri)
+    advisory_note = False
     if not complete:
         status = "unknown"
         summary = (
             "A deck result was returned, but the provider could not confirm both "
             "a stored PPTX and a non-empty slide count."
         )
-    elif qa_warnings:
-        status = "degraded"
-        summary = (
-            f"Rendered {slide_count} slides with {qa_warnings} remaining "
-            "layout warning(s)."
-        )
     else:
         status = "passed"
-        summary = f"Rendered {slide_count} slides with no remaining layout warnings."
+        notes: list[str] = []
+        if qa_warnings:
+            notes.append(f"{qa_warnings} residual layout warning(s)")
+        if figures_used == 0 and source_count == 0:
+            notes.append(
+                "content is model-generated with no input figures or cited sources "
+                "— verify specific facts, numbers, and claims before use"
+            )
+        if notes:
+            advisory_note = True
+            summary = (
+                f"Rendered {slide_count} slides. Delivered with quality notes: "
+                + "; ".join(notes)
+                + "."
+            )
+        else:
+            summary = f"Rendered {slide_count} slides with no remaining layout warnings."
 
     deliverable_id = str(
         input_data.get("deliverable_id")
@@ -168,9 +309,13 @@ def _pptx_assessment(
         "criteria": [
             {
                 "criterion_id": "slides_rendered_and_quality_checked",
-                "status": status,
+                # A delivered-but-warned deck rides an advisory criterion so the
+                # host surfaces the layout note without degrading the task; the
+                # envelope-level ``status`` stays the delivery verdict (passed).
+                "status": "degraded" if advisory_note else status,
                 "summary": summary,
                 "evidence_refs": evidence_refs,
+                "advisory": advisory_note,
             }
         ],
         "evidence_refs": evidence_refs,
@@ -422,6 +567,9 @@ class ResearchPptxEngine:
             *, arguments: dict[str, Any] | None = None, input_data: dict[str, Any] | None = None
     ) -> dict[str, Any] | None:
         args = arguments or input_data or {}
+        normalized = _models.remap_common_alias_fields(args)
+        args.clear()
+        args.update(normalized)
         _extract_file_paths_from_topic(args)
         # Single-skill routing / a workflow step may hand us the raw user text as
         # ``input``/``query`` (or the overall ``workflow_goal``) instead of
@@ -453,16 +601,18 @@ class ResearchPptxEngine:
         # / workflow_results) are a valid source too — they are absorbed into
         # reference_text inside execute(), but validate_params runs BEFORE that,
         # so we must recognise them here or the step fails as missing_input.
-        _has_source = any(str(args.get(k, "")).strip() for k in
-                          ("topic", "outline", "markdown_uri", "pdf_uri", "reference_text"))
+        _has_source = _has_presentation_source(args)
         _has_upstream = bool(
             (isinstance(args.get("depends_on_results"), dict) and args["depends_on_results"])
             or (isinstance(args.get("workflow_results"), dict) and args["workflow_results"])
         )
         if not _has_source and not _has_upstream and not args.get("resume_token"):
             return {
-                "error": ("Provide a source: topic, outline, markdown_uri, pdf_uri, "
-                          "or reference_text (or resume_token to continue a review)."),
+                "error": (
+                    "Provide a source: topic, outline, markdown_uri, pdf_uri, "
+                    "paper_uris, file_uris, reference_text, corpus_query, or "
+                    "source_ids (or resume_token to continue a review)."
+                ),
                 "recoverable": False, "blocking": True,
                 "error_info": {"code": "missing_input",
                                "message": "no source or resume_token provided",
@@ -548,6 +698,7 @@ class ResearchPptxEngine:
 
     # ── entry point ──
     async def execute(self, progress_callback: Any | None = None, **kwargs: Any) -> dict[str, Any]:
+        kwargs = _models.remap_common_alias_fields(kwargs)
         _extract_file_paths_from_topic(kwargs)
         # Belt-and-suspenders topic fallback (see validate_params): if the
         # framework passed the user text as input/query/workflow_goal, use it as
@@ -560,8 +711,7 @@ class ResearchPptxEngine:
                 _extract_file_paths_from_topic(kwargs)
         # topic can be empty on the resume path; require topic XOR resume_token
         # here so PresentationRequest(topic="") no longer crashes.
-        _has_source = any(str(kwargs.get(k, "")).strip() for k in
-                          ("topic", "outline", "markdown_uri", "pdf_uri", "reference_text"))
+        _has_source = _has_presentation_source(kwargs)
         _has_upstream = bool(
             (isinstance(kwargs.get("depends_on_results"), dict) and kwargs["depends_on_results"])
             or (isinstance(kwargs.get("workflow_results"), dict) and kwargs["workflow_results"])
@@ -569,8 +719,11 @@ class ResearchPptxEngine:
         if not _has_source and not _has_upstream and not kwargs.get("resume_token"):
             return {
                 "status": "error",
-                "error": ("Provide a source: topic, outline, markdown_uri, "
-                          "pdf_uri, or reference_text (or resume_token)."),
+                "error": (
+                    "Provide a source: topic, outline, markdown_uri, pdf_uri, "
+                    "paper_uris, file_uris, reference_text, corpus_query, or "
+                    "source_ids (or resume_token)."
+                ),
                 "recoverable": False, "blocking": True,
                 "error_info": {
                     "code": "missing_input",
@@ -612,9 +765,7 @@ class ResearchPptxEngine:
         req = PresentationRequest(**kwargs)
         result = await self._run(req, progress_callback)
 
-        if isinstance(result, dict):  # review checkpoint payload
-            return result
-        output = result.model_dump()
+        output = dict(result) if isinstance(result, dict) else result.model_dump()
         if output.get("pptx_uri") or output.get("artifacts"):
             output["deliverable_assessment"] = _pptx_assessment(
                 self.ctx,
@@ -702,13 +853,28 @@ class ResearchPptxEngine:
             "size_bytes": stored.size_bytes,
         }
 
-    async def _persist_review_state(self, token, plan, content, work_dir) -> dict:
+    async def _persist_review_state(
+        self,
+        token: str,
+        plan: PresentationPlan,
+        content: ParsedContent,
+        work_dir: str,
+        *,
+        request: PresentationRequest,
+    ) -> dict[str, Any]:
         """Copy resolved figures to a durable dir + write a review-state file so a
         cross-process resume can rebuild the deck with all visuals intact."""
+        request_dict = request.model_dump(
+            exclude={"approved_plan", "plan_edits", "resume_token"}
+        )
         paths = getattr(self.ctx, "paths", None)
         if paths is None or getattr(paths, "artifacts_dir", None) is None:
             # No durable store: best-effort, same-process resume only.
-            return {"content": content.model_dump(), "state_uri": ""}
+            return {
+                "content": content.model_dump(),
+                "request": request_dict,
+                "state_uri": "",
+            }
 
         review_dir = Path(paths.artifacts_dir) / "pptx_review" / token
         fig_dir = review_dir / "figures"
@@ -771,13 +937,33 @@ class ResearchPptxEngine:
             except Exception:  # noqa: BLE001
                 pass
 
-        state = {"plan": plan_dict, "content": content_dict}
+        owner = {
+            key: str(getattr(self.ctx, key, "") or "")
+            for key in (
+                "session_id",
+                "task_id",
+                "subtask_id",
+                "workflow_run_id",
+            )
+        }
+        state = {
+            "plan": plan_dict,
+            "content": content_dict,
+            "request": request_dict,
+            "owner": owner,
+            "created_at": time.time(),
+            "consumed_at": None,
+        }
         state_path = review_dir / "state.json"
         state_path.write_text(
             json.dumps(state, ensure_ascii=False, default=str), encoding="utf-8"
         )
-        return {"content": content_dict, "state_uri": f"file://{state_path}",
-                "plan": plan_dict}
+        return {
+            "content": content_dict,
+            "request": request_dict,
+            "state_uri": f"file://{state_path}",
+            "plan": plan_dict,
+        }
 
     async def _resolve_to_local(self, uri: str, work_dir: str, suffix: str) -> str | None:
         """Resolve an artifact:// or local uri to a real file (generic)."""
@@ -886,26 +1072,164 @@ class ResearchPptxEngine:
         if not state_path.is_file():
             return None
         try:
-            return json.loads(state_path.read_text(encoding="utf-8"))
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            return None if state.get("consumed_at") else state
         except Exception:  # noqa: BLE001
             return None
 
-    @staticmethod
-    def _detect_misrouted_intent(kwargs: dict[str, Any]) -> dict[str, Any] | None:
+    def _find_recent_review_token(self) -> str | None:
+        """Return the sole active review token owned by the current session.
+
+        Automatic recovery is deliberately fail-closed: legacy unowned state,
+        cross-session state, consumed checkpoints, stale checkpoints, and more
+        than one active candidate all require an explicit ``resume_token``.
+        """
+        paths = getattr(self.ctx, "paths", None)
+        if paths is None or getattr(paths, "artifacts_dir", None) is None:
+            return None
+        session_id = str(getattr(self.ctx, "session_id", "") or "")
+        if not session_id:
+            return None
+        review_root = Path(paths.artifacts_dir) / "pptx_review"
+        if not review_root.is_dir():
+            return None
+        cutoff = time.time() - 86400  # 24-hour expiry
+        candidates: list[str] = []
+        for child in review_root.iterdir():
+            if not child.is_dir():
+                continue
+            state_file = child / "state.json"
+            if not state_file.is_file():
+                continue
+            mtime = state_file.stat().st_mtime
+            if mtime < cutoff:
+                continue
+            try:
+                state = json.loads(state_file.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            owner = state.get("owner")
+            if not isinstance(owner, dict):
+                continue
+            if str(owner.get("session_id") or "") != session_id:
+                continue
+            if state.get("consumed_at"):
+                continue
+            candidates.append(child.name)
+        return candidates[0] if len(candidates) == 1 else None
+
+    def _mark_review_consumed(self, token: str) -> None:
+        """Mark a durable review checkpoint consumed after a successful render."""
+
+        _REVIEW_CACHE.pop(token, None)
+        paths = getattr(self.ctx, "paths", None)
+        if paths is None or getattr(paths, "artifacts_dir", None) is None:
+            return
+        state_path = Path(paths.artifacts_dir) / "pptx_review" / token / "state.json"
+        if not state_path.is_file():
+            return
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["consumed_at"] = time.time()
+            state_path.write_text(
+                json.dumps(state, ensure_ascii=False, default=str),
+                encoding="utf-8",
+            )
+        except (OSError, json.JSONDecodeError):
+            logger.debug("Unable to mark review token consumed", exc_info=True)
+
+    def _detect_misrouted_intent(
+        self, kwargs: dict[str, Any]
+    ) -> dict[str, Any] | None:
         """Catch intents the planner pasted into topic instead of input fields.
 
         Returns a recoverable guidance result (so the model re-calls correctly),
         or None when the request looks well-formed.
 
-        The original version had hard‑coded Chinese cleaning strings. This
-        rewrite uses a generic directive list *and* a regex‑based cleaner so
-        the topic is stripped of the directive regardless of surrounding
-        punctuation, keeping the logic portable and easy to extend.
+        Also *mutates* kwargs in-place to set review_mode, target_slides, and
+        resume_token when they are clearly implied by the topic text but not
+        explicitly set. This catches common patterns the Omni planner often
+        fails to route correctly:
+
+        - "let me check outline first" → review_mode="plan"
+        - "15-page deck" → target_slides=15
+        - approval/generate-after-review phrases -> auto-resume
         """
         topic = str(kwargs.get("topic", "") or "")
         low = topic.lower()
+        has_resume = bool(str(kwargs.get("resume_token", "") or "").strip())
 
-        # Phrases that the user might type to request outline review
+        # Extract the page constraint before any review-routing early return so a
+        # combined request such as "15 slides; show the outline first" keeps both
+        # pieces of intent.
+        slide_match = re.search(
+            r"(\d{1,2})\s*(?:-?\s*(?:page|slide|\u9875|\u30da\u30fc\u30b8|p)\w*)",
+            topic,
+            flags=re.IGNORECASE,
+        )
+        if slide_match and not kwargs.get("target_slides"):
+            count = int(slide_match.group(1))
+            if 3 <= count <= 80:
+                kwargs["target_slides"] = count
+
+        # ── Auto-resume: detect approve / generate-from-outline intents ──
+        # When the user says "approve" or "generate the PPT based on the outline"
+        # but the Omni planner didn't pass resume_token, find the most recent
+        # review state and inject the token so the skill resumes correctly.
+        _resume_patterns = (
+            "approve this outline",
+            "approve the outline",
+            "outline is approved",
+            "render this outline",
+            "render the approved outline",
+            "generate the ppt based on this outline",
+            "generate the slides based on this outline",
+            "\u6279\u51c6\u5927\u7eb2",
+            "\u786e\u8ba4\u5927\u7eb2\u5e76\u751f\u6210",
+            "\u6839\u636e\u5927\u7eb2",
+            "\u6839\u636e\u4fee\u6539",
+            "\u6309\u5927\u7eb2",
+            "\u6309\u4fee\u6539",
+            "\u57fa\u4e8e\u5927\u7eb2",
+        )
+        exact_approval = low.strip(" ，,。.；;：:") in {
+            "approve",
+            "approved",
+            "\u6279\u51c6",
+            "\u540c\u610f",
+        }
+        matched_resume = (
+            "approve"
+            if exact_approval
+            else next((pattern for pattern in _resume_patterns if pattern in low), "")
+        )
+        if not has_resume and matched_resume:
+            token = self._find_recent_review_token()
+            if token:
+                kwargs["resume_token"] = token
+                logger.info(
+                    "[intent] Auto-resume detected from topic "
+                    "(pattern=%r, token=%s)", matched_resume, token[:8]
+                )
+                return None
+            return {
+                "status": "error",
+                "outcome": {"code": "review_pending"},
+                "error": (
+                    "No unique active outline checkpoint was found. Pass the "
+                    "resume_token returned by the outline review before rendering."
+                ),
+                "recoverable": True,
+                "blocking": False,
+                "error_info": {
+                    "code": "review_pending",
+                    "retryable": True,
+                    "workflow_recoverable": True,
+                },
+            }
+
+        # Phrases that the user might type to request outline review.
+        # Extended with more patterns the Omni planner misses in practice.
         review_directives = (
             "review_mode=plan",
             "review the outline",
@@ -914,6 +1238,25 @@ class ResearchPptxEngine:
             "let me review",
             "let me check",
             "outline first",
+            "check outline",
+            "check the outline",
+            "review outline",
+            "approve outline",
+            "approve the outline",
+            "outline review",
+            "outline for review",
+            "check first",
+            "review first",
+            "review before",
+            # Chinese patterns (same intent, different language)
+            "\u5148\u770b\u5927\u7eb2",
+            "\u5148\u770b\u4e0b\u5927\u7eb2",
+            "\u5148\u770b\u4e00\u4e0b\u5927\u7eb2",
+            "\u5ba1\u6838\u5927\u7eb2",
+            "\u6279\u51c6\u5927\u7eb2",
+            "\u5148\u5ba1\u9605",
+            "\u68c0\u67e5\u5927\u7eb2",
+            "\u786e\u8ba4\u5927\u7eb2",
         )
 
         review_mode = str(kwargs.get("review_mode", "none")).lower()
@@ -937,8 +1280,6 @@ class ResearchPptxEngine:
 
         return None
 
-
-
     # ── main pipeline ──
     async def _run(
         self, req: PresentationRequest, progress_callback: Any | None
@@ -955,34 +1296,151 @@ class ResearchPptxEngine:
             last_ts = now
             return d
 
-        async def _progress(stage: str, msg: str, detail: dict | None = None) -> None:
+        async def _progress(message: str, fraction: float) -> None:
+            """Emit stable stage ids to Omni and localized text to simple hosts."""
             if progress_callback:
+                if fraction <= 0.18:
+                    stage = "parsing"
+                elif fraction <= 0.22:
+                    stage = "deciding"
+                elif fraction <= 0.32:
+                    stage = "planning"
+                elif fraction <= 0.60:
+                    stage = "rendering"
+                elif fraction <= 0.75:
+                    stage = "qa"
+                elif fraction <= 0.85:
+                    stage = "critique"
+                else:
+                    stage = "upload"
                 try:
-                    await progress_callback(stage, min(0.95, (time.time() - t0) / 120))
+                    await progress_callback(stage, fraction)
                 except TypeError:
-                    await progress_callback(msg)
+                    await progress_callback(message)
 
         tel.audit("started", topic=req.topic, mode=req.mode, review_mode=req.review_mode)
 
         try:
             # ── Resume path: render a previously-reviewed plan ──
             if req.resume_token:
-                cached = _REVIEW_CACHE.pop(req.resume_token, None)
+                cached = _REVIEW_CACHE.get(req.resume_token)
                 if cached is None:
                     cached = self._load_review_state(req.resume_token)
-                plan_dict = req.approved_plan or (cached or {}).get("plan")
-                if plan_dict is None:
+                cached_plan = (cached or {}).get("plan")
+                cached_request = (cached or {}).get("request")
+                if isinstance(cached_request, dict):
+                    continuation = req
+                    restored_request = dict(cached_request)
+                    restored_request.update(
+                        {
+                            "resume_token": continuation.resume_token,
+                            "approved_plan": continuation.approved_plan,
+                            "plan_edits": continuation.plan_edits,
+                        }
+                    )
+                    if continuation.target_slides is not None:
+                        restored_request["target_slides"] = continuation.target_slides
+                    req = PresentationRequest(**restored_request)
+                approved_plan = (
+                    req.approved_plan
+                    if isinstance(req.approved_plan, dict)
+                    and req.approved_plan.get("slides")
+                    else None
+                )
+                if cached_plan is None and approved_plan is None:
                     return {
                         "status": "error",
                         "outcome": {"code": "review_pending"},
-                        "error": "unknown or expired resume_token (pass approved_plan to recover)",
+                        "error": (
+                            "unknown or expired resume_token; pass a complete "
+                            "approved_plan to recover"
+                        ),
                         "recoverable": True,
                         "error_info": {"code": "review_pending", "retryable": True,
                                        "workflow_recoverable": True},
                     }
+
+                # ── Build the plan to render ──
+                # Priority (highest first):
+                #  1. approved_plan (full replacement, user- or model-edited)
+                #  2. plan_edits applied on top of the cached original (surgical edits)
+                #  3. cached plan as-is (plain approve)
+                plan_edits = req.plan_edits or []
+                plan_dict: dict[str, Any] | None = None
+                edit_source = "unchanged"
+
+                if approved_plan is not None:
+                    # Validate: an approved_plan MUST have a non-empty slides array.
+                    plan_dict = approved_plan
+                    edit_source = "approved_plan"
+                elif req.approved_plan and isinstance(req.approved_plan, dict):
+                    if cached_plan is not None:
+                        # Truncated / incomplete approved_plan — merge with cached
+                        # and warn so the model can learn the right shape.
+                        logger.warning(
+                            "approved_plan missing 'slides' — merging with cached plan"
+                        )
+                        merged = dict(cached_plan)
+                        merged.update(req.approved_plan)
+                        plan_dict = merged
+                        edit_source = "approved_plan_merged"
+
+                if plan_edits:
+                    # Apply surgical edits on top of whatever plan_dict we have
+                    # (or the cached original if no approved_plan was provided).
+                    if plan_dict is None and cached_plan is None:
+                        return {
+                            "status": "error",
+                            "outcome": {"code": "review_pending"},
+                            "error": "plan_edits require the original review checkpoint",
+                            "recoverable": True,
+                            "error_info": {
+                                "code": "review_pending",
+                                "retryable": True,
+                                "workflow_recoverable": True,
+                            },
+                        }
+                    base = plan_dict if plan_dict is not None else dict(cached_plan)
+                    try:
+                        plan_dict = self._apply_plan_edits(base, plan_edits)
+                    except ValueError as exc:
+                        return {
+                            "status": "error",
+                            "outcome": {"code": "invalid_plan_edits"},
+                            "error": str(exc),
+                            "recoverable": True,
+                            "blocking": False,
+                            "resume_token": req.resume_token,
+                            "error_info": {
+                                "code": "invalid_plan_edits",
+                                "retryable": True,
+                                "workflow_recoverable": True,
+                            },
+                        }
+                    edit_source = (
+                        "plan_edits"
+                        if edit_source == "unchanged"
+                        else f"approved_plan+{len(plan_edits)}_edits"
+                    )
+
+                if plan_dict is None:
+                    plan_dict = dict(cached_plan)
+
                 plan = PresentationPlan(**plan_dict)
-                original = (cached or {}).get("plan") or {}
-                edited = bool(req.approved_plan) and req.approved_plan != original
+                if (
+                    req.target_slides is not None
+                    and len(plan.slides) != req.target_slides
+                ):
+                    return _slide_count_mismatch_result(
+                        target=req.target_slides,
+                        actual=len(plan.slides),
+                        phase="review_resume",
+                        resume_token=req.resume_token,
+                    )
+                original = cached_plan or {}
+                edited = edit_source != "unchanged"
+                n_edits = len(plan_edits) if plan_edits else 0
+
                 # structured decision event for "user reviewed the outline".
                 tel.decision(
                     "outline_review",
@@ -992,12 +1450,16 @@ class ResearchPptxEngine:
                     requires_review=True,
                     rationale="resumed from review checkpoint",
                     extra={"token": req.resume_token,
+                           "edit_source": edit_source,
+                           "n_edits": n_edits,
                            "original_slides": len(original.get("slides", [])),
                            "final_slides": len(plan.slides)},
                 )
                 tel.audit(
                     "review_resumed", token=req.resume_token,
                     user_edited_plan=edited,
+                    edit_source=edit_source,
+                    n_edits=n_edits,
                     original_slides=len(original.get("slides", [])),
                     final_slides=len(plan.slides),
                 )
@@ -1005,10 +1467,20 @@ class ResearchPptxEngine:
                 if cached_content is not None:
                     _cache_content_for_render(work_dir, ParsedContent(**cached_content))
                 tel.stage("pptx_resumed", input_summary={"token": req.resume_token})
-                return await self._render_and_finish(plan, work_dir, req, tel, _progress, t0, _ms)
+                await _progress(
+                    _l10n(req.language, "progress.resuming_render") or "Resuming slide render...",
+                    0.25,
+                )
+                result = await self._render_and_finish(plan, work_dir, req, tel, _progress, t0, _ms)
+                if not isinstance(result, dict) and result.status == "ok":
+                    self._mark_review_consumed(req.resume_token)
+                return result
 
             # ── Step 1: parse ──
-            await _progress("parsing", "Processing inputs...")
+            await _progress(
+                _l10n(req.language, "progress.processing_inputs") or "Processing inputs...",
+                0.05,
+            )
             content = await self._process_inputs(req, work_dir, _progress)
             tel.stage("pptx_input_parsed",
                       output_summary={"source_type": content.source_type,
@@ -1016,6 +1488,10 @@ class ResearchPptxEngine:
                                       "n_tables": len(content.tables),
                                       "chars": len(content.markdown_text)},
                       latency_ms=_ms())
+            await _progress(
+                _l10n(req.language, "progress.source_done") or "Source parsing done",
+                0.18,
+            )
 
             # ── Step 1.5: agentic strategy decision ──
             # In agentic mode the LLM decides the deck strategy (slide mix,
@@ -1025,7 +1501,10 @@ class ResearchPptxEngine:
             strategy: dict[str, Any] | None = None
             if req.mode == "agentic":
                 _cp = _load_sibling("content_planner")
-                await _progress("deciding", "Deciding strategy...")
+                await _progress(
+                    _l10n(req.language, "progress.deciding_strategy") or "Deciding presentation strategy...",
+                    0.20,
+                )
                 strategy = await _cp.decide_presentation_strategy(
                     self._llm(), content, req
                 )
@@ -1047,11 +1526,18 @@ class ResearchPptxEngine:
 
             # ── Step 2: plan (auto | agentic) ──
             plan_presentation = _load_sibling("content_planner").plan_presentation
-            await _progress("planning", "Planning slides...")
+            await _progress(
+                _l10n(req.language, "progress.planning_structure") or "Planning slide structure...",
+                0.25,
+            )
             plan = await plan_presentation(self._llm(), content, req)
             tel.stage("pptx_plan_built",
                       output_summary={"title": plan.title[:120], "n_slides": len(plan.slides)},
                       latency_ms=_ms())
+            await _progress(
+                _l10n(req.language, "progress.structure_ready") or "Slide structure ready",
+                0.32,
+            )
 
             # ── Feature 1: adopt colours + fonts from a user PPTX template ──
             if req.template_uri:
@@ -1073,7 +1559,11 @@ class ResearchPptxEngine:
             if effective_review in ("plan", "interactive"):
                 token = uuid.uuid4().hex[:16]
                 persisted = await self._persist_review_state(
-                    token, plan, content, work_dir
+                    token,
+                    plan,
+                    content,
+                    work_dir,
+                    request=req,
                 )
                 _REVIEW_CACHE[token] = {
                     # Use the persisted plan so template asset paths point at the
@@ -1081,6 +1571,7 @@ class ResearchPptxEngine:
                     # resume), staying consistent with state.json on disk.
                     "plan": persisted.get("plan") or plan.model_dump(),
                     "content": persisted["content"],
+                    "request": persisted["request"],
                     "state_uri": persisted["state_uri"],
                 }
                 # emit the review checkpoint as a decision event too.
@@ -1097,7 +1588,7 @@ class ResearchPptxEngine:
                 tel.audit("review_checkpoint", token=token,
                           n_slides=len(plan.slides), n_figs=len(content.figures))
 
-                # Human-friendly outline as a Markdown artifact (English).
+                # Human-friendly outline as a Markdown artifact.
                 outline_lines = [f"# Presentation outline for review: {plan.title}\n"]
                 if strategy:
                     outline_lines.append(
@@ -1134,9 +1625,92 @@ class ResearchPptxEngine:
                         pass
 
                 tel.stage("pptx_awaiting_review", output_summary={"token": token})
-                # Lifecycle status must be ok|partial|error; the domain state
-                # ('awaiting_review') lives in outcome.code so the workflow
-                # scheduler and the output-schema contract stay generic.
+
+                # ── Build the review checkpoint response ──
+                _await_prompt = "Outline approval required"
+                _await_state = "Awaiting outline approval"
+                _opt_enter = "Approve & render"
+                _opt_edit = "Edit outline"
+                _opt_cancel = "Cancel"
+
+                # Detect slide-count mismatch so the REPL model can flag it.
+                _target = req.target_slides
+                _actual = len(plan.slides)
+                _count_mismatch = _target is not None and _actual != _target
+                _count_note = ""
+                if _count_mismatch:
+                    _diff = _actual - _target
+                    _word = "more" if _diff > 0 else "fewer"
+                    _count_note = (
+                        f" NOTE: the plan has {_actual} slides ({abs(_diff)} {_word} "
+                        f"than the requested {_target}). You may trim via plan_edits "
+                        f"(remove_slide) or merge slides before approving."
+                    )
+
+                # Include the exact typed continuation in the user-visible
+                # checkpoint; the host confirmation flow can submit it verbatim.
+                _resume_call = (
+                    f'run_skill(skill_name="research-pptx", mode="foreground", '
+                    f'input={{"resume_token":"{token}"}})'
+                )
+                _summary = (
+                    f"Drafted a {_actual}-slide outline for review"
+                    + (_count_note if _count_mismatch else "")
+                    + ". Review the outline below.\n\n"
+                    + outline_md
+                    + "\n\n"
+                    + f"To approve and render: call {_resume_call}. "
+                    + "To edit: pass plan_edits with the same resume_token."
+                )
+                _omni_msg = (
+                    f"Drafted {_actual}-slide outline"
+                    + (f" (requested {_target})" if _count_mismatch else "")
+                    + f" — on approval call {_resume_call}."
+                )
+
+                # Plan-edits operations the model can use for surgical edits,
+                # avoiding the need to reconstruct the full plan JSON.
+                _plan_edits_guide = {
+                    "indexing": (
+                        "slide_index is 0‑based — outline slide N → "
+                        "slide_index N-1. Always subtract 1 from the number "
+                        "the user sees in the outline."
+                    ),
+                    "description": (
+                        "For surgical edits, use plan_edits instead of "
+                        "approved_plan. Each edit is one op: set_title, "
+                        "set_bullets, set_bullet, remove_slide, add_slide, "
+                        "set_figure, set_type, swap_slides, move_slide."
+                    ),
+                    "examples": [
+                        {"action": "set_title", "slide_index": 2,
+                         "title": "New title text"},
+                        {"action": "set_bullet", "slide_index": 3,
+                         "bullet_index": 0, "text": "Updated bullet"},
+                        {"action": "remove_slide", "slide_index": 4},
+                        {"action": "add_slide", "after_index": 2,
+                         "slide": {"slide_type": "content",
+                                   "title": "New Slide",
+                                   "bullets": ["point 1", "point 2"]}},
+                        {"action": "set_figure", "slide_index": 5,
+                         "figure_path": "figure_2"},
+                        {"action": "swap_slides", "index_a": 2, "index_b": 5},
+                    ],
+                    "merge_two_slides": (
+                        "To merge slide A into slide B: use set_bullets on "
+                        "slide B to combine bullets from both, then "
+                        "remove_slide on slide A. Example — merge outline "
+                        "slide 4 into slide 3: "
+                        '[{"action":"set_bullets","slide_index":2,'
+                        '"bullets":["merged bullet 1","merged bullet 2","..."]},'
+                        '{"action":"remove_slide","slide_index":3}]'
+                    ),
+                    "delete_slide_and_renumber": (
+                        "To delete a slide: remove_slide on its 0‑based index. "
+                        "To delete outline slide N, use slide_index N-1."
+                    ),
+                }
+
                 return {
                     "status": "partial",
                     "outcome": {"code": "awaiting_review"},
@@ -1144,13 +1718,39 @@ class ResearchPptxEngine:
                     "recoverable": True,
                     "blocking": False,
                     "resume_token": token,
-                    "summary": (
-                        f"Drafted a {len(plan.slides)}-slide outline for review. "
-                        f"To render, resume with resume_token=\"{token}\"."
-                    ),
+                    "target_slides": _target,
+                    "actual_slides": _actual,
+                    "slide_count_mismatch": _count_mismatch,
+                    "awaiting_action": {
+                        "prompt": _await_prompt,
+                        "options": [
+                            {
+                                "key": "enter",
+                                "label": _opt_enter,
+                                "tool": "run_skill",
+                                "skill_name": "research-pptx",
+                                "input": {"resume_token": token},
+                            },
+                            {
+                                "key": "e",
+                                "label": _opt_edit,
+                                "tool": "run_skill",
+                                "skill_name": "research-pptx",
+                                "input": {"resume_token": token},
+                            },
+                            {"key": "c", "label": _opt_cancel},
+                        ],
+                        "state": _await_state,
+                    },
+                    "summary": _summary,
                     "report_uri": doc_uri,
+                    # Full markdown outline — the REPL model MUST display this
+                    # to the user verbatim. It is the primary review artifact.
+                    "outline_text": outline_md,
                     "strategy": strategy or {},
-                    # explicit, machine-readable next step for the model.
+                    # Surgical-edit guide so the model doesn't reconstruct the
+                    # full plan JSON (error-prone for multi-turn editing).
+                    "plan_edits_guide": _plan_edits_guide,
                     "next_action": {
                         "when": "after the user approves or edits the outline",
                         "tool": "run_skill",
@@ -1158,24 +1758,36 @@ class ResearchPptxEngine:
                         "mode": "foreground",
                         "required_input": {
                             "resume_token": token,
-                            # Pass approved_plan back verbatim (or user-edited).
-                            "approved_plan": "<the plan object, edited if the user requested changes>",
+                        },
+                        "optional_input": {
+                            "plan_edits": (
+                                "[list of edit ops — see plan_edits_guide above. "
+                                "Use this for surgical edits INSTEAD of approved_plan. "
+                                "Pass approved_plan ONLY for full-plan replacement.]"
+                            ),
+                            "approved_plan": (
+                                "<full plan JSON — only if the user provided "
+                                "a complete replacement plan>"
+                            ),
                         },
                         "note": (
-                            "Do NOT call submit_task again and do NOT re-plan the "
-                            "outline. Resuming with the token renders the existing plan."
+                            "Prefer plan_edits for incremental changes. "
+                            "Pass approved_plan only when replacing the entire plan."
                         ),
                     },
-                    # end this turn cleanly so the model reports to the user
-                    # instead of immediately re-planning.
-                    "_omni_control": {"terminal": True, "message": (
-                        f"Drafted {len(plan.slides)}-slide outline. Please review. "
-                        f"I will render the deck with the resume_token once you approve."
-                    )},
+                    "_omni_control": {
+                        "terminal": True,
+                        "message": _omni_msg,
+                        "display": "outline",
+                        "approve_tool": "run_skill",
+                        "approve_skill": "research-pptx",
+                        "approve_input": {"resume_token": token},
+                    },
                     "resume_instructions": {
                         "skill_name": "research-pptx",
                         "resume_token": token,
                         "approved_plan": persisted.get("plan") or plan.model_dump(),
+                        "plan_edits_guide": _plan_edits_guide,
                     },
                     "plan": persisted.get("plan") or plan.model_dump(),
                     "outline": [
@@ -1184,7 +1796,9 @@ class ResearchPptxEngine:
                     ],
                 }
 
-            return await self._render_and_finish(plan, work_dir, req, tel, _progress, t0, _ms)
+            return await self._render_and_finish(
+                plan, work_dir, req, tel, _progress, t0, _ms
+            )
 
         except Exception as exc:  # noqa: BLE001
             missing_module = (
@@ -1220,6 +1834,13 @@ class ResearchPptxEngine:
     async def _render_and_finish(
             self, plan, work_dir, req, tel, _progress, t0, _ms
     ) -> PresentationResult | dict[str, Any]:
+        if req.target_slides is not None and len(plan.slides) != req.target_slides:
+            return _slide_count_mismatch_result(
+                target=req.target_slides,
+                actual=len(plan.slides),
+                phase="pre_render",
+                resume_token=req.resume_token,
+            )
         _sr = _load_sibling("slide_renderer")
         node_runtime_dir = _omni_renderer_runtime_dir(self.ctx)
         setup_command = (
@@ -1240,10 +1861,18 @@ class ResearchPptxEngine:
         content = _resolve_content_for_render_impl(work_dir)
 
         if content.equations:
+            await _progress(
+                _l10n(req.language, "progress.rendering_eq") or "Rendering equations",
+                0.34,
+            )
             await self._render_equations(content.equations, work_dir)
             tel.stage("pptx_equations_rendered",
                       input_summary={"n": len(content.equations)}, latency_ms=_ms())
 
+        await _progress(
+            _l10n(req.language, "progress.resolving_figs") or "Resolving figures",
+            0.35,
+        )
         plan = resolve_figure_paths(plan, content.figures, work_dir)
         # Auto-number figure / table captions so the audience can point at them
         # during Q&A. Idempotent — runs skip captions that already carry a
@@ -1253,10 +1882,17 @@ class ResearchPptxEngine:
 
         sparse = self._check_sparse_slides(plan)
         if sparse:
-            self._fix_sparse_slides(plan, sparse)
+            self._fix_sparse_slides(
+                plan,
+                sparse,
+                target_slides=req.target_slides,
+            )
             tel.stage("pptx_sparse_fixed", input_summary={"n": len(sparse)}, latency_ms=_ms())
 
-        await _progress("rendering", "Rendering PPTX...")
+        await _progress(
+            _l10n(req.language, "progress.rendering_slides") or "Rendering slides",
+            0.45,
+        )
 
         # ── template-faithful path — reuse the user PPTX as a container ──
         # When a resolved template exists AND python-pptx can reuse its layouts,
@@ -1297,8 +1933,17 @@ class ResearchPptxEngine:
             else "no reusable template; rebuilt master",
         )
 
+        await _progress(
+            f"{_l10n(req.language, 'progress.render_done') or 'Slide render done'} · {len(plan.slides)}/{len(plan.slides)} "
+            f"{_l10n(req.language, 'detail.pages') or 'pages'}",
+            0.60,
+        )
+
         # ── QA overflow loop (geometric, deterministic) ──
-        await _progress("qa", "Quality checks...")
+        await _progress(
+            _l10n(req.language, "progress.quality_check") or "Quality check",
+            0.65,
+        )
         for qa_iter in range(2):
             overflow = await asyncio.to_thread(check_overflow_structured, pptx_path)
             critical = [o for o in overflow if o["severity"] == "critical"]
@@ -1318,12 +1963,25 @@ class ResearchPptxEngine:
             else:
                 break
         warnings = await asyncio.to_thread(check_overflow_structured, pptx_path)
+        _qa_detail = (
+            _l10n(req.language, "detail.no_overflow") or "No overflow"
+            if not warnings
+            else (_l10n(req.language, "detail.warnings_fixed", count=len(warnings))
+                  or f"{len(warnings)} warning(s) fixed")
+        )
+        await _progress(
+            f"{_l10n(req.language, 'progress.quality_done') or 'Quality check done'} · {_qa_detail}",
+            0.75,
+        )
 
         # ── Text-domain structured visual critique (no multimodal model) ──
         # Translate the rendered deck into a *textual* layout report and let the
         # LLM catch figure/section mismatches, sparse pages, and figure↔bullet
         # inconsistencies it cannot fix geometrically. One bounded repair pass.
-        await _progress("critique", "Visual review...")
+        await _progress(
+            _l10n(req.language, "progress.visual_review") or "Visual review",
+            0.78,
+        )
         warnings_before = list(warnings)
         edits: list[dict[str, Any]] = []
         proposed = 0
@@ -1342,7 +2000,23 @@ class ResearchPptxEngine:
                     )
                 else:
                     pptx_path = await render_pptx(plan, work_dir)
+                # Re-check for overflow introduced by the critique edits
+                # and run one bounded fix pass so the stored artifact is clean.
                 warnings = await asyncio.to_thread(check_overflow_structured, pptx_path)
+                if warnings:
+                    crit = [w for w in warnings if w.get("severity") == "critical"]
+                    if crit:
+                        self._apply_overflow_fixes(plan, crit, iteration=1)
+                        try:
+                            if render_backend == "template_reuse":
+                                pptx_path = await _tb.render_pptx_from_template(
+                                    plan, tpl_local, work_dir,
+                                )
+                            else:
+                                pptx_path = await render_pptx(plan, work_dir)
+                            warnings = await asyncio.to_thread(check_overflow_structured, pptx_path)
+                        except Exception:
+                            pass  # best-effort; don't fail the whole render
                 tel.decision(
                     "visual_critique",
                     options=["render_as_is", "apply_edits"],
@@ -1375,9 +2049,27 @@ class ResearchPptxEngine:
             latency_ms=_ms(),
         )
         tel.stage("pptx_qa_done", output_summary={"remaining": len(warnings)}, latency_ms=_ms())
+        _vr_detail = (
+            _l10n(req.language, "detail.edits", count=applied) or f"{applied} edit(s)"
+        )
+        await _progress(
+            f"{_l10n(req.language, 'progress.visual_done') or 'Visual review done'} · {_vr_detail}",
+            0.85,
+        )
+
+        if req.target_slides is not None and len(plan.slides) != req.target_slides:
+            return _slide_count_mismatch_result(
+                target=req.target_slides,
+                actual=len(plan.slides),
+                phase="post_render",
+                resume_token=req.resume_token,
+            )
 
         # ── store artifact ──
-        await _progress("upload", "Storing artifact...")
+        await _progress(
+            _l10n(req.language, "progress.storing") or "Storing artifact",
+            0.88,
+        )
         pptx_artifact = await self._store_pptx(pptx_path, plan.title)
         pptx_uri = str(pptx_artifact["uri"])
         figures_used = sum(
@@ -1397,8 +2089,11 @@ class ResearchPptxEngine:
             duration_s=elapsed,
             pptx_uri=pptx_uri,
         )
-        summary = (f"Generated a {len(plan.slides)}-slide deck '{plan.title}' "
-                   f"({figures_used} figures).")
+        size_mb = round(os.path.getsize(pptx_path) / (1024 * 1024), 1)
+        elapsed_str = f"{int(elapsed // 60)}:{int(elapsed % 60):02d}" if elapsed >= 60 else f"{elapsed:.0f}s"
+        summary = (f"Generated {len(plan.slides)}-slide deck '{plan.title}'"
+                   f" with {figures_used} figures")
+        await _progress(f"PPTX saved · {size_mb} MB · {elapsed_str}", 1.0)
         return PresentationResult(
             status="ok",
             summary=summary,
@@ -1547,6 +2242,142 @@ class ResearchPptxEngine:
                         )
                         applied += 1
         return applied
+
+    @staticmethod
+    def _apply_plan_edits(plan_dict: dict, edits: list[dict[str, Any]]) -> dict:
+        """Apply a list of edit operations to a plan dict.
+
+        This lets the REPL model make surgical edits without reconstructing
+        the entire plan JSON — it passes ``plan_edits`` instead of (or in
+        addition to) ``approved_plan`` when resuming from a review checkpoint.
+
+        Supported actions:
+
+        - ``set_title``: change a slide's title
+        - ``set_bullets``: replace a slide's entire bullet list
+        - ``set_bullet``: change a single bullet by index
+        - ``remove_slide``: delete a slide by index
+        - ``add_slide``: insert a new slide (provide ``slide`` dict + ``after_index``)
+        - ``set_figure``: change figure_path on a slide
+        - ``set_type``: change slide_type (content→content_figure etc.)
+        - ``swap_slides``: swap two slides by index
+        - ``move_slide``: move a slide from one position to another
+        """
+        output = copy.deepcopy(plan_dict)
+        slides = output.get("slides", [])
+        if not slides:
+            raise ValueError("plan_edits require a plan with at least one slide")
+
+        supported_actions = {
+            "set_title",
+            "set_bullets",
+            "set_bullet",
+            "remove_slide",
+            "add_slide",
+            "set_figure",
+            "set_type",
+            "swap_slides",
+            "move_slide",
+        }
+
+        def index_for(edit: dict[str, Any], key: str) -> int:
+            try:
+                index = int(edit[key])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(f"plan edit {key} must be an integer") from exc
+            if not 0 <= index < len(slides):
+                raise ValueError(
+                    f"plan edit {key}={index} is outside 0..{len(slides) - 1}"
+                )
+            return index
+
+        # Operations are applied in declaration order. Every index therefore
+        # refers to the plan produced by the preceding operation, matching the
+        # examples shown to users (edit a slide, then remove another one).
+        for edit in edits:
+            if not isinstance(edit, dict):
+                raise ValueError("every plan edit must be an object")
+            action = str(edit.get("action", "")).strip()
+            if action not in supported_actions:
+                raise ValueError(f"unsupported plan edit action: {action or '<empty>'}")
+
+            if action == "remove_slide":
+                del slides[index_for(edit, "slide_index")]
+
+            elif action == "add_slide":
+                new_slide = edit.get("slide")
+                if not isinstance(new_slide, dict):
+                    raise ValueError("add_slide requires a slide object")
+                try:
+                    after = int(edit.get("after_index", len(slides) - 1))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("add_slide after_index must be an integer") from exc
+                if not -1 <= after < len(slides):
+                    raise ValueError(
+                        f"plan edit after_index={after} is outside -1..{len(slides) - 1}"
+                    )
+                slides.insert(after + 1, copy.deepcopy(new_slide))
+
+            elif action == "swap_slides":
+                a = index_for(edit, "index_a")
+                b = index_for(edit, "index_b")
+                slides[a], slides[b] = slides[b], slides[a]
+
+            elif action == "move_slide":
+                src = index_for(edit, "from_index")
+                dst = index_for(edit, "to_index")
+                if src != dst:
+                    slides.insert(dst, slides.pop(src))
+
+            elif action == "set_title":
+                idx = index_for(edit, "slide_index")
+                title = str(edit.get("title", "")).strip()
+                if not title:
+                    raise ValueError("set_title requires non-empty title text")
+                slides[idx]["title"] = title
+
+            elif action == "set_bullets":
+                idx = index_for(edit, "slide_index")
+                bullets = edit.get("bullets")
+                if not isinstance(bullets, list):
+                    raise ValueError("set_bullets requires a bullets array")
+                slides[idx]["bullets"] = [str(bullet) for bullet in bullets]
+
+            elif action == "set_bullet":
+                idx = index_for(edit, "slide_index")
+                bullets = slides[idx].get("bullets")
+                if not isinstance(bullets, list):
+                    raise ValueError("set_bullet requires an existing bullets array")
+                try:
+                    bullet_idx = int(edit["bullet_index"])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ValueError("set_bullet bullet_index must be an integer") from exc
+                if not 0 <= bullet_idx < len(bullets):
+                    raise ValueError(
+                        f"plan edit bullet_index={bullet_idx} is outside "
+                        f"0..{len(bullets) - 1}"
+                    )
+                text = str(edit.get("text", "")).strip()
+                if not text:
+                    raise ValueError("set_bullet requires non-empty text")
+                bullets[bullet_idx] = text
+
+            elif action == "set_figure":
+                idx = index_for(edit, "slide_index")
+                figure_path = edit.get("figure_path")
+                slides[idx]["figure_path"] = (
+                    str(figure_path) if figure_path else None
+                )
+
+            elif action == "set_type":
+                idx = index_for(edit, "slide_index")
+                slide_type = str(edit.get("slide_type", "")).strip()
+                if not slide_type:
+                    raise ValueError("set_type requires a non-empty slide_type")
+                slides[idx]["slide_type"] = slide_type
+
+        output["slides"] = slides
+        return output
 
     async def _process_paper_corpus(
             self, req: PresentationRequest, work_dir: str, _progress: Any,
@@ -1754,7 +2585,10 @@ class ResearchPptxEngine:
 
         # Case 1: PDF
         if pdf_path and pdf_path.lower().endswith(".pdf"):
-            await _progress("parsing", "Parsing PDF...")
+            await _progress(
+                _l10n(req.language, "progress.parsing_pdf") or "Parsing PDF content...",
+                0.08,
+            )
             sections_map, total_pages = await prescreen_sections(pdf_path)
             ref_start = sections_map.get("references", total_pages)
             page_range = None
@@ -1793,9 +2627,10 @@ class ResearchPptxEngine:
             equations = extract_equations_from_markdown(md_text)
 
             await _progress(
-                "parsing",
-                f"Extracted {len(figures)} figures, {len(tables)} tables, "
-                f"{len(equations)} equations",
+                _l10n(req.language, "progress.extraction_done",
+                      figures=len(figures), tables=len(tables))
+                or f"Extracted {len(figures)} figures · {len(tables)} tables",
+                0.12,
             )
             content = ParsedContent(
                 source_type="pdf",
@@ -1895,6 +2730,31 @@ class ResearchPptxEngine:
             modified = False
             if slide.slide_type in ("title", "section"):
                 continue
+            if slide.slide_type == "metrics" and slide.metrics:
+                modified = False
+                # Truncate long labels that cause horizontal overflow in
+                # narrow cards. Values are handled by adaptive font sizing
+                # in the JS renderer on re-render.
+                max_label_len = 18 if severity == "critical" else 24
+                for i, m in enumerate(slide.metrics):
+                    label = str(m.get("label", ""))
+                    if len(label) > max_label_len:
+                        cut = label[:max_label_len].rfind(" ")
+                        if cut < max_label_len // 2:
+                            cut = max_label_len
+                        m["label"] = label[:cut].rstrip(",.;:") + "…"
+                        modified = True
+                # If still critical, reduce metric count — fewer cards
+                # means wider cards and more room for text.
+                if severity == "critical" and len(slide.metrics) > 2:
+                    slide.metrics = slide.metrics[:2]
+                    modified = True
+                elif overflow_inches >= 0.3 and len(slide.metrics) > 3:
+                    slide.metrics = slide.metrics[:3]
+                    modified = True
+                if modified:
+                    fixed += 1
+                continue
             if slide.bullets:
                 max_len = 70 if severity == "critical" else 90
                 for i, b in enumerate(slide.bullets):
@@ -1913,6 +2773,26 @@ class ResearchPptxEngine:
                 max_rows = 5 if severity == "critical" else 6
                 if len(slide.table_rows) > max_rows:
                     slide.table_rows = slide.table_rows[:max_rows]
+                    modified = True
+                # Also truncate overly long cell text that causes
+                # horizontal overflow within narrow columns.
+                max_cell_len = 45 if severity == "critical" else 60
+                for ri, row in enumerate(slide.table_rows):
+                    for ci, cell in enumerate(row):
+                        cell_str = str(cell)
+                        if len(cell_str) > max_cell_len:
+                            cut = cell_str[:max_cell_len].rfind(" ")
+                            if cut < max_cell_len // 2:
+                                cut = max_cell_len
+                            row[ci] = cell_str[:cut].rstrip(",.;:") + "…"
+                            modified = True
+                # If there are too many columns, text becomes illegible;
+                # drop the rightmost columns to keep content readable.
+                max_cols = 6 if severity == "critical" else 8
+                if slide.table_headers and len(slide.table_headers) > max_cols:
+                    slide.table_headers = slide.table_headers[:max_cols]
+                    for ri in range(len(slide.table_rows)):
+                        slide.table_rows[ri] = slide.table_rows[ri][:max_cols]
                     modified = True
             if slide.figure_caption and len(slide.figure_caption) > 120:
                 slide.figure_caption = slide.figure_caption[:117] + "..."
@@ -1950,7 +2830,16 @@ class ResearchPptxEngine:
         return warnings
 
     @staticmethod
-    def _fix_sparse_slides(plan, sparse_warnings) -> int:
+    def _fix_sparse_slides(
+        plan: PresentationPlan,
+        sparse_warnings: list[dict[str, Any]],
+        *,
+        target_slides: int | None = None,
+    ) -> int:
+        """Remove mergeable sparse slides unless an exact count forbids it."""
+
+        if target_slides is not None:
+            return 0
         indices_to_remove: set[int] = set()
         fixed = 0
         for w in sparse_warnings:

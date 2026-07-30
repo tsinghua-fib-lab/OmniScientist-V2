@@ -117,6 +117,16 @@ class TaskORM(Base):
     # ``/schedule show`` list a schedule's run history in headless-turn mode,
     # where the work is a full planner→workflow turn (not one direct subtask).
     schedule_id: Mapped[str] = mapped_column(String(40), default="", index=True)
+    # Retry lineage. ``task retry`` creates a NEW task that carries
+    # ``retry_of_task_id`` (its immediate parent attempt), ``root_task_id`` (the
+    # first attempt of the chain), and a monotonically increasing ``attempt``.
+    # ``input_snapshot_json`` is the immutable turn input (user text + file uris +
+    # interaction mode + origin) so a later attempt reproduces the original
+    # request without mutating the task it retried.
+    retry_of_task_id: Mapped[str] = mapped_column(String(40), default="", index=True)
+    root_task_id: Mapped[str] = mapped_column(String(40), default="", index=True)
+    attempt: Mapped[int] = mapped_column(Integer, default=1)
+    input_snapshot_json: Mapped[dict] = mapped_column(JSON, default=dict)
     kind: Mapped[str] = mapped_column(String(24), default="turn", index=True)
     # turn | subagent | maintenance
     depth: Mapped[int] = mapped_column(Integer, default=0)
@@ -294,6 +304,10 @@ class SubtaskORM(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     archived_reason: Mapped[str] = mapped_column(Text, default="")
+    # Local-first execution owner. A replacement process can immediately
+    # settle a claim whose PID is dead; live owners are never stolen.
+    # 0 means "legacy / unclaimed" and follows the time lease.
+    owner_pid: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class WorkflowCheckpointORM(Base):
@@ -322,6 +336,13 @@ class TaskEventORM(Base):
     """Append-only event stream for a :class:`TaskORM`."""
 
     __tablename__ = "task_events"
+    # Deployed databases carry this index under an older name, but nothing in the
+    # code declared it any more, so a freshly created store had no constraint at
+    # all: concurrent appends silently wrote two events under one sequence number
+    # and the stream stopped being orderable. Declaring it keeps old and new
+    # stores telling the same story; `TaskRecorder.append_event` retries on the
+    # collision rather than surfacing it.
+    __table_args__ = (UniqueConstraint("task_id", "seq", name="ux_task_events_task_seq"),)
 
     id: Mapped[str] = mapped_column(String(40), primary_key=True, default=_uuid)
     task_id: Mapped[str] = mapped_column(
@@ -330,6 +351,10 @@ class TaskEventORM(Base):
     seq: Mapped[int] = mapped_column(Integer, default=0, index=True)
     event_type: Mapped[str] = mapped_column(String(64), default="", index=True)
     status: Mapped[str] = mapped_column(String(32), default="")
+    # Canonical invocation semantics. ``status`` remains the legacy projection
+    # consumed by existing CLI/API clients during the compatibility window.
+    lifecycle_status: Mapped[str] = mapped_column(String(32), default="")
+    result_success: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     name: Mapped[str] = mapped_column(String(128), default="")
     tool_name: Mapped[str] = mapped_column(String(128), default="")
     skill_name: Mapped[str] = mapped_column(String(128), default="")
@@ -819,6 +844,11 @@ class ActionCheckpointORM(Base):
     origin_project_dir: Mapped[str] = mapped_column(String(512), default="")
     channel: Mapped[str] = mapped_column(String(32), default="cli", index=True)
     session_id: Mapped[str] = mapped_column(String(40), default="", index=True)
+    # Owning Task (the needs_input turn that persisted this draft). Lets
+    # ``task resume <task-id>`` find the checkpoint directly; pre-migration rows
+    # that predate this column backfill lazily from ``action.checkpoint.created``
+    # events during resume.
+    task_id: Mapped[str] = mapped_column(String(40), default="", index=True)
     actor_principal: Mapped[str] = mapped_column(String(96), default="local", index=True)
     required_decider: Mapped[str] = mapped_column(String(96), default="", index=True)
     # The sealed proposal-so-far, its drift fingerprint, and the resolver verdict
@@ -880,6 +910,11 @@ class TaskIndexORM(Base):
     external_key: Mapped[str] = mapped_column(String(256), default="", index=True)
     session_id: Mapped[str] = mapped_column(String(40), default="", index=True)
     parent_task_id: Mapped[str] = mapped_column(String(40), default="")
+    # Denormalised retry lineage so ``task --all`` can render/route attempts
+    # without opening the owning workspace (mirrors :class:`TaskORM`).
+    retry_of_task_id: Mapped[str] = mapped_column(String(40), default="", index=True)
+    root_task_id: Mapped[str] = mapped_column(String(40), default="", index=True)
+    attempt: Mapped[int] = mapped_column(Integer, default=1)
     schedule_id: Mapped[str] = mapped_column(String(40), default="", index=True)
     kind: Mapped[str] = mapped_column(String(24), default="turn", index=True)
     status: Mapped[str] = mapped_column(String(32), default="running", index=True)

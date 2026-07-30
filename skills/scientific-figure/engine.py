@@ -17,7 +17,7 @@ class ScientificFigureEngine:
     def validate_params(*, arguments: dict | None = None, input_data: dict | None = None) -> dict | None:
         data = arguments or input_data or {}
         prompt = str(data.get("input") or data.get("query") or data.get("prompt") or "")
-        if not prompt:
+        if not prompt and not _source_dot(data):
             return {"error": "input is required"}
         if str(data.get("revision_mode") or "").strip() and not _source_dot(data):
             return {
@@ -31,6 +31,10 @@ class ScientificFigureEngine:
     async def execute(self, progress_callback: Any = None, **input_data: Any) -> dict[str, Any]:
         prompt = str(input_data.get("input") or input_data.get("query") or input_data.get("prompt") or "")
         source_dot = _source_dot(input_data)
+        revision_mode = str(input_data.get("revision_mode") or "").strip()
+        if not revision_mode and isinstance(input_data.get("revision_constraints"), dict):
+            revision_mode = "major"
+        authored = bool(source_dot) and not revision_mode
         source_title = str(input_data.get("source_artifact_title") or (_dot_title(source_dot) if source_dot else ""))
         title = str(input_data.get("title") or source_title or "Scientific Figure")
         ctx = getattr(self, "ctx", None)
@@ -44,15 +48,32 @@ class ScientificFigureEngine:
             title=title,
             source_text=source_dot,
         )
+        instruction_graph = (
+            not authored
+            and not source_dot
+            and not revision_mode
+            and _needs_instruction_graph(prompt, title)
+        )
+        if instruction_graph:
+            figure_kind = "generic"
+            kind_gate = {
+                "code": "instruction_graph",
+                "requested_kind": requested_figure_kind,
+                "figure_kind": "generic",
+                "named_stages": _instruction_named_stages(prompt, title),
+            }
         effective_inputs = _effective_inputs(
             input_data,
             prompt=prompt,
             title=title,
             requested_figure_kind=requested_figure_kind,
             figure_kind=figure_kind,
-            revision=bool(source_dot),
+            revision=bool(revision_mode),
+            authored=authored,
         )
-        if source_dot:
+        if authored:
+            dot = _retitle_dot(source_dot, title) if title else source_dot
+        elif source_dot:
             dot = _major_revision_dot(source_dot, prompt=prompt, title=title, kind=figure_kind)
             revision = {
                 "mode": "major",
@@ -83,8 +104,14 @@ class ScientificFigureEngine:
                         summary=str(quality["reason"]),
                     ),
                 }
+        elif instruction_graph:
+            dot = _instruction_dot(prompt, title)
         else:
             dot = _figure_dot(figure_kind, title)
+
+        topology_gate = _topology_gate(prompt=prompt, title=title, dot=dot)
+        if topology_gate:
+            kind_gate = {**kind_gate, **topology_gate}
 
         await _progress(progress_callback, "render graphviz", 0.35)
         rendered = await _render_graphviz(dot)
@@ -131,6 +158,7 @@ class ScientificFigureEngine:
             mime="application/json",
             kind="data",
             meta=artifact_meta,
+            presentation_role="support",
         )
         if input_art:
             artifacts.append(input_art)
@@ -163,26 +191,52 @@ class ScientificFigureEngine:
         if provenance_art:
             artifacts.append(provenance_art)
 
-        await _progress(progress_callback, "done", 1.0)
         formats = ", ".join(
             a["format"].upper() for a in artifacts if a.get("format") in {"dot", "svg", "png"}
         )
+        await _progress(
+            progress_callback,
+            "done",
+            1.0,
+            stage_id="figure.done",
+            milestone="Figure rendered and checked",
+            stats={"formats": formats} if formats else {},
+        )
         gate_code = str(kind_gate.get("code") or "")
-        status = "partial" if gate_code == "generic_despite_domain_terms" else "ok"
         warning = ""
-        if gate_code == "generic_despite_domain_terms":
+        if gate_code == "topology_mismatch":
+            missing = ", ".join(str(item) for item in kind_gate.get("missing_stages") or [] if item)
+            warning = (
+                "The figure is missing stages the instruction named"
+                + (f" ({missing})" if missing else "")
+                + ". This is a weaker Graphviz schematic; livefigure can draw a richer architecture."
+            )
+        elif gate_code == "instruction_graph":
+            warning = (
+                "This is a weaker Graphviz schematic synthesized from the named stages. "
+                "Built-in templates are only generic, rag, and transformer; "
+                "livefigure can draw a richer architecture."
+            )
+        elif gate_code == "generic_despite_domain_terms":
             warning = (
                 "The instruction names domain components that the generic template does "
                 "not render; the figure is a degraded placeholder. Provide figure_kind "
                 "(rag/transformer) or a more specific instruction for a full diagram."
             )
+        status = "partial" if warning else "ok"
+        if authored and not warning:
+            matched_summary = "Rendered the provided Graphviz source as the figure."
+        elif instruction_graph:
+            matched_summary = warning
+        else:
+            matched_summary = f"Effective figure template `{figure_kind}` matched the provider check."
         assessment = _figure_assessment(
             ctx,
             input_data,
             effective_inputs=effective_inputs,
             kind_gate=kind_gate,
             status="degraded" if warning else "passed",
-            summary=warning or f"Effective figure template `{figure_kind}` matched the provider check.",
+            summary=warning or matched_summary,
             evidence_refs=[
                 str(artifact.get("uri") or "")
                 for artifact in artifacts
@@ -199,7 +253,7 @@ class ScientificFigureEngine:
             "effective_inputs": effective_inputs,
             "deliverable_assessment": assessment,
             "summary": f"Generated an auditable, reproducible {title} ({formats}).",
-            "caption": _caption(figure_kind),
+            "caption": _caption(figure_kind, instruction_graph=instruction_graph),
             "artifacts": artifacts,
             "dot_uri": _first_uri(artifacts, "dot"),
             "svg_uri": _first_uri(artifacts, "svg"),
@@ -208,11 +262,11 @@ class ScientificFigureEngine:
             "research": research,
             "figure_bundle": figure_bundle,
             **({"revision": revision} if revision else {}),
-            "next_actions": [
-                "Use /task show <id> to inspect DOT/SVG/PNG artifacts and the audit trace.",
-                "Use /task attach <id> to continue revising the figure in the current session.",
-                "Use /verify --session to audit claims and supporting evidence.",
-            ],
+            # No ``next_actions``: navigating to this task is the host's to offer,
+            # and it is the only party that knows the id. Declaring them here got
+            # them printed twice — once with a literal "<id>" the reader cannot
+            # use, then again underneath with the real one. ``next_actions`` is
+            # for a command only this skill could know to suggest.
         }
 
 
@@ -306,6 +360,144 @@ def _resolve_creation_kind(
     return declared, {}
 
 
+# Instruction-named control-loop stages a stamped template must actually draw.
+# Word-boundary matching avoids treating RAG's "Citation Verification" as Reflect.
+_LOOP_STAGE_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("perceive", ("perceive", "observe", "\u611f\u77e5", "\u89c2\u5bdf")),
+    ("act", ("act", "\u884c\u52a8")),
+    ("reflect", ("reflect", "\u53cd\u601d")),
+)
+
+
+_LOOP_INTENT = (
+    "closed loop",
+    "closed-loop",
+    "control loop",
+    "loop engineering",
+    "\u95ed\u73af",
+)
+
+
+def _topology_gate(*, prompt: str, title: str, dot: str) -> dict[str, Any]:
+    """Return missing control-loop stages the instruction named but the graph omitted.
+
+    Keyword routing can pick ``rag`` because the prompt also says query/retriever,
+    then stamp a linear pipeline that never draws Perceive/Act/Reflect. That is
+    not ``figure_matches_instruction``.
+    """
+    instruction = f"{title}\n{prompt}"
+    named = _named_loop_stages(instruction)
+    if len(named) < 2 and _has_loop_intent(instruction):
+        named = list(_LOOP_STAGE_GROUPS)
+    if len(named) < 2:
+        return {}
+    missing = [name for name, tokens in named if not _dot_has_any(dot, tokens)]
+    if not missing:
+        return {}
+    return {
+        "code": "topology_mismatch",
+        "named_stages": [name for name, _ in named],
+        "missing_stages": missing,
+    }
+
+
+def _has_loop_intent(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(token in lowered for token in _LOOP_INTENT)
+
+
+def _needs_instruction_graph(prompt: str, title: str) -> bool:
+    """True when a built-in stamp would omit a named or implied control loop."""
+
+    instruction = f"{title}\n{prompt}"
+    return len(_named_loop_stages(instruction)) >= 2 or _has_loop_intent(instruction)
+
+
+def _instruction_named_stages(prompt: str, title: str) -> list[str]:
+    instruction = f"{title}\n{prompt}"
+    named = [name for name, _ in _named_loop_stages(instruction)]
+    if len(named) < 2 and _has_loop_intent(instruction):
+        return [name for name, _ in _LOOP_STAGE_GROUPS]
+    return named
+
+
+def _named_rag_inner(text: str) -> list[tuple[str, str]]:
+    lowered = (text or "").lower()
+    found: list[tuple[str, str]] = []
+    for node_id, stem, label in (
+        ("query", "query", "Query"),
+        ("retriever", "retriev", "Retriever"),
+        ("reranker", "rerank", "Reranker"),
+        ("llm", "llm", "LLM"),
+    ):
+        if stem in lowered:
+            found.append((node_id, label))
+    return found
+
+
+def _dot_escape(value: str) -> str:
+    return str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def _instruction_dot(prompt: str, title: str) -> str:
+    """Weak control-loop schematic from named stages; RAG stays inside Reason."""
+
+    inner = _named_rag_inner(f"{title}\n{prompt}")
+    safe_title = _dot_escape(title)
+    header = f"""digraph InstructionFigure {{
+  graph [rankdir=LR, bgcolor="white", fontname="Helvetica", labelloc=t, label="{safe_title}"];
+  node [shape=box, style="rounded,filled", color="#334155", fillcolor="#f8fafc", fontname="Helvetica", fontsize=14];
+  edge [color="#475569", fontname="Helvetica", fontsize=11];
+  perceive [label="Perceive / Observe"];
+  act [label="Act"];
+  reflect [label="Reflect / Verify"];
+"""
+    if inner:
+        nodes = "\n".join(f'    {node_id} [label="{label}"];' for node_id, label in inner)
+        edges = "\n".join(
+            f"    {inner[index][0]} -> {inner[index + 1][0]};"
+            for index in range(len(inner) - 1)
+        )
+        first_id = inner[0][0]
+        last_id = inner[-1][0]
+        body = f"""  subgraph cluster_reason {{
+    label="Reason / Plan";
+    color="#0f766e";
+{nodes}
+{edges}
+  }}
+  perceive -> {first_id};
+  {last_id} -> act;
+  act -> reflect;
+  reflect -> perceive;
+}}
+"""
+    else:
+        body = """  reason [label="Reason / Plan"];
+  perceive -> reason -> act -> reflect -> perceive;
+}
+"""
+    return header + body
+
+
+def _named_loop_stages(text: str) -> list[tuple[str, tuple[str, ...]]]:
+    return [
+        (name, tokens)
+        for name, tokens in _LOOP_STAGE_GROUPS
+        if _dot_has_any(text, tokens)
+    ]
+
+
+def _dot_has_any(text: str, tokens: tuple[str, ...]) -> bool:
+    return any(_has_stage_token(text, token) for token in tokens)
+
+
+def _has_stage_token(text: str, token: str) -> bool:
+    if any("\u4e00" <= char <= "\u9fff" for char in token):
+        return token in (text or "")
+    return re.search(rf"(?<![A-Za-z]){re.escape(token)}(?![A-Za-z])", text or "", flags=re.I) is not None
+
+
 def _effective_inputs(
     input_data: dict[str, Any],
     *,
@@ -314,6 +506,7 @@ def _effective_inputs(
     requested_figure_kind: str,
     figure_kind: str,
     revision: bool,
+    authored: bool = False,
 ) -> dict[str, Any]:
     """Auditable inputs actually used by the provider, excluding local paths."""
 
@@ -323,6 +516,7 @@ def _effective_inputs(
         "requested_figure_kind": requested_figure_kind,
         "figure_kind": figure_kind,
         "revision_mode": "major" if revision else "",
+        "authored_source": bool(authored),
         "source_task_id": str(input_data.get("source_task_id") or ""),
         "source_artifact_uri": str(input_data.get("source_artifact_uri") or ""),
     }
@@ -642,13 +836,20 @@ async def _render_graphviz(dot: str) -> dict[str, Any]:
         return {"cmd": "dot not found; used SVG fallback"}
     out: dict[str, Any] = {"cmd": f"{dot_bin} -Tsvg/-Tpng"}
     for fmt in ("svg", "png"):
-        proc = await asyncio.create_subprocess_exec(
-            dot_bin,
-            f"-T{fmt}",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                dot_bin,
+                f"-T{fmt}",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as exc:
+            # Windows can discover a PATH shim through PATHEXT yet still reject
+            # it at CreateProcess time. Missing Graphviz is optional: callers
+            # already synthesize an SVG fallback when no rendered bytes exist.
+            out[f"{fmt}_error"] = str(exc)[:500]
+            continue
         stdout, stderr = await proc.communicate(dot.encode("utf-8"))
         if proc.returncode == 0 and stdout:
             out[fmt] = stdout
@@ -667,6 +868,7 @@ async def _store_artifact(
     kind: str = "figure",
     meta: dict[str, Any] | None = None,
     record_format: str | None = None,
+    presentation_role: str = "primary",
 ) -> dict[str, str] | None:
     if ctx is None or getattr(ctx, "artifacts", None) is None:
         return None
@@ -680,12 +882,14 @@ async def _store_artifact(
         task_id=getattr(ctx, "task_id", ""),
         subtask_id=getattr(ctx, "subtask_id", ""),
         workflow_run_id=getattr(ctx, "workflow_run_id", ""),
-        meta=meta,
+        meta={**(meta or {}), "presentation_role": presentation_role},
     )
     # Shared record shape + user-facing path (launch-dir copy when mirrored).
     # ``record_format`` lets a compound on-disk extension (``provenance.json``)
     # keep a clean result label (``json``) without polluting format lookups.
-    return stored.result_record(title=title, format=record_format or fmt)
+    record = stored.result_record(title=title, format=record_format or fmt)
+    record["presentation_role"] = presentation_role
+    return record
 
 
 async def _write_provenance(
@@ -763,6 +967,7 @@ async def _write_provenance(
         mime="application/json",
         kind="figure",
         meta=meta,
+        presentation_role="support",
     )
 
 
@@ -1005,7 +1210,12 @@ def _first_uri(artifacts: list[dict[str, str]], fmt: str) -> str:
     return next((a.get("uri", "") for a in artifacts if a.get("format") == fmt), "")
 
 
-def _caption(kind: str) -> str:
+def _caption(kind: str, *, instruction_graph: bool = False) -> str:
+    if instruction_graph:
+        return (
+            "A weaker Graphviz schematic of the named control-loop stages; "
+            "not a livefigure architecture diagram."
+        )
     if kind == "rag":
         return (
             "RAG combines query rewriting, vector retrieval, reranking or context compression, "

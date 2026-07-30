@@ -6,6 +6,54 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) and semanti
 
 ### Added
 
+- GitHub Actions ``Release preflight`` workflow: the release OS × Python
+  matrix on demand, without a tag or PyPI publish.
+- ``scripts/release.sh --preflight`` runs the same isolated ruff / pytest /
+  release-gate / wheel / smoke cell as GitHub ``release.yml`` on this OS.
+
+### Fixed
+
+- Host slide fill passes ``artifact://`` (or an existing absolute path) into
+  ``research-pptx``, not a store-relative ``artifacts/*.md``. A child whose
+  cwd is not the control store no longer fails ``markdown_uri`` lookup.
+- ``os_sandbox=auto`` without a kernel backend warns and keeps running, so
+  stock Linux and GitHub runners are not fail-closed. ``cli_exec`` grants
+  host-supplied input paths that do not open the control store.
+- Windows release no longer fails specialist / workflow parallelism on a
+  wall-clock budget or a triple-point overlap that process spawn can miss.
+- Cancel persist retries a locked SQLite writer with the same queue as
+  workflow checkpoints, so a dying Windows ``cli_exec`` does not turn
+  ``react.tool.failed`` into ``database is locked``.
+
+## [2.0.0rc3] - 2026-08-16
+
+### Fixed
+
+- A turn that already has the named files on this task no longer settles
+  failed or Partial success because a leftover child failed or a host fill
+  succeeded. WeChat hop 2 notifies the parent channel after the child
+  finishes. The survey closer still retrieves after a ReAct demote.
+  `综述` plus PPT binds slides, not a manuscript.
+- Windows release no longer fails the async-subagent overlap test on
+  wall-clock noise.
+- WeChat no longer deadlocks when the model asks for `run_skill` in
+  foreground: a turn that does not wait detaches the skill and still
+  sends files on hop 2 after the inbound send lock drops.
+- Scratch and `$OMNI_OUTPUT_DIR` now live outside the control store.
+  Sandbox write roots never open `$OMNI_HOME`. `uninstall --purge` refuses
+  a user store that was adopted as an in-place project, skips the outer
+  store in the registered list, aborts if a service stop fails, and does
+  not `rmtree` after a quarantine rename failure.
+
+### Changed
+
+- Bumped the release candidate to `2.0.0rc3` (Git tag `v2.0.0rc3`).
+  PyPI will not replace `2.0.0rc2`.
+
+## [2.0.0rc2] - 2026-08-01
+
+### Added
+
 - Added a reactive typed-plan control plane: immutable content-addressed revisions, contract-declared
   semantic constraints and binding provenance, one host-scoped model patch after findings, verified
   resolver ownership for factual identifiers, and a final live-contract execution gate.
@@ -24,9 +72,12 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) and semanti
 - Added a fail-closed 80% changed-code coverage artifact for `cli/src/omni/**/*.py` in pull-request,
   push, and tag workflows, with event-bound baselines, previous-release comparison, and an immutable
   first-release bootstrap.
+- Added typed task recovery (`retry` / `resume` / `requeue`) with cross-workspace routing, plus
+  branch-coverage tests that clear the first-tag changed-code coverage gate (≥80%).
 
 ### Changed
 
+- Bumped the release candidate to `2.0.0rc2` (planned Git tag `v2.0.0rc2`).
 - Plan approval now binds the canonical plan, skill catalog, provider contracts, and exact sensitive
   grants in one authority fingerprint and atomic claim. Reapproval replaces prior grants instead of
   retaining privilege by union.

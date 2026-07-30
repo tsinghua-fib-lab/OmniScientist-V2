@@ -280,16 +280,40 @@ def _result_error_message(result: dict[str, Any]) -> str:
     return "unknown error"
 
 
+def _partial_outputs_are_deliverable(value: Any) -> bool:
+    """True when a prompt-skill trace actually wrote a file, not just ran bash.
+
+    Bash/read traces used to count as visible output, so a skill that extracted
+    a PDF and then announced ``done`` with an empty ``text`` was settled as
+    succeeded. Only writes (or an explicit path that is not a shell command)
+    are a deliverable.
+    """
+    if not isinstance(value, list):
+        return False
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        tool = str(item.get("tool") or "")
+        path = str(item.get("path") or "").strip()
+        if tool in {"write_file", "edit_file"} and path:
+            return True
+        if path and tool not in {"bash", "read_file"}:
+            return True
+    return False
+
+
 def _result_has_visible_output(result: Any) -> bool:
     if not isinstance(result, dict):
         return result is not None
     for key in ("summary", "text", "message", "title", "warning", "error"):
         if str(result.get(key) or "").strip():
             return True
-    for key in ("artifacts", "files", "output_uris", "steps", "partial_outputs"):
+    for key in ("artifacts", "files", "output_uris", "steps"):
         value = result.get(key)
         if isinstance(value, list) and value:
             return True
+    if _partial_outputs_are_deliverable(result.get("partial_outputs")):
+        return True
     research = result.get("research")
     if isinstance(research, dict) and any(research.get(key) for key in ("source_ids", "claim_ids", "evidence_ids", "task_id")):
         return True

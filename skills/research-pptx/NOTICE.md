@@ -11,7 +11,7 @@ may be governed by separate publisher, dataset, or service terms.
 
 The `research-pptx` implementation was contributed from
 `https://gitee.com/zgc-omni/omniscientistv2.git`, branch/path
-`zms/skills/research-pptx`, commit `a7def530f1b15434d5eb8344cb5e141d78658f0f`.
+`zms/skills/research-pptx`, commit `eba86d7822c4f3d3ced19f14c8e4f590af30d291`.
 It was adapted for Omni capability routing, task-time read-only dependency
 preflight, provenance/artifact storage, progressive documentation, and
 portable Claude Code, Codex, and OpenClaw execution. The July 2026 update also

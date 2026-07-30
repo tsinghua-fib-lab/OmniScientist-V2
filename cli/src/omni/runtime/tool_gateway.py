@@ -13,9 +13,12 @@ from omni.core.tool_contracts import (
 )
 from omni.core.tool_policy import ToolPolicyGuard, policy_violation
 from omni.core.tool_result import (
+    ToolCallOutcome,
+    attach_tool_outcome,
     is_tool_rejection,
     tool_event_output,
     tool_event_suffix,
+    tool_outcome_event_fields,
     tool_rejection_error,
     tool_result_failure,
     tool_transport_status,
@@ -48,6 +51,7 @@ class ToolGateway:
         resource_scope: str = "",
         policy: Any = None,
         per_tool_limits: dict[str, int] | None = None,
+        origin: dict[str, str] | None = None,
     ) -> None:
         self.task_id = task_id
         self.tools = list(tools or [])
@@ -59,6 +63,10 @@ class ToolGateway:
         self.approval_gate = approval_gate
         self.resource_locks = resource_locks
         self.resource_scope = resource_scope
+        # Where in a workflow these tool calls are happening, when they are
+        # happening in one at all. Empty for a coordinator turn, which has no
+        # position and must not claim one.
+        self.origin = {key: value for key, value in (origin or {}).items() if value}
         self._policy_guard = (
             ToolPolicyGuard.from_policy(policy)
             if policy is not None
@@ -75,6 +83,7 @@ class ToolGateway:
         policy: Any = None,
         per_tool_limits: dict[str, int] | None = None,
         upstream: Any = None,
+        skill_name: str = "",
     ) -> ToolGateway:
         existing = getattr(ctx, "tool_gateway", None)
         if isinstance(existing, cls) and existing.event_family == event_family:
@@ -91,13 +100,44 @@ class ToolGateway:
             resource_scope=str(getattr(ctx, "resource_scope", "") or ""),
             policy=policy,
             per_tool_limits=per_tool_limits,
+            origin={
+                **{
+                    key: str(getattr(ctx, key, "") or "")
+                    for key in ("workflow_run_id", "workflow_step_id", "subtask_id")
+                },
+                "skill_name": skill_name,
+            },
         )
 
     @property
     def tool_specs(self):  # noqa: ANN201
+        """Every tool this gateway can dispatch — the reachable set.
+
+        Reachability is decided upstream by ``ToolPolicy``: a denied tool is not
+        in ``self.tools`` at all and cannot be reached by naming it. What remains
+        here stays runnable whether or not the turn advertises it.
+        """
         return [tool.spec for tool in self.tools]
 
+    def model_visible_specs(self):  # noqa: ANN201
+        """The subset whose schemas this turn pays to send (Codex's naming).
+
+        A deferred tool is absent from here and present in :attr:`tool_specs`,
+        which is the whole point: withholding a schema to save per-iteration
+        tokens must not withdraw the capability, or a turn can do its work and
+        then fail to save it.
+        """
+        return [tool.spec for tool in self.tools if tool.spec.exposure == "direct"]
+
     def invoker(self):  # noqa: ANN201
+        """Return the compatibility invoker without interpreting result JSON."""
+        return self._build_invoker(resolve_owned_outcomes=False)
+
+    def react_invoker(self):  # noqa: ANN201
+        """Return the ReAct invoker that carries trusted adapter outcomes."""
+        return self._build_invoker(resolve_owned_outcomes=True)
+
+    def _build_invoker(self, *, resolve_owned_outcomes: bool):  # noqa: ANN202
         async def invoke(name: str, args: dict[str, Any]) -> Any:
             tool = self._tools_by_name.get(name)
             if tool is None:
@@ -112,6 +152,9 @@ class ToolGateway:
                 input_schema=tool.input_schema,
                 output_schema=tool.output_schema,
                 delegated_target_resolver=tool.admission_target,
+                outcome_resolver=(
+                    tool.outcome_resolver if resolve_owned_outcomes else None
+                ),
             )
 
         return invoke
@@ -129,6 +172,7 @@ class ToolGateway:
         contract: Any = None,
         delegated_target: str = "",
         delegated_target_resolver: Callable[[dict[str, Any]], str] | None = None,
+        outcome_resolver: Callable[[Any], ToolCallOutcome | None] | None = None,
     ) -> Any:
         """Invoke an operation using one immutable admission snapshot.
 
@@ -148,6 +192,7 @@ class ToolGateway:
             contract=contract,
             delegated_target=delegated_target,
             delegated_target_resolver=delegated_target_resolver,
+            outcome_resolver=outcome_resolver,
             apply_runtime_policy=True,
             apply_tool_authorization=True,
             apply_tool_budget=True,
@@ -191,6 +236,7 @@ class ToolGateway:
             contract=contract,
             delegated_target="",
             delegated_target_resolver=None,
+            outcome_resolver=None,
             apply_runtime_policy=False,
             apply_tool_authorization=False,
             apply_tool_budget=False,
@@ -232,6 +278,7 @@ class ToolGateway:
             contract=contract,
             delegated_target="",
             delegated_target_resolver=None,
+            outcome_resolver=None,
             apply_runtime_policy=True,
             apply_tool_authorization=True,
             apply_tool_budget=False,
@@ -251,6 +298,7 @@ class ToolGateway:
         contract: Any = None,
         delegated_target: str,
         delegated_target_resolver: Callable[[dict[str, Any]], str] | None,
+        outcome_resolver: Callable[[Any], ToolCallOutcome | None] | None,
         apply_runtime_policy: bool,
         apply_tool_authorization: bool,
         apply_tool_budget: bool,
@@ -418,7 +466,12 @@ class ToolGateway:
                 *validate_prepared_json_schema(event_result, output_contract),
             )
             if not output_errors:
-                return result
+                return attach_tool_outcome(
+                    result,
+                    outcome_resolver(event_result)
+                    if outcome_resolver is not None
+                    else None,
+                )
             return _contract_violation(
                 name,
                 "output_contract_violation",
@@ -506,10 +559,38 @@ class ToolGateway:
                     "name": name,
                     "arguments": admitted_arguments,
                     "result": event_result,
-                    **_terminal_event_fields(event_result),
+                    **_terminal_event_fields(result),
                 },
             )
+        await self._record_observed_exec(name, admitted_arguments, result)
         return result
+
+    async def _record_observed_exec(
+        self, name: str, arguments: dict[str, Any], result: Any
+    ) -> None:
+        """Write an experiment-run row for exec the host already performed."""
+        db = getattr(self.tasks, "db", None) or getattr(self.tasks, "_db", None)
+        if db is None:
+            return
+        fields = _terminal_event_fields(result)
+        session_id = ""
+        if self.task_id and self.tasks is not None and hasattr(self.tasks, "get_task"):
+            try:
+                task = await self.tasks.get_task(self.task_id)
+            except Exception:  # noqa: BLE001 - ROM write is best-effort
+                task = None
+            if task is not None:
+                session_id = str(getattr(task, "session_id", "") or "")
+        from omni.research.host_record import record_observed_exec
+
+        await record_observed_exec(
+            db,
+            tool_name=name,
+            command=str(arguments.get("command") or arguments.get("code") or ""),
+            status=str(fields.get("status") or ""),
+            session_id=session_id,
+            subtask_id=str(self.origin.get("subtask_id") or ""),
+        )
 
     async def emit(self, phase: str, data: dict[str, Any]) -> None:
         data = copy.deepcopy(data)
@@ -522,11 +603,29 @@ class ToolGateway:
                 "error": error,
                 "status": tool_transport_status(data.get("status"), error),
             }
+            data.setdefault(
+                "lifecycle_status",
+                _lifecycle_from_transport_status(data["status"]),
+            )
+            data.setdefault(
+                "result_success",
+                True if data["lifecycle_status"] == "completed" else None,
+            )
         if self.upstream is not None:
             emitted = self.upstream(phase, copy.deepcopy(data))
             if inspect.isawaitable(emitted):
                 await emitted
         if self.tasks is None:
+            return
+        if phase == "notice" and str(data.get("kind") or "") == "context_rollover":
+            await self.tasks.append_event(
+                self.task_id,
+                event_type=f"{self.event_family}.context.compacted",
+                status="succeeded",
+                name="context",
+                output_json=copy.deepcopy(data),
+                summary=f"{self.event_family} context compacted; continuing same run",
+            )
             return
         if phase == "budget":
             status = str(data.get("status") or "warning")
@@ -561,6 +660,7 @@ class ToolGateway:
                 status="running",
                 name=name,
                 tool_name=name,
+                **self.origin,
                 input_json=copy.deepcopy(data.get("arguments") or {}),
                 summary=f"{self.event_family} tool {name} start",
             )
@@ -576,6 +676,7 @@ class ToolGateway:
                 status=status,
                 name=name,
                 tool_name=name,
+                **self.origin,
                 input_json={
                     **copy.deepcopy(data.get("arguments") or {}),
                     **({"_call_id": data.get("call_id")} if data.get("call_id") else {}),
@@ -584,18 +685,22 @@ class ToolGateway:
                 error=error,
                 summary=_result_brief(result, error),
                 duration_ms=float(data.get("duration_ms") or 0.0),
+                lifecycle_status=str(data.get("lifecycle_status") or ""),
+                result_success=data.get("result_success"),
             )
 
 
 __all__ = ["ToolGateway"]
 
 
-def _terminal_event_fields(result: Any) -> dict[str, str]:
+def _terminal_event_fields(result: Any) -> dict[str, Any]:
     """Build one consistent lifecycle payload for non-raising failures."""
     if is_tool_rejection(result):
         return {
             "status": "rejected",
             "error": tool_rejection_error(result),
+            "lifecycle_status": "blocked",
+            "result_success": None,
         }
     output = tool_event_output(result)
     if isinstance(output, dict) and output.get("contract_violation") is True:
@@ -603,11 +708,31 @@ def _terminal_event_fields(result: Any) -> dict[str, str]:
         return {
             "status": "failed" if execution_started else "rejected",
             "error": str(output.get("error") or "tool contract validation failed"),
+            "lifecycle_status": "failed" if execution_started else "blocked",
+            "result_success": None,
         }
     if failure := tool_result_failure(result):
         status, error = failure
-        return {"status": status, "error": error}
-    return {}
+        return {
+            "status": status,
+            "error": error,
+            **tool_outcome_event_fields(result),
+        }
+    return {
+        "status": "succeeded",
+        "error": "",
+        **tool_outcome_event_fields(result),
+    }
+
+
+def _lifecycle_from_transport_status(status: str) -> str:
+    return {
+        "succeeded": "completed",
+        "failed": "failed",
+        "rejected": "blocked",
+        "cancelled": "aborted",
+        "timed_out": "timed_out",
+    }.get(status, "completed")
 
 
 def _contract_violation(

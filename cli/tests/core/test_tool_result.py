@@ -5,10 +5,16 @@ from omni.core.tool_policy import policy_violation
 from omni.core.tool_result import (
     COMMAND_RESULT_SCHEMA,
     HostToolRejection,
+    ToolCallOutcome,
     ToolResultEnvelope,
     _mint_host_tool_rejection,
+    command_exit_summary,
+    command_failure_hint,
+    command_output_window,
     command_result_status,
+    first_command_output_line,
     is_tool_rejection,
+    owned_result_outcome,
     tool_event_output,
     tool_event_suffix,
     tool_observation,
@@ -104,14 +110,69 @@ def test_tool_rejection_error_preserves_reason_only_payloads() -> None:
     assert tool_rejection_error({"reason": "not a rejection"}) == ""
 
 
-def test_explicit_domain_failures_are_not_mistaken_for_transport_success() -> None:
-    assert tool_result_failure(
-        {"status": "error", "error": "source unavailable"}
-    ) == ("failed", "source unavailable")
-    assert tool_result_failure(
-        {"status": "cancelled", "summary": "stopped by user"}
-    ) == ("cancelled", "stopped by user")
-    assert tool_result_failure({"status": "ok"}) is None
+def test_untrusted_result_status_is_domain_data_not_invocation_authority() -> None:
+    for status in ("error", "failed", "cancelled", "timed_out", "blocked", "invalid"):
+        assert tool_result_failure(
+            {"status": status, "summary": "historical object state"}
+        ) is None
+
+
+def test_typed_unsuccessful_result_retains_invocation_authority() -> None:
+    output = {"status": "error", "error": "source unavailable"}
+    result = ToolResultEnvelope(
+        observation='{"status":"error","error":"source unavailable"}',
+        event_output=output,
+        outcome=ToolCallOutcome.completed(
+            success=False,
+            error="source unavailable",
+        ),
+    )
+
+    assert tool_result_failure(result) == ("failed", "source unavailable")
+    assert tool_event_output(result) is output
+
+
+def test_owned_result_resolver_preserves_declared_cancellation() -> None:
+    outcome = owned_result_outcome(
+        {"status": "cancelled", "summary": "child job was cancelled"}
+    )
+
+    assert outcome is not None
+    assert outcome.lifecycle == "aborted"
+    assert outcome.result_success is None
+    assert outcome.error == "child job was cancelled"
+
+
+def test_command_exit_summary_keeps_the_process_error_line() -> None:
+    assert command_exit_summary(128) == "Command exited with code 128"
+    assert first_command_output_line("\n  \n致命错误：不是 Git 仓库（或者任何父目录）：.git\n") == (
+        "致命错误：不是 Git 仓库（或者任何父目录）：.git"
+    )
+    assert command_exit_summary(
+        128, "致命错误：不是 Git 仓库（或者任何父目录）：.git\n"
+    ) == "Command exited with code 128: 致命错误：不是 Git 仓库（或者任何父目录）：.git"
+
+
+def test_command_failure_hint_prefers_stderr_and_skips_progress() -> None:
+    assert command_failure_hint(
+        126,
+        "[ 36%]\n./nope: Permission denied\n",
+        "./nope: Permission denied\n",
+    ) == "./nope: Permission denied"
+    assert command_failure_hint(126, "[ 36%]\n") == "cannot execute"
+    assert command_failure_hint(127, "") == "command not found"
+    assert command_exit_summary(126, "[ 36%]\n") == (
+        "Command exited with code 126: cannot execute"
+    )
+
+
+def test_command_output_window_keeps_head_and_tail() -> None:
+    text = "HEAD" + ("." * 40) + "TAIL"
+    window = command_output_window(text, 16, tail_weight=2)
+    assert window.startswith("HEAD")
+    assert window.endswith("TAIL")
+    assert "…" in window
+    assert len(window) <= 16
 
 
 def test_command_outcome_remains_separate_from_transport_status() -> None:

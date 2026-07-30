@@ -102,13 +102,22 @@ class ConversationStore:
 
     async def history(self, session_id: str, limit: int = 12) -> list[dict[str, Any]]:
         """Compaction-aware prompt history: latest bridge + last ``limit`` turns
-        (``compacted`` rows are hidden — kept for replay, already in the bridge)."""
+        (``compacted`` rows are hidden — kept for replay, already in the bridge).
+
+        The bridge is handed over as the user's, the way Codex does it. Spoken in
+        the assistant's voice it reads as something the model itself concluded,
+        and a model holds to its own prior claims: one session's bridge said the
+        research was finished and both reports were stored, and that was still
+        being restated turns later on a request that had produced neither. As
+        material it is evidence to be used; as its own words it is a position to
+        defend.
+        """
         rows = await self.recent_rows(session_id)
         comps = [r for r in rows if not (r.meta or {}).get("compacted")
                  and (r.content_type or "") == "compaction"]
         out: list[dict[str, Any]] = []
         if comps:
-            out.append({"role": "assistant", "content": comps[-1].content})
+            out.append({"role": "user", "content": comps[-1].content})
         out += [{"role": r.role, "content": r.content}
                 for r in self.normal_rows(rows)[-limit:]]
         return out
@@ -150,10 +159,11 @@ class ConversationStore:
 
         The covered rows are kept for replay (``compacted=True``) rather than
         deleted; the bridge summary stands in for them in the prompt history.
+        Stored under the role it is replayed under — see :meth:`history`.
         """
         async with self._db.session() as s:
             s.add(ConversationMessageORM(
-                session_id=session_id, role="assistant", content_type="compaction",
+                session_id=session_id, role="user", content_type="compaction",
                 content=bridge,
                 meta={"kind": "compaction", "covered": covered, "count": len(covered)},
             ))

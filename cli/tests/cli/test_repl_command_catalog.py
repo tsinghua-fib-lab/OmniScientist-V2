@@ -18,7 +18,7 @@ from omni.cli.repl_input import SlashCommandCompleter
 # REPL-only verbs that have no backing Typer command but are dispatched in the loop.
 _IN_PROCESS = {
     "help", "clear", "new", "inbox", "stop", "steer", "compact",
-    "context", "mode", "verbose", "plan", "review", "exit", "quit",
+    "context", "mode", "verbose", "model", "plan", "review", "exit", "quit",
 }
 
 
@@ -107,6 +107,12 @@ def test_space_completes_subcommands_of_a_group():
     typing = _rows("/task sh")
     assert [completion.text for completion in typing] == ["show"]
     assert typing[0].start_position == -2  # replaces only "sh", keeping "/task "
+
+
+def test_model_completion_exposes_the_three_typed_roles_and_source_views():
+    assert {"main", "vision", "embedding", "status", "explain"} <= set(
+        _texts("/model ")
+    )
 
 
 def test_group_help_is_completed_for_every_multi_subcommand_group():

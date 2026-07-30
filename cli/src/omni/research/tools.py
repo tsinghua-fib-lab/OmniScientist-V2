@@ -7,7 +7,7 @@ baseline builtin tool surface (see ``builtin_tools.build_builtin_tools``) so the
 main ReAct loop, native `omni lit`, and compatible imported skills get them.
 
 Every tool is additive and best-effort: writing a structured row also feeds a
-memory entry (so existing hybrid recall + self-evolution benefit, with no change
+memory entry (so existing hybrid recall benefits, with no change
 to the memory design) and a NOTEBOOK line, but a failure there never breaks the
 tool. Tools that need the store no-op gracefully when ``ctx.db`` is absent.
 """
@@ -27,7 +27,15 @@ from omni.skills_runtime.context import ExecContext, Tool
 
 # Packages whose versions form a lightweight, deterministic environment lock for
 # the run ledger (avoids spawning ``pip freeze`` on every log_run).
-_ENV_LOCK_PKGS = ("numpy", "scipy", "pandas", "matplotlib", "scikit-learn", "torch", "omniscientist")
+_ENV_LOCK_PKGS = (
+    "numpy",
+    "scipy",
+    "pandas",
+    "matplotlib",
+    "scikit-learn",
+    "torch",
+    "OmniScientist-V2",
+)
 
 
 def _store(ctx: ExecContext) -> ResearchStore | None:
@@ -41,7 +49,7 @@ def _as_of(ctx: ExecContext) -> str:
 async def _feed_memory(
     ctx: ExecContext, *, summary: str, memory_type: str, importance: float = 0.5
 ) -> None:
-    """Mirror a research object into memory for recall/self-evolution (best-effort)."""
+    """Mirror a research object into memory so recall can find it (best-effort)."""
     try:
         from omni.memory.service import MemoryLayer, MemoryService, open_global_store
 
@@ -171,73 +179,20 @@ def build_research_tools(ctx: ExecContext) -> list[Tool]:
                 "matches": [p.to_dict(i) for i, p in enumerate(passages, 1)],
                 "note": "Use [S#] inline citations and call add_evidence(claim_id, source_id) for each recorded claim."}
 
-    # ── search_literature (live connectors) ──
+    # ── search_literature (single resilient funnel) ──
     async def search_literature(args: dict) -> Any:
-        from omni.research.engine_util import index_results
-        from omni.research.registry import ConnectorRegistry
+        # Delegate to the one health-aware funnel so every caller gets
+        # Retry-After + backoff, burst-vs-quota classification, concurrent
+        # multi-connector fan-out, circuit breaking, and the local-corpus floor
+        # — no per-provider branches here (RC6: no drifting second copy).
+        from omni.research.retrieval import search_literature as _funnel
 
         query = str(args.get("query", "")).strip()
         if not query:
             return {"error": "query is required"}
         rows = max(1, min(int(args.get("rows", 6) or 6), 25))
-        reg = ConnectorRegistry(ctx.settings)
-        enabled = [c.name for c in reg.enabled()]
-        requested = [str(s).strip().lower() for s in (args.get("sources") or []) if str(s).strip()]
-        if requested:
-            preferred = requested
-        else:
-            from omni.research.domain_packs import DomainPackRegistry
-
-            preferred = DomainPackRegistry(ctx.settings).recommended_connectors(
-                available=set(enabled)
-            ) or enabled
-        names = [n for n in preferred if n in enabled]
-        if not names:
-            return {"status": "error", "connectors": [], "results": [],
-                    "error": f"No connector is available (requested={requested or 'default'}; enabled={enabled}). "
-                             "Enable connectors with omni config set research.connectors or check their names."}
-
-        per_source: dict[str, Any] = {}
-        errors: list[str] = []
-        indexed = deduped = 0
-        aggregated: list[dict[str, Any]] = []
-        for name in names:
-            try:
-                found = await _run_connector(name, query, rows, reg)
-            except Exception as exc:  # noqa: BLE001 — one bad source shouldn't sink the search
-                errors.append(f"{name}: {exc}")
-                per_source[name] = {"error": str(exc)[:160]}
-                continue
-            if not found:
-                per_source[name] = {"found": 0}
-                continue
-            try:
-                summary = await index_results(ctx, found, origin=name, query=query)
-            except Exception as exc:  # noqa: BLE001 — indexing hiccup shouldn't drop the hits
-                errors.append(f"{name} index: {exc}")
-                per_source[name] = {"found": len(found), "error": str(exc)[:160]}
-                aggregated.extend(found)
-                continue
-            indexed += int(summary.get("indexed", 0))
-            deduped += int(summary.get("deduped", 0))
-            per_source[name] = {"found": len(found), "indexed": summary.get("indexed", 0),
-                                "deduped": summary.get("deduped", 0), "sources": summary.get("sources", [])}
-            aggregated.extend(found)
-
-        compact = _dedup_papers(aggregated)
-        status = "ok" if (compact or not errors) else "error"
-        return {
-            "status": status,
-            "query": query,
-            "connectors": names,
-            "count": len(compact),
-            "indexed": indexed,
-            "deduped": deduped,
-            "results": compact,
-            "per_source": per_source,
-            "errors": errors,
-            "note": "Indexed into the local corpus. Use search_corpus for grounding and cite_source/add_evidence for provenance.",
-        }
+        sources = [str(s).strip().lower() for s in (args.get("sources") or []) if str(s).strip()]
+        return await _funnel(ctx, query=query, rows=rows, sources=sources or None)
 
     # ── citation_neighbors ──
     async def citation_neighbors_tool(args: dict) -> Any:
@@ -368,7 +323,7 @@ def build_research_tools(ctx: ExecContext) -> list[Tool]:
 
     # ── deterministic statistical reviewer ──
     async def review_statistics(args: dict) -> Any:
-        from omni.eval.research_quality import evaluate_statistical_correctness
+        from omni.research.quality import evaluate_statistical_correctness
 
         result = evaluate_statistical_correctness(args)
         return {
@@ -442,7 +397,7 @@ def build_research_tools(ctx: ExecContext) -> list[Tool]:
             "source_ids": capsule.source_ids,
             "claim_ids": capsule.claim_ids,
             "reasons": reasons,
-            "note": ("Artifact is bound to sources and claims and can be checked by artifact_provenance_capsule verification."
+            "note": ("Artifact is bound to sources and claims, so its grounding can be audited by `omni verify`."
                      if grounded else "The capsule is empty; provide sources/claims or source_ids/claim_ids for traceability."),
         }
 
@@ -487,7 +442,7 @@ def build_research_tools(ctx: ExecContext) -> list[Tool]:
                 "text": {"type": "string"},
                 "hypothesis_id": {"type": "string"},
                 "polarity": {"type": "string", "enum": ["assert", "negate", "open"]},
-                "confidence": {"type": "number", "description": "Calibrated confidence from 0 to 1"},
+                "confidence": {"type": "number", "description": "0-1"},
             }, "required": ["text"]},
         ), record_claim),
         Tool(ToolSpec(
@@ -598,7 +553,7 @@ def build_research_tools(ctx: ExecContext) -> list[Tool]:
             {"type": "object", "properties": {
                 "artifact_uri": {"type": "string", "description": "Artifact URI, path, or label"},
                 "title": {"type": "string"},
-                "source_ids": {"type": "array", "items": {"type": "string"}, "description": "Recorded source ids"},
+                "source_ids": {"type": "array", "items": {"type": "string"}},
                 "sources": {"type": "array", "items": {"type": "object"},
                             "description": "Inline source metadata such as title, DOI, arXiv id, or URL; sources are recorded automatically"},
                 "claim_ids": {"type": "array", "items": {"type": "string"}},
@@ -709,8 +664,8 @@ async def _run_connector(name: str, query: str, rows: int, reg: Any) -> list[dic
 async def _record_provenance_event(ctx: ExecContext, capsule: Any, *, grounded: bool) -> None:
     """Record a durable ``provenance.capsule`` run event (best-effort).
 
-    This is what the verification runner's ``artifact_provenance_capsule`` check
-    and the eval harness inspect — an artifact was shipped *with* its grounding.
+    This is what the honesty audit and the eval harness inspect — evidence that an
+    artifact was shipped *with* its grounding rather than naked.
     """
     db = getattr(ctx, "db", None)
     run_id = getattr(ctx, "task_id", "") or ""

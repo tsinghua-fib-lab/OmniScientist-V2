@@ -1,0 +1,142 @@
+[
+  {
+    "node_id": "l2_richard_feynman_C01",
+    "level": "L2",
+    "category": "C01",
+    "category_label": "怎样定义问题",
+    "description": "这位科学家在定义问题时，会明确设定一个核心的验证目标，并以此作为研究的主要目的。例如，他明确提出要证明除声子外不存在靠近基态的状态，这体现了他将问题界定为一个可验证的命题，并围绕这一命题构建研究框架。这种思维模式强调对问题的精确界定，并直接指向一个具体的判据或结论。",
+    "trigger_contexts": [
+      "需要明确验证某一物理假设或排除特定状态的理论推导",
+      "研究初期需要设定一个清晰、可检验的核心命题",
+      "涉及量子多体系统或低温物理中基态性质的理论分析"
+    ],
+    "contraindicated_contexts": [
+      "探索性研究或开放式问题发现阶段，需要广泛扫描可能性",
+      "实验数据初步分析时，尚未形成明确假设的情况",
+      "多因素耦合且目标不单一的综合问题，过早设定单一验证目标可能限制视野"
+    ],
+    "supporting_L1_count": 1
+  },
+  {
+    "node_id": "l2_richard_feynman_C02",
+    "level": "L2",
+    "category": "C02",
+    "category_label": "怎样选择方法",
+    "description": "这位科学家在方法选择上表现出强烈的实用主义与物理直觉导向。他会主动选择不同于常规的切入路径，如从相对论与量子力学结合推导反粒子而非从负能量解出发；优先采用最简单的扰动项或近似以便分析，并明确判断近似精度是否足够，在需要时改用更精确的形式。他偏好从整体时空观化简公式，使积分更容易，明确强调方法能提升精度或减少计算成本。在处理具体问题时，他会主动提出新波函数，选择在关键能区进行计算，基于实验约束忽略某些可能项（如中性流），区分排他性与包容性实验，并直接选定特定参数值或数据。总之，其方法选择以物理清晰性和计算可行性为首要标准，并明确承认这些选择是基于便利性、实验基础或物理直觉。",
+    "trigger_contexts": [
+      "从多个等效路径中选取更直观的物理切入点",
+      "评估近似精度并选用更精确的近似",
+      "化简复杂积分或表达式以降低计算难度",
+      "基于实验约束排除不必要的可能性",
+      "选择计算的重点区域或关键参数值"
+    ],
+    "contraindicated_contexts": [
+      "需要严格系统性推导或穷举所有可能情形",
+      "需要严格数学证明而简易近似会丧失一般性",
+      "数据不足或不可靠且物理直觉可能误导",
+      "需要全面考虑所有相互作用而不能人为忽略某些项"
+    ],
+    "supporting_L1_count": 13
+  },
+  {
+    "node_id": "l2_richard_feynman_C03",
+    "level": "L2",
+    "category": "C03",
+    "category_label": "怎样验证结论",
+    "description": "在验证结论时，费曼展现出以数学等价性、物理原理（如规范不变性）和结果鲁棒性为核心标准的思维模式。他明确将数学等价作为新表述是否有效的判据（如1948年论文中承认新表述与标准表述在数学上等价），并批评破坏规范不变性的做法。同时，他关注结果是否依赖于特定参数选择（如液氦理论中对Ko的鲁棒性判断），并相信计数论证在极端条件下的可靠性。验证过程强调通过实际尝试和淘汰错误来检验想法，坚持在检验前决定发表无论结果，并强调科学知识的非绝对确定性和怀疑自由，警惕选择性发表和训练偏向。",
+    "trigger_contexts": [
+      "checking_mathematical_equivalence",
+      "testing_gauge_invariance",
+      "evaluating_parameter_robustness",
+      "assessing_limit_case_validity",
+      "designing_falsification_experiments",
+      "precommitting_to_publication_regardless_of_outcome"
+    ],
+    "contraindicated_contexts": [
+      "rapid_consensus_driven_decision_making",
+      "authority_based_validation",
+      "practical_engineering_without_theoretical_consistency",
+      "situations_requiring_absolute_certainty",
+      "selective_reporting_or_publication_bias"
+    ],
+    "supporting_L1_count": 10
+  },
+  {
+    "node_id": "l2_richard_feynman_C04",
+    "level": "L2",
+    "category": "C04",
+    "category_label": "怎样解释结果",
+    "description": "该科学家在解释结果时，强调解释必须增进对物理的真正理解，而非仅停留在形式化层面。他明确批评纯形式化的处理“无助于理解”，对标准解释表达“不满意”，并通过对比不同解来明确指出哪个能产生物理上可理解的效应（如电荷集中导致分子形成）。其思维模式是：解释应揭示机理、满足直觉，并服务于理论简洁性。",
+    "trigger_contexts": [
+      "evaluating_whether_a_theoretical_result_provides_physical_understanding",
+      "choosing_between_competing_interpretations_based_on_intuitive_mechanism",
+      "critiquing_formal_manipulations_that_lack_physical_insight",
+      "simplifying_theory_to_achieve_conceptual_clarity"
+    ],
+    "contraindicated_contexts": [
+      "rigorous_proofs_where_formal_steps_are_directly_justified",
+      "technical_computations_that_do_not_require_immediate_intuitive_interpretation",
+      "formalisms_where_physical_intuition_may_be_misleading_or_premature"
+    ],
+    "supporting_L1_count": 3
+  },
+  {
+    "node_id": "l2_richard_feynman_C05",
+    "level": "L2",
+    "category": "C05",
+    "category_label": "怎样判断美丑",
+    "description": "在该论文中，当面对两个可选择的定义时，作者明确表示“Since (2) is simpler”，即因为定义(2)更简单而选择它。这反映出在判断哪种形式更优时，他优先考虑简洁性，将简洁视为一种美学标准。这种思维模式是具体情境下的判断，而非普遍宣称的稳定偏好。",
+    "trigger_contexts": [
+      "选择多个等价定义或表述时",
+      "评估理论或公式的优雅性",
+      "在数学推导中挑选更简洁的路径"
+    ],
+    "contraindicated_contexts": [
+      "需要全面考虑物理意义而简洁性可能误导时",
+      "当简洁性与准确性冲突且准确性更重要时",
+      "处理复杂系统必须保留必要细节的场合"
+    ],
+    "supporting_L1_count": 1
+  },
+  {
+    "node_id": "l2_richard_feynman_C06",
+    "level": "L2",
+    "category": "C06",
+    "category_label": "怎样处理失败",
+    "description": "费曼在遇到实验结果与理论不符或失败时，不会简单接受或掩盖异常，而是强调需要进一步检验（如对Rustad和Ruby的氦6反冲实验指出‘进一步检验显然非常可取’），或将偏差明确归因于模型缺陷并寻求修正（如发现大质量差态的元素过大时提出需要引入常数补偿）。在测试超自然现象（如Uri Geller的演示）失败后，他改变条件仍失败，最终将失败归因于现象本身不成立，而非自身实验问题。他还批判性地指出，剔除偏离数据（如密立根实验中的做法）会掩盖真实差异，主张直面异常。整体上，他倾向于通过重复或变通实验来确证失败原因，并将失败视为对理论或现象的检验。",
+    "trigger_contexts": [
+      "experimental_result_contradicts_theory",
+      "anomalous_data_points",
+      "testing_extraordinary_claims",
+      "replicating_experiment_to_verify_failure"
+    ],
+    "contraindicated_contexts": [
+      "when_outliers_should_be_discarded_for_known_systematic_errors",
+      "when_resources_are_too_limited_for_further_experiments",
+      "when_rapid_decision_making_requires_accepting_current_evidence"
+    ],
+    "supporting_L1_count": 4
+  },
+  {
+    "node_id": "l2_richard_feynman_C07",
+    "level": "L2",
+    "category": "C07",
+    "category_label": "怎样产生想法",
+    "description": "这位科学家在思考如何产生想法时，明确主张要对未知保持开放的态度，即“让通往未知的门半开着”。这体现了一种思维模式：在探索或解决问题时，不追求封闭的确定性结论，而是主动留出空间给未知的可能性，认为未知本身是科学价值的重要来源。这种模式强调对未解问题的容忍和好奇，避免过早用已有知识框架限制想象力。",
+    "trigger_contexts": [
+      "探索全新问题",
+      "理论困境",
+      "发散性头脑风暴",
+      "跨学科联想",
+      "开放性假设生成"
+    ],
+    "contraindicated_contexts": [
+      "工程实现需确定性",
+      "常规实验验证",
+      "紧急决策",
+      "标准化操作",
+      "收敛性归纳"
+    ],
+    "supporting_L1_count": 1
+  }
+]

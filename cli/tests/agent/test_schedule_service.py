@@ -57,13 +57,12 @@ async def _service(agent: OmniAgent) -> ScheduleService:
 # ── L1/L2: one contract, deterministic CLI parity ──
 
 
-def test_to_cli_argv_round_trips_through_the_real_cli_parser(tmp_path, monkeypatch):
+def test_to_cli_argv_round_trips_through_the_real_cli_parser(omni_home):
     """Every serialised request parses under the real Typer command.
 
     Guards the incident directly: a generated ``omni schedule add`` command can
     never contain an option the parser does not accept.
     """
-    monkeypatch.setenv("OMNI_HOME", str(tmp_path))
     project = "argv-parity"
     requests = [
         ScheduleCreateRequest(trigger=cron_trigger("0 18 * * *"), goal="daily digest", title="d"),
@@ -258,18 +257,32 @@ async def test_tampered_proposal_payload_is_rejected_on_approval():
 
 
 @pytest.mark.asyncio
-async def test_proposal_is_approvable_from_a_different_workspace(tmp_path, monkeypatch):
+async def test_proposal_is_approvable_from_a_different_workspace(omni_home, tmp_path):
     """The regression this fixes: WeChat is served on the ``default`` anchor, but
     the owner approves from their repo. Creation and approval resolve to different
     workspace DBs, so a per-workspace proposal store made ``approve`` miss it
     ("No pending schedule proposal matches"). Proposals now live in the machine-
     global control store, and the approved schedule materialises back into the
     *originating* workspace (so an IM result still returns to that channel).
+
+    The approving side is keyed off a repository directory rather than named with
+    ``--project``, because that is what the owner's side of the incident was and
+    the two resolve by different rules: a named project is a directory the store
+    owns, a repo is a workspace hashed from a path outside it. Two named projects
+    exercised one rule twice and could not have caught a control store that
+    resolved per workspace *kind*. Nor could this test be written at all until
+    the home moved to the shipping shape: pointed at a bare temp directory, a
+    repo underneath it is inside the store, and resolution sends it to the
+    ``default`` named project instead of hashing its path.
     """
-    monkeypatch.setenv("OMNI_HOME", str(tmp_path))
+    checkout = tmp_path / "repo"
+    (checkout / ".git").mkdir(parents=True)
+
     anchor = await OmniAgent.create(load_settings(project="anchor"))
-    repo = await OmniAgent.create(load_settings(project="repo"))
+    repo = await OmniAgent.create(load_settings(cwd=checkout))
     try:
+        assert anchor.settings.paths.project_dir.parent.name == "projects"
+        assert repo.settings.paths.project_dir.parent.name == "workspaces"
         # Created by the IM anchor workspace (as the daemon would).
         svc_anchor = await _service(anchor)
         proposed = await svc_anchor.create(
@@ -297,10 +310,9 @@ async def test_proposal_is_approvable_from_a_different_workspace(tmp_path, monke
 
 
 @pytest.mark.asyncio
-async def test_legacy_workspace_proposal_is_migrated_into_the_control_store(tmp_path, monkeypatch):
+async def test_legacy_workspace_proposal_is_migrated_into_the_control_store(omni_home):
     """A pending proposal written by a pre-upgrade build (per-workspace store) is
     swept into the machine-global store on first touch, so it is not orphaned."""
-    monkeypatch.setenv("OMNI_HOME", str(tmp_path))
     agent = await OmniAgent.create(load_settings(project="legacy"))
     try:
         from omni.storage.models import ScheduleActionProposalORM, _utcnow

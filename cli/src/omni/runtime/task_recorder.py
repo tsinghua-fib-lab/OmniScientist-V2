@@ -8,27 +8,35 @@ down into subtasks when needed.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, literal, or_, select, update
+from sqlalchemy import func, literal, or_, select, text, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from omni.core.termination import aggregate_outcome_status
+from omni.runtime.settlement import (
+    TURN_END_EVENTS,
+    Settlement,
+    effective_subtasks,
+    settlement_for,
+)
 from omni.runtime.task_results import (
     _aware_dt,
     _result_has_artifacts,
     action_required_presentation,
     installation_required_presentation,
 )
-from omni.runtime.verification import effective_subtasks
-from omni.storage.db import Database
+from omni.storage.db import Database, retry_while_busy
 from omni.storage.models import (
     ArtifactORM,
     OutboundDeliveryORM,
@@ -44,9 +52,22 @@ from omni.storage.models import (
 
 logger = logging.getLogger(__name__)
 
+# Contention on an event's sequence number is brief — each retry only re-reads a
+# max — so a handful of closely spaced attempts absorbs a worker pool reporting
+# progress without making a genuinely wedged database wait.
+_EVENT_SEQ_ATTEMPTS = 5
+_EVENT_SEQ_BACKOFF_S = 0.01
+
 _ACTIVE_TASK_STATUSES = {"running", "recovering"}
 _ACTIVE_EXECUTION_STATUSES = {"scheduled", "pending", "running", "recovering"}
 _FAILED_EXECUTION_STATUSES = {"failed", "cancelled", "interrupted"}
+
+# The statuses that mean "this run is over". A run reaches one of these once,
+# and moving off one goes through ``reopen_task_for_recovery`` so the transition
+# is recorded rather than silently overwriting what the user was already shown.
+# ``needs_input`` and ``awaiting_approval`` are deliberately absent: they are
+# protected pauses, and answering one is exactly how it settles.
+_TERMINAL_TASK_STATUSES = {"succeeded", "degraded", "failed", "cancelled", "interrupted"}
 
 # Deletion protection tiers for tasks (user requests):
 #   * blocked  — a worker owns the row; refuse in bulk until it settles/reconciles.
@@ -57,12 +78,18 @@ _TASK_BLOCKED_STATUSES = ("running", "recovering")
 _TASK_PROTECTED_STATUSES = ("succeeded", "degraded", "needs_input", "awaiting_approval")
 _TASK_PRUNABLE_STATUSES = ("failed", "cancelled", "interrupted")
 
-# Intents whose turns are pure conversation/inspection: the planner routes them
-# to a direct answer (optionally reading built-in tools) rather than durable
-# skill work. Only these are eligible to be filed as ``kind="chat"`` — richer
-# intents (memory_update / schedule / single_skill_task / workflow) always
-# remain ``turn`` even when they leave no artifact.
-_CONVERSATIONAL_INTENTS = {"direct_answer", "react_fallback"}
+# Intents whose turns are pure conversation: the planner routes them to an
+# answer rather than to work. Only these are eligible to be filed as
+# ``kind="chat"`` — richer intents (memory_update / schedule / single_skill_task
+# / workflow) always remain ``turn`` even when they leave no artifact.
+#
+# ``react_fallback`` used to be here and is the reason this list is now one
+# entry. It names the general agent loop, the path that runs shell, reads files,
+# writes memory and spawns sub-agents; it is where the heaviest turns land, not
+# the lightest. Run 2db31f83 asked for shell permission and then spent 473
+# seconds on 48 bash calls and four sub-agents before settling as ``chat`` and
+# vanishing from the ledger.
+_CONVERSATIONAL_INTENTS = {"direct_answer"}
 _STEERABLE_INTENTS = {"react_fallback", "schedule"}
 
 
@@ -135,11 +162,11 @@ def _windows_process_is_alive(pid: int) -> bool:
 def _is_conversational_turn(task: TaskORM) -> bool:
     """A no-work direct answer that should stay out of the /task work ledger.
 
-    True only when a top-level ``turn`` produced no durable side effect — no
-    submitted subtask/workflow, no artifact, and no schedule — and the planner
-    classified it as a conversational intent. Reclassifying such a turn to
-    ``kind="chat"`` hides it from the default ``/task`` view without deleting
-    it (it stays in the transcript and under ``/task list --kind chat``).
+    The cheap screen, read off the task row alone: a top-level ``turn`` the
+    planner routed to an answer, holding no submitted subtask/workflow, no
+    artifact and no schedule. Passing it is necessary but not sufficient —
+    :func:`_left_no_trace` still has to agree — because these columns record
+    only three shapes of work and a turn can do plenty that fits none of them.
     """
     return (
         (task.kind or "turn") == "turn"
@@ -151,19 +178,139 @@ def _is_conversational_turn(task: TaskORM) -> bool:
     )
 
 
+# Guards the one-shot repair below per (process, sessions DB): the misfiling it
+# undoes cannot recur once the predicate is fixed, so one sweep per workspace is
+# all a process ever needs.
+_repaired_chat: set[str] = set()
+
+
+async def repair_misfiled_chat(db: Any, *, force: bool = False) -> int:
+    """Return to the ledger the turns the old predicate hid, and count them.
+
+    Between 9ce69f1 and the fix above, any succeeded ``react_fallback`` turn
+    that recorded no subtask, workflow or artifact was filed as ``chat`` and
+    dropped out of ``/task``. That caught the agent loop's heaviest runs: in the
+    workspace where this was found, the three longest turns on record — one of
+    them 473 seconds with four sub-agents — were all hidden, against three
+    ordinary turns left visible.
+
+    Only rows with evidence of work move, and they only ever move back to
+    ``turn``, so a genuine conversation stays where it is and running this twice
+    changes nothing the first run left.
+
+    Asked before it writes, and on both list paths, so the steady state costs a
+    read: once a workspace has been swept there is nothing left to match, and no
+    later process takes a write lock to discover that. This runs while other
+    processes may be mid-task, and a lock held for a repair with no work to do
+    is a lock taken away from one that has some.
+    """
+    key = str(getattr(db, "path", "") or id(db))
+    if not force and key in _repaired_chat:
+        return 0
+    _repaired_chat.add(key)
+    delegated = select(TaskORM.parent_task_id).where(
+        TaskORM.parent_task_id.is_not(None), TaskORM.parent_task_id != ""
+    )
+    used_a_tool = select(TaskEventORM.task_id).where(
+        TaskEventORM.event_type.contains(".tool.")
+    )
+    misfiled = (
+        TaskORM.kind == "chat",
+        or_(
+            TaskORM.intent_type == "react_fallback",
+            TaskORM.id.in_(delegated),
+            TaskORM.id.in_(used_a_tool),
+        ),
+    )
+    try:
+        async with db.session() as s:
+            pending = await s.scalar(
+                select(func.count()).select_from(TaskORM).where(*misfiled)
+            )
+        if not pending:
+            return 0
+        async with db.session() as s:
+            result = await s.execute(update(TaskORM).where(*misfiled).values(kind="turn"))
+            await s.commit()
+            return int(result.rowcount or 0)
+    except Exception:  # noqa: BLE001 - a repair must never break a list view.
+        logger.debug("task recorder: chat repair skipped", exc_info=True)
+        return 0
+
+
+async def _left_no_trace(session: AsyncSession, task_id: str) -> bool:
+    """Whether a turn reached for anything at all before answering.
+
+    The row columns see three kinds of work: skill executions, workflows and
+    artifacts. A turn that shells out, edits a file, writes memory or delegates
+    to a sub-agent registers in none of them, so the row alone reported run
+    2db31f83 — 48 bash calls, four child tasks — as having done nothing.
+
+    Two questions cover the rest without a list of tool names to maintain: did
+    it delegate, and did it call a tool. A turn that answered from what it
+    already had did neither, and that is the one this feature was built to hide.
+    """
+    delegated = await session.scalar(
+        select(func.count())
+        .select_from(TaskORM)
+        .where(TaskORM.parent_task_id == task_id)
+    )
+    if delegated:
+        return False
+    used_a_tool = await session.scalar(
+        select(func.count())
+        .select_from(TaskEventORM)
+        .where(
+            TaskEventORM.task_id == task_id,
+            TaskEventORM.event_type.contains(".tool."),
+        )
+    )
+    return not used_a_tool
+
+
+@dataclass(frozen=True)
+class TaskDeleteItem:
+    """Immutable row summary captured with the deletion policy decision."""
+
+    id: str
+    status: str
+    title: str
+
+
+@dataclass(frozen=True)
+class TaskExecutionBarrier:
+    """One live execution that prevents deletion of its owning Task tree."""
+
+    task_id: str
+    object_kind: str
+    object_id: str
+    status: str
+
+
 @dataclass
 class TaskClearOutcome:
     """Result of a task-level clear/prune, split for a transparent preview.
 
     ``deleted`` counts rows removed (or, in a dry run, rows that *would* be
-    removed) grouped by status. ``protected`` and ``blocked`` explain what was
-    left behind and why, so the CLI can say exactly who is protected instead of
-    a bare ``0 deleted``.
+    removed) grouped by status. The id-bearing fields expose the exact closure
+    for CLI previews and index cleanup. ``protected`` and ``blocked`` explain
+    status/lease barriers; ``retained`` records archive or age boundaries, so
+    the CLI can explain every preserved tree instead of reporting bare zeroes.
     """
 
     deleted: dict[str, int] = field(default_factory=dict)
     protected: dict[str, int] = field(default_factory=dict)
     blocked: dict[str, int] = field(default_factory=dict)
+    retained: dict[str, int] = field(default_factory=dict)
+    deleted_ids: list[str] = field(default_factory=list)
+    deleted_tasks: list[TaskDeleteItem] = field(default_factory=list)
+    known_task_ids: list[str] = field(default_factory=list)
+    protected_tasks: dict[str, str] = field(default_factory=dict)
+    blocked_tasks: dict[str, str] = field(default_factory=dict)
+    blocked_executions: list[TaskExecutionBarrier] = field(default_factory=list)
+    retained_tasks: dict[str, str] = field(default_factory=dict)
+    missing_ids: list[str] = field(default_factory=list)
+    concurrent_write: bool = False
 
     @property
     def deleted_total(self) -> int:
@@ -176,6 +323,256 @@ class TaskClearOutcome:
     @property
     def blocked_total(self) -> int:
         return sum(self.blocked.values())
+
+    @property
+    def retained_total(self) -> int:
+        return sum(self.retained.values())
+
+
+def _unique_task_ids(task_ids: Sequence[str]) -> list[str]:
+    """Return non-empty task ids once, preserving the caller's order."""
+    return list(
+        dict.fromkeys(
+            str(task_id).strip() for task_id in task_ids if str(task_id).strip()
+        )
+    )
+
+
+def _task_descendant_closure(
+    rows_by_id: Mapping[str, TaskORM],
+    root_ids: Sequence[str],
+) -> list[TaskORM]:
+    """Expand roots to their complete child-Task closure without recursion."""
+    children: dict[str, list[str]] = {}
+    for row in rows_by_id.values():
+        if row.parent_task_id:
+            children.setdefault(row.parent_task_id, []).append(row.id)
+    pending = list(reversed(_unique_task_ids(root_ids)))
+    seen: set[str] = set()
+    closure: list[TaskORM] = []
+    while pending:
+        task_id = pending.pop()
+        if task_id in seen:
+            continue
+        seen.add(task_id)
+        row = rows_by_id.get(task_id)
+        if row is None:
+            continue
+        closure.append(row)
+        pending.extend(reversed(children.get(task_id, [])))
+    return closure
+
+
+def _task_ancestor_closure(
+    rows_by_id: Mapping[str, TaskORM],
+    task_ids: Sequence[str],
+) -> list[TaskORM]:
+    """Return every stored ancestor of ``task_ids`` once, nearest first."""
+    seen = set(_unique_task_ids(task_ids))
+    ancestors: list[TaskORM] = []
+    for task_id in _unique_task_ids(task_ids):
+        row = rows_by_id.get(task_id)
+        parent_id = (row.parent_task_id or "") if row is not None else ""
+        branch_seen = {task_id}
+        while parent_id and parent_id not in branch_seen:
+            branch_seen.add(parent_id)
+            parent = rows_by_id.get(parent_id)
+            if parent is None:
+                break
+            if parent.id not in seen:
+                seen.add(parent.id)
+                ancestors.append(parent)
+            parent_id = parent.parent_task_id or ""
+    return ancestors
+
+
+def _topmost_selected_task_ids(
+    rows_by_id: Mapping[str, TaskORM],
+    task_ids: Sequence[str],
+) -> list[str]:
+    """Keep selected rows that have no selected ancestor through a skipped row."""
+    selected = set(task_ids)
+    roots: list[str] = []
+    for task_id in _unique_task_ids(task_ids):
+        parent_id = rows_by_id[task_id].parent_task_id or ""
+        visited = {task_id}
+        has_selected_ancestor = False
+        while parent_id and parent_id not in visited:
+            if parent_id in selected:
+                has_selected_ancestor = True
+                break
+            visited.add(parent_id)
+            parent = rows_by_id.get(parent_id)
+            parent_id = (parent.parent_task_id or "") if parent is not None else ""
+        ancestry_cycle = bool(parent_id and parent_id in visited)
+        if not has_selected_ancestor and not ancestry_cycle:
+            roots.append(task_id)
+    return roots
+
+
+def _add_status_count(bucket: dict[str, int], status: str) -> None:
+    bucket[status] = bucket.get(status, 0) + 1
+
+
+def _protect_task_rows(
+    outcome: TaskClearOutcome,
+    rows: Sequence[TaskORM],
+    *,
+    force: bool,
+) -> bool:
+    """Record full-tree deletion barriers; active work is never force-deletable."""
+    blocked = [row for row in rows if row.status in _TASK_BLOCKED_STATUSES]
+    protected = [
+        row
+        for row in rows
+        if not force and row.status in _TASK_PROTECTED_STATUSES
+    ]
+    for row in blocked:
+        if row.id not in outcome.blocked_tasks:
+            outcome.blocked_tasks[row.id] = row.status
+            _add_status_count(outcome.blocked, row.status)
+    for row in protected:
+        if row.id not in outcome.protected_tasks:
+            outcome.protected_tasks[row.id] = row.status
+            _add_status_count(outcome.protected, row.status)
+    return bool(blocked or protected)
+
+
+def _retain_task_rows(
+    outcome: TaskClearOutcome,
+    rows: Sequence[TaskORM],
+    *,
+    reason: str,
+) -> bool:
+    """Record rows outside a clear operation's visibility/retention scope."""
+    retained = bool(rows)
+    for row in rows:
+        if row.id in outcome.retained_tasks:
+            continue
+        outcome.retained_tasks[row.id] = reason
+        _add_status_count(outcome.retained, reason)
+    return retained
+
+
+async def _active_executions_by_task(
+    session: AsyncSession,
+) -> dict[str, list[TaskExecutionBarrier]]:
+    """Load live workflow/step/subtask leases, grouped by owning Task.
+
+    Task status is a presentation/aggregation projection and can briefly lag
+    the execution rows beneath it. Deletion authority therefore comes from
+    both layers. Querying active rows by their small status set avoids a large
+    ``IN`` expression when a delegated Task tree contains many nodes.
+    """
+    active: dict[str, list[TaskExecutionBarrier]] = {}
+    models = (
+        ("workflow_run", WorkflowRunORM),
+        ("workflow_step", WorkflowStepORM),
+        ("skill_execution", SubtaskORM),
+    )
+    for object_kind, model in models:
+        rows = (
+            await session.execute(
+                select(model.id, model.task_id, model.status).where(
+                    model.status.in_(tuple(_ACTIVE_EXECUTION_STATUSES))
+                )
+            )
+        ).all()
+        for object_id, task_id, status in rows:
+            if not task_id:
+                continue
+            owner = str(task_id)
+            active.setdefault(owner, []).append(
+                TaskExecutionBarrier(
+                    task_id=owner,
+                    object_kind=object_kind,
+                    object_id=str(object_id),
+                    status=str(status),
+                )
+            )
+    return active
+
+
+def _protect_active_executions(
+    outcome: TaskClearOutcome,
+    task_ids: Sequence[str],
+    active_by_task: Mapping[str, Sequence[TaskExecutionBarrier]],
+) -> bool:
+    """Record live execution leases owned by any Task in the guarded tree."""
+    matches = [
+        execution
+        for task_id in _unique_task_ids(task_ids)
+        for execution in active_by_task.get(task_id, ())
+    ]
+    existing = {
+        (barrier.object_kind, barrier.object_id)
+        for barrier in outcome.blocked_executions
+    }
+    for barrier in matches:
+        key = (barrier.object_kind, barrier.object_id)
+        if key in existing:
+            continue
+        existing.add(key)
+        outcome.blocked_executions.append(barrier)
+        _add_status_count(outcome.blocked, barrier.status)
+    return bool(matches)
+
+
+def _delete_item(row: TaskORM) -> TaskDeleteItem:
+    """Freeze the Task fields a confirmation preview is allowed to display."""
+    return TaskDeleteItem(
+        id=row.id,
+        status=row.status,
+        title=str(row.title or row.user_input or "-"),
+    )
+
+
+def _task_id_batches(task_ids: Sequence[str], *, size: int = 500) -> list[list[str]]:
+    """Bound SQLite bind parameters for closure-wide maintenance statements."""
+    ids = _unique_task_ids(task_ids)
+    return [ids[offset : offset + size] for offset in range(0, len(ids), size)]
+
+
+def _unrooted_task_ids(
+    rows_by_id: Mapping[str, TaskORM],
+    task_ids: Sequence[str],
+    root_ids: Sequence[str],
+) -> list[str]:
+    """Find selected rows that no acyclic topmost root can reach."""
+    reachable = {
+        row.id for row in _task_descendant_closure(rows_by_id, root_ids)
+    }
+    return [task_id for task_id in _unique_task_ids(task_ids) if task_id not in reachable]
+
+
+async def _begin_task_delete_snapshot(
+    session: AsyncSession,
+    outcome: TaskClearOutcome,
+    *,
+    dry_run: bool,
+) -> bool:
+    """Open a stable read snapshot or reserve the SQLite writer for deletion.
+
+    SQLite's legacy deferred mode does not start a transaction for SELECTs.
+    Without an explicit write reservation, another process can turn a checked
+    Task tree active between policy validation and the cascading DELETE. Real
+    mutations therefore start with ``BEGIN IMMEDIATE``; previews use ``BEGIN``
+    for a coherent, non-blocking snapshot and are revalidated on confirmation.
+    """
+    statement = "BEGIN" if dry_run else "BEGIN IMMEDIATE"
+    try:
+        await session.execute(text(statement))
+    except OperationalError as exc:
+        code = getattr(getattr(exc, "orig", None), "sqlite_errorcode", None)
+        message = str(exc).lower()
+        sqlite_contention = (
+            isinstance(code, int) and (code & 0xFF) in {5, 6}
+        ) or "database is locked" in message or "database is busy" in message
+        if not sqlite_contention:
+            raise
+        outcome.concurrent_write = True
+        return False
+    return True
 
 
 def _clip(value: Any, n: int = 600) -> str:
@@ -347,6 +744,8 @@ def _event_row(
         seq=seq,
         event_type=event_type,
         status=status,
+        lifecycle_status=str(payload.get("lifecycle_status") or ""),
+        result_success=payload.get("result_success"),
         name=str(
             payload.get("name")
             or tool_name
@@ -402,7 +801,7 @@ def _apply_event_projection(
         task.current_subtask_id = event.subtask_id
     if event.summary:
         task.summary = event.summary
-    if event.event_type in {"execution.finished", "react.finished"}:
+    if event.event_type in TURN_END_EVENTS:
         task.steering_status = "sealed"
     _merge_task_ids(task, raw_output)
 
@@ -414,7 +813,13 @@ def _apply_plan_projection(
     status: str,
     current_authority_fingerprint: str,
 ) -> None:
-    """Update the latest plan and invalidate approval on authority change."""
+    """Update the latest plan and invalidate reviewed approval on authority change.
+
+    Workspace-auto and schedule grants live on ``approved_tools`` without a
+    reviewed plan fingerprint. A first plan persist must not wipe those; only
+    a changed *reviewed* authority (the owner approved a specific plan) drops
+    the grant set.
+    """
     authority_unchanged = bool(
         current_authority_fingerprint
         and task.approval_authority_fingerprint
@@ -433,8 +838,10 @@ def _apply_plan_projection(
     task.current_stage = f"plan.{status}"
     task.current_authority_fingerprint = current_authority_fingerprint
     if not authority_unchanged:
+        had_reviewed_approval = bool(task.approval_authority_fingerprint)
         task.approval_authority_fingerprint = ""
-        task.approved_tools = []
+        if had_reviewed_approval:
+            task.approved_tools = []
 
 
 def _log_event_row(event: TaskEventORM) -> None:
@@ -508,6 +915,11 @@ class TaskRecorder:
     ) -> None:
         self._db = db
         self._project = project
+        # Sequence numbers come from reading the current max, so the workers of
+        # one process would otherwise race each other for every progress event.
+        # Serializing them here makes the common case contention-free; the unique
+        # index and the retry below still cover a second process writing at once.
+        self._event_seq_lock = asyncio.Lock()
         # Optional global task index (``control.sqlite3``). When set, task
         # create/status/archive/delete transitions are mirrored into it so any
         # CLI can list + route to this workspace's tasks. ``None`` ⇒ no-op (the
@@ -518,6 +930,11 @@ class TaskRecorder:
         # default ``/task`` ledger. False restores the legacy "one task per
         # request" behaviour.
         self._classify_conversational = classify_conversational
+
+    @property
+    def db(self) -> Database:
+        """The workspace database this recorder writes events into."""
+        return self._db
 
     async def _record_index(self, task: TaskORM | None) -> None:
         """Mirror a fresh task row into the global index (best-effort)."""
@@ -562,16 +979,43 @@ class TaskRecorder:
         origin_workflow_run_id: str = "",
         origin_workflow_step_id: str = "",
         schedule_id: str = "",
+        retry_of_task_id: str = "",
+        root_task_id: str = "",
+        attempt: int = 1,
+        input_snapshot: dict | None = None,
+        file_uris: list[str] | None = None,
+        interaction_mode: str = "",
+        origin: str = "interactive",
     ) -> TaskORM:
-        title = title or _clip(" ".join(user_input.split()), 80) or "Untitled task"
+        from omni.runtime.task_title import short_task_title
+
+        title = title or short_task_title(user_input)
         if not external_key and session_id:
             external_key = await self._session_external_key(session_id)
+        # Immutable turn input so any later ``task retry`` can reproduce the
+        # request. Explicit args backfill fields the caller did not fold in.
+        snapshot = dict(input_snapshot or {})
+        snapshot.setdefault("user_input", user_input)
+        if file_uris and not snapshot.get("file_uris"):
+            snapshot["file_uris"] = [str(u) for u in file_uris]
+        if interaction_mode and not snapshot.get("interaction_mode"):
+            snapshot["interaction_mode"] = interaction_mode
+        if origin and not snapshot.get("origin"):
+            snapshot["origin"] = origin
+        if channel and not snapshot.get("channel"):
+            snapshot["channel"] = channel
+        if external_key and not snapshot.get("external_key"):
+            snapshot["external_key"] = external_key
         row = TaskORM(
             session_id=session_id,
             parent_task_id=parent_task_id or None,
             origin_workflow_run_id=origin_workflow_run_id,
             origin_workflow_step_id=origin_workflow_step_id,
             schedule_id=schedule_id or "",
+            retry_of_task_id=retry_of_task_id or "",
+            root_task_id=root_task_id or "",
+            attempt=max(1, int(attempt or 1)),
+            input_snapshot_json=snapshot,
             kind=kind or "turn",
             depth=max(0, int(depth)),
             project=self._project,
@@ -602,6 +1046,21 @@ class TaskRecorder:
             output_json={"task_id": row.id, "status": "planning"},
             summary=f"accepted task {row.id[:8]}",
         )
+        if retry_of_task_id:
+            await self.append_event(
+                row.id,
+                event_type="task.retry.created",
+                status="info",
+                name="retry",
+                output_json={
+                    "retry_of_task_id": retry_of_task_id,
+                    "root_task_id": row.root_task_id,
+                    "attempt": row.attempt,
+                },
+                summary=(
+                    f"retry attempt {row.attempt} of {row.root_task_id[:8] or row.id[:8]}"
+                ),
+            )
         if parent_task_id:
             await self.append_event(
                 parent_task_id,
@@ -734,6 +1193,8 @@ class TaskRecorder:
         *,
         event_type: str,
         status: str = "",
+        lifecycle_status: str = "",
+        result_success: bool | None = None,
         name: str = "",
         tool_name: str = "",
         skill_name: str = "",
@@ -753,6 +1214,8 @@ class TaskRecorder:
         payload = {
             "event_type": event_type,
             "status": status,
+            "lifecycle_status": lifecycle_status,
+            "result_success": result_success,
             "name": name,
             "tool_name": tool_name,
             "skill_name": skill_name,
@@ -767,24 +1230,58 @@ class TaskRecorder:
             "pct": pct,
             "duration_ms": duration_ms,
         }
-        async with self._db.session() as s:
-            max_seq = (
-                await s.execute(select(func.max(TaskEventORM.seq)).where(TaskEventORM.task_id == task_id))
-            ).scalar_one_or_none()
-            seq = int(max_seq or 0) + 1
-            event = _event_row(task_id, seq, payload)
-            s.add(event)
-            task = await s.get(TaskORM, task_id)
-            if task is not None:
-                _apply_event_projection(
-                    task,
-                    event,
-                    raw_output=output_json,
-                )
-            await s.commit()
-            await s.refresh(event)
-        _log_event_row(event)
-        return event
+        # ``(task_id, seq)`` is unique and assigned by reading the current max,
+        # so two events appended concurrently under one task pick the same number
+        # and one insert loses. A skill that reports progress from a worker pool
+        # does exactly that, and the lost event used to surface as a raw
+        # IntegrityError traceback in the middle of a running turn. Re-reading the
+        # max is the whole retry: the loser simply takes the next number.
+        # A cancel that lands while the run is still writing hits the other
+        # queue: SQLite's one-writer lock. Five 10ms retries lose on Windows —
+        # the dying cli_exec keeps the aiosqlite worker lock after the asyncio
+        # task is gone. ``retry_while_busy`` is the same queue workflow persist
+        # already uses so the cancel event lands inside a 2s turn.
+        for attempt in range(_EVENT_SEQ_ATTEMPTS):
+            async def _write_event() -> TaskEventORM:
+                async with self._event_seq_lock, self._db.session() as s:
+                    max_seq = (
+                        await s.execute(
+                            select(func.max(TaskEventORM.seq)).where(
+                                TaskEventORM.task_id == task_id
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    seq = int(max_seq or 0) + 1
+                    event = _event_row(task_id, seq, payload)
+                    s.add(event)
+                    # Reading the task would otherwise autoflush the insert and
+                    # take the write lock before the projection is applied.
+                    with s.no_autoflush:
+                        task = await s.get(TaskORM, task_id)
+                    if task is not None:
+                        _apply_event_projection(
+                            task,
+                            event,
+                            raw_output=output_json,
+                        )
+                    await s.commit()
+                    await s.refresh(event)
+                    return event
+
+            try:
+                event = await retry_while_busy(_write_event)
+            except IntegrityError:
+                if attempt + 1 >= _EVENT_SEQ_ATTEMPTS:
+                    logger.warning(
+                        "task.event.seq_contention task=%s type=%s dropped after %d attempts",
+                        task_id[:8], event_type, _EVENT_SEQ_ATTEMPTS,
+                    )
+                    return None
+                await asyncio.sleep(_EVENT_SEQ_BACKOFF_S * (attempt + 1))
+                continue
+            _log_event_row(event)
+            return event
+        return None
 
     async def link_workflow(self, task_id: str, workflow_run_id: str) -> None:
         """Attach one durable workflow run to its user-request task."""
@@ -871,14 +1368,16 @@ class TaskRecorder:
         await self.link_subtask(task_id, subtask_id, event_id=event.id if event is not None else "")
 
     async def finish_task(self, task_id: str, *, status: str, summary: str = "", error: str = "") -> None:
-        """Settle a terminal task through verification.
+        """Settle a terminal task against the durable record.
 
         ``finish_task`` remains the compatibility API used by commands and
         extensions. Successful, degraded, and failed completions all flow
-        through :meth:`settle_task`; only an external cancellation bypasses
-        content verification because it is itself the terminal decision.
+        through :meth:`settle_task`, so no caller can publish a status the record
+        does not support; only an external cancellation or a lost-executor
+        interrupt bypasses it, because those are themselves the terminal
+        decision.
         """
-        if status == "cancelled":
+        if status in {"cancelled", "interrupted"}:
             await self._finish_task_unchecked(
                 task_id,
                 status=status,
@@ -904,7 +1403,15 @@ class TaskRecorder:
         summary: str = "",
         error: str = "",
     ) -> None:
-        """Persist a terminal decision already made by the verifier or operator."""
+        """Persist a terminal decision already made by the verifier or operator.
+
+        The one writer of a terminal status, and it writes each run's only once.
+        Sealing steering and stamping ``finished_at`` are what make a run *over*
+        for everyone downstream — `/task`, the daemon's active set, the steering
+        channel — so they belong to a decision that is actually final. A second
+        terminal write is refused rather than applied: whatever the user was
+        already shown stands until a recovery explicitly reopens the run.
+        """
         if not task_id:
             return
         parent_task_id = ""
@@ -912,6 +1419,15 @@ class TaskRecorder:
         async with self._db.session() as s:
             task = await s.get(TaskORM, task_id)
             if task is None:
+                return
+            if task.status in _TERMINAL_TASK_STATUSES and task.status != status:
+                logger.warning(
+                    "refusing to re-settle task %s: %s is already terminal, "
+                    "proposed %s (reopen for recovery to move off a terminal status)",
+                    task_id[:8],
+                    task.status,
+                    status,
+                )
                 return
             parent_task_id = task.parent_task_id or ""
             kind = task.kind or "turn"
@@ -921,6 +1437,7 @@ class TaskRecorder:
                 self._classify_conversational
                 and status == "succeeded"
                 and _is_conversational_turn(task)
+                and await _left_no_trace(s, task_id)
             ):
                 task.kind = "chat"
             task.summary = summary or task.summary
@@ -962,20 +1479,42 @@ class TaskRecorder:
         proposed_status: str,
         summary: str = "",
         error: str = "",
+        turn_in_flight: bool = False,
     ) -> str:
-        """Verify an otherwise complete task before committing its terminal state."""
-        verification = await self.verify_task(task_id)
-        if verification == "pending":
+        """Commit a terminal state once the record shows the run has earned it.
+
+        ``turn_in_flight`` marks a caller that is not the turn itself, so the
+        record is read as unfinished rather than deficient. See
+        :func:`omni.runtime.settlement.settlement_for`.
+        """
+        # A clarifying turn is a *suspend*, not a failure: honor needs_input as a
+        # protected terminal outcome. A turn that stopped to ask a question
+        # legitimately produced none of the work the run was going to do, so
+        # ranking it on the success/degraded/failed axis would only mislabel the
+        # pause. This mirrors Codex/Claude Code, where awaiting-input is
+        # terminal-and-protected.
+        if proposed_status == "needs_input":
+            await self.mark_needs_input(task_id, summary=summary)
+            return "needs_input"
+        current = await self.get_task(task_id)
+        if current is not None and current.status in _TERMINAL_TASK_STATUSES:
+            return current.status
+        settled = await settlement_for(self, task_id, turn_in_flight=turn_in_flight)
+        if settled.is_pending:
             return "running"
-        verification_outcome = (
-            "failed" if verification == "failed" else
-            "degraded" if verification == "degraded" else
-            "succeeded"
-        )
-        status = aggregate_outcome_status(proposed_status, verification_outcome)
+        # A settled ``needs_input`` falls through deliberately. It is off the
+        # success/degraded/failed axis, so aggregation skips it and the caller's
+        # proposal decides — which is what closing a pause requires: `task resume`
+        # answers the question and then names the outcome the answer produced.
+        status = aggregate_outcome_status(proposed_status, settled.status)
+        if settled.status == "succeeded" and proposed_status == "degraded":
+            # The record already combined the loop stop with children and named
+            # outputs. A caller proposing ``degraded`` for leftover ``no_progress``
+            # must not outrank a complete contract.
+            status = "succeeded"
         final_error = error
         if status == "failed" and proposed_status not in {"cancelled", "needs_input"}:
-            final_error = error or "task verification failed; inspect verification.failed"
+            final_error = error or _settlement_error(settled)
         await self._finish_task_unchecked(
             task_id,
             status=status,
@@ -1088,6 +1627,94 @@ class TaskRecorder:
             summary=summary or f"task resumed from {previous_status}",
         )
         await self._reindex(task_id)
+
+    async def park_maintenance(self, task_id: str, *, summary: str = "") -> None:
+        """Park a maintenance run as owed work rather than work in flight.
+
+        ``pending`` is deliberately outside the stale sweep: the run has no
+        worker yet, so it must not be mistaken for one whose process died. It
+        waits in the queue until a drain claims it, however many sessions later
+        that is.
+        """
+        if not task_id:
+            return
+        async with self._db.session() as s:
+            task = await s.get(TaskORM, task_id)
+            if task is None:
+                return
+            task.status = "pending"
+            task.current_stage = "maintenance.queued"
+            task.finished_at = None
+            if summary:
+                task.summary = summary
+            await s.commit()
+        await self.append_event(
+            task_id,
+            event_type="maintenance.queued",
+            status="pending",
+            name="memory",
+            summary=summary or "memory maintenance queued for a later drain",
+        )
+        await self._reindex(task_id)
+
+    async def settle_orphaned_maintenance(self, *, stale_after_s: float = 1800.0) -> list[str]:
+        """Settle maintenance runs whose process died mid-pass.
+
+        The general stale sweep only runs inside a service, and an interactive
+        window never starts one — so a pass cut off by an exit stayed ``running``
+        forever, and real workspaces accumulated dozens of them. The drain owns
+        this queue, so it also clears the wreckage of earlier drains.
+        """
+        settled: list[str] = []
+        minutes = max(1, int(stale_after_s // 60))
+        for row in await self.list_stale_active_tasks(stale_after_s=stale_after_s):
+            if row.kind != "maintenance":
+                continue
+            await self._finish_task_unchecked(
+                row.id,
+                status="interrupted",
+                summary=row.summary,
+                error=(
+                    f"interrupted: no activity for over {minutes} minute(s); "
+                    "the process running this memory pass exited before finishing"
+                ),
+            )
+            settled.append(row.id)
+        return settled
+
+    async def claim_pending_maintenance(self, *, limit: int = 5) -> list[TaskORM]:
+        """Claim parked maintenance runs, oldest first, with a status CAS.
+
+        Every window and the service share one queue, so two drains starting at
+        once must not run the same pass twice. Only rows this call moves out of
+        ``pending`` are returned.
+        """
+        if limit <= 0:
+            return []
+        claimed: list[TaskORM] = []
+        async with self._db.session() as s:
+            rows = list(
+                (
+                    await s.execute(
+                        select(TaskORM)
+                        .where(TaskORM.kind == "maintenance", TaskORM.status == "pending")
+                        .order_by(TaskORM.created_at.asc())
+                        .limit(limit)
+                    )
+                ).scalars().all()
+            )
+            for row in rows:
+                won = await s.execute(
+                    update(TaskORM)
+                    .where(TaskORM.id == row.id, TaskORM.status == "pending")
+                    .values(status="running", current_stage="maintenance.claimed")
+                )
+                if int(won.rowcount or 0) == 1:
+                    claimed.append(row)
+            await s.commit()
+        for row in claimed:
+            await self._reindex(row.id)
+        return claimed
 
     async def claim_plan_approval(
         self,
@@ -1447,7 +2074,7 @@ class TaskRecorder:
         *,
         stale_after_s: float = 30.0,
     ) -> int:
-        """Return stale, unacknowledged claims to ``pending`` on task resume.
+        """Return stale, unacknowledged steers to ``pending`` on task resume.
 
         ``consumed`` means a prior process claimed the row but never durably
         acknowledged a semantic delivery. A dead consumer PID is recoverable
@@ -1456,6 +2083,11 @@ class TaskRecorder:
         Recovery is intentionally at-least-once after a hard process crash;
         graceful foreground settlement remains exactly-once. Applied and
         foreground-requeued rows are terminal and remain untouched.
+
+        Cancel is never recovered. Codex treats Interrupt as the end of that
+        turn; replaying a consumed cancel would kill the next attempt
+        (approval resume, scheduled re-fire, or the turn that starts after
+        ``omni update --local`` restarts serve).
         """
         if not task_id:
             return 0
@@ -1470,6 +2102,7 @@ class TaskRecorder:
                     await s.execute(
                         select(TaskControlORM).where(
                             TaskControlORM.task_id == task_id,
+                            TaskControlORM.action == "steer",
                             TaskControlORM.status == "consumed",
                             TaskControlORM.consumed_at.is_not(None),
                         )
@@ -1683,12 +2316,29 @@ class TaskRecorder:
         await self._reindex(task_id)
 
     async def refresh_from_executions(self, task_id: str) -> None:
-        """Settle a task from workflow, direct execution, and child-task outcomes."""
+        """Settle a task from workflow, direct execution, and child-task outcomes.
+
+        Never while the parent's own turn is still running. A child finishing is
+        an observation the turn may still act on — call another tool, retry it,
+        write the answer — not a verdict about the turn. Codex draws the same
+        line (`trigger_turn: false`: a child's completion posts a result for the
+        coordinator to read, and never settles the coordinator's turn), and omni
+        already honours it for subagents. Settling here mid-turn published a
+        status the run had not earned, sealed steering while the user could still
+        steer, and — because the task then left the active set — dropped every
+        later child outcome from the aggregate.
+
+        A background drain arriving after the turn, or a task whose work was
+        enqueued with no turn at all, still settles here: that is this method's
+        job, and nobody else is going to do it.
+        """
         if not task_id:
             return
         async with self._db.session() as s:
             task = await s.get(TaskORM, task_id)
             if task is None or task.status not in _ACTIVE_TASK_STATUSES:
+                return
+            if await self._turn_in_flight(s, task):
                 return
             workflow_ids = [str(v) for v in (task.submitted_workflow_ids or []) if v]
             execution_ids = [str(v) for v in (task.submitted_subtask_ids or []) if v]
@@ -1788,17 +2438,43 @@ class TaskRecorder:
             proposed_status=status,
             summary=summary,
             error=error,
+            # This method already returned if the parent turn was still writing
+            # the record. A child completing after ``react.finished`` is an
+            # outsider looking at a finished turn, not a mid-loop observer.
+            turn_in_flight=False,
         )
+
+    async def _turn_in_flight(self, session: Any, task: TaskORM) -> bool:
+        """Whether a turn has begun on this task and not yet reached its end.
+
+        The execution epoch is already durable: ``record_plan`` opens it (a plan
+        exists only because a turn planned this task) and a turn-end event seals
+        it. Between those two points the loop is still running and still writing
+        the record. Outside them there is no turn to defer to — a task whose work
+        was enqueued directly has children but no loop, and settles from them as
+        it always did.
+        """
+        if not task.plan_json:
+            return False
+        row = (
+            await session.execute(
+                select(TaskEventORM.id)
+                .where(
+                    TaskEventORM.task_id == task.id,
+                    TaskEventORM.event_type.in_(tuple(TURN_END_EVENTS)),
+                )
+                .limit(1)
+            )
+        ).first()
+        return row is None
 
     async def refresh_from_subtasks(self, task_id: str) -> None:
         """Compatibility name for callers; aggregation now spans all executions."""
         await self.refresh_from_executions(task_id)
 
-    async def verify_task(self, task_id: str) -> str:
-        """Compatibility entry point; VerificationRunner owns the checks."""
-        from omni.runtime.verification import VerificationRunner
-
-        return await VerificationRunner(self).verify(task_id)
+    async def settlement(self, task_id: str) -> Settlement:
+        """The terminal status the record says ``task_id`` has earned."""
+        return await settlement_for(self, task_id)
 
     async def get_task(self, task_id: str) -> TaskORM | None:
         task_id = (task_id or "").strip()
@@ -1826,6 +2502,10 @@ class TaskRecorder:
         kind: str | None = None,
     ) -> list[TaskORM]:
         """List recent tasks; ``kind`` filters turn / subagent / maintenance rows."""
+        # Before the filter, not after: a row still misfiled as ``chat`` is
+        # excluded by ``kind == "turn"`` in SQL, so repairing afterwards would
+        # leave it missing from the very list that went looking for it.
+        await repair_misfiled_chat(self._db)
         async with self._db.session() as s:
             q = select(TaskORM).order_by(TaskORM.created_at.desc()).limit(limit)
             if status:
@@ -1855,6 +2535,90 @@ class TaskRecorder:
                 )
             ).scalars().first()
 
+    async def latest_task_for_session(self, session_id: str) -> TaskORM | None:
+        """Newest turn for one conversation, regardless of status.
+
+        ``active_task_for_session`` is the controllable row. Resume orientation
+        also needs the last finished turn so the card can say where work stopped.
+        """
+        if not session_id:
+            return None
+        async with self._db.session() as s:
+            return (
+                await s.execute(
+                    select(TaskORM)
+                    .where(
+                        TaskORM.session_id == session_id,
+                        TaskORM.kind == "turn",
+                        TaskORM.archived_at.is_(None),
+                    )
+                    .order_by(TaskORM.created_at.desc())
+                    .limit(1)
+                )
+            ).scalars().first()
+
+    async def delivered_attachment_keys(
+        self,
+        task_id: str,
+        *,
+        channel: str,
+        external_key: str = "",
+    ) -> set[str]:
+        """uri/path keys this channel has already uploaded for ``task_id``.
+
+        A later skill notice skips only these files. Legacy events that stored
+        a cover boolean and no keys contribute nothing — unknown files must
+        still be sent.
+        """
+        if not task_id or not channel:
+            return set()
+        async with self._db.session() as session:
+            rows = list(
+                (
+                    await session.execute(
+                        select(TaskEventORM)
+                        .where(
+                            TaskEventORM.task_id == task_id,
+                            TaskEventORM.event_type.in_(
+                                ("presentation.sent", "presentation.degraded")
+                            ),
+                            TaskEventORM.name == channel,
+                        )
+                        .order_by(TaskEventORM.created_at.asc(), TaskEventORM.seq.asc())
+                    )
+                ).scalars().all()
+            )
+        keys: set[str] = set()
+        for row in rows:
+            payload = row.output_json if isinstance(row.output_json, dict) else {}
+            recorded_key = str(payload.get("external_key") or "")
+            if external_key and recorded_key and recorded_key != external_key:
+                continue
+            for field_name in ("delivered_uris", "delivered_paths"):
+                values = payload.get(field_name) or []
+                if isinstance(values, list):
+                    keys.update(str(item) for item in values if item)
+        return keys
+
+    async def turn_covers_deliverables(
+        self,
+        task_id: str,
+        *,
+        channel: str,
+        external_key: str = "",
+    ) -> bool:
+        """Whether a sent/degraded parent turn already attached chat files.
+
+        Pending-child turns withhold attachments and must still notify. The
+        skill-notice path compares ``delivered_attachment_keys`` to the files
+        the notice would send; this boolean only answers "did any file go".
+        """
+        return bool(
+            await self.delivered_attachment_keys(
+                task_id, channel=channel, external_key=external_key
+            )
+        )
+
     async def list_events(self, task_id: str) -> list[TaskEventORM]:
         async with self._db.session() as s:
             return list(
@@ -1866,6 +2630,19 @@ class TaskRecorder:
                     )
                 ).scalars().all()
             )
+
+    async def list_artifacts_by_task(self, task_id: str) -> list[ArtifactORM]:
+        if not task_id:
+            return []
+        async with self._db.session() as session:
+            rows = (
+                await session.execute(
+                    select(ArtifactORM)
+                    .where(ArtifactORM.task_id == task_id)
+                    .order_by(ArtifactORM.created_at.asc())
+                )
+            ).scalars().all()
+        return list(rows)
 
     async def list_subtasks_by_ids(self, task_ids: list[str]) -> list[SubtaskORM]:
         if not task_ids:
@@ -2102,24 +2879,87 @@ class TaskRecorder:
         return interrupted
 
     async def delete_task(self, task_id: str) -> bool:
-        """Delete one task by exact id; subtasks/events/controls cascade in one DELETE.
+        """Compatibility wrapper for one fail-closed full-tree deletion."""
+        outcome = await self.delete_tasks([task_id])
+        return outcome.deleted_total > 0
 
-        Artifacts survive (``ON DELETE SET NULL``): produced files are user
-        deliverables, not task bookkeeping. Callers own the protection policy.
+    async def delete_tasks(
+        self,
+        task_ids: Sequence[str],
+        *,
+        force: bool = False,
+        dry_run: bool = False,
+    ) -> TaskClearOutcome:
+        """Atomically delete exact task ids and every descendant Child Task.
+
+        The complete closure is checked before any row is touched. Active rows
+        are never deletable; protected rows require ``force``. Missing ids and
+        either protection tier fail the whole requested batch closed. Artifact
+        rows and files survive, while every deleted Task id is removed from the
+        machine-global index after the workspace transaction commits.
         """
+        outcome = TaskClearOutcome()
+        roots = _unique_task_ids(task_ids)
+        if not roots:
+            return outcome
         async with self._db.session() as s:
-            obj = await s.get(TaskORM, task_id)
-            if obj is None:
-                return False
-            await s.execute(
-                update(ArtifactORM)
-                .where(ArtifactORM.task_id == task_id)
-                .values(task_id=None)
+            if not await _begin_task_delete_snapshot(s, outcome, dry_run=dry_run):
+                return outcome
+            rows = list((await s.execute(select(TaskORM))).scalars().all())
+            rows_by_id = {row.id: row for row in rows}
+            outcome.known_task_ids = list(rows_by_id)
+            active_by_task = await _active_executions_by_task(s)
+            outcome.missing_ids = [task_id for task_id in roots if task_id not in rows_by_id]
+            if outcome.missing_ids:
+                return outcome
+            closure = _task_descendant_closure(rows_by_id, roots)
+            ancestors = _task_ancestor_closure(
+                rows_by_id,
+                roots,
             )
-            await s.delete(obj)
+            guarded_rows = [*closure, *ancestors]
+            has_barrier = _protect_task_rows(outcome, guarded_rows, force=force)
+            has_barrier = (
+                _protect_active_executions(
+                    outcome,
+                    [row.id for row in guarded_rows],
+                    active_by_task,
+                )
+                or has_barrier
+            )
+            if has_barrier:
+                return outcome
+            outcome.deleted_ids = [row.id for row in closure]
+            delete_roots = _topmost_selected_task_ids(rows_by_id, outcome.deleted_ids)
+            unrooted = _unrooted_task_ids(
+                rows_by_id,
+                outcome.deleted_ids,
+                delete_roots,
+            )
+            if unrooted:
+                _retain_task_rows(
+                    outcome,
+                    [rows_by_id[task_id] for task_id in unrooted],
+                    reason="invalid_task_tree",
+                )
+                outcome.deleted_ids = []
+                return outcome
+            outcome.deleted_tasks = [_delete_item(row) for row in closure]
+            for row in closure:
+                _add_status_count(outcome.deleted, row.status)
+            if dry_run:
+                return outcome
+            for batch in _task_id_batches(outcome.deleted_ids):
+                await s.execute(
+                    update(ArtifactORM)
+                    .where(ArtifactORM.task_id.in_(batch))
+                    .values(task_id=None)
+                )
+            for root_id in delete_roots:
+                await s.delete(rows_by_id[root_id])
             await s.commit()
-        await self._deindex([task_id])
-        return True
+        await self._deindex(outcome.deleted_ids)
+        return outcome
 
     async def clear_tasks(
         self,
@@ -2137,53 +2977,134 @@ class TaskRecorder:
         Running/recovering tasks are always blocked; succeeded/degraded/
         needs_input/awaiting_approval are protected unless ``force``. When
         ``prunable_only`` is set only failed/cancelled/interrupted tasks are
-        considered (used by ``prune``). Deletion cascades to each task's
-        subtasks, events, and controls via foreign keys.
+        considered (used by ``prune``). Every selected root is expanded to its
+        complete Child-Task closure before policy checks; eligible trees then
+        cascade to workflows, skill executions, events, and controls via FKs.
         """
         outcome = TaskClearOutcome()
         async with self._db.session() as s:
+            if not await _begin_task_delete_snapshot(s, outcome, dry_run=dry_run):
+                return outcome
             rows = list((await s.execute(select(TaskORM))).scalars().all())
-            to_delete: list[TaskORM] = []
+            rows_by_id = {row.id: row for row in rows}
+            outcome.known_task_ids = list(rows_by_id)
+            active_by_task = await _active_executions_by_task(s)
+            candidates: list[TaskORM] = []
             for r in rows:
-                if r.archived_at is not None and not include_archived:
-                    continue
                 if status and r.status != status:
                     continue
                 if kind and r.kind != kind:
+                    continue
+                if prunable_only and r.status not in _TASK_PRUNABLE_STATUSES:
                     continue
                 # Age by completion time so a task settled recently (e.g. just
                 # reconciled to interrupted) is not reaped in the same sweep.
                 if before is not None and _aware_dt(r.finished_at or r.created_at) >= before:
                     continue
-                if prunable_only and r.status not in _TASK_PRUNABLE_STATUSES:
+                if r.archived_at is not None and not include_archived:
+                    _retain_task_rows(outcome, [r], reason="archived")
                     continue
                 if r.status in _TASK_BLOCKED_STATUSES:
-                    outcome.blocked[r.status] = outcome.blocked.get(r.status, 0) + 1
+                    _protect_task_rows(outcome, [r], force=force)
                     continue
                 if r.status in _TASK_PROTECTED_STATUSES and not force:
-                    outcome.protected[r.status] = outcome.protected.get(r.status, 0) + 1
+                    _protect_task_rows(outcome, [r], force=force)
                     continue
-                to_delete.append(r)
-                outcome.deleted[r.status] = outcome.deleted.get(r.status, 0) + 1
-            deleted_ids = [r.id for r in to_delete]
-            if not dry_run:
-                if deleted_ids:
-                    await s.execute(
-                        update(ArtifactORM)
-                        .where(ArtifactORM.task_id.in_(deleted_ids))
-                        .values(task_id=None)
+                candidates.append(r)
+
+            candidate_ids = [row.id for row in candidates]
+            candidate_roots = _topmost_selected_task_ids(rows_by_id, candidate_ids)
+            for task_id in _unrooted_task_ids(
+                rows_by_id,
+                candidate_ids,
+                candidate_roots,
+            ):
+                _retain_task_rows(
+                    outcome,
+                    [rows_by_id[task_id]],
+                    reason="invalid_task_tree",
+                )
+            deletable: list[TaskORM] = []
+            seen: set[str] = set()
+            for root_id in candidate_roots:
+                closure = _task_descendant_closure(rows_by_id, [root_id])
+                ancestors = _task_ancestor_closure(rows_by_id, [root_id])
+                guarded_rows = [*closure, *ancestors]
+                has_barrier = _protect_task_rows(
+                    outcome,
+                    guarded_rows,
+                    force=force,
+                )
+                if not include_archived:
+                    has_barrier = (
+                        _retain_task_rows(
+                            outcome,
+                            [row for row in guarded_rows if row.archived_at is not None],
+                            reason="archived",
+                        )
+                        or has_barrier
                     )
-                for r in to_delete:
-                    await s.delete(r)
+                if before is not None:
+                    has_barrier = (
+                        _retain_task_rows(
+                            outcome,
+                            [
+                                row
+                                for row in guarded_rows
+                                if _aware_dt(row.finished_at or row.created_at) >= before
+                            ],
+                            reason="newer_than_cutoff",
+                        )
+                        or has_barrier
+                    )
+                has_barrier = (
+                    _protect_active_executions(
+                        outcome,
+                        [row.id for row in guarded_rows],
+                        active_by_task,
+                    )
+                    or has_barrier
+                )
+                if has_barrier:
+                    continue
+                for row in closure:
+                    if row.id not in seen:
+                        seen.add(row.id)
+                        deletable.append(row)
+            outcome.deleted_ids = [row.id for row in deletable]
+            outcome.deleted_tasks = [_delete_item(row) for row in deletable]
+            for row in deletable:
+                _add_status_count(outcome.deleted, row.status)
+            if not dry_run:
+                if outcome.deleted_ids:
+                    for batch in _task_id_batches(outcome.deleted_ids):
+                        await s.execute(
+                            update(ArtifactORM)
+                            .where(ArtifactORM.task_id.in_(batch))
+                            .values(task_id=None)
+                        )
+                for root_id in _topmost_selected_task_ids(rows_by_id, outcome.deleted_ids):
+                    await s.delete(rows_by_id[root_id])
                 await s.commit()
-        if not dry_run and deleted_ids:
-            await self._deindex(deleted_ids)
+        if not dry_run and outcome.deleted_ids:
+            await self._deindex(outcome.deleted_ids)
         return outcome
 
     async def _session_external_key(self, session_id: str) -> str:
         async with self._db.session() as s:
             row = await s.get(SessionORM, session_id)
         return row.external_key if row is not None else ""
+
+
+def _settlement_error(settled: Settlement) -> str:
+    """Name what the record was missing, so a failure is actionable."""
+    if unfounded := settled.detail.get("unfounded_claims"):
+        return "the turn claimed work that left no record: " + ", ".join(unfounded)
+    if lost := settled.detail.get("lost"):
+        return f"{len(lost)} submitted task(s) did not complete"
+    if missing := settled.detail.get("missing"):
+        return f"{len(missing)} submitted task(s) have no record"
+    return "task did not complete"
 
 
 def _merge_task_ids(task: TaskORM, payload: Any) -> None:

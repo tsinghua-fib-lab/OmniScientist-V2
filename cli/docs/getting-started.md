@@ -6,7 +6,9 @@
 - **Python ≥ 3.11** (an isolated install does **not** touch your system Python).
 - [`uv`](https://docs.astral.sh/uv/) or [`pipx`](https://pipx.pypa.io/) for an isolated install.
   The repository installer downloads uv from Astral automatically when it is missing.
-- **Node.js ≥ 20.9 with npm** is required for the lockfile-pinned research-pptx renderer.
+- **Node.js ≥ 20.9** is required to *run* the lockfile-pinned research-pptx renderer.
+  The first `omni skills setup research-pptx` (also run by `omni init` / `omni update`)
+  additionally needs **npm** on PATH — pnpm is not a substitute for that `npm ci`.
   `ffmpeg` and LibreOffice remain optional for specific Skills.
 - **Windows tip:** use **Windows Terminal** (or any UTF-8 console) so login QR codes render; or pass
   `--no-qr` to print the link instead.
@@ -23,9 +25,11 @@ across operating systems.
 PyPI is the stable package authority:
 
 ```bash
-uv tool install omniscientist
+uv tool install OmniScientist-V2
 # or
-pipx install omniscientist
+pip install OmniScientist-V2
+# or
+pipx install OmniScientist-V2
 
 omni
 ```
@@ -109,10 +113,10 @@ under `cli/`, hence `#subdirectory=cli`). `--remote --ref` rejects mutable branc
 branch is only allowed through the explicit, non-reproducible `--channel master`:
 
 ```bash
-uv tool install "omniscientist[mcp,vec,channels] @ git+<GITHUB_REPOSITORY_URL>@<RELEASE_TAG>#subdirectory=cli"
+uv tool install "OmniScientist-V2[mcp,vec,channels] @ git+<GITHUB_REPOSITORY_URL>@<RELEASE_TAG>#subdirectory=cli"
 ```
 
-For normal users, prefer `uv tool install omniscientist` or `pipx install omniscientist`; a shared
+For normal users, prefer `uv tool install OmniScientist-V2` or `pipx install OmniScientist-V2`; a shared
 environment-level `pip install` is supported but does not provide the same isolation.
 
 ### Uninstall
@@ -157,11 +161,15 @@ when two terminals appear to run different Omni versions.
 
 ```bash
 uv venv --python 3.12 .venv
-uv pip install -e "./cli[dev,mcp,vec,channels]" --python .venv
+uv pip install -e "./cli[all,dev]" --python .venv
 # Run tests / lint. POSIX: .venv/bin/<tool>   Windows: .venv\Scripts\<tool>
 .venv/bin/pytest -q cli/tests
 .venv/bin/ruff check cli/src cli/tests
 ```
+
+`[all,dev]` matches CI (`uv sync --all-extras` from `cli/`). A narrower extra set
+that omits `tokens` skips the tokenizer tests and measures transcripts in
+different units than CI.
 
 The base install includes active built-in Skill Python runtimes. Run `omni init`
 once to configure Omni and prepare research-pptx's lockfile-pinned Node renderer.
@@ -206,8 +214,8 @@ width in a single clean pass, so nothing stays frozen at the old width and no st
 are left behind. Scroll back through history with your terminal's usual wheel and
 keys; Omni only ever redraws the bottom dock. For a copy that does not depend on the current mouse
 selection, `Alt+Y` (or the `/copy` command) writes the most recent assistant answer to the system
-clipboard over OSC 52 — which works across SSH and tmux — and reports `copied last answer` (or
-`no answer to copy yet`). The command overview shown by bare `omni` and `/help` starts collapsed;
+clipboard over OSC 52 — which works across SSH and tmux — and writes a scrollback notice
+(`copied last answer (N characters)`, or a failure with a next step). The command overview shown by bare `omni` and `/help` starts collapsed;
 ordinary long raw output starts expanded. Press `Ctrl+T` to expand or fold these blocks in the
 current normal-buffer transcript. Omni replays the semantic transcript at the current width, so
 collapsed rows disappear and the same composer moves up without opening a pager, losing the draft,
@@ -335,7 +343,23 @@ Channels are set up separately with Shell `omni channel login` or REPL `/channel
 
 ### Configure a real model
 
-One line sets provider + endpoint + model + token and (optionally) tests it immediately:
+Run `omni model` (or `/model` in the REPL) to pick a preset, or switch the main
+model in one step:
+
+```bash
+omni model                    # picker: openai / deepseek / ollama / mock, plus vision and embedding
+omni model deepseek-chat      # one-shot, like Claude Code's /model
+omni model status             # effective roles and which layer won
+omni model explain main       # field-level precedence
+```
+
+These commands keep the active-`OMNI_HOME` persistence scope. Isolated homes do
+not inherit `~/.omni` at runtime; `omni init` will offer a discovered environment
+or host stack instead of silently writing mock. Root `--model` remains a
+temporary override for one launch.
+
+The advanced one-line form sets main provider + endpoint + model + token and
+(optionally) tests it immediately:
 
 ```bash
 omni config model -p openai -u https://api.deepseek.com/v1 -m deepseek-chat -k sk-... --test
@@ -364,8 +388,8 @@ Ollama, vLLM, …). The API key is masked in all command output (even `omni conf
 ### Configure the optional VLM for LiveFigure
 
 LiveFigure needs a multimodal OpenAI-compatible chat endpoint. Configure and
-probe it once; `omni init` exposes the same optional VLM fields for first-run or
-non-interactive setup:
+probe it with `omni config vlm` (or `omni model vision`); `omni init` does not
+accept VLM flags:
 
 ```bash
 omni config vlm \
@@ -374,15 +398,6 @@ omni config vlm \
   --api-key sk-... \
   --test
 omni doctor
-```
-
-For deterministic initialization, pass the same values directly:
-
-```bash
-omni init --non-interactive \
-  --vlm-endpoint https://vision.example/v1/chat/completions \
-  --vlm-model vision-model \
-  --vlm-api-key sk-...
 ```
 
 Remote VLM endpoints must use HTTPS; plain HTTP is allowed only for
@@ -468,8 +483,8 @@ version.
 
 `omni update` detects the owner of the running installation:
 
-- a PyPI package owned by uv runs `uv tool upgrade omniscientist`;
-- a PyPI package owned by pipx runs `pipx upgrade omniscientist`;
+- a PyPI package owned by uv runs `uv tool upgrade OmniScientist-V2`;
+- a PyPI package owned by pipx runs `pipx upgrade OmniScientist-V2`;
 - a dedicated Python environment upgrades through that exact interpreter;
 - a linked source checkout fast-forwards with `git pull --ff-only`, then reinstalls it;
 - an explicit moving development channel re-resolves its branch tip.
@@ -481,7 +496,9 @@ current local tree, including uncommitted changes, rerun `./cli/scripts/install.
 The package operation and local lifecycle are one serialized transaction. Omni quiesces the
 supervisor, reserves the Home Service singleton, updates the package, prepares bundled runtimes,
 retires old per-workspace daemons, refreshes the launcher, restores the prior
-service state, waits for READY, and records the converged package fingerprint. If a step fails, the
+service state, waits until the new gateway has claimed the singleton (control-plane READY is
+preferred; IM channels may still be connecting), and records the converged package fingerprint. If a
+step fails, the
 fingerprint remains pending so the next `omni`/`omni update` retries instead of silently accepting
 mixed versions. SQLite migrations stay lazy and data-preserving: each store is backed up and
 reconciled when first opened by the new CLI or Home Service.
@@ -490,8 +507,8 @@ reconciled when first opened by the new CLI or Home Service.
 
 | Audience | Install | Update |
 |---|---|---|
-| **User, uv** | `uv tool install omniscientist` | `omni update` or `uv tool upgrade omniscientist`, then `omni` |
-| **User, pipx** | `pipx install omniscientist` | `omni update` or `pipx upgrade omniscientist`, then `omni` |
+| **User, uv** | `uv tool install OmniScientist-V2` | `omni update` or `uv tool upgrade OmniScientist-V2`, then `omni` |
+| **User, pipx** | `pipx install OmniScientist-V2` | `omni update` or `pipx upgrade OmniScientist-V2`, then `omni` |
 | **Developer, snapshot** | `./cli/scripts/install.sh` | rerun the installer for the current tree; `omni update` follows git upstream |
 | **Developer, editable** | `./cli/scripts/install.sh --editable --local` | edits load on next launch; rerun the installer to re-sync dependencies |
 
@@ -500,8 +517,8 @@ reconciled when first opened by the new CLI or Home Service.
 Direct package-manager updates are supported:
 
 ```bash
-uv tool upgrade omniscientist          # isolated uv tool install
-pipx upgrade omniscientist             # pipx install
+uv tool upgrade OmniScientist-V2          # isolated uv tool install
+pipx upgrade OmniScientist-V2             # pipx install
 ```
 
 Package managers replace only Python files. They cannot know `OMNI_HOME`, lock the Home Service,
@@ -568,7 +585,9 @@ shell prompt (`omni "Explain diffusion models"`) is chat; a mistyped command (`o
 omni "Summarise recent advances in 3D Gaussian Splatting for SLAM"
 omni "Analyze arXiv 2310.06825"
 
-# non-interactive (scripts/CI): read a task from a file or stdin
+# non-interactive (scripts/CI): read a task from a file or stdin.
+# Defaults to workspace-auto (in-workspace writes + sandboxed bash/compute).
+# Pass --ask on a TTY to keep the approval prompt.
 omni exec -f task.md -o answer.md
 echo "Summarize 2310.06825" | omni exec -q
 
@@ -600,8 +619,8 @@ omni task inbox
 ### Grounded research workflow
 
 What turns omni into a *research* agent: a local literature corpus, an auditable
-hypothesis→claim→evidence trail, a reproducible run ledger, and a verification pass. Every research
-verb is also a REPL slash command (`/lit`, `/verify`, `/bench`, `/hypo`, …).
+hypothesis→claim→evidence trail, a reproducible run ledger, and an honesty pass over what was
+recorded. Every research verb is also a REPL slash command (`/lit`, `/verify`, `/bench`, `/hypo`, …).
 
 ```bash
 # 1) search OpenAlex; Omni records returned sources in the local workspace
@@ -756,8 +775,8 @@ Two things matter for a schedule to actually produce output:
    gate in `~/.omni/config.toml` under `[security] approval_allowlist = ["bash"]`, but that applies to
    **every** context, not just this schedule — prefer the per-schedule grant above.
 
-Results land in the inbox (`omni inbox`) and the run's task (`omni task show <id>`) exactly like any
-other background task.
+Results land in the inbox (`omni task inbox` or REPL `/inbox`) and the run's task
+(`omni task show <id>`) exactly like any other background task.
 
 ## Always-on home service (IM channels)
 
@@ -784,7 +803,7 @@ is unavailable). Every subcommand also exists as a slash command (`/serve start`
 | --- | --- |
 | `omni serve start` | Enable and start the always-on, OS-supervised service (macOS launchd / Linux systemd-user / Windows Scheduled Task). It survives logout and restarts on crash. Usually redundant — launching `omni` already brings the service up — but handy to force it up right now. |
 | `omni serve status [--verbose] [--all]` | Show the single home service: desired state, live runtime, the channel **anchor**, and channels. `--verbose` expands the per-workspace schedule-dispatch breakdown; `--all` lists any lingering legacy per-workspace daemons under `OMNI_HOME`. Always safe to poll. |
-| `omni serve restart` | Manually reload the service onto current config. `omni update` already refreshes/restores it transactionally, so no extra restart is needed after an update. |
+| `omni serve restart` | Manually reload the service onto current config. `omni update` already refreshes/restores it transactionally, so no extra restart is needed after an update. Restart succeeds once the new process has claimed the singleton; WeChat/Feishu/DingTalk may still be reconnecting — check `omni serve status`. |
 | `omni serve stop [--all] [--ghosts]` | **Transient pause**: stop the service now (the next `omni` launch brings it back; to keep it off, set `service.ensure_on_launch = false`) and clean up legacy per-workspace daemons for this workspace; `--all`/`--ghosts` sweep them everywhere. |
 | `omni serve doctor` | Diagnose supervisor availability, desired-vs-actual drift, and any lingering legacy daemons, with hints to fix them. |
 | `omni serve prune` | Stop ghost legacy daemons and optionally remove their stale data directories. |
@@ -807,10 +826,11 @@ omni serve poller           # foreground: dispatch schedules only, no channels (
 
 ```bash
 omni channel add feishu   # optional: write <OMNI_HOME>/channels/feishu.toml template
-omni channel login wechat --method gateway --gateway-url http://127.0.0.1:8088 --start
-omni channel login feishu --app-id cli_xxx --app-secret "$FEISHU_APP_SECRET" --credential-store file --start
-omni channel login dingtalk --client-id ding_xxx --client-secret "$DINGTALK_CLIENT_SECRET" --credential-store file --start
+omni channel login wechat --start
+omni channel login feishu --app-id cli_xxx --app-secret "$FEISHU_APP_SECRET" --start
+omni channel login dingtalk --client-id ding_xxx --client-secret "$DINGTALK_CLIENT_SECRET" --start
 # stores credentials, prints a QR/setup link, creates a short-lived /pair code, and applies the channel to the running home service
+omni channel pair feishu    # the /pair code is single-use and expires in 10 minutes; this issues a new one
 omni channel list         # see enabled / configured channels
 omni channel test feishu  # check the config is complete
 omni serve status         # the single home service: desired state, runtime, anchor, channels
@@ -822,10 +842,8 @@ omni serve stop           # transient pause (the next `omni` launch brings it ba
 On **Windows (PowerShell)** the commands are identical; use PowerShell's `$env:` for secrets:
 
 ```powershell
-# Choose one explicit WeChat transport; the default gateway requires a running local gateway.
-omni channel login wechat --method gateway --gateway-url http://127.0.0.1:8088 --credential-store file --start
-omni channel login wechat --method ilink --credential-store file --start  # experimental
-omni channel login feishu --app-id cli_xxx --app-secret $env:FEISHU_APP_SECRET --credential-store file --start
+omni channel login wechat --start
+omni channel login feishu --app-id cli_xxx --app-secret $env:FEISHU_APP_SECRET --start
 omni serve status
 ```
 
@@ -840,18 +858,22 @@ terminal *and* logging out, and restarts on crash. Exiting the interactive CLI d
 `omni serve stop` only pauses it until your next `omni` launch (to keep it off, set
 `service.ensure_on_launch = false`).
 
-After starting the interactive `omni` REPL, use the corresponding slash commands. The REPL does
-not expand shell variables such as `$FEISHU_APP_SECRET`; omit the secret option and enter it at the
-hidden prompt:
+After starting the interactive `omni` REPL, use the corresponding slash commands:
 
 ```text
-/channel login feishu --app-id cli_xxx --credential-store file --start
-/channel login dingtalk --client-id ding_xxx --credential-store file --start
-/channel login wechat --method gateway --gateway-url http://127.0.0.1:8088 --credential-store file --start
+/channel login wechat --start
+/channel login feishu --app-id cli_xxx --app-secret '<FEISHU_APP_SECRET>' --start
+/channel login dingtalk --client-id ding_xxx --client-secret '<DINGTALK_CLIENT_SECRET>' --start
+/channel pair feishu
 /channel list
 /channel test feishu
 /serve status
 ```
+
+The REPL does not expand shell variables such as `$FEISHU_APP_SECRET`, so quote the literal value
+(it is redacted in the transcript and in history). You may instead omit the option and type it at
+the hidden prompt, but that hands the terminal to the child command, and the `/pair` code it prints
+disappears when the REPL repaints — run `/channel pair <name>` afterwards to get a fresh one.
 
 The home service is **home-scoped**: one process per `OMNI_HOME` owns each WeChat/Feishu/DingTalk
 account (from the anchor workspace) and dispatches every workspace's schedules, so multiple CLI
@@ -860,45 +882,59 @@ locks still guard against a stray legacy per-workspace daemon claiming an accoun
 shows the anchor and channels, and `omni serve status --all` lists any lingering legacy daemons to
 retire.
 
+Readiness is three layers, written to `<OMNI_HOME>/service/service.pid`:
+
+- **starting** — the process has claimed the singleton (new code is in memory).
+- **ready** — agents and task runtimes can accept work (schedules, inbound tasks). This is
+  control-plane READY; it does **not** wait for WeChat / Feishu / DingTalk HTTP.
+- **channel_health** — each IM adapter reports `starting` / `running` / `degraded` on its own.
+
+`omni update` always restarts this gateway onto the new code. It succeeds once the new process has
+claimed the singleton; a still-starting service is a warning, not an update failure. Use
+`omni serve status` to watch channels reconnect.
+
 ### Cross-platform notes (credentials & QR)
 
-- **Credential storage.** macOS uses the system **Keychain** by default. **Windows and Linux have no
-  built-in encrypted store here**, so add **`--credential-store file`** to `channel login` — secrets
-  go to `<OMNI_HOME>/secrets.toml` (`0600` on POSIX; keep it user-only on Windows). Without that flag on
-  Windows/Linux, login stops with a clear hint instead of saving anything. On macOS you can also use
-  `--credential-store file` if the Keychain is locked or you are on a headless/SSH session.
-- **QR codes.** Login draws a QR with Unicode blocks. Use a UTF-8 terminal (Windows Terminal, modern
-  macOS/Linux terminals); if it looks garbled, add `--no-qr` to print the scannable link instead.
+- **Credential storage.** No flag required anywhere: macOS uses the system **Keychain**, and
+  **Windows and Linux have no built-in encrypted store**, so `channel login` writes secrets to
+  `<OMNI_HOME>/secrets.toml` (`0600` on POSIX; keep it user-only on Windows) and says so. A locked
+  Keychain or a headless/SSH session falls back to the same file with a warning, so a credential you
+  just earned by scanning a QR is never thrown away. `--credential-store file` forces the file on any
+  OS and `--credential-store keychain` refuses to start without one, but neither is needed normally.
+- **QR codes.** Login draws a compact QR from Unicode half blocks (about 39x20 cells, so it fits an
+  80x24 window) and keeps that size without colour by varying the glyph. Terminals that cannot draw
+  block characters print the plain link instead; `--no-qr` always prints just the link.
 - **Stopping/restarting.** `omni serve stop` / `omni serve restart` work cross-platform (Windows uses
   the OS terminate path rather than POSIX signals). `omni serve status [--all]` is always safe to run.
 
 ### WeChat
 
-Shell `omni channel login wechat` and REPL `/channel login wechat` default to an operator-managed
-local gateway. The experimental iLink mode is enabled only with an explicit `--method ilink`: it prints the
-`liteapp.weixin.qq.com/...&bot_type=3` QR that the official Tencent OpenClaw plugin uses, so you
-scan it with WeChat and then chat with the shared **WeChat ClawBot** - no Node, no OpenClaw, and no public
-webhook. After the scan the connector stores the returned `bot_token` (macOS Keychain by default; add
-`--credential-store file` on Windows/Linux), records the per-account messaging host, and auto-allows
-the WeChat account that scanned. `omni serve` then keeps a `getupdates` long-poll open and replies
-through `sendmessage`.
+Shell `omni channel login wechat --start` and REPL `/channel login wechat --start` go through
+Tencent's **official WeChat ClawBot bot API** (the iLink protocol on `ilinkai.weixin.qq.com`, the same
+backend as the `@tencent-weixin/openclaw-weixin` plugin). It prints the
+`liteapp.weixin.qq.com/...&bot_type=3` QR, you scan it with WeChat, and you then chat with the
+**WeChat ClawBot** — no gateway, no local port, no Node, no OpenClaw, and no public webhook. After
+the scan the connector stores the returned `bot_token` (macOS Keychain, otherwise `secrets.toml`),
+records the per-account messaging host, and auto-allows the WeChat account that scanned, so WeChat
+never needs a `/pair` code. `omni serve` then keeps a `getupdates` long-poll open and replies through
+`sendmessage`.
 
 ```bash
-omni channel login wechat --method gateway --gateway-url http://127.0.0.1:8088
-omni channel login wechat --method wecom --gateway-url http://127.0.0.1:8088
-omni channel login wechat --method ilink --credential-store file  # experimental explicit opt-in
-# On macOS you may drop --credential-store file to use the Keychain.
+omni channel login wechat --start   # the one command; identical on Linux, macOS, and Windows
 ```
 
-- The experimental iLink mode reuses Tencent's bot backend with a **non-OpenClaw client**: the
-  backend may rate-limit or deny by client identity, so prefer a secondary WeChat account.
+- Tencent's *WeChat ClawBot* terms govern the paired account.
+- **Session lifetime**: an iLink connection is valid for about 24 hours. When it lapses the service
+  logs that the token expired and stops replying; rerun `omni channel login wechat --start` to
+  rebind. There is no automatic re-scan yet.
 - **Images, files & typing**: replies that carry artifacts (plots, PDFs) are AES-128-ECB encrypted and
   uploaded to WeChat's CDN, then sent as native image/file messages; inbound images/files/videos are
   downloaded, decrypted, and handed to the agent as a local path. A "typing…" indicator shows while
-  the agent works. These need the optional `cryptography` backend (`pip install "omniscientist[channels]"`);
+  the agent works. These need the optional `cryptography` backend (`pip install "OmniScientist-V2[channels]"`);
   without it, media gracefully falls back to a text link. Disable typing with `typing_indicator = false`
   in `<OMNI_HOME>/channels/wechat.toml`.
-- Supported paths are `--method gateway` and gateway-fronted `--method wecom`.
-- Additional WeChat users can self-bind by sending `/pair <code>` (from `omni channel login` or
-  `/channel login`) in the
-  bot conversation; the scanner is bound automatically.
+- Self-hosted `--method gateway` and gateway-fronted `--method wecom` still work for existing
+  deployments, but they need a WeChat gateway you run yourself (Omni does not launch it) and are no
+  longer part of the advertised setup.
+- The scanning account is bound automatically. Additional WeChat users can self-bind by sending
+  `/pair <code>` (from `omni channel login` or `/channel login`) in the bot conversation.

@@ -148,6 +148,14 @@ class VlmGateway:
                     category="configuration",
                     retryable=False,
                 ) from None
+            if status == 400 and reference_image_uri:
+                raise VlmServiceError(
+                    "VLM endpoint rejected the image request (HTTP 400); verify that "
+                    "the configured model supports image input.",
+                    code="vlm_image_input_rejected",
+                    category="configuration",
+                    retryable=False,
+                ) from None
             raise VlmServiceError(
                 f"VLM endpoint returned HTTP {status}.",
                 code="vlm_http_error",

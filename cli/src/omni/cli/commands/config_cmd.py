@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -11,8 +12,10 @@ from typing import Any
 import tomli_w
 import typer
 
+from omni.cli.command_surface import spell_commands
 from omni.cli.render import data_table, error, info, kv_table, success, warn
 from omni.cli.state import AppState
+from omni.config.model_stack import safe_endpoint_display
 from omni.config.paths import (
     configure_user_home,
     default_user_home,
@@ -31,7 +34,7 @@ from omni.core.vlm import (
 
 app = typer.Typer(help="Inspect and modify layered TOML configuration.", no_args_is_help=True)
 _CONFIG_SUBCOMMANDS = (
-    "list", "get", "set", "model", "vlm", "embeddings", "home", "test", "path", "unset", "help",
+    "list", "get", "set", "model", "vlm", "semantic-scholar", "embeddings", "home", "test", "path", "unset", "help",
 )
 
 _SENSITIVE = ("api_key", "secret", "token", "password")
@@ -52,34 +55,40 @@ _REMOVED_KEY_SHORTCUTS = {
 def render_config_usage_help() -> None:
     """Render detailed config help for shell and REPL users."""
     info("Use `config ...` or `/config ...` in the REPL and `omni config ...` in the shell.")
+    info(
+        f"For model setup, prefer `{spell_commands('/model')}`: it unifies main, vision, and embedding "
+        "roles and explains the effective source. Advanced dotted config remains available here."
+    )
     info(f"Available subcommands: {', '.join(_CONFIG_SUBCOMMANDS)}.")
     data_table(
         "config subcommands",
         ["command", "purpose", "example"],
         [
-            ["list", "Show effective model, memory, channel, and skill settings", "config list"],
-            ["get <key>", "Read a setting; sensitive values are redacted", "config get model.provider"],
-            ["set <key> <value>", "Write a setting; secrets go to secrets.toml", "config set model.base_url https://api.deepseek.com/v1"],
+            ["list", "Show effective model, memory, channel, and skill settings", spell_commands("/config list")],
+            ["get <key>", "Read a setting; sensitive values are redacted", spell_commands("/config get model.provider")],
+            ["set <key> <value>", "Write a setting; secrets go to secrets.toml", spell_commands("/config set model.base_url https://api.deepseek.com/v1")],
             [
                 "set research.semantic_scholar_api_key <KEY>",
                 "Set the optional Semantic Scholar key in secrets.toml",
-                "config set research.semantic_scholar_api_key <API_KEY>",
+                spell_commands("/config set research.semantic_scholar_api_key <API_KEY>"),
             ],
-            ["model", "Set model endpoint, key, and name", "config model -p openai -u <BASE_URL> -m <MODEL> -k <API_KEY>"],
-            ["vlm", "Configure the optional vision model used by visual skills", "config vlm -u <ENDPOINT> -m <MODEL> -k <API_KEY>"],
-            ["embeddings", "Choose semantic or keyword recall and configure embeddings", "config embeddings --enable -u <EMBED_URL> -m <EMBED_MODEL> -k <API_KEY>"],
-            ["home [PATH]", "Show or change the Omni data directory; --reset restores ~/.omni", "config home /data/omni"],
-            ["test", "Test the active model configuration", "config test"],
-            ["path", "Show user, secret, and project config paths", "config path"],
-            ["unset <key>", "Remove a user or secret setting", "config unset model.api_key"],
+            ["model", "Set model endpoint, key, and name", spell_commands("/config model -p openai -u <BASE_URL> -m <MODEL> -k <API_KEY>")],
+            ["vlm", "Configure the optional vision model used by visual skills", spell_commands("/config vlm -u <ENDPOINT> -m <MODEL> -k <API_KEY>")],
+            ["semantic-scholar", "Configure literature-search credentials", spell_commands("/config semantic-scholar -k <API_KEY> --test")],
+            ["embeddings", "Configure remote or local semantic embeddings", spell_commands("/config embeddings --enable -p specter2 --python <PYTHON> --base-model <DIR> --adapter <DIR>")],
+            ["home [PATH]", "Show or change the Omni data directory; --reset restores ~/.omni", spell_commands("/config home /data/omni")],
+            ["test", "Test the active model configuration", spell_commands("/config test")],
+            ["path", "Show user, secret, and project config paths", spell_commands("/config path")],
+            ["unset <key>", "Remove a user or secret setting", spell_commands("/config unset model.api_key")],
         ],
     )
     info("config model options: -p provider · -u base_url · -m model · -k api_key.")
     _render_model_config_guide()
     _render_vlm_config_guide()
+    _render_semantic_scholar_config_guide()
     _render_embeddings_config_guide()
     info(
-        "Semantic Scholar: `config set research.semantic_scholar_api_key <API_KEY>`. "
+        f"Semantic Scholar: `{spell_commands('/config set research.semantic_scholar_api_key <API_KEY>')}`. "
         "Register at https://www.semanticscholar.org/product/api"
     )
 
@@ -92,9 +101,11 @@ def _render_model_config_guide() -> None:
 
     text = Text()
     text.append("Configure a model; changes apply to the next command:\n", "bold")
-    text.append("  1. One command: ", "dim")
-    text.append("config model -p openai -u https://api.deepseek.com/v1 -m deepseek-chat -k sk-xxx\n", "cyan")
-    text.append("  2. Or run `config path` and edit the reported files:\n", "dim")
+    text.append("  1. Guided three-role setup: ", "dim")
+    text.append(f"{spell_commands('/model')}\n", "cyan")
+    text.append("  2. One advanced command: ", "dim")
+    text.append(f"{spell_commands('/config model -p openai -u https://api.deepseek.com/v1 -m deepseek-chat -k sk-xxx')}\n", "cyan")
+    text.append(f"  3. Or run `{spell_commands('/config path')}` and edit the reported files:\n", "dim")
     text.append("       config.toml   → [model] provider / base_url / model\n", "cyan")
     text.append("       secrets.toml  -> [model] api_key (stored separately from projects)\n", "cyan")
     text.append("Provider selection: ", "bold")
@@ -104,7 +115,7 @@ def _render_model_config_guide() -> None:
         "  base_url=https://api.deepseek.com/v1 are sufficient. mock is offline.\n",
         "dim",
     )
-    text.append("  If only -u is supplied, mock changes to openai_compatible. Verify with config test.", "dim")
+    text.append(f"  If only -u is supplied, mock changes to openai_compatible. Verify with {spell_commands('/config test')}.", "dim")
     console.print(text)
 
 
@@ -118,8 +129,7 @@ def _render_vlm_config_guide() -> None:
     text.append("Configure an optional vision model for visual skills:\n", "bold")
     text.append("  ", "dim")
     text.append(
-        "config vlm -u https://vision.example/v1/chat/completions "
-        "-m <VISION_MODEL> -k <API_KEY>\n",
+        f"{spell_commands('/config vlm -u https://vision.example/v1/chat/completions -m <VISION_MODEL> -k <API_KEY>')}\n",
         "cyan",
     )
     text.append(
@@ -130,8 +140,26 @@ def _render_vlm_config_guide() -> None:
     console.print(text)
 
 
+def _render_semantic_scholar_config_guide() -> None:
+    """Explain the owner-scoped Semantic Scholar credential."""
+    from rich.text import Text
+
+    from omni.cli.render import console
+
+    text = Text()
+    text.append("Configure Semantic Scholar for literature evidence:\n", "bold")
+    text.append("  ", "dim")
+    text.append(f"{spell_commands('/config semantic-scholar -k <API_KEY> --test')}\n", "cyan")
+    text.append(
+        "  The token is stored in secrets.toml and cannot be overridden by a "
+        "project config. Paper review requires it for its complete literature-check stage.",
+        "dim",
+    )
+    console.print(text)
+
+
 def _render_embeddings_config_guide() -> None:
-    """Explain semantic versus keyword recall and every supported config path."""
+    """Explain remote and owner-scoped local embedding configuration."""
     from rich.text import Text
 
     from omni.cli.render import console
@@ -139,13 +167,23 @@ def _render_embeddings_config_guide() -> None:
     text = Text()
     text.append("Configure embedding recall:\n", "bold")
     text.append("  Enable: ", "dim")
-    text.append("config embeddings --enable -u https://api.openai.com/v1 -m text-embedding-3-small -k sk-xxx\n", "cyan")
+    text.append(f"{spell_commands('/config embeddings --enable -u https://api.openai.com/v1 -m text-embedding-3-small -k sk-xxx')}\n", "cyan")
     text.append("       Semantic recall matches paraphrases; the endpoint must provide /embeddings and may incur cost.\n", "dim")
+    text.append("  Local SPECTER2: ", "dim")
+    text.append(
+        f"{spell_commands('/config embeddings --enable -p specter2 --python <PYTHON> --base-model <BASE_DIR> --adapter <ADAPTER_DIR> --device cuda:0')}\n",
+        "cyan",
+    )
+    text.append(
+        "       Runs the local model offline in its dedicated Python environment; "
+        "no API endpoint or token is used.\n",
+        "dim",
+    )
     text.append("  Disable: ", "dim")
-    text.append("config embeddings --disable", "cyan")
+    text.append(spell_commands("/config embeddings --disable"), "cyan")
     text.append(" -> keyword recall without an embedding request.\n", "dim")
-    text.append("  Settings can also be changed individually with config set.\n", "dim")
-    text.append("  Or run `config path` and edit [memory] embedding_* in the reported files.", "dim")
+    text.append(f"  Settings can also be changed individually with {spell_commands('/config set')}.\n", "dim")
+    text.append(f"  Or run `{spell_commands('/config path')}` and edit [memory] embedding_* in the reported files.", "dim")
     console.print(text)
 
 
@@ -230,12 +268,18 @@ def list_cmd(ctx: typer.Context) -> None:
         ("vlm.endpoint", s.vlm.endpoint or "(unset)"),
         ("vlm.protocol", s.vlm.protocol),
         ("vlm.api_key", "***set***" if s.vlm.api_key else "(unset)"),
+        ("research.semantic_scholar_api_key", "***set***" if s.research.semantic_scholar_api_key else "(unset)"),
+        ("research.semantic_scholar_enabled", "semanticscholar" in s.research.connectors),
         ("memory.enabled", s.memory.enabled),
         ("memory.embeddings_enabled", s.memory.embeddings_enabled),
         ("memory.embedding_provider", s.memory.embedding_provider or "(unset)"),
         ("memory.embedding_base_url", s.memory.embedding_base_url or "(unset)"),
         ("memory.embedding_model", s.memory.embedding_model),
         ("memory.embedding_api_key", "***set***" if s.memory.embedding_api_key else "(unset)"),
+        ("memory.embedding_specter2_python", s.memory.embedding_specter2_python or "(unset)"),
+        ("memory.embedding_specter2_base_model", s.memory.embedding_specter2_base_model or "(unset)"),
+        ("memory.embedding_specter2_adapter", s.memory.embedding_specter2_adapter or "(unset)"),
+        ("memory.embedding_specter2_device", s.memory.embedding_specter2_device),
         ("memory.vector_backend", s.memory.vector_backend),
         (
             "research.semantic_scholar_api_key",
@@ -244,6 +288,8 @@ def list_cmd(ctx: typer.Context) -> None:
         ("react.max_iterations", s.react.max_iterations),
         ("react.max_tool_calls", s.react.max_tool_calls),
         ("react.max_seconds", s.react.max_seconds),
+        ("react.stall_timeout_s", s.react.stall_timeout_s),
+        ("react.stream_max_retries", s.react.stream_max_retries),
         ("react.finalization_timeout_s", s.react.finalization_timeout_s),
         ("react.self_review", s.react.self_review),
         ("display.ui_mode", s.display.ui_mode),
@@ -251,6 +297,8 @@ def list_cmd(ctx: typer.Context) -> None:
         ("cost.enabled", s.cost.enabled),
         ("cost.max_total_tokens", s.cost.max_total_tokens),
         ("cost.max_cost_usd", s.cost.max_cost_usd),
+        ("cost.warn_total_tokens", s.cost.warn_total_tokens),
+        ("cost.warn_cost_usd", s.cost.warn_cost_usd),
         ("tasks.auto_retry", s.tasks.auto_retry),
         ("tasks.workflow_max_steps", s.tasks.workflow_max_steps),
         ("tasks.workflow_max_tool_calls", s.tasks.workflow_max_tool_calls),
@@ -496,7 +544,7 @@ def model_cmd(
         changed.append(f"provider={provider}")
     if base_url:
         _write_config_value(paths, "model.base_url", base_url)
-        changed.append(f"base_url={base_url}")
+        changed.append(f"base_url={safe_endpoint_display(base_url)}")
     if model:
         _write_config_value(paths, "model.model", model)
         changed.append(f"model={model}")
@@ -584,7 +632,7 @@ def vlm_cmd(
     if endpoint:
         value = endpoint.strip()
         _write_config_value(paths, "vlm.endpoint", value)
-        changed.append(f"endpoint={value}")
+        changed.append(f"endpoint={safe_endpoint_display(value)}")
     if model:
         value = model.strip()
         _write_config_value(paths, "vlm.model", value)
@@ -623,6 +671,75 @@ def _run_vlm_connectivity_test(ctx: typer.Context) -> bool:
     return ok
 
 
+@app.command("semantic-scholar")
+def semantic_scholar_cmd(
+    ctx: typer.Context,
+    api_key: str = typer.Option(
+        "", "--api-key", "-k", help="Semantic Scholar token stored in secrets.toml."
+    ),
+    test: bool = typer.Option(
+        False, "--test", help="Verify the configured token with one small metadata request."
+    ),
+) -> None:
+    """Configure the owner-scoped Semantic Scholar credential."""
+    settings = ctx.obj.settings()
+    current = settings.research.semantic_scholar_api_key
+    if not api_key and not test:
+        kv_table(
+            "Semantic Scholar",
+            [
+                ("connector_enabled", "semanticscholar" in settings.research.connectors),
+                ("api_key", "***set***" if current else "(unset)"),
+            ],
+        )
+        info("Configure with `config semantic-scholar -k <API_KEY> --test`.")
+        return
+
+    if api_key:
+        _write_config_value(
+            settings.paths,
+            "research.semantic_scholar_api_key",
+            api_key.strip(),
+        )
+        success(
+            "Updated Semantic Scholar configuration: "
+            f"api_key={_mask(api_key.strip())}"
+        )
+    if test:
+        _run_semantic_scholar_connectivity_test(ctx)
+
+
+def _run_semantic_scholar_connectivity_test(ctx: typer.Context) -> bool:
+    """Test Semantic Scholar without exposing its token or response body."""
+    from omni.cli.state import run_async
+    from omni.research import connectors
+
+    api_key = ctx.obj.settings().research.semantic_scholar_api_key
+    if not api_key:
+        error(
+            "Semantic Scholar API key is not configured. "
+            "Run `config semantic-scholar -k <API_KEY>` first."
+        )
+        return False
+    info("Testing Semantic Scholar credentials...")
+    try:
+        results = run_async(
+            connectors.semanticscholar_search(
+                "automated peer review large language model",
+                rows=1,
+                api_key=api_key,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - CLI converts connector errors to safe text
+        error(f"Semantic Scholar test failed: {exc}")
+        return False
+    if not results:
+        error("Semantic Scholar responded but returned no result for the test query.")
+        return False
+    success("Semantic Scholar credentials are working.")
+    return True
+
+
 @app.command("embeddings")
 def embeddings_cmd(
     ctx: typer.Context,
@@ -639,31 +756,205 @@ def embeddings_cmd(
     model: str = typer.Option(
         "", "--model", "-m", help="Embedding model, such as text-embedding-3-small or bge-m3.",
     ),
+    provider: str = typer.Option(
+        "",
+        "--provider",
+        "-p",
+        help="Embedding provider: openai_compatible or local specter2.",
+    ),
+    local_python: str = typer.Option(
+        "",
+        "--python",
+        help="Dedicated Python executable containing torch, transformers, and adapters.",
+    ),
+    local_base_model: str = typer.Option(
+        "",
+        "--base-model",
+        help="Local SPECTER2 base-model directory.",
+    ),
+    local_adapter: str = typer.Option(
+        "",
+        "--adapter",
+        help="Local SPECTER2 proximity-adapter directory.",
+    ),
+    device: str = typer.Option(
+        "",
+        "--device",
+        help="Local SPECTER2 device: cpu, mps, cuda, or cuda:N.",
+    ),
 ) -> None:
-    """Configure semantic recall or deterministic keyword fallback."""
+    """Configure remote or local semantic embeddings."""
     settings = ctx.obj.settings()
     memory = settings.memory
     paths = settings.paths
+    local_values_supplied = bool(
+        local_python or local_base_model or local_adapter or device
+    )
+    any_values_supplied = bool(
+        base_url or api_key or model or provider or local_values_supplied
+    )
 
     if enabled is None:
-        if base_url or api_key or model:
+        if any_values_supplied:
             error("Choose either --enable or --disable.")
             raise typer.Exit(2)
-        kv_table("Embedding recall", [
-            ("mode", "semantic" if memory.embeddings_enabled else "keyword"),
+        rows: list[tuple[str, Any]] = [
             ("enabled", memory.embeddings_enabled),
-            ("base_url", memory.embedding_base_url or "(unset)"),
+            ("provider", memory.embedding_provider or "(unset)"),
+            (
+                "base_url",
+                (
+                    "(not used by local SPECTER2)"
+                    if memory.embedding_provider == "specter2"
+                    else memory.embedding_base_url or "(unset)"
+                ),
+            ),
             ("model", memory.embedding_model or "(unset)"),
-            ("api_key", "***set***" if memory.embedding_api_key else "(unset; may reuse model token)"),
-        ])
-        info("Change with `config embeddings --enable -u <URL> -m <MODEL> -k <KEY>` or `--disable`.")
+            (
+                "api_key",
+                (
+                    "(not used by local SPECTER2)"
+                    if memory.embedding_provider == "specter2"
+                    else (
+                        "***set***"
+                        if memory.embedding_api_key
+                        else "(unset; model token is reused only for the same origin)"
+                    )
+                ),
+            ),
+        ]
+        if memory.embedding_provider == "specter2":
+            rows.extend(
+                [
+                    (
+                        "python",
+                        memory.embedding_specter2_python or "(unset)",
+                    ),
+                    (
+                        "base_model",
+                        memory.embedding_specter2_base_model or "(unset)",
+                    ),
+                    (
+                        "adapter",
+                        memory.embedding_specter2_adapter or "(unset)",
+                    ),
+                    ("device", memory.embedding_specter2_device),
+                ]
+            )
+        kv_table("Embedding recall", rows)
+        info(
+            "Use `config embeddings --enable -u <URL> -m <MODEL> -k <KEY>` "
+            "or choose local `-p specter2 --python ... --base-model ... "
+            "--adapter ...`."
+        )
         return
 
     if not enabled:
+        if any_values_supplied:
+            error("Do not combine --disable with provider configuration options.")
+            raise typer.Exit(2)
         _write_config_value(paths, "memory.embeddings_enabled", False)
         success("Embeddings disabled. Keyword recall will be used; endpoint settings are retained.")
         return
 
+    requested_provider = provider.strip().casefold()
+    if not requested_provider:
+        if base_url or api_key:
+            requested_provider = "openai_compatible"
+        else:
+            requested_provider = (
+                str(memory.embedding_provider or "openai_compatible")
+                .strip()
+                .casefold()
+            )
+    if requested_provider == "openai":
+        requested_provider = "openai_compatible"
+    if requested_provider not in {"openai_compatible", "specter2"}:
+        error("Embedding provider must be openai_compatible or specter2.")
+        raise typer.Exit(2)
+
+    if requested_provider == "specter2":
+        if base_url or api_key:
+            error("Local SPECTER2 does not use --base-url or --api-key.")
+            raise typer.Exit(2)
+        resolved_python = local_python or memory.embedding_specter2_python
+        resolved_base = local_base_model or memory.embedding_specter2_base_model
+        resolved_adapter = local_adapter or memory.embedding_specter2_adapter
+        resolved_device = device or memory.embedding_specter2_device or "cpu"
+        local_paths = (
+            (resolved_python, "file"),
+            (resolved_base, "directory"),
+            (resolved_adapter, "directory"),
+        )
+        if not all(value for value, _kind in local_paths):
+            error(
+                "SPECTER2 requires --python, --base-model, and --adapter "
+                "the first time it is configured."
+            )
+            raise typer.Exit(2)
+        try:
+            # Preserve a virtual-environment launcher symlink. Resolving it can
+            # bypass that environment's ``pyvenv.cfg`` and start the base
+            # interpreter without the packages installed in the selected env.
+            python_path = Path(
+                os.path.abspath(os.path.expanduser(resolved_python))
+            )
+            base_path = Path(resolved_base).expanduser().resolve(strict=True)
+            adapter_path = Path(resolved_adapter).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError):
+            error("A configured SPECTER2 local path does not exist.")
+            raise typer.Exit(2) from None
+        if not python_path.is_file() or not os.access(python_path, os.X_OK):
+            error("The SPECTER2 Python executable is not an executable file.")
+            raise typer.Exit(2)
+        if not base_path.is_dir() or not adapter_path.is_dir():
+            error("The SPECTER2 base model and adapter must be directories.")
+            raise typer.Exit(2)
+        if not re.fullmatch(r"(?:cpu|mps|cuda(?::\d+)?)", resolved_device):
+            error("SPECTER2 device must be cpu, mps, cuda, or cuda:N.")
+            raise typer.Exit(2)
+        resolved_model = (
+            model.strip()
+            or (
+                memory.embedding_model
+                if memory.embedding_provider == "specter2"
+                else ""
+            )
+            or "allenai/specter2-proximity"
+        )
+        _write_config_value(paths, "memory.embedding_provider", "specter2")
+        _write_config_value(paths, "memory.embedding_model", resolved_model)
+        _write_config_value(paths, "memory.embedding_dim", 768)
+        _write_config_value(
+            paths,
+            "memory.embedding_specter2_python",
+            str(python_path),
+        )
+        _write_config_value(
+            paths,
+            "memory.embedding_specter2_base_model",
+            str(base_path),
+        )
+        _write_config_value(
+            paths,
+            "memory.embedding_specter2_adapter",
+            str(adapter_path),
+        )
+        _write_config_value(
+            paths,
+            "memory.embedding_specter2_device",
+            resolved_device,
+        )
+        _write_config_value(paths, "memory.embeddings_enabled", True)
+        success(
+            f"Enabled local SPECTER2 embeddings: {resolved_model} "
+            f"on {resolved_device} (768 dimensions)"
+        )
+        return
+
+    if local_values_supplied:
+        error("Local Python/model/adapter/device options require -p specter2.")
+        raise typer.Exit(2)
     resolved_base = (base_url or memory.embedding_base_url).rstrip("/")
     resolved_model = model or memory.embedding_model or "text-embedding-3-small"
     if not resolved_base:
@@ -672,15 +963,22 @@ def embeddings_cmd(
         )
         raise typer.Exit(2)
 
-    _write_config_value(paths, "memory.embedding_provider", "openai_compatible")
+    _write_config_value(paths, "memory.embedding_provider", requested_provider)
     _write_config_value(paths, "memory.embedding_base_url", resolved_base)
     _write_config_value(paths, "memory.embedding_model", resolved_model)
     if api_key:
         _write_config_value(paths, "memory.embedding_api_key", api_key)
     _write_config_value(paths, "memory.embeddings_enabled", True)
-    success(f"Enabled semantic recall: {resolved_model} @ {resolved_base}")
-    if not api_key and not memory.embedding_api_key and not settings.model.api_key:
-        warn("No embedding API key is configured; remote services may require -k.")
+    success(
+        f"Enabled semantic recall: {resolved_model} @ "
+        f"{safe_endpoint_display(resolved_base)}"
+    )
+    if not api_key and not memory.embedding_api_key:
+        warn(
+            "No dedicated embedding API key is configured. The model token is reused "
+            "only when the model and embedding endpoints have the same origin; "
+            "otherwise configure -k."
+        )
 
 
 def _is_mock_provider(provider: str) -> bool:
@@ -711,7 +1009,11 @@ def _run_connectivity_test(ctx: typer.Context) -> bool:
     )
     (success if ok else error)(detail)
     if not ok:
-        info("Update the credential or endpoint with `config model ...`, then run `config test` again.")
+        info(
+            "Update the credential or endpoint with "
+            f"`{spell_commands('/model main ...')}`, then run "
+            f"`{spell_commands('/config test')}` again."
+        )
     return ok
 
 

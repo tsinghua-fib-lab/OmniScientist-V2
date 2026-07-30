@@ -12,13 +12,16 @@ import zipfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from .prompts import build_generation_prompt, build_repair_prompt
 from .vlm import VlmError, reference_as_data_url
 from .vlm import reference_bytes as decode_reference_bytes
 
-Progress = Callable[[str, float], Awaitable[None]]
+# ``(stage, pct)`` at minimum; a host that speaks the stage contract also takes
+# the ``stage_id``/``milestone``/``stats`` keywords, so the shape is negotiated
+# per call rather than fixed here.
+Progress = Callable[..., Awaitable[None]]
 
 # --- Static code denylist -------------------------------------------------
 #
@@ -251,7 +254,14 @@ async def generate_pptx(
                 code_path, output_dir, pptx_path, sandbox_prefix=config.sandbox_prefix
             )
             _validate_pptx(pptx_path)
-            await _progress(progress, "pptx ready", 1.0)
+            await _progress(
+                progress,
+                "pptx ready",
+                1.0,
+                stage_id="livefigure.done",
+                milestone="Live figure built",
+                stats={"attempts": attempt},
+            )
             return PipelineResult(title, pptx_path, code_path, input_path, reference_path, attempt)
         except LiveFigureError as exc:
             last_error = exc
@@ -355,6 +365,18 @@ def _validate_code(code: str) -> None:
             raise LiveFigureError("Generated code contains a forbidden dunder name")
 
 
+def _isolated_script_command(code_path: Path, output_dir: Path) -> list[str]:
+    """Run generated code isolated, but keep the sibling helper importable."""
+    boot_path = output_dir / "_omni_livefigure_boot.py"
+    boot_path.write_text(
+        "import runpy, sys\n"
+        f"sys.path.insert(0, {str(output_dir.resolve())!r})\n"
+        f"runpy.run_path({str(code_path.resolve())!r}, run_name='__main__')\n",
+        encoding="utf-8",
+    )
+    return [sys.executable, "-I", str(boot_path)]
+
+
 async def _execute_code(
     code_path: Path,
     output_dir: Path,
@@ -366,9 +388,11 @@ async def _execute_code(
         pptx_path.unlink()
     env = {"PATH": os.environ.get("PATH", ""), "PYTHONNOUSERSITE": "1"}
     # Isolated interpreter (``-I``): ignore env vars / user site / cwd on
-    # sys.path. When the host supplies a ``sandbox_prefix`` (seatbelt / bwrap),
-    # the child additionally runs under kernel write-confinement.
-    argv = [*sandbox_prefix, sys.executable, "-I", str(code_path.name)]
+    # sys.path. That also hides the trusted ``tools.py`` copied beside the
+    # script, so a host-owned boot fragment reinserts only ``output_dir``.
+    # When the host supplies a ``sandbox_prefix`` (seatbelt / bwrap), the
+    # child additionally runs under kernel write-confinement.
+    argv = [*sandbox_prefix, *_isolated_script_command(code_path, output_dir)]
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -419,6 +443,9 @@ def _validate_pptx(path: Path) -> None:
         )
 
 
-async def _progress(callback: Progress | None, stage: str, pct: float) -> None:
+async def _progress(callback: Progress | None, stage: str, pct: float, **data: Any) -> None:
     if callback is not None:
-        await callback(stage, pct)
+        try:
+            await callback(stage, pct, **data)
+        except TypeError:
+            await callback(stage, pct)

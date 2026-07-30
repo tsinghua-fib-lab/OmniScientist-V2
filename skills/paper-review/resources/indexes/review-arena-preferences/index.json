@@ -1,0 +1,48 @@
+{
+  "active_generation": "gen-d3d10521cfba4e5eb4ebdfbcc3302ff6",
+  "artifacts": {
+    "papers.jsonl": {
+      "bytes": 1676207,
+      "sha256": "1ad359367788d95693bdcacdfc1c36158d6a3a0698506bb199825c8f1b631953"
+    },
+    "preferences.pack": {
+      "bytes": 4961189,
+      "sha256": "0cab4af422ad81a205d67f5f3fced649740f473418eeef06ef2700d382b78f4e"
+    },
+    "vectors.faiss": {
+      "bytes": 2273130,
+      "sha256": "8b2c19bc42a46fcf9710d08b7583b11cad05dddae41024f0bc64865e0f7bf691"
+    }
+  },
+  "completed_at_unix": 1785682121,
+  "corpus_content_sha256": "5874791b6d6ff2182a249265310b6fb30e19b9e3b4b9ad3f6d14df88dac91e32",
+  "corpus_paper_count": 738,
+  "corpus_preference_pair_count": 738,
+  "embedding_dimension": 768,
+  "embedding_model": "allenai/specter2-proximity",
+  "embedding_space_id": "emb-v2:f9a5a5603792ab0c2582bcdef2cc1bfd3df560d059dc87e6a9bf6fd9b86d48a4",
+  "embedding_text_policy": "specter2_title_sep_abstract_v1",
+  "index_fingerprint": "722a80b9b3dc16e154bc714ea7e930fa058a6f7332c27ec59280c04bf80d8676",
+  "index_format": "faiss-idmap2-flat-ip",
+  "index_owner": "omniscientist.paper-review.preference-memory",
+  "parse_report": {
+    "battles_included": 3321,
+    "battles_seen": 4928,
+    "battles_skipped": 1607,
+    "battles_with_responses": 3746,
+    "duplicate_response_rows_folded": 169,
+    "paper_count": 738,
+    "preference_pair_count": 738,
+    "skipped_by_reason": {
+      "ambiguous_response": 1182,
+      "both_bad_not_outvoted": 4,
+      "no_strict_winner_pair": 421
+    },
+    "title_only_paper_count": 0
+  },
+  "preference_text_policy": "arena_complete_anonymous_pair_v1",
+  "schema_version": "paper_review_preference_memory_faiss_v1",
+  "similarity": "cosine",
+  "status": "ready",
+  "vectors_normalized": true
+}

@@ -192,7 +192,7 @@ def _get_target_slide_count(
     override: int | None = None,
 ) -> int:
     if override is not None:
-        return max(4, min(60, override))
+        return max(3, min(80, override))
     guidelines = SLIDE_GUIDELINES.get(talk_type, SLIDE_GUIDELINES["conference"])
     durations = sorted(guidelines.keys(), key=int)
     nearest = min(durations, key=lambda d: abs(int(d) - duration))
@@ -637,24 +637,46 @@ trained for 100 epochs with a batch size of 256 on 8 V100 GPUs."
    - "Total compute: ~340 GPU-hours"
 """
 
+    slide_count_tolerance = "exact" if req.target_slides is not None else "±3"
+
+    # When target_slides is explicit, build a prominent count-enforcement block
+    # that appears FIRST in the prompt so the LLM cannot miss it.
+    _count_enforcement = ""
+    if req.target_slides is not None:
+        _count_enforcement = f"""
+## ⛔ CRITICAL CONSTRAINT — READ FIRST
+
+You MUST produce EXACTLY {target_slides} slides. The JSON ``slides`` array must
+contain exactly {target_slides} entries — no more, no less.
+
+- If your first draft has >{target_slides} slides: MERGE the weakest pair into one
+  (e.g. combine two adjacent content slides, or fold a sparse visual slide into the
+  next slide's bullets). Do NOT just drop a slide silently.
+- If your first draft has <{target_slides} slides: SPLIT the densest slide into two.
+
+Count your slides before returning. This constraint is enforced by the engine and
+a plan with the wrong count will be rejected or auto-trimmed (potentially cutting
+content you wanted to keep).
+"""
+
     user_prompt = f"""Plan a scientific presentation with the following specifications:
+{_count_enforcement}
+Topic/Description: {req.topic}
+Talk type: {req.talk_type}
+Duration: {req.duration_minutes} minutes
+Target slide count: {target_slides} slides ({slide_count_tolerance})
+Language: {req.language}
 
-    Topic/Description: {req.topic}
-    Talk type: {req.talk_type}
-    Duration: {req.duration_minutes} minutes
-    Target slide count: {target_slides} slides (±3)
-    Language: {req.language}
+{lang_hint}
 
-    {lang_hint}
+{instruction_block}
 
-    {instruction_block}
+Source material:
+---
+{content_summary}
+---
 
-    Source material:
-    ---
-    {content_summary}
-    ---
-
-    {slide_types_desc}
+{slide_types_desc}
 
     {rewriting_rules}
 
@@ -693,6 +715,12 @@ trained for 100 epochs with a batch size of 256 on 8 V100 GPUs."
     - If you have ≥3 figures, use ≥1 "full_figure" slide for the most important one
     - If you have ≥2 tables, use ≥2 "table" slides
     - "metrics" slides count toward visual variety — use them for headline numbers
+
+    ### Metrics value format (IMPORTANT)
+    - Values MUST be compact (≤8 chars): "94.2%", "2.3×", "3.1pp", "340h", "4/5"
+    - Labels MUST be short (≤15 chars): "Accuracy", "Speedup", "GPU-hours"
+    - NEVER put long phrases like "3.1 percentage points improvement" in a value
+    - Write: {{"value":"+3.1pp","label":"vs baseline"}} NOT {{"value":"3.1 percentage points improvement","label":"compared to the baseline"}}
 
     ## SLIDE-TYPE QUOTAS (for {target_slides} slides)
 
@@ -800,6 +828,10 @@ trained for 100 epochs with a batch size of 256 on 8 V100 GPUs."
     11. For "steps" slides: exactly 3-5 steps, each with step_number+step_title+step_desc.
     12. For "emphasis_box" slides: box_text MUST be 1-2 short sentences, the SINGLE
         most important insight from this slide's evidence.
+    13. **SLIDE COUNT (see CRITICAL CONSTRAINT above)**: the slides array MUST have
+        exactly {target_slides} entries. Count them. If you have too many, merge the
+        weakest adjacent slides — do NOT just drop content. This is enforced at the
+        engine level; wrong-count plans will be auto-trimmed.
     """
 
     system = (
@@ -887,10 +919,21 @@ trained for 100 epochs with a batch size of 256 on 8 V100 GPUs."
             )
             plan = _autoattach_slide_citations(plan)
 
-            plan = _append_references_slide(plan)
+            plan = _append_references_slide(plan, target_slides=req.target_slides)
 
             # post-validation — enforce visual variety
-            plan = _enforce_visual_variety(plan, content)
+            plan = _enforce_visual_variety(plan, content, target_slides=req.target_slides)
+
+            # An explicit count is a delivery constraint, not a suggestion.
+            # Trim excess slides and split dense content slides when short.
+            if req.target_slides is not None:
+                plan = _trim_slides_to_target(plan, req.target_slides)
+                plan = _expand_slides_to_target(plan, req.target_slides)
+                if len(plan.slides) != req.target_slides:
+                    raise ValueError(
+                        "could not satisfy explicit target_slides="
+                        f"{req.target_slides}; planned {len(plan.slides)}"
+                    )
 
             logger.info(
                 "[content-planner] Plan: '%s', %d slides "
@@ -917,9 +960,218 @@ trained for 100 epochs with a batch size of 256 on 8 V100 GPUs."
         f"{last_error}"
     )
 
+def _trim_slides_to_target(
+    plan: PresentationPlan,
+    target: int,
+) -> PresentationPlan:
+    """Remove the most expendable slides until the count matches *target*.
+
+    Three-tier removal, progressively more aggressive:
+
+    **Tier 1 (always expendable):**
+      1. Plain ``content`` slides with the fewest bullets
+      2. ``section`` dividers
+
+    **Tier 2 (expendable when ≥2 of the same type remain):**
+      3. ``emphasis_box``, ``icon_rows``, ``steps``, ``two_column``
+         (keep at least 1 of each type for visual variety)
+
+    **Tier 3 (last resort — score ALL non-essential slides):**
+      Every slide except title (index 0) and conclusion (last) is scored by
+      information density: fewer bullets + no figure + expendable type = higher
+      removal score. The lowest-density slide(s) are cut.
+
+    Never removes: title, conclusion, and the *only* table, metrics, or
+    full-figure slide (these carry essential evidence). An essential slide can
+    be removed only while another slide of the same type remains.
+    """
+    excess = len(plan.slides) - target
+    if excess <= 0:
+        return plan
+
+    n_slides = len(plan.slides)
+
+    type_counts: dict[str, int] = {}
+    for slide in plan.slides:
+        type_counts[slide.slide_type] = type_counts.get(slide.slide_type, 0) + 1
+
+    def _count_type(st: str) -> int:
+        return type_counts.get(st, 0)
+
+    # Types that are never removed unless they appear multiple times.
+    _PROTECTED_SINGLETON = {"title", "conclusion", "table", "metrics", "full_figure"}
+    # Types that can be removed in tier 2.
+    _TIER2_TYPES = {"emphasis_box", "icon_rows", "steps", "two_column"}
+
+    indices_to_remove: set[int] = set()
+
+    def _select_for_removal(index: int, *, keep_one_of_type: bool = False) -> bool:
+        """Select a slide while maintaining the live count for its type."""
+        if index in indices_to_remove:
+            return False
+        slide_type = plan.slides[index].slide_type
+        if keep_one_of_type and _count_type(slide_type) <= 1:
+            return False
+        indices_to_remove.add(index)
+        type_counts[slide_type] = _count_type(slide_type) - 1
+        return True
+
+    # ── Tier 1: content + section ──
+    tier1: list[tuple[int, int]] = []  # (index, score)
+    for i, s in enumerate(plan.slides):
+        if s.slide_type == "section":
+            tier1.append((i, 3))
+        elif s.slide_type == "content":
+            n = len(s.bullets or [])
+            if n <= 1:
+                tier1.append((i, 10))
+            elif n <= 2:
+                tier1.append((i, 5))
+            else:
+                tier1.append((i, 2))
+    tier1.sort(key=lambda x: x[1], reverse=True)
+    for idx, _score in tier1:
+        if len(indices_to_remove) >= excess:
+            break
+        _select_for_removal(idx)
+
+    # ── Tier 2: visual slides with duplicates ──
+    if len(indices_to_remove) < excess:
+        tier2: list[tuple[int, int]] = []
+        for i, s in enumerate(plan.slides):
+            if i in indices_to_remove:
+                continue
+            if s.slide_type not in _TIER2_TYPES:
+                continue
+            # Can remove if ≥2 of this type remain (keep at least 1)
+            if _count_type(s.slide_type) <= 1:
+                continue
+            n_b = len(s.bullets or [])
+            score = 4 + max(0, 3 - n_b)  # base 4, + up to 3 for sparse bullets
+            tier2.append((i, score))
+        tier2.sort(key=lambda x: x[1], reverse=True)
+        for idx, _score in tier2:
+            if len(indices_to_remove) >= excess:
+                break
+            _select_for_removal(idx, keep_one_of_type=True)
+
+    # ── Tier 3: last resort — score every non-essential slide ──
+    if len(indices_to_remove) < excess:
+        tier3: list[tuple[int, int]] = []
+        for i, s in enumerate(plan.slides):
+            if i in indices_to_remove:
+                continue
+            st = s.slide_type
+            # Never remove title (first) or conclusion (last)
+            if st == "title" or st == "conclusion":
+                continue
+            # Protected singletons — only remove if duplicates exist
+            if st in _PROTECTED_SINGLETON and _count_type(st) <= 1:
+                continue
+
+            # Score: lower = more expendable. We want to remove the slide
+            # with the lowest information density.
+            score = 0
+
+            # Type base score — slides carrying hard data are less expendable
+            _type_base = {
+                "table": 10, "metrics": 9, "full_figure": 8,
+                "content_figure": 7, "emphasis_box": 6, "two_column": 5,
+                "icon_rows": 4, "steps": 4, "content": 3, "section": 2,
+            }
+            score += _type_base.get(st, 3)
+
+            # Bullet count — more bullets = more information = less expendable
+            n_b = len(s.bullets or [])
+            score += min(n_b, 5)  # cap at 5
+
+            # Figure presence — slides with figures are less expendable
+            if s.figure_path:
+                score += 3
+
+            # Position penalty — middle slides slightly more expendable
+            pos_ratio = i / max(n_slides - 1, 1)
+            if 0.2 <= pos_ratio <= 0.85:
+                score -= 1  # middle slides are 1 point more expendable
+
+            tier3.append((i, score))
+
+        # Sort by score ASCENDING (lowest = most expendable = remove first)
+        tier3.sort(key=lambda x: x[1])
+        for idx, _score in tier3:
+            if len(indices_to_remove) >= excess:
+                break
+            _select_for_removal(
+                idx,
+                keep_one_of_type=plan.slides[idx].slide_type in _PROTECTED_SINGLETON,
+            )
+
+    if indices_to_remove:
+        plan.slides = [
+            s for i, s in enumerate(plan.slides)
+            if i not in indices_to_remove
+        ]
+        logger.info(
+            "[trim] Removed %d expendable slide(s) to hit target_slides=%d "
+            "(was %d, now %d)", len(indices_to_remove), target,
+            len(plan.slides) + len(indices_to_remove), len(plan.slides),
+        )
+    elif excess > 0:
+        logger.warning(
+            "[trim] Could not trim %d excess slide(s) — no expendable "
+            "slides found among %d total (target=%d). "
+            "The review checkpoint will show the over-target count.",
+            excess, len(plan.slides), target,
+        )
+
+    return plan
+
+
+def _expand_slides_to_target(
+    plan: PresentationPlan,
+    target: int,
+) -> PresentationPlan:
+    """Split dense content slides until an explicit page count is reached.
+
+    The operation preserves title and conclusion slides and never fabricates
+    new scientific claims. If the source plan has too little splittable content,
+    the caller rejects it and lets the bounded planning retry ask for a fuller
+    plan instead of silently returning the wrong page count.
+    """
+
+    unsplittable = {"title", "conclusion", "section", "table", "metrics", "full_figure"}
+    while len(plan.slides) < target:
+        candidates = [
+            (len(slide.bullets or []), index)
+            for index, slide in enumerate(plan.slides)
+            if slide.slide_type not in unsplittable and len(slide.bullets or []) >= 2
+        ]
+        if not candidates:
+            break
+
+        _, index = max(candidates)
+        slide = plan.slides[index]
+        split_at = max(1, len(slide.bullets) // 2)
+        continuation = slide.model_copy(deep=True)
+        continuation.title = f"{slide.title} — continued"
+        continuation.bullets = list(slide.bullets[split_at:])
+        slide.bullets = list(slide.bullets[:split_at])
+
+        # A continued slide must not duplicate a single source figure.
+        continuation.figure_path = None
+        continuation.figure_caption = None
+        if continuation.slide_type in {"content_figure", "full_figure"}:
+            continuation.slide_type = "content"
+        plan.slides.insert(index + 1, continuation)
+
+    return plan
+
+
 def _enforce_visual_variety(
     plan: PresentationPlan,
     content: ParsedContent,
+    *,
+    target_slides: int | None = None,
 ) -> PresentationPlan:
     """Post-validation: warn (and best-effort fix) if visuals are under-used.
 
@@ -971,27 +1223,49 @@ def _enforce_visual_variety(
             content.tables,
             key=lambda t: len(t.get("rows", [])) * len(t.get("headers", [])),
         )
-        # Insert before conclusion
-        insert_pos = len(plan.slides) - 1
-        for i in range(len(plan.slides) - 1, -1, -1):
-            if plan.slides[i].slide_type == "conclusion":
-                insert_pos = i
-                break
-
-        title_text = best_tbl.get("caption", "")[:60] or "Quantitative Comparison"
+        visible_rows = [
+            [str(c) for c in row]
+            for row in best_tbl.get("rows", [])[:6]
+        ]
         new_slide = SlideData(
             slide_type="table",
-            title=title_text,
+            title=best_tbl.get("caption", "")[:60] or "Quantitative Comparison",
             table_headers=[str(h) for h in best_tbl.get("headers", [])],
-            table_rows=[
-                [str(c) for c in r] for r in best_tbl.get("rows", [])[:6]
-            ],
-            highlight_row=len(best_tbl.get("rows", [])) - 1,  # often last row = ours
+            table_rows=visible_rows,
+            highlight_row=len(visible_rows) - 1 if visible_rows else None,
         )
-        plan.slides.insert(insert_pos, new_slide)
-        logger.info("[variety] Inserted missing table slide at position %d", insert_pos)
+        # Insert before conclusion; when target_slides is set AND we are already at
+        # (or over) the target, replace the most expendable plain-content slide
+        # instead of adding a new one so the count stays exact.
+        at_target = target_slides is not None and len(plan.slides) >= target_slides
+        if at_target:
+            # Find the most expendable plain content slide to replace
+            replaced = False
+            for i in range(len(plan.slides) - 2, 1, -1):
+                if plan.slides[i].slide_type == "content" and not plan.slides[i].dark_background:
+                    plan.slides[i] = new_slide
+                    logger.info(
+                        "[variety] Replaced expendable content slide %d with table (target=%d)",
+                        i, target_slides,
+                    )
+                    replaced = True
+                    break
+            if not replaced:
+                logger.info(
+                    "[variety] Skipped table slide insertion — already at target_slides=%d "
+                    "with no expendable content slot", target_slides,
+                )
+        else:
+            insert_pos = len(plan.slides) - 1
+            for i in range(len(plan.slides) - 1, -1, -1):
+                if plan.slides[i].slide_type == "conclusion":
+                    insert_pos = i
+                    break
+            plan.slides.insert(insert_pos, new_slide)
+            logger.info("[variety] Inserted missing table slide at position %d", insert_pos)
 
     return plan
+
 
 async def _chat_compat(llm, *, system: str, user: str, temperature: float, max_tokens: int) -> str:
     """Adapt to omni's LLMClient.chat(system_prompt, user_message) signature.
@@ -1069,7 +1343,11 @@ scarce for the requested length, or the talk is high-stakes (defense)."""
     payload.setdefault("risks", [])
     return payload
 
-def _append_references_slide(plan: PresentationPlan) -> PresentationPlan:
+def _append_references_slide(
+    plan: PresentationPlan,
+    *,
+    target_slides: int | None = None,
+) -> PresentationPlan:
     """Auto-append References slide(s) when the plan has citations but none.
 
     Idempotent: if a `references` slide already exists we do nothing. When
@@ -1083,8 +1361,59 @@ def _append_references_slide(plan: PresentationPlan) -> PresentationPlan:
     if any(s.slide_type == "references" for s in plan.slides):
         return plan
 
-    per_page = 12
     total = len(plan.references)
+    # When the user specified an exact slide count, try to fit references
+    # without pushing the deck past the target.
+    at_target = target_slides is not None and len(plan.slides) >= target_slides
+    if at_target:
+        # Preserve the explicit count without truncating the bibliography.
+        # Intro (index 1), title, conclusion, and evidence-specific layouts are
+        # protected; only later plain-content slides may be replaced. If the
+        # deck has too few such slots, fail closed so the bounded planner retry
+        # can produce a plan that budgets space for every reference.
+        per_page = 18
+        chunks = [
+            plan.references[start : start + per_page]
+            for start in range(0, total, per_page)
+        ]
+        replaceable = [
+            index
+            for index in range(2, max(2, len(plan.slides) - 1))
+            if plan.slides[index].slide_type == "content"
+            and not plan.slides[index].dark_background
+        ]
+        if len(replaceable) < len(chunks):
+            raise ValueError(
+                "explicit target_slides leaves too few replaceable slides for "
+                f"{len(chunks)} reference slide(s)"
+            )
+
+        selected = replaceable[-len(chunks) :]
+        pages = len(chunks)
+        for page_index, (slide_index, chunk) in enumerate(
+            zip(selected, chunks, strict=True),
+            start=1,
+        ):
+            plan.slides[slide_index] = SlideData(
+                slide_type="references",
+                title=(
+                    "References"
+                    if pages == 1
+                    else f"References ({page_index}/{pages})"
+                ),
+                bullets=[f"{r['key']} {r['text']}" for r in chunk],
+            )
+            logger.info(
+                "[references] Replaced content slide %d with references "
+                "page %d/%d (target=%d)",
+                slide_index,
+                page_index,
+                pages,
+                target_slides,
+            )
+        return plan
+
+    per_page = 12
     pages = (total + per_page - 1) // per_page
 
     insert_at = len(plan.slides)

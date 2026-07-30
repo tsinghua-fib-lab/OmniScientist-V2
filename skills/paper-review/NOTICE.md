@@ -15,3 +15,11 @@ commit `2f75b9f5a7d20dc744eead1f1100a9673596f88a`. It was adapted from the
 upstream `omniscientist-paper-review` identity to the repository's canonical
 `paper-review` provider and enhanced with Omni routing, bounded prompt
 execution, standalone licensing, and portable research provenance.
+
+The integrated visual-analysis stage invokes MinerU through its documented
+command-line interface and parses its documented output files; it does not
+include or modify MinerU source code. MinerU is available at
+<https://github.com/opendatalab/MinerU> under its own license and model terms.
+The visual-review design is informed by public multimodal paper-review systems,
+including Ai-Review, but the implementation in this skill is independent and
+operates on MinerU-extracted crops rather than screenshots of every PDF page.

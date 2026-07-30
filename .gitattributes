@@ -1,0 +1,21 @@
+# One byte sequence per file on every platform.
+#
+# Several assets here are pinned by SHA-256 and validated against the bytes on
+# disk: the bundled scientist personas carry a manifest digest per file, and
+# `cli/hatch_build.py` refuses to package a mismatch. A checkout that rewrites
+# LF to CRLF therefore does not merely look different, it fails the build — the
+# Windows release job died exactly this way, hashing a CRLF `manifest.json`.
+# Normalising to LF everywhere keeps a checkout byte-identical to the blob.
+#
+# `.ps1` is deliberately LF too: the documented installer pipes the raw blob
+# into PowerShell (`irm ... | iex`), so LF is already what Windows executes.
+* text=auto eol=lf
+
+# Digest-pinned: never eligible for conversion, whatever the text heuristics say.
+skills/soulagent/assets/builtin-scientist-kg/** -text
+
+# Binary payloads where a silent rewrite would corrupt an index rather than
+# announce itself.
+*.faiss binary
+*.pack binary
+*.png binary

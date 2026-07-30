@@ -63,6 +63,49 @@ async def test_read_file_on_directory_returns_listing_not_error():
 
 
 @pytest.mark.asyncio
+async def test_read_file_accepts_ascii_quotes_for_curly_named_file():
+    ctx = _ctx()
+    proj = ctx.paths.project_dir
+    real = proj / "报告“初稿”.md"
+    real.write_text("body", encoding="utf-8")
+    asked = proj / '报告"初稿".md'
+
+    out = await _tool(build_fs_tools(ctx), "read_file")({"path": str(asked)})
+
+    assert out == "body"
+
+
+@pytest.mark.asyncio
+async def test_read_file_missing_path_forbids_quote_retries():
+    ctx = _ctx()
+    missing = ctx.paths.project_dir / "nope.md"
+
+    out = await _tool(build_fs_tools(ctx), "read_file")({"path": str(missing)})
+
+    assert out.startswith("ERROR: path does not exist")
+    assert "do not rewrite quotation marks" in out
+    assert "Do not retry" in out
+
+
+@pytest.mark.asyncio
+async def test_read_file_resolves_artifact_uri():
+    ctx = _ctx()
+    target = ctx.paths.project_dir / "stored.md"
+    target.write_text("from-store", encoding="utf-8")
+
+    class _Store:
+        async def resolve_path(self, uri: str):
+            return target if uri == "artifact://abc123" else None
+
+    ctx.artifacts = _Store()
+    out = await _tool(build_fs_tools(ctx), "read_file")({"path": "artifact://abc123"})
+    assert out == "from-store"
+
+    missing = await _tool(build_fs_tools(ctx), "read_file")({"path": "artifact://missing"})
+    assert missing.startswith("ERROR: artifact not found")
+
+
+@pytest.mark.asyncio
 async def test_read_file_denies_sensitive_and_actionable_root_error():
     ctx = _ctx()
     proj = ctx.paths.project_dir
@@ -101,12 +144,20 @@ async def test_grep_and_glob_skip_sensitive_files():
 
 
 @pytest.mark.asyncio
-async def test_fs_denies_symlink_to_sensitive_target_under_root():
+async def test_fs_denies_symlink_to_sensitive_target_under_root(tmp_path):  # noqa: ANN001
     # TOCTOU hardening: a benign-named symlink whose *resolved* target is
     # sensitive must be denied on read/write/edit — checking only the link name
     # (``notes.txt``) would smuggle the secret past the name-glob guard.
-    ctx = _ctx()
-    proj = ctx.paths.project_dir
+    #
+    # The link lives in an ordinary working directory rather than under the omni
+    # store: inside the store the protected-directory check refuses first, and
+    # the refusal this test is about would never be reached.
+    settings = load_settings()
+    paths = get_paths(project="fstest")
+    paths.project_dir.mkdir(parents=True, exist_ok=True)
+    proj = tmp_path / "repo"
+    proj.mkdir(parents=True, exist_ok=True)
+    ctx = ExecContext(settings=settings, paths=paths, working_dir=proj)
     secret = proj / ".env"
     secret.write_text("SECRET=1", encoding="utf-8")
     link = proj / "notes.txt"
@@ -124,7 +175,7 @@ async def test_fs_denies_symlink_to_sensitive_target_under_root():
 
 
 @pytest.mark.asyncio
-async def test_open_artifact_readmits_raw_path_fallback():
+async def test_open_artifact_readmits_raw_path_fallback(tmp_path):
     # open_artifact's raw-path fallback must apply the read-root + sensitivity
     # gate so it cannot be used to read arbitrary/sensitive files off disk.
     from omni.skills_runtime.builtin_tools.recall import build_recall_tools
@@ -148,8 +199,10 @@ async def test_open_artifact_readmits_raw_path_fallback():
 
         open_artifact = _tool(build_recall_tools(ctx), "open_artifact")
 
-        # Outside the roots → refused.
-        outside = await open_artifact({"uri": "/etc/hosts"})
+        # A real file outside the roots → refused on every host OS.
+        outside_path = tmp_path / "outside.txt"
+        outside_path.write_text("not accessible", encoding="utf-8")
+        outside = await open_artifact({"uri": str(outside_path)})
         assert "outside the accessible roots" in outside.get("error", "")
 
         # Sensitive file under a root → refused.

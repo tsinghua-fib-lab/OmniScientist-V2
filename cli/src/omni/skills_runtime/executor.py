@@ -12,6 +12,7 @@ the asynchronous background task path (task runtime).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import importlib
 import importlib.util
@@ -22,10 +23,18 @@ import shutil
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from omni.core.tool_result import command_result_status
+from omni.config.settings import resolve_max_output_tokens
+from omni.core.termination import (
+    base_termination_reason,
+    is_bounded_termination,
+    termination_next_action,
+    termination_reason_label,
+)
+from omni.core.tool_result import command_result_status, owned_result_outcome
 from omni.runtime.execution_policy import skill_requires_approval
 from omni.runtime.hooks import execution_policy_active, execution_policy_covers
 from omni.runtime.tool_gateway import ToolGateway
@@ -39,11 +48,13 @@ _ENGINE_IMPORT_LOCK = threading.RLock()
 class SkillExecutionError(RuntimeError):
     """A trusted skill could not be executed."""
 
+# Transient conditions: the same run, re-issued unchanged, can legitimately
+# succeed. Resource exhaustion is deliberately *not* here — replaying a run that
+# spent its whole iteration/tool budget under that same budget only spends it
+# again, so it is reported as a bounded result with a widen-the-budget
+# affordance rather than as something the workflow layer should silently retry.
 _RECOVERABLE_PROMPT_REASONS = frozenset(
     {
-        "timeout",
-        "max_iterations",
-        "max_tool_calls",
         "llm_error",
         "llm_timeout",
         "llm_rate_limited",
@@ -54,40 +65,72 @@ _RECOVERABLE_PROMPT_REASONS = frozenset(
 _SALVAGEABLE_PROMPT_REASONS = frozenset({"timeout", "max_iterations", "max_tool_calls"})
 
 
+def _provider_snapshot_names(snapshot: dict[str, Any]) -> tuple[str, str]:
+    """Return the ``(name, source)`` a provider snapshot claims to govern.
+
+    ``execution_identity`` wins over the binding fields: capability resolution
+    seals ``provider_name`` as the *planned* name, which may differ from the
+    entry that was actually resolved and hashed.
+    """
+    identity = snapshot.get("execution_identity")
+    identity = identity if isinstance(identity, dict) else {}
+    return (
+        str(identity.get("name") or snapshot.get("provider_name") or ""),
+        str(identity.get("source") or snapshot.get("provider_source") or ""),
+    )
+
+
 def _authority_for_entry(ctx: ExecContext, entry: SkillEntry) -> dict[str, Any]:
-    """Return the direct or delegated provider slice governing ``entry``."""
+    """Return the direct or delegated provider slice governing ``entry``.
+
+    An empty result means "this authority does not govern ``entry``" and callers
+    fail closed on it. That distinction is the point: handing back a snapshot
+    sealed for a *different* provider made the fingerprint check compare two
+    unrelated skills and report a benign context reuse as provider tampering.
+    """
     authority = getattr(ctx, "provider_authority", None)
     if not isinstance(authority, dict):
         return {}
-    identity = authority.get("execution_identity")
-    if isinstance(identity, dict) and (
-        str(identity.get("name") or "") == entry.name
-        and (
-            not identity.get("source")
-            or str(identity.get("source") or "") == entry.source
-        )
-    ):
+    governed, source = _provider_snapshot_names(authority)
+    if governed == entry.name and (not source or source == entry.source):
         return authority
     delegated = authority.get("delegated_provider_authorities")
     if isinstance(delegated, list):
         for item in delegated:
             if not isinstance(item, dict):
                 continue
-            identity = item.get("execution_identity")
-            name = str(
-                item.get("provider_name")
-                or (identity.get("name") if isinstance(identity, dict) else "")
-                or ""
-            )
-            source = str(
-                item.get("provider_source")
-                or (identity.get("source") if isinstance(identity, dict) else "")
-                or ""
-            )
-            if name == entry.name and (not source or source == entry.source):
+            name, item_source = _provider_snapshot_names(item)
+            if name == entry.name and (
+                not item_source or item_source == entry.source
+            ):
                 return item
         return {}
+    if governed:
+        return {}
     return authority
+
+
+def _authority_scope_error(ctx: ExecContext, entry: SkillEntry) -> str:
+    """Explain why the authority in scope may not stand in as ``entry``'s seal.
+
+    Deliberately not phrased as a fingerprint mismatch: nothing about the
+    provider changed, the authority in hand simply belongs to another consumer.
+    """
+    authority = getattr(ctx, "provider_authority", None)
+    if not isinstance(authority, dict) or not authority:
+        return ""
+    if isinstance(authority.get("delegated_provider_authorities"), list):
+        return (
+            f"provider execution authority is missing for delegated skill "
+            f"'{entry.name}'"
+        )
+    governed, _ = _provider_snapshot_names(authority)
+    if governed and governed != entry.name:
+        return (
+            f"provider execution authority in scope governs '{governed}', not "
+            f"'{entry.name}'; re-plan or re-submit before running"
+        )
+    return f"provider execution authority is missing for skill '{entry.name}'"
 
 
 def _load_engine_module(
@@ -170,7 +213,7 @@ def _load_engine_module_locked(
                     f"{entry.source}\0{entry.name}\0"
                     f"{candidate.resolve(strict=False)}\0{source_sha}\0"
                     f"{authority_fingerprint}"
-                ).encode()
+                ).encode("utf-8", errors="backslashreplace")
             ).hexdigest()
             mod_name = (
                 f"omni_skill__{entry.name.replace('-', '_')}__"
@@ -391,10 +434,7 @@ def _make_skill_handler(skill, ctx):  # noqa: ANN001, ANN201
     async def handler(args: dict) -> Any:
         expected = _authority_for_entry(ctx, skill)
         if getattr(ctx, "provider_authority", None) and not expected:
-            raise SkillExecutionError(
-                f"provider execution authority is missing for delegated skill "
-                f"'{skill.name}'"
-            )
+            raise SkillExecutionError(_authority_scope_error(ctx, skill))
         if expected:
             from omni.agent.plan_revision import provider_authority_error
 
@@ -415,6 +455,35 @@ def _jsonify(value: Any) -> Any:
         return value
     except TypeError:
         return str(value)
+
+
+def _sanitize_json_surrogates(value: Any) -> Any:
+    """Replace invalid Unicode surrogate code points at process boundaries."""
+    if isinstance(value, str):
+        return "".join(
+            "\ufffd" if 0xD800 <= ord(char) <= 0xDFFF else char
+            for char in value
+        )
+    if isinstance(value, dict):
+        return {
+            _sanitize_json_surrogates(key): _sanitize_json_surrogates(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_json_surrogates(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize_json_surrogates(item) for item in value)
+    return value
+
+
+def _json_stdin_bytes(value: Any) -> bytes:
+    """Serialize skill stdin as strict, valid UTF-8 JSON."""
+    safe_value = _sanitize_json_surrogates(value)
+    return json.dumps(
+        safe_value,
+        ensure_ascii=False,
+        default=lambda item: _sanitize_json_surrogates(str(item)),
+    ).encode("utf-8")
 
 
 def _prompt_partial_outputs(tool_trace: list[Any]) -> list[dict[str, Any]]:
@@ -459,23 +528,50 @@ def _prompt_partial_outputs(tool_trace: list[Any]) -> list[dict[str, Any]]:
     return outputs
 
 
+def _bounded_stop_message(entry: SkillEntry, reason: str) -> str:
+    """Say which budget stopped the run, in the user's terms."""
+    label = termination_reason_label(reason)
+    return f"{entry.name} stopped at its budget ({label})" if label else ""
+
+
 def _prompt_skill_result(
     entry: SkillEntry,
     result: Any,
     *,
     salvage_text: str = "",
-    fallback_identity: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Return a stable contract for prompt-only skill sub-agent outcomes."""
+    reason = base_termination_reason(str(result.terminated_reason or ""))
+    bounded = is_bounded_termination(str(result.terminated_reason or ""))
     status = "ok" if result.kind == "text" else result.kind
     original_error = ""
     if status == "error":
         original_error = result.content or result.terminated_reason or f"{entry.name} failed"
+    text = str(salvage_text or result.content or "").strip()
+    salvaged_empty = bool(salvage_text.strip()) and not str(result.content or "").strip()
     if status == "error" and salvage_text:
+        status = "partial"
+    elif status == "ok" and salvaged_empty:
+        # The model announced done with no answer. Salvage recovered prose, but
+        # that is a wrap-up, not a completed skill — same honesty as a budget stop.
+        status = "partial"
+        original_error = f"{entry.name} stopped without a final answer"
+    if (
+        status == "ok"
+        and not text
+        and not _prompt_has_file_deliverable(result)
+    ):
+        status = "error"
+        original_error = f"{entry.name} returned empty result"
+    # The loop now forces a real final answer when it hits a budget, so the
+    # result arrives as usable text. That answer is still *bounded*: reporting
+    # it as a plain success would hide that exploration was cut short, which is
+    # how a truncated review used to pass as a finished one.
+    if status == "ok" and bounded:
         status = "partial"
     payload: dict[str, Any] = {
         "status": status,
-        "text": salvage_text or result.content,
+        "text": text,
         "tools_used": result.tool_names(),
         "terminated_reason": result.terminated_reason,
         "total_iterations": result.total_iterations,
@@ -484,8 +580,16 @@ def _prompt_skill_result(
         "usage_budget": dict(result.usage_budget),
         "partial_outputs": _prompt_partial_outputs(result.tool_trace),
     }
+    next_action = termination_next_action(reason)
+    if next_action:
+        payload["next_action"] = next_action
     if status == "partial":
-        message = original_error or result.terminated_reason or f"{entry.name} stopped early"
+        message = original_error or _bounded_stop_message(entry, reason) or f"{entry.name} stopped early"
+        # A run stopped by its own budget is not retryable *as issued*: the
+        # replay would exhaust the same ceiling. It is recoverable only by
+        # widening the budget, which is an operator decision, so the workflow
+        # layer must not loop on it.
+        retryable = not bounded
         payload["warning"] = message
         payload["summary"] = f"{entry.name} partially completed: {message}"
         payload["recoverable"] = True
@@ -493,16 +597,17 @@ def _prompt_skill_result(
         payload["error_info"] = {
             "code": result.terminated_reason or "partial",
             "message": message,
-            "retryable": True,
-            "workflow_recoverable": True,
+            "retryable": retryable,
+            "workflow_recoverable": retryable,
             "tool_calls": result.total_tool_calls,
             "iterations": result.total_iterations,
+            **({"next_action": next_action} if next_action else {}),
         }
     if status == "error":
         message = original_error
         payload["error"] = message
         payload["summary"] = f"{entry.name} did not complete: {message}"
-        retryable = result.terminated_reason in _RECOVERABLE_PROMPT_REASONS
+        retryable = reason in _RECOVERABLE_PROMPT_REASONS
         payload["recoverable"] = retryable
         payload["blocking"] = not retryable
         payload["error_info"] = {
@@ -513,59 +618,9 @@ def _prompt_skill_result(
             "terminated_reason": result.terminated_reason,
             "tool_calls": result.total_tool_calls,
             "iterations": result.total_iterations,
+            **({"next_action": next_action} if next_action else {}),
         }
-    from omni.runtime.deliverable_assessment import (
-        apply_prompt_assessment_transport,
-    )
-
-    return apply_prompt_assessment_transport(
-        payload,
-        final_text=str(payload.get("text") or ""),
-        quality_contract=entry.quality_contract,
-        provider=entry.name,
-        fallback_identity=fallback_identity or {},
-    )
-
-
-def _prompt_assessment_fallback_identity(
-    entry: SkillEntry,
-    ctx: ExecContext,
-) -> dict[str, str]:
-    """Return host-owned identity fields for an explicit unknown fallback."""
-
-    deliverable_id = str(
-        entry.quality_contract.get("deliverable_id")
-        or next(iter(entry.deliverables), "")
-        or entry.name
-    ).strip()
-    authority = _authority_for_entry(ctx, entry)
-    contract_hash = str(
-        authority.get("fingerprint")
-        or entry.sha256
-        or hashlib.sha256(
-            json.dumps(
-                {
-                    "provider": entry.name,
-                    "source": entry.source,
-                    "version": entry.version,
-                    "quality_contract": entry.quality_contract,
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-                default=str,
-            ).encode()
-        ).hexdigest()
-    ).strip()
-    return {
-        "deliverable_id": deliverable_id,
-        "provider_binding_id": f"skill:{entry.name}:{deliverable_id}",
-        "contract_hash": contract_hash,
-        "step_id": str(
-            ctx.workflow_step_key
-            or ctx.workflow_step_id
-            or deliverable_id
-        ).strip(),
-    }
+    return payload
 
 
 def _int_policy(value: Any, default: int) -> int:
@@ -583,12 +638,129 @@ def _float_policy(value: Any, default: float) -> float:
 
 
 def _bounded_int_policy(value: Any, default: int, ceiling: int) -> int:
-    return min(_int_policy(value, default), max(1, int(ceiling)))
+    return min(_int_policy(value, max(1, int(default))), max(1, int(ceiling)))
 
 
-def _bounded_float_policy(value: Any, default: float, ceiling: float) -> float:
-    requested = _float_policy(value, default)
-    return min(requested, max(0.01, float(ceiling)))
+@dataclass(frozen=True)
+class SkillBudget:
+    """A skill's wall clock plus the advice that names whatever bound it.
+
+    Resolution is ``skill-specific > skill-global > ceiling > live envelope``:
+    a manifest's ``execution.max_seconds`` wins over the global fallback, may
+    raise it up to the owner-trusted ceiling, and is then bounded for real by
+    the workflow envelope clock. Keeping ``default`` and ``ceiling`` distinct is
+    the point — passing one value for both silently clamps every declaration
+    back to the fallback.
+    """
+
+    seconds: float
+    remedy: str
+    stall_seconds: float = 0.0
+
+    def timeout_error(self, name: str) -> SkillExecutionTimeout:
+        return SkillExecutionTimeout(
+            f"skill '{name}' timed out after {self.seconds:g}s — {self.remedy}"
+        )
+
+    def stall_error(self, name: str) -> SkillExecutionTimeout:
+        return SkillExecutionTimeout(
+            f"skill '{name}' reported no progress for {self.stall_seconds:g}s — the run "
+            f"is stuck rather than slow. Raise `execution.stall_seconds` in its SKILL.md "
+            f"if the skill is simply quiet for that long."
+        )
+
+
+def _skill_budget(
+    entry: Any, ctx: Any, *, default: float, ceiling: float, knob: str
+) -> SkillBudget:
+    declared = _float_policy((entry.execution or {}).get("max_seconds"), 0.0)
+    requested = declared if declared > 0 else float(default)
+    capped = min(requested, max(0.01, float(ceiling)))
+    if declared > capped:
+        # Loud, not silent: the manifest asked for a budget it can never get, so
+        # the author learns here instead of at the truncated deadline.
+        logger.warning(
+            "[skills] skill '%s' declares execution.max_seconds=%g but %s caps it at %g",
+            entry.name, declared, knob, capped,
+        )
+    seconds = _remaining_timeout(ctx, capped)
+    if seconds < capped:
+        remedy = (
+            "the surrounding workflow envelope ran out first, so the skill never had "
+            "its full budget. Give the workflow more room with "
+            "`/config set tasks.workflow_max_seconds <seconds>`."
+        )
+    elif capped < requested:
+        remedy = (
+            f"its SKILL.md asked for {requested:g}s but `{knob}` caps skills at "
+            f"{capped:g}s. Raise the ceiling with `/config set {knob} <seconds>`."
+        )
+    elif declared > 0:
+        remedy = (
+            "that is the budget its own SKILL.md declares; raise "
+            "`execution.max_seconds` there if the work legitimately takes longer."
+        )
+    else:
+        remedy = (
+            f"it declares no budget of its own, so it fell back to {default:g}s. "
+            "Declare `execution.max_seconds` in its SKILL.md if the work legitimately "
+            "takes longer."
+        )
+    stall = _float_policy((entry.execution or {}).get("stall_seconds"), 0.0)
+    return SkillBudget(seconds, remedy, min(stall, seconds) if stall > 0 else 0.0)
+
+
+class _SkillStalled(Exception):
+    """A watched skill went quiet for longer than its declared stall window."""
+
+
+class _ProgressHeartbeat:
+    """Records when a skill last reported progress.
+
+    Mirrors the coordinator loop, where ``react.stall_timeout_s`` is the primary
+    "something is stuck" guard and the wall clock is only a runaway backstop. A
+    skill is watched only when it declares ``execution.stall_seconds`` *and*
+    accepts a progress callback — a silent engine cannot feed a watchdog, so it
+    keeps the plain wall-clock behaviour.
+    """
+
+    def __init__(self) -> None:
+        self.last = time.monotonic()
+        self.armed = False
+
+    def wrap(self, callback: Any) -> Any:
+        if callback is None:
+            return None
+        self.armed = True
+
+        def _forward(*args: Any, **kwargs: Any) -> Any:
+            self.last = time.monotonic()
+            return callback(*args, **kwargs)
+
+        return _forward
+
+
+async def _await_skill_call(call: Any, budget: SkillBudget, heartbeat: _ProgressHeartbeat) -> Any:
+    if budget.stall_seconds <= 0 or not heartbeat.armed:
+        return await asyncio.wait_for(call, timeout=budget.seconds)
+    task = asyncio.ensure_future(call)
+    deadline = time.monotonic() + budget.seconds
+    try:
+        while True:
+            now = time.monotonic()
+            if now >= deadline:
+                raise TimeoutError
+            if now >= heartbeat.last + budget.stall_seconds:
+                raise _SkillStalled
+            slice_s = min(deadline, heartbeat.last + budget.stall_seconds) - now
+            done, _ = await asyncio.wait({task}, timeout=slice_s)
+            if done:
+                return task.result()
+    finally:
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
 
 
 def _remaining_timeout(ctx: Any, requested: float) -> float:
@@ -625,13 +797,43 @@ def _tool_limits(entry: SkillEntry) -> dict[str, int]:
     return limits
 
 
+def _installed_skill_root(entry: SkillEntry) -> Path | None:
+    if entry.path is None:
+        return None
+    root = entry.path if entry.path.is_dir() else entry.path.parent
+    return root.resolve()
+
+
+def _prompt_has_file_deliverable(result: Any) -> bool:
+    for record in getattr(result, "tool_trace", None) or []:
+        name = str(getattr(record, "name", "") or "")
+        args = getattr(record, "arguments", {})
+        if not isinstance(args, dict):
+            continue
+        if name in {"write_file", "edit_file"} and str(args.get("path") or "").strip():
+            return True
+    return False
+
+
+def _should_salvage_prompt_result(result: Any) -> bool:
+    """Salvage budget stops *and* a voluntary empty ``done`` (Codex-style wrap-up)."""
+    reason = base_termination_reason(str(result.terminated_reason or ""))
+    if result.kind == "error" and reason in _SALVAGEABLE_PROMPT_REASONS:
+        return True
+    if str(getattr(result, "content", "") or "").strip():
+        return False
+    if _prompt_has_file_deliverable(result):
+        return False
+    return reason in {"done", "no_progress", *_SALVAGEABLE_PROMPT_REASONS}
+
+
 def _recoverable_prompt_boundary(result: Any) -> bool:
-    return result.kind == "error" and result.terminated_reason in _SALVAGEABLE_PROMPT_REASONS
+    return _should_salvage_prompt_result(result)
 
 
 async def _salvage_prompt_result(entry: SkillEntry, merged: dict[str, Any], result: Any, ctx: Any) -> str:
     """One no-tool finalization pass after a prompt skill hits a runtime boundary."""
-    if not _recoverable_prompt_boundary(result) or getattr(ctx, "llm", None) is None:
+    if not _should_salvage_prompt_result(result) or getattr(ctx, "llm", None) is None:
         return ""
     observations: list[str] = []
     for idx, record in enumerate(result.tool_trace[-12:], start=1):
@@ -644,7 +846,7 @@ async def _salvage_prompt_result(entry: SkillEntry, merged: dict[str, Any], resu
             f"   observation={obs[:1000]}"
         )
     system = (
-        "You are finalizing a bounded skill run after tool use was stopped by the runtime. "
+        "You are finalizing a skill run that stopped without a usable answer. "
         "Do not call tools. Produce the best partial result from the available observations, "
         "clearly list missing work, and do not invent evidence or artifacts."
     )
@@ -689,6 +891,64 @@ def _filter_prompt_tools(entry: SkillEntry, tools: list[Any]) -> list[Any]:
     return [tool for tool in tools if tool.spec.name in allowed]
 
 
+def _make_local_tool_handler(spec: Any, instance: Any):  # noqa: ANN202
+    async def handler(args: dict[str, Any]) -> dict[str, Any]:
+        validate = getattr(instance, "validate_params", None)
+        if callable(validate):
+            try:
+                error = validate(arguments=args, input_data=args)
+            except TypeError:
+                error = None
+            if error:
+                return (
+                    {"status": "error", **error}
+                    if isinstance(error, dict)
+                    else {
+                        "status": "error",
+                        "error": str(error),
+                    }
+                )
+        method = getattr(instance, spec.method or "execute")
+        result = method(**dict(args or {}))
+        if inspect.isawaitable(result):
+            result = await result
+        return result if isinstance(result, dict) else {"status": "ok", "result": _jsonify(result)}
+
+    return handler
+
+
+def _build_local_prompt_tools(entry: SkillEntry, ctx: Any) -> list[Any]:
+    """Load trusted Skill-private tools without adding them to the global catalog."""
+    if not entry.trusted or not entry.local_tools:
+        return []
+    from omni.core.react_agent import ToolSpec
+    from omni.skills_runtime.context import Tool
+
+    tools: list[Tool] = []
+    for spec in entry.local_tools:
+        try:
+            module = _load_engine_module(entry, spec.module)
+            cls = getattr(module, spec.class_name)
+            instance = cls()
+            instance.ctx = ctx
+        except (ImportError, AttributeError, OSError, SyntaxError) as exc:
+            logger.warning(
+                "cannot load local tool %s for skill %s: %s",
+                spec.name,
+                entry.name,
+                exc,
+            )
+            continue
+        tools.append(
+            Tool(
+                ToolSpec(spec.name, spec.description, spec.input_schema),
+                _make_local_tool_handler(spec, instance),
+                outcome_resolver=owned_result_outcome,
+            )
+        )
+    return tools
+
+
 def _prompt_budget_note(entry: SkillEntry, limits: dict[str, int | float]) -> str:
     parts: list[str] = []
     if limits.get("max_tool_calls"):
@@ -713,8 +973,10 @@ def _prompt_skill_runtime_context(entry: SkillEntry) -> str:
     return (
         "\n\nOmni runtime context:\n"
         f"- Installed Skill root: {root.resolve()}\n"
-        "- Resolve relative scripts, references, and assets against that Skill root. "
-        "Keep requested deliverables under the current Omni workspace/artifacts roots."
+        "- Bundled scripts and references are also in $OMNI_SKILL_DIR "
+        "(same path). Call them as $OMNI_SKILL_DIR/scripts/... — do not resolve "
+        "them against the process working directory.\n"
+        "- Keep requested deliverables under the current Omni workspace/artifacts roots."
     )
 
 
@@ -843,6 +1105,52 @@ def _missing_binary_action(entry: SkillEntry) -> dict[str, Any] | None:
     }
 
 
+def _missing_python_module_action(entry: SkillEntry) -> dict[str, Any] | None:
+    """Preflight a skill's declared Python module requirements (SKILL.md
+    ``runtime_requirements.python_modules``).
+
+    Uses ``importlib.util.find_spec`` against omni's *own* interpreter — the same
+    environment the engine imports from — so a module omni already has never
+    blocks, and a genuinely missing one is reported once as a terminal
+    ``action_required: install`` carrying the skill's declared
+    ``dependency_setup_command``. This is the generic answer to "process an
+    artifact whose parser isn't installed": a capability declares its modules and
+    this single host gate enforces them, instead of the model hand-rolling
+    ``pip install`` across the wrong venv/interpreter (PEP 668, missing
+    ``.venv/bin/pip``, ``--break-system-packages``…). Adding a new format never
+    adds host code — only a skill declaration.
+    """
+    from omni.skills_runtime.manifest import missing_python_modules
+
+    missing = missing_python_modules(entry)
+    if not missing:
+        return None
+    joined = ", ".join(missing)
+    command = str(entry.dependency_setup_command or "").strip()
+    error = f"Required Python module(s) not importable in omni's interpreter: {joined}."
+    if command:
+        error += f" Install with: {command}"
+    return {
+        "status": "error",
+        "summary": f"{entry.name} needs Python module(s) installed first: {joined}.",
+        "error": error,
+        "recoverable": False,
+        "blocking": True,
+        "action_required": {
+            "kind": "install",
+            "python_modules": missing,
+            "command": command,
+        },
+        "setup_command": command,
+        "error_info": {
+            "code": entry.dependency_error_code or "runtime_dependency_missing",
+            "category": "configuration",
+            "retryable": False,
+            "workflow_recoverable": False,
+        },
+    }
+
+
 async def execute_skill(
     entry: SkillEntry,
     input_data: dict[str, Any],
@@ -864,9 +1172,10 @@ async def execute_skill(
         )
     expected = _authority_for_entry(ctx, entry)
     if getattr(ctx, "provider_authority", None) and not expected:
-        raise SkillExecutionError(
-            f"provider execution authority is missing for skill '{entry.name}'"
-        )
+        raise SkillExecutionError(_authority_scope_error(ctx, entry))
+    skill_root = _installed_skill_root(entry)
+    if skill_root is not None and getattr(ctx, "skill_root", None) is None:
+        ctx = ctx.for_execution(skill_root=skill_root)
     if expected:
         from omni.agent.plan_revision import provider_authority_error
 
@@ -888,6 +1197,13 @@ async def execute_skill(
     unmet_service = _service_configuration_action(entry, ctx)
     if unmet_service is not None:
         return unmet_service
+    # Declared Python module deps are gated for every kind: a skill that opts in
+    # via ``runtime_requirements.python_modules`` gets one actionable install
+    # prompt instead of a mid-engine ImportError (skills that declare none are
+    # unaffected).
+    unmet_module = _missing_python_module_action(entry)
+    if unmet_module is not None:
+        return unmet_module
     tool_gateway = ToolGateway.from_context(ctx, event_family="skill")
 
     async def invoke() -> dict[str, Any]:
@@ -988,30 +1304,49 @@ async def _run_python_engine(entry, merged, ctx, progress_callback) -> dict[str,
     method = getattr(instance, spec.method or "execute")
     sig = inspect.signature(method)
     kwargs = dict(merged)
+    budget = _skill_budget(
+        entry, ctx,
+        default=ctx.settings.skills.default_seconds,
+        ceiling=ctx.settings.skills.max_python_seconds,
+        knob="skills.max_python_seconds",
+    )
+    heartbeat = _ProgressHeartbeat()
     if "progress_callback" in sig.parameters:
-        kwargs["progress_callback"] = progress_callback
+        kwargs["progress_callback"] = heartbeat.wrap(progress_callback)
     # Drop kwargs the method does not accept unless it takes **kwargs.
     accepts_var_kw = any(p.kind == p.VAR_KEYWORD for p in sig.parameters.values())
     if not accepts_var_kw:
         kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters}
 
-    timeout = _remaining_timeout(
-        ctx,
-        _bounded_float_policy(
-            (entry.execution or {}).get("max_seconds"),
-            ctx.settings.skills.max_python_seconds,
-            ctx.settings.skills.max_python_seconds,
-        ),
-    )
+    meter = None
+    original_llm = getattr(ctx, "llm", None)
+    if original_llm is not None:
+        from omni.core.llm.usage import UsageMeter, UsageTrackingLLM
+
+        meter = UsageMeter()
+        ctx.llm = UsageTrackingLLM(
+            original_llm,
+            meter,
+            on_usage=_engine_usage_publisher(ctx, progress_callback),
+        )
     call = method(**kwargs) if inspect.iscoroutinefunction(method) else asyncio.to_thread(method, **kwargs)
     try:
-        result = await asyncio.wait_for(call, timeout=timeout)
+        result = await _await_skill_call(call, budget, heartbeat)
     except TimeoutError:
-        raise SkillExecutionTimeout(
-            f"skill '{entry.name}' timed out after {timeout:g}s"
-        ) from None
+        raise budget.timeout_error(entry.name) from None
+    except _SkillStalled:
+        raise budget.stall_error(entry.name) from None
+    finally:
+        if original_llm is not None:
+            ctx.llm = original_llm
+        if meter is not None:
+            await _record_engine_cost(entry, ctx, meter)
     if not isinstance(result, dict):
         result = {"result": _jsonify(result)}
+    if meter is not None:
+        usage = meter.as_usage()
+        if meter.calls and usage.get("total_tokens") and "usage" not in result:
+            result["usage"] = usage
     return result
 
 
@@ -1021,42 +1356,66 @@ async def _run_cli_exec(entry, merged, ctx) -> dict[str, Any]:
     spec = entry.exec_spec
     if not spec or not spec.command:
         raise SkillExecutionError(f"skill '{entry.name}' has no exec binding")
+    safe_merged = _sanitize_json_surrogates(merged)
     fmt_args = []
     for a in spec.args:
         try:
-            fmt_args.append(a.format(**merged))
+            fmt_args.append(a.format(**safe_merged))
         except (KeyError, IndexError):
             fmt_args.append(a)
-    env = None
+    import os
+
     if spec.env_allowlist:
-        import os
         env = {k: os.environ[k] for k in spec.env_allowlist if k in os.environ}
+    else:
+        env = os.environ.copy()
+    from omni.skills_runtime.exec_io import (
+        compute_io_vars,
+        confined_exec_prefix,
+        input_write_roots,
+        register_output_dir,
+    )
+    from omni.skills_runtime.sandbox import SandboxUnavailableError
+
+    # Host-owned delivery path: same $OMNI_OUTPUT_DIR / $TMPDIR as bash/run_compute,
+    # even when the skill listed a narrow env_allowlist.
+    env.update(compute_io_vars(ctx))
+    # JSON stdin/stdout is an explicit UTF-8 transport contract. Redirected
+    # Python pipes otherwise default to a legacy code page on some Windows
+    # runners, turning U+FFFD bytes (EF BF BD) into the three characters ï¿½.
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    payload = _json_stdin_bytes(safe_merged)
+    budget = _skill_budget(
+        entry, ctx,
+        default=spec.timeout_seconds,
+        ceiling=ctx.settings.skills.max_cli_seconds,
+        knob="skills.max_cli_seconds",
+    )
+    try:
+        prefix = confined_exec_prefix(ctx, extra_writable=input_write_roots(safe_merged))
+    except SandboxUnavailableError as exc:
+        raise SkillExecutionError(
+            f"skill '{entry.name}': OS sandbox required but unavailable: {exc}"
+        ) from exc
     proc = await asyncio.create_subprocess_exec(
-        spec.command, *fmt_args,
+        *prefix, spec.command, *fmt_args,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        cwd=spec.cwd or str(ctx.paths.project_dir),
+        cwd=spec.cwd or str(ctx.working_dir or ctx.paths.invocation_cwd or ctx.paths.project_dir),
         env=env,
         **process_group_options(),
     )
-    payload = json.dumps(merged, ensure_ascii=False).encode()
-    timeout = _remaining_timeout(
-        ctx,
-        _bounded_float_policy(
-            (entry.execution or {}).get("max_seconds"),
-            spec.timeout_seconds,
-            ctx.settings.skills.max_cli_seconds,
-        ),
-    )
     try:
-        out, err = await asyncio.wait_for(proc.communicate(payload), timeout=timeout)
+        out, err = await asyncio.wait_for(proc.communicate(payload), timeout=budget.seconds)
     except TimeoutError:
         await stop_process_tree(proc, grace_seconds=0.1)
-        raise SkillExecutionTimeout(f"skill '{entry.name}' timed out after {timeout:g}s") from None
+        raise budget.timeout_error(entry.name) from None
     except asyncio.CancelledError:
         await stop_process_tree(proc)
         raise
+    await register_output_dir(ctx)
     if proc.returncode != 0:
         raise SkillExecutionError(
             f"skill '{entry.name}' exited {proc.returncode}: {err.decode('utf-8', 'replace')[:500]}"
@@ -1075,11 +1434,13 @@ async def _run_prompt_skill(entry, merged, ctx, progress_callback=None) -> dict[
     if ctx.llm is None:
         return {"status": "ok", "instructions": entry.load_body(), "note": "no LLM configured; returned skill body"}
 
+    from omni.config.settings import session_compact_token_budget
     from omni.core.react_agent import ReActLoopAgent, ToolSpec
     from omni.skills_runtime.builtin_tools import build_builtin_tools
     from omni.skills_runtime.context import Tool
 
     tools = build_builtin_tools(ctx)
+    tools.extend(_build_local_prompt_tools(entry, ctx))
     # Give the prompt sub-agent access to engine-backed sync skills too
     # (so e.g. research-ideation can call arxiv-fetch).
     if getattr(ctx, "registry", None) is not None:
@@ -1097,6 +1458,7 @@ async def _run_prompt_skill(entry, merged, ctx, progress_callback=None) -> dict[
                     input_schema=sk.input_schema,
                     output_schema=sk.output_schema,
                     replay_safe=sk.replay_safe,
+                    outcome_resolver=owned_result_outcome,
                 ))
     tools = _filter_prompt_tools(entry, tools)
     per_tool_limits = _tool_limits(entry)
@@ -1104,7 +1466,7 @@ async def _run_prompt_skill(entry, merged, ctx, progress_callback=None) -> dict[
     async def on_tool_event(phase: str, data: dict) -> None:
         tool_name = str(data.get("name", ""))
         pct = 0.15 if phase == "start" else 0.85
-        # ``gateway.invoker()`` intentionally invokes with ``emit_events=False``:
+        # ``gateway.react_invoker()`` intentionally invokes with ``emit_events=False``:
         # ReAct owns the final call id, duration, and projected event result.
         # Forward that completed event exactly once here so prompt-only nested
         # tools are durable and auditable, not just temporary progress text.
@@ -1126,29 +1488,31 @@ async def _run_prompt_skill(entry, merged, ctx, progress_callback=None) -> dict[
         event_family="prompt_skill",
         tools=tools,
         per_tool_limits=per_tool_limits,
+        skill_name=entry.name,
     )
-    invoker = gateway.invoker()
+    invoker = gateway.react_invoker()
 
     skill_cfg = ctx.settings.skills
     limits: dict[str, int | float] = {
         "max_tool_calls": _bounded_int_policy(
             (entry.execution or {}).get("max_tool_calls"),
-            ctx.settings.react.max_tool_calls,
+            skill_cfg.default_prompt_tool_calls,
             skill_cfg.max_prompt_tool_calls,
         ),
         "max_iterations": _bounded_int_policy(
             (entry.execution or {}).get("max_iterations"),
-            ctx.settings.react.max_iterations,
+            skill_cfg.default_prompt_iterations,
             skill_cfg.max_prompt_iterations,
         ),
-        "max_seconds": _remaining_timeout(
-            ctx,
-            _bounded_float_policy(
-                (entry.execution or {}).get("max_seconds"),
-                ctx.settings.react.max_seconds,
-                skill_cfg.max_prompt_seconds,
-            ),
-        ),
+        # A delegated sub-agent that declares nothing gets the same conservative
+        # fallback as any other skill; declaring ``execution.max_seconds`` is how
+        # it asks for the headroom its ceiling already permits.
+        "max_seconds": _skill_budget(
+            entry, ctx,
+            default=skill_cfg.default_seconds,
+            ceiling=skill_cfg.max_prompt_seconds,
+            knob="skills.max_prompt_seconds",
+        ).seconds,
     }
     max_tool_calls = int(limits["max_tool_calls"])
     soft_limit, keep_results = _prompt_compaction_limits(ctx)
@@ -1159,18 +1523,26 @@ async def _run_prompt_skill(entry, merged, ctx, progress_callback=None) -> dict[
         max_seconds=float(limits["max_seconds"]),
         shared_tool_budget=getattr(ctx, "tool_budget", None),
         finalization_timeout_s=ctx.settings.react.finalization_timeout_s,
+        finalization_attempts=ctx.settings.react.finalization_attempts,
+        max_tokens=resolve_max_output_tokens(ctx.settings.model),
         # A high-budget prompt sub-agent (e.g. a long agent-goal / systematic
         # review) can accumulate many large tool observations. Shrink the oldest
         # ones once the transcript passes the model-window budget so a long run
         # keeps making progress instead of starving its own context — the same
         # cheap first-tier microcompaction the coordinator loop uses.
         soft_token_limit=soft_limit,
+        context_rollover_token_limit=session_compact_token_budget(ctx.settings),
         microcompact_keep_tool_results=keep_results,
-        # Prompt-skill tasks keep the partial/recoverable boundary contract that
-        # the workflow layer depends on (retry/handoff) plus their own no-tool
-        # ``_salvage_prompt_result`` finalization, so the interactive loop's
-        # forced-synthesis terminal is disabled here.
-        no_progress_synthesis=False,
+        observation_max_chars=int(
+            getattr(getattr(ctx.settings, "memory", None), "tool_observation_max_chars", 8000) or 0
+        ),
+        # A prompt sub-agent keeps the *structured* clarification contract the
+        # workflow layer depends on: a ``needs_input`` terminal stays the tool's
+        # typed payload rather than being recomposed as prose.
+        compose_needs_input=False,
+        stall_timeout_s=float(
+            getattr(getattr(ctx.settings, "react", None), "stall_timeout_s", 0.0) or 0.0
+        ),
         **_prompt_usage_limits(ctx),
     )
     system = (
@@ -1187,12 +1559,7 @@ async def _run_prompt_skill(entry, merged, ctx, progress_callback=None) -> dict[
     )
     await _record_prompt_skill_cost(entry, ctx, result, system=system, user=user)
     salvage_text = await _salvage_prompt_result(entry, merged, result, ctx)
-    return _prompt_skill_result(
-        entry,
-        result,
-        salvage_text=salvage_text,
-        fallback_identity=_prompt_assessment_fallback_identity(entry, ctx),
-    )
+    return _prompt_skill_result(entry, result, salvage_text=salvage_text)
 
 
 def _prompt_usage_limits(ctx: Any) -> dict[str, int | float]:
@@ -1204,21 +1571,82 @@ def _prompt_usage_limits(ctx: Any) -> dict[str, int | float]:
 def _prompt_compaction_limits(ctx: Any) -> tuple[int, int]:
     """Model-window soft budget + tool-results-to-keep for prompt-skill microcompaction.
 
-    Mirrors the coordinator loop: ``soft_token_limit = window × autocompact_pct``
-    and ``memory.microcompact_keep_tool_results``. Returns ``(0, 0)`` when either
-    is disabled/unresolvable so the loop leaves the transcript untouched.
+    Mirrors the coordinator loop: the *cheap* tier's threshold
+    (``window × microcompact_pct``) plus ``memory.microcompact_keep_tool_results``.
+    Trimming an observation is what this budget buys, so it must not be read off
+    the expensive tier's percentage. Returns ``(0, 0)`` when either is
+    disabled/unresolvable so the loop leaves the transcript untouched.
     """
     try:
-        from omni.config.settings import resolve_context_window_tokens
+        from omni.config.settings import microcompact_token_budget
 
-        window = int(resolve_context_window_tokens(ctx.settings) or 0)
-        pct = float(getattr(ctx.settings.memory, "autocompact_pct", 0.70) or 0.70)
-        pct = min(max(pct, 0.1), 0.95)
-        soft = max(0, int(window * pct)) if window > 0 else 0
+        soft = max(0, microcompact_token_budget(ctx.settings))
         keep = int(getattr(ctx.settings.memory, "microcompact_keep_tool_results", 0) or 0)
     except Exception:  # noqa: BLE001 - compaction is an optimisation, never fatal
         return 0, 0
     return soft, keep
+
+
+_USAGE_PROGRESS_INTERVAL_S = 2.0
+_USAGE_PROGRESS_TOKEN_STEP = 10_000
+
+
+def _engine_usage_publisher(ctx: Any, progress_callback: Any) -> Any:
+    """Throttle engine usage snapshots onto the skill progress channel."""
+    last = {"t": 0.0, "tokens": 0}
+
+    async def _publish(snapshot: dict[str, Any]) -> None:
+        tokens = int(snapshot.get("total_tokens") or 0)
+        if tokens <= 0:
+            return
+        now = time.monotonic()
+        first = last["t"] == 0.0
+        jumped = tokens - int(last["tokens"]) >= _USAGE_PROGRESS_TOKEN_STEP
+        due = (now - last["t"]) >= _USAGE_PROGRESS_INTERVAL_S
+        if not (first or due or jumped):
+            return
+        last["t"] = now
+        last["tokens"] = tokens
+        payload = dict(snapshot)
+        try:
+            from omni.agent.cost import estimate_cost
+
+            model = getattr(ctx.llm, "model", "") or getattr(ctx.settings.model, "model", "")
+            payload["cost_usd"] = estimate_cost(
+                model, snapshot, cost_cfg=getattr(ctx.settings, "cost", None)
+            ).cost_usd
+        except Exception:  # noqa: BLE001 - a missing price must not hide the token count
+            pass
+        await _emit_progress(progress_callback, "usage", 0.0, **payload)
+
+    return _publish
+
+
+async def _record_engine_cost(entry, ctx, meter) -> None:  # noqa: ANN001
+    """Write one ``cost.usage`` event for every real model call the engine made."""
+    task_id = str(getattr(ctx, "task_id", "") or "")
+    if not task_id or meter.calls <= 0:
+        return
+    tasks = getattr(ctx, "task_recorder", None)
+    if tasks is None:
+        db = getattr(ctx, "db", None)
+        if db is None:
+            return
+        from omni.runtime.task_recorder import TaskRecorder
+
+        tasks = TaskRecorder(db, project=getattr(ctx, "project", "default") or "default")
+    from omni.agent.cost import record_usage_cost_event
+
+    await record_usage_cost_event(
+        tasks,
+        ctx.settings,
+        getattr(ctx, "llm", None),
+        task_id,
+        meter.as_usage(),
+        component=f"engine:{entry.name}",
+        estimated=meter.estimated,
+        calls=meter.calls,
+    )
 
 
 async def _record_prompt_skill_cost(entry, ctx, result, *, system: str, user: str) -> None:  # noqa: ANN001

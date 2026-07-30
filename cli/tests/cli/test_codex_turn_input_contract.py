@@ -273,6 +273,37 @@ async def test_resumed_task_recovers_only_unacknowledged_consumed_steer(
 
 
 @pytest.mark.asyncio
+async def test_resumed_task_does_not_recover_consumed_cancel(
+    tmp_path,
+) -> None:
+    agent = await OmniAgent.create(load_settings(cwd=tmp_path))
+    try:
+        task = await agent.tasks.create_task(
+            session_id=await agent.ensure_session(channel="cli"),
+            channel="cli",
+            user_input="resume must not replay cancel",
+        )
+        await _open_react_steering(agent, task.id)
+        control = await agent.tasks.request_control(task.id, action="cancel")
+        assert len(await agent.tasks.consume_controls(task.id, actions={"cancel"})) == 1
+        assert await agent.tasks.control_status(control.id) == "consumed"
+
+        async with agent.db.session() as session:
+            await session.execute(
+                update(TaskControlORM)
+                .where(TaskControlORM.id == control.id)
+                .values(consumer_pid=2_147_483_647)
+            )
+            await session.commit()
+
+        assert await agent.tasks.recover_consumed_controls(task.id, stale_after_s=0) == 0
+        assert await agent.tasks.control_status(control.id) == "consumed"
+        assert await agent.tasks.consume_controls(task.id, actions={"cancel"}) == []
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
 async def test_control_ownership_and_audit_event_commit_atomically(
     tmp_path,
     monkeypatch,

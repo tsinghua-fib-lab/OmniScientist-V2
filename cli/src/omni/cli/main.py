@@ -1,7 +1,7 @@
 """OmniScientist CLI entry point (`omni`).
 
 `omni` (no args) → interactive REPL. `omni "<prompt>"` → one-shot. Subcommands
-(`config`, `skills`, `mcp`, `project`, `memory`, `task`, `artifacts`, `profile`, `session`,
+(`model`, `config`, `skills`, `soul`, `mcp`, `project`, `memory`, `task`, `artifacts`, `profile`, `session`,
 `channel`, `cite`, `exec`, `replay`, `init`, `doctor`, `terminal`, `serve`, `uninstall`) work as usual,
 as do the research commands (`lit`, `verify`, `bench`, `hypo`, `claim`,
 `evidence`, `run`, `source`). The REPL exposes the same verbs as slash commands
@@ -17,6 +17,7 @@ with a suggestion instead of being silently swallowed as a prompt.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import difflib
 import json
 import os
@@ -26,19 +27,23 @@ import subprocess
 import sys
 import threading
 from collections import deque
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import click
 import typer
+from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 from typer.core import TyperGroup
 
 from omni import __version__
-from omni.agent.persona_stoma import PersonaStatus, persona_status
+from omni.cli import theme
 from omni.cli.commands import (
     artifacts_cmd,
+    autosota_cmd,
     bench_cmd,
     channel_cmd,
     cite_cmd,
@@ -50,6 +55,7 @@ from omni.cli.commands import (
     lit_cmd,
     mcp_cmd,
     memory_cmd,
+    model_cmd,
     profile_cmd,
     project_cmd,
     replay_cmd,
@@ -59,6 +65,7 @@ from omni.cli.commands import (
     serve_cmd,
     session_cmd,
     skills_cmd,
+    soul_cmd,
     status_cmd,
     tasks_cmd,
     terminal_cmd,
@@ -67,8 +74,13 @@ from omni.cli.commands import (
     update_cmd,
     verify_cmd,
 )
-from omni.cli.live_display import VERBOSITY_LEVELS, TurnDisplay, resolve_verbosity
-from omni.cli.render import assistant_answer, banner, console, error, info, success, warn
+from omni.cli.live_display import (
+    VERBOSITY_LEVELS,
+    TurnDisplay,
+    resolve_debug,
+    resolve_verbosity,
+)
+from omni.cli.render import assistant_answer, console, error, guide, info, success, warn
 from omni.cli.repl_command_policy import (
     classify_repl_command,
     consume_restart_notice,
@@ -86,6 +98,7 @@ from omni.cli.repl_output import (
 )
 from omni.cli.repl_transcript import DataTableData, TranscriptEvent, TranscriptKind
 from omni.cli.repl_tui import (
+    TERMINAL_TURN_STATES,
     ReplInterrupt,
     ReplSubmission,
     ReplTui,
@@ -93,18 +106,24 @@ from omni.cli.repl_tui import (
     resolve_ui_mode,
 )
 from omni.cli.runner import (
+    render_deliverables,
     render_tasks,
     render_turn_diagnostics,
+    render_turn_outcome,
     run_one_shot,
     should_suppress_assistant_text,
     task_ack_cb,
 )
+from omni.cli.session_resume import render_session_resume
 from omni.cli.state import AppState, make_agent, run_async
 from omni.cli.timefmt import format_local_time
 from omni.config.settings import ModelCfg, OmniSettings
 from omni.core.execution_control import CancellationEscalator
+from omni.core.file_mentions import resolve_turn_attachments
 from omni.runtime import update_check
 from omni.runtime.daemon import daemon_info, is_daemon_running
+from omni.runtime.memory_maintenance import spawn_maintenance_drain
+from omni.runtime.presentation import turn_presentation_from_result
 
 try:
     import termios
@@ -261,6 +280,22 @@ class _TerminalInputGuard:
         except (OSError, termios.error):
             return
 
+    def discard_pending_input(self) -> None:
+        """Drop queued terminal input nobody is going to read.
+
+        For the exit path when the terminal UI did not finish letting go. It
+        asks the terminal questions — where is the cursor — and reads the
+        answers itself; any left queued would be inherited by the shell and
+        appear at its prompt as typed text like ``;1R``. Never use this while
+        the REPL is running: it would also swallow what the user typed ahead.
+        """
+        if termios is None or self._fd is None:
+            return
+        try:
+            termios.tcflush(self._fd, termios.TCIFLUSH)
+        except (OSError, termios.error):
+            return
+
 
 def _read_repl_line(
     input_guard: _TerminalInputGuard,
@@ -406,8 +441,11 @@ app = typer.Typer(
     help="OmniScientist - a local-first personal research agent for CLI and messaging channels.",
 )
 
+app.add_typer(model_cmd.app, name="model")
 app.add_typer(config_cmd.app, name="config")
+app.add_typer(autosota_cmd.app, name="autosota")
 app.add_typer(skills_cmd.app, name="skills")
+app.add_typer(soul_cmd.app, name="soul")
 app.add_typer(mcp_cmd.app, name="mcp")
 app.add_typer(project_cmd.app, name="project")
 app.add_typer(profile_cmd.app, name="profile")
@@ -460,14 +498,17 @@ def _maybe_ensure_home_service(state: AppState) -> None:
 
     omni is not usable without its one supervised background service per
     ``OMNI_HOME``: channels, schedules, and inbound IM all flow through it. So a
-    bare ``omni`` guarantees it is running — enabling + installing it on first
-    need and repairing it if it drifted down. This is deliberately: (1) skippable
-    only via the ``service.ensure_on_launch`` escape hatch (CI / power users who
-    manage the unit themselves); (2) a no-op when the service is already healthy
-    (the common path, zero added latency); and (3) dispatched on a daemon thread
-    so it never blocks the REPL, and never raises. Because the model is always-on,
-    a prior ``omni serve stop`` is *transient* — it pauses the service until the
-    next launch, which brings it back here.
+    bare ``omni`` guarantees it is running:
+
+    * **First need** on a real home — install the OS unit once and start it.
+    * **Later launches** — only repair/kick the existing unit (never rewrite a
+      new LaunchAgent).
+    * **Ephemeral homes** (pytest/tmp) — skip durable host install entirely.
+
+    Skippable via ``service.ensure_on_launch = false``. No-op when already
+    healthy. First install is synchronous and bounded; later repairs use a
+    daemon thread. A prior ``omni serve stop`` is a *transient* pause the next
+    launch undoes.
     """
     try:
         settings = state.settings()
@@ -476,12 +517,53 @@ def _maybe_ensure_home_service(state: AppState) -> None:
     if not settings.service.ensure_on_launch:
         return
     from omni.runtime import service_state
+    from omni.runtime.service_supervisors import (
+        allows_ephemeral_host_service,
+        is_ephemeral_omni_home,
+    )
+
+    # A durable supervisor must never target storage that disappears with the
+    # invoking process. Enforce this before writing start intent or creating a
+    # worker, so tests cannot outlive their HOME/launchctl isolation.
+    if (
+        is_ephemeral_omni_home(settings.paths.home)
+        and not allows_ephemeral_host_service()
+    ):
+        service_state.clear_start_request(settings.paths)
+        return
 
     observation = service_state.observe_service(settings.paths)
     if observation.phase in {"starting", "ready"}:
         service_state.clear_start_request(settings.paths)
         return
-    # Record intent synchronously before dispatching the non-blocking worker.
+    from omni.runtime import service_control
+
+    desired = service_state.read_desired(settings.paths)
+    if not desired.configured:
+        # First launch is the one intentional install point. Run it synchronously
+        # so "first omni starts the home service" is an actual guarantee rather
+        # than a daemon thread that can disappear when the CLI exits.
+        try:
+            result = service_control.lazy_enable(
+                settings,
+                reason="launch",
+                wait_s=8.0,
+            )
+        except Exception as exc:  # noqa: BLE001 - keep the foreground CLI usable.
+            warn(f"Could not start the home service during first launch: {exc}")
+            return
+        if not result.ok:
+            warn(
+                "Could not start the home service during first launch: "
+                f"{result.detail}"
+            )
+            info(
+                "Interactive mode still works. Tasks live in the workspace store, "
+                "not the home service. Retry with `omni serve start` or `omni doctor`."
+            )
+        return
+
+    # Record repair intent synchronously before dispatching the non-blocking worker.
     # If `omni update` wins the lifecycle lock, it will consume this marker and
     # start the service on the updated code instead of losing this bare launch.
     try:
@@ -493,14 +575,13 @@ def _maybe_ensure_home_service(state: AppState) -> None:
 
     def _bring_up() -> None:
         try:
-            from omni.runtime import service_control
-
-            # Enable + install + start on first need; repair if enabled-but-down.
+            # This path is configured already: repair/kick, never blind install.
             service_control.lazy_enable(settings, reason="launch", wait_s=4.0)
         except Exception:  # noqa: BLE001 - launch-time bring-up is best-effort.
             pass
 
-    threading.Thread(target=_bring_up, name="omni-service-ensure", daemon=True).start()
+    thread = threading.Thread(target=_bring_up, name="omni-service-ensure", daemon=True)
+    thread.start()
 
 
 def _run_first_time_setup(state: AppState) -> None:
@@ -513,7 +594,7 @@ def _run_first_time_setup(state: AppState) -> None:
             "`omni init --non-interactive` for offline defaults."
         )
         raise typer.Exit(2)
-    info("No user configuration was found; starting first-time setup.")
+    info(init_cmd.first_run_setup_message(state.settings().paths.home))
     init_cmd.run_setup_wizard(state)
     info("Setup complete; starting interactive mode.")
 
@@ -585,11 +666,14 @@ def main(
     cont: bool = typer.Option(False, "--continue", "-c", help="Continue the latest workspace session."),
     trust: bool = typer.Option(None, "--trust/--no-trust", help="Trust (or refuse) the current directory without prompting."),
     out: str = typer.Option(None, "--out", help="Directory for generated files (default: the launch directory)."),
+    debug: bool = typer.Option(False, "--debug", help="Reveal the L4 diagnostic layer (raw args/results, protocol labels, internals)."),
     version: bool = typer.Option(None, "--version", "-V", callback=_version_callback, is_eager=True),
 ) -> None:
     if ui is not None and ui.lower() not in {"auto", "tui", "classic"}:
         raise typer.BadParameter("--ui must be auto, tui, or classic")
     overrides: dict = {"display": {"ui_mode": ui.lower()}} if ui else {}
+    if debug:
+        overrides.setdefault("display", {})["debug"] = True
     if out:
         overrides.setdefault("artifacts", {})["output_dir"] = out
     ctx.obj = AppState(project=project, profile=profile, model=model, overrides=overrides, trust_flag=trust)
@@ -619,6 +703,7 @@ def chat(
     cont: bool = typer.Option(False, "--continue", "-c", help="Continue the most recent session."),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Hide tool progress."),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Expand live progress: full arguments, results, and stages."),
+    debug: bool = typer.Option(False, "--debug", help="Reveal the L4 diagnostic layer (raw args/results, protocol labels, internals)."),
     detach: bool = typer.Option(False, "--detach", help="Submit background tasks without waiting."),
     mode: str = typer.Option("auto", "--mode", help="Interaction mode: auto, plan, or review."),
 ) -> None:
@@ -633,7 +718,18 @@ def chat(
         return
     if mode not in {"auto", "plan", "review"}:
         raise typer.BadParameter("--mode must be auto, plan, or review")
-    run_async(run_one_shot(state, text, cont=cont, quiet=quiet, verbose=verbose, detach=detach, interaction_mode=mode))
+    run_async(
+        run_one_shot(
+            state,
+            text,
+            cont=cont,
+            quiet=quiet,
+            verbose=verbose,
+            debug=debug,
+            detach=detach,
+            interaction_mode=mode,
+        )
+    )
 
 
 @app.command("current")
@@ -652,7 +748,7 @@ def why_cmd(
     task_id: str = typer.Argument("", help="Task ID/prefix; defaults to the latest workspace task."),
     session: str = typer.Option("", "--session", "-s", help="Session ID/prefix used to filter the latest task."),
 ) -> None:
-    """Explain the route, plan, provider selection, and verification for a task."""
+    """Explain the route, plan, provider selection, and settlement for a task."""
     state: AppState = ctx.obj or AppState()
     run_async(_render_why_command(state, task_id=task_id, session=session))
 
@@ -734,8 +830,6 @@ async def _render_why_command(state: AppState, *, task_id: str = "", session: st
                 "route.arbitration",
                 "plan.target.artifact",
                 "subtask.submitted",
-                "verification.passed",
-                "verification.failed",
                 "assistant.message",
             }
         ]
@@ -783,72 +877,58 @@ def _missing_model_fields(model: ModelCfg) -> list[str]:
 def _model_setup_commands(model: ModelCfg) -> list[tuple[str, str]]:
     if _is_mock_provider(model.provider):
         return [
-            ("config set model.provider openai", "select an OpenAI-compatible provider"),
-            ("config set model.base_url https://api.deepseek.com", "set the API endpoint"),
-            ("config set model.api_key sk-xxx", "store the key in secrets.toml"),
-            ("config set model.model deepseek-v4-pro", "set the model name"),
+            ("/model", "open the persistent model picker"),
+            ("/model deepseek-chat", "switch the main model in one step"),
         ]
 
     templates = {
-        "model.base_url": ("config set model.base_url https://api.deepseek.com", "set the API endpoint"),
-        "model.api_key": ("config set model.api_key sk-xxx", "set the API key"),
-        "model.model": ("config set model.model deepseek-v4-pro", "set the model name"),
+        "model.base_url": ("/model main -u https://api.deepseek.com/v1", "set the API endpoint"),
+        "model.api_key": ("/model main -k sk-xxx", "store the key in secrets.toml"),
+        "model.model": ("/model deepseek-chat", "set the model name"),
     }
     return [templates[field] for field in _missing_model_fields(model)]
 
 
-def _repl_banner_text(project_name: str, settings: OmniSettings) -> Text:
+def _repl_banner_text(project_name: str, settings: OmniSettings) -> str:
+    """The startup guide, as Rich markup rather than a pre-styled ``Text``.
+
+    Only ``str``/``Text`` payloads reach the TUI transcript, and a ``Text``
+    arrives there with its spans flattened to plain characters. Markup is the one
+    form that keeps its colour on both surfaces.
+    """
     model = settings.model
     missing = _missing_model_fields(model)
     mock = _is_mock_provider(model.provider)
-    model_style = "yellow" if missing or mock else "green"
+    model_style = theme.CAUTION if missing or mock else theme.SUCCESS
 
-    text = Text()
-    text.append("OmniScientist interactive mode", "bold cyan")
-    text.append(" · project ")
-    text.append(project_name, "bright_green")
-    text.append(" · model ")
-    text.append(f"{model.provider}/{model.model}", model_style)
     if missing:
-        text.append(" · missing ", "yellow")
-        text.append(", ".join(missing), "yellow")
+        state = f"[{theme.CAUTION}]missing {escape(', '.join(missing))}[/]"
     elif mock:
-        text.append(" · offline mock", "yellow")
+        state = f"[{theme.CAUTION}]offline mock[/]"
     else:
-        text.append(" · ready", "green")
-    text.append(f"\nworkspace {settings.paths.project_dir}", "dim")
-    text.append("\nEnter /help for examples or /exit to quit.", "dim")
-    return text
+        state = f"[{theme.SUCCESS}]ready[/]"
+    dim, accent = theme.MUTED, theme.ACCENT
+    # Labels dim, values at full strength: dimming the workspace path and the
+    # whole guide line left the box's own border as the most legible thing in it.
+    return "\n".join(
+        (
+            f"[{theme.STRONG} {accent}]OmniScientist[/] [{dim}]interactive mode · project[/]"
+            f" {escape(project_name)} [{dim}]· model[/]"
+            f" [{model_style}]{escape(f'{model.provider}/{model.model}')}[/]"
+            f" [{dim}]·[/] {state}",
+            f"[{dim}]workspace[/] {escape(str(settings.paths.project_dir))}",
+            f"[{dim}]Enter[/] [{accent}]/help[/] [{dim}]for examples,[/] [{accent}]@[/]"
+            f" [{dim}]to attach a file, or[/] [{accent}]/exit[/] [{dim}]to quit.[/]",
+            f"[{dim}]Chat from WeChat, Feishu, or DingTalk:[/]"
+            f" [{accent}]/channel login wechat --start[/] [{dim}]scans a QR;[/]"
+            f" [{accent}]/channel help[/] [{dim}]covers the rest.[/]",
+        )
+    )
 
 
-def _render_persona_status(working_dir: Path | None, *, startup: bool) -> None:
-    """Surface the active scientist persona and any loadable ``scientist-kg/``.
-
-    Read-only and boundary-respecting: reads SoulAgent's on-disk state via
-    ``persona_stoma`` and never imports or mutates the skill. At startup it stays
-    silent unless a persona is active or a ``scientist-kg/`` is present, so
-    ordinary sessions are unaffected; ``/soul`` always reports.
-    """
-    status: PersonaStatus = persona_status(working_dir)
-    if status.active:
-        who = status.overlay.scientist_name or status.overlay.scientist_id
-        info(
-            f'Active scientist persona: {who} — answers reflect this persona. '
-            'Say "restore yourself" or run $soulagent to unload it.'
-        )
-        return
-    if status.scientist_kg_present:
-        listed = ", ".join(status.available[:6]) if status.available else "none validated yet"
-        info(
-            f'Scientist personas available ({listed}). Say "think like <name>" or run '
-            "$soulagent to load one; /soul shows status."
-        )
-        return
-    if not startup:
-        info(
-            "No scientist persona active and no scientist-kg/ here. Build one with "
-            "$scientist-kg-distiller, then load it with $soulagent."
-        )
+def _render_persona_status(paths, *, startup: bool) -> None:  # noqa: ANN001
+    """Surface the active persona and SoulAgent's effective scanner inventory."""
+    soul_cmd.render_status(paths, startup=startup)
 
 
 def _typer_children_summary(command_app: typer.Typer) -> str:
@@ -864,10 +944,9 @@ def _repl_quickstart_rows() -> list[tuple[str, str, str, str]]:
 
     Columns are (command, subcommands, purpose/details, example): the detail column is
     self-explanatory and the example column is a concrete, runnable command
-    chosen for what a first-time user reaches for first. The first three rows
-    are ordered by what a new user does first — just ask, then run the setup
-    wizard, then tune the model config — and the caller colour-highlights the
-    top "ask" and "config" rows.
+    chosen for what a first-time user reaches for first. The first four rows
+    are ordered by what a new user does first — ask, run setup, choose a model,
+    then use advanced config — and the caller colour-highlights those rows.
     """
     rows = [
         ("Ask directly", "none", "Start a conversation by entering a question", "Summarize the contributions of arXiv 2310.06825"),
@@ -878,10 +957,16 @@ def _repl_quickstart_rows() -> list[tuple[str, str, str, str]]:
             "/init",
         ),
         (
+            "/model",
+            _typer_children_summary(model_cmd.app),
+            "Configure and explain the persistent main, vision, and embedding model stack",
+            "/model",
+        ),
+        (
             "/config",
             _typer_children_summary(config_cmd.app),
             "Configure model and embedding endpoints, keys, and models; changes apply immediately",
-            "config model -p openai -u <BASE_URL> -m <MODEL> -k <API_KEY>",
+            "/config model -p openai -u <BASE_URL> -m <MODEL> -k <API_KEY>",
         ),
         (
             "/skills",
@@ -889,9 +974,15 @@ def _repl_quickstart_rows() -> list[tuple[str, str, str, str]]:
             "Inspect, search, import, and export skills; --all includes external libraries",
             "/skills examples",
         ),
+        (
+            "/soul",
+            _typer_children_summary(soul_cmd.app),
+            "Inspect available scientist personas or create a new persona KG",
+            "/soul list",
+        ),
         ("/status", "none", "Show workspace, database, daemon, and task status", "/status"),
         ("/current", "none", "Show the active artifact, paper, task, or source focus", "/current"),
-        ("/why", "[task_id]", "Explain route, plan, provider selection, and verification", "/why"),
+        ("/why", "[task_id]", "Explain route, plan, provider selection, and settlement", "/why"),
         (
             "/mode",
             "auto|plan|review",
@@ -922,8 +1013,8 @@ def _repl_quickstart_rows() -> list[tuple[str, str, str, str]]:
         (
             "/channel",
             _typer_children_summary(channel_cmd.app),
-            "Configure messaging channels and reuse the background service with --start",
-            "/channel help",
+            "Drive the agent from WeChat (scan a QR), Feishu, or DingTalk; --start puts it online",
+            "/channel login wechat --start",
         ),
         (
             "/serve",
@@ -1062,24 +1153,25 @@ def _print_model_setup_hint() -> None:
     """Show the two ways to configure a real model (command + config file)."""
     text = Text()
     text.append("Configure a real model; changes apply immediately:\n", "bold")
-    text.append("  1. One command: ", "dim")
-    text.append("config model -p openai -u <BASE_URL> -m <MODEL> -k <API_KEY>\n", "cyan")
+    text.append("  1. Guided main / vision / embedding setup: ", "dim")
+    text.append("/model\n", "cyan")
+    text.append("  2. One advanced command: ", "dim")
+    text.append("/config model -p openai -u <BASE_URL> -m <MODEL> -k <API_KEY>\n", "cyan")
     text.append("       -p provider · -u base_url · -m model · -k api_key\n", "dim")
     text.append("       use provider=openai for OpenAI-compatible APIs; base_url selects the service, for example https://api.deepseek.com/v1\n", "dim")
-    text.append("  2. Or edit config.toml and secrets.toml under the active Omni data directory.\n", "dim")
-    text.append("       Run `omni config path` to show their exact paths.\n", "cyan")
+    text.append("  3. Or edit config.toml and secrets.toml under the active Omni data directory.\n", "dim")
+    text.append("       Run `/config path` to show their exact paths.\n", "cyan")
     console.print(text)
 
 
 def _quickstart_row_style(command: str) -> str | None:
-    """Colour the three rows a first-time user reaches for first.
+    """Colour the four rows a first-time user reaches for first.
 
-    ``Ask directly``, ``/init`` (setup wizard), and ``/config`` (model
-    setup) are the first things a new user touches, so they share one highlight
-    (bold cyan). Everything else uses the default row colour so these three stand
-    out together as the key commands.
+    ``Ask directly``, ``/init``, ``/model``, and advanced ``/config`` are the
+    first things a new user touches, so they share one highlight. Everything
+    else uses the default row colour.
     """
-    if command in ("Ask directly", "/init", "/config"):
+    if command in ("Ask directly", "/init", "/model", "/config"):
         return "bold cyan"
     return None
 
@@ -1123,7 +1215,9 @@ def _show_repl_help() -> None:
     )
     # Echo what /init sets and how to adjust each item later, so users don't
     # re-run the whole wizard to tweak one thing (config/channel/... own these).
-    init_cmd.render_init_config_map()
+    from omni.cli.command_surface import REPL
+
+    init_cmd.render_init_config_map(surface=REPL)
 
 
 def _render_update_menu(latest: str) -> None:
@@ -1238,13 +1332,30 @@ class ReplCommandResult:
 class _ReplControls:
     """Mutable REPL-loop settings shared with the in-turn command fast-path.
 
-    ``/mode`` and ``/verbose`` must take effect immediately even when typed while a
-    turn is running, so the loop keeps them here (rather than as plain locals) and the
-    turn monitor mutates the same object.
+    ``/mode``, ``/verbose`` and ``/debug`` must take effect immediately even when typed
+    while a turn is running, so the loop keeps them here (rather than as plain locals)
+    and the turn monitor mutates the same object.
     """
 
     interaction_mode: str
     display_verbosity: str
+    display_debug: bool = False
+
+
+def _apply_debug_command(line: str, current: bool) -> bool:
+    """Handle ``/debug [on|off]``: bare form toggles, and echoes the new state."""
+    requested = line.split(maxsplit=1)[1].strip().lower() if " " in line else ""
+    if requested in {"", "toggle"}:
+        new = not current
+    elif requested in {"on", "true", "1"}:
+        new = True
+    elif requested in {"off", "false", "0"}:
+        new = False
+    else:
+        warn("Usage: /debug [on|off]")
+        return current
+    info(f"Diagnostic layer (L4) {'shown' if new else 'hidden'}.")
+    return new
 
 
 @dataclass
@@ -1306,7 +1417,18 @@ async def _run_live_repl_command(
             if cmd == "copy":
                 tui.copy_last_answer()
             elif cmd == "soul":
-                _render_persona_status(agent.paths.local_ops_dir, startup=False)
+                requested = value.removeprefix("/soul").strip().lower()
+                if not requested or requested == "status":
+                    _render_persona_status(agent.paths, startup=False)
+                elif requested == "list":
+                    soul_cmd.render_list(agent.paths)
+                elif requested == "help":
+                    soul_cmd.help_cmd()
+                else:
+                    warn(
+                        "Only /soul, /soul status, /soul list, and /soul help are "
+                        "available while a task is running."
+                    )
             elif cmd == "mode":
                 requested = value.removeprefix("/mode").strip().lower()
                 if not requested:
@@ -1331,6 +1453,8 @@ async def _run_live_repl_command(
                     info(f"Live progress verbosity changed to {controls.display_verbosity}")
                 else:
                     warn("Usage: /verbose quiet|normal|verbose")
+            elif cmd == "debug":
+                controls.display_debug = _apply_debug_command(value, controls.display_debug)
             else:
                 # /task, /context, /inbox, /help — all read-only in ``_repl_command``.
                 await _repl_command(agent, state, value, session_id)
@@ -1558,18 +1682,43 @@ async def _monitor_foreground_turn(
 
 def _turn_header_state(turn: object) -> str:
     """Map a completed agent result to the compact state shown on its input row."""
-    kind = str(getattr(turn, "kind", "") or "").lower()
-    verification = str(getattr(turn, "verification_status", "") or "").lower()
-    termination = str(getattr(turn, "terminated_reason", "") or "").lower()
-    if kind == "needs_input" or verification == "needs_input":
-        return "needs input"
-    if kind == "error" or verification == "failed":
-        return "failed"
-    if termination.split(":", 1)[0] == "cancelled":
-        return "cancelled"
-    if kind == "partial" or verification in {"degraded", "salvaged"}:
-        return "degraded"
-    return ""
+    from omni.runtime.turn_outcome import header_state
+
+    return header_state(turn)
+
+
+def _turn_stage_reporter(
+    tui: ReplTui | None, turn_id: str
+) -> Callable[[str], None] | None:
+    """Forward the live display's stage to the managed TUI's turn state.
+
+    Without this the footer holds whatever state submission set — "planning" —
+    for the entire turn, so a run that spent minutes retrieving, retrying, or
+    writing looked stuck at its first step. The stage strings are built for a
+    status line and can carry a long skill label, so they are trimmed to what a
+    footer can show.
+
+    A stage is a progress label, and one source of them is whatever sentence a
+    python-engine skill chose to emit. That means an ordinary label can spell a
+    word the TUI reads as a lifecycle verdict, and publishing a verdict retires
+    the turn: every later update, including the real ``done``, is dropped and
+    the footer freezes — the very symptom this reporter exists to cure. A
+    colliding label is therefore prefixed rather than dropped, because the
+    progress it reports is still worth showing and the prefix says plainly that
+    it describes a step rather than the turn's outcome.
+    """
+    if tui is None or not turn_id:
+        return None
+
+    def report(stage: str) -> None:
+        label = " ".join(str(stage or "").split())
+        if not label:
+            return
+        if label.casefold() in TERMINAL_TURN_STATES:
+            label = f"stage: {label}"
+        tui.set_turn_state(turn_id, label[:32])
+
+    return report
 
 
 def _reindex_pending_turns(tui: ReplTui | None, pending: deque[ReplSubmission]) -> None:
@@ -1577,6 +1726,45 @@ def _reindex_pending_turns(tui: ReplTui | None, pending: deque[ReplSubmission]) 
         return
     for index, item in enumerate(pending, start=1):
         tui.set_turn_state(item.turn_id, f"queued {index}")
+
+
+async def _maybe_prompt_confirmation(
+    turn: Any,
+    *,
+    tui: ReplTui | None,
+    pending_lines: deque[Any],
+) -> bool:
+    """Surface a skill checkpoint as one interactive confirmation, then resume.
+
+    When a turn ends on a decision only the user can make -- approve an outline,
+    approve a poster, confirm a distillation -- prompt for it in the confirmation
+    region and enqueue the follow-up the choice implies as the next turn. An
+    ordinary turn detects nothing, so this is a no-op on the hot path.
+    """
+    from omni.cli.confirmation import detect_confirmation, present_confirmation
+    from omni.cli.repl_output import set_output_status
+
+    request = detect_confirmation(turn)
+    if request is None:
+        return False
+    # The dynamic status region is already retired by ``display.end()``; clear it
+    # explicitly so a classic-mode prompt never reads as "still running".
+    set_output_status("")
+    try:
+        choice = await present_confirmation(request, tui=tui)
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        raise
+    except Exception:  # noqa: BLE001 - a prompt failure must never take the REPL down
+        # No checkpoint actually reached the user, so let the turn close out with
+        # its deliverables rather than ending on nothing at all.
+        return False
+    option = request.option(choice)
+    if option is not None and option.submit:
+        if tui is not None:
+            tui.accept_text(option.submit)
+        else:
+            pending_lines.append(option.submit)
+    return True
 
 
 async def _await_classic_foreground_turn(
@@ -1604,33 +1792,181 @@ async def _shutdown_repl_resources(
     session_id: str,
     inbox_watcher,
     tui: ReplTui | None,
-    timeout_seconds: float = 5.0,
+    input_guard=None,
+    background: Sequence[asyncio.Task | None] = (),
+    session_timeout_s: float = 1.0,
+    agent_timeout_s: float = 2.0,
+    tui_timeout_s: float = 2.5,
 ) -> None:  # noqa: ANN001
-    """Close REPL resources independently within one bounded deadline."""
-    try:
-        inbox_watcher.stop()
-    except Exception as exc:  # noqa: BLE001
-        warn(f"Could not stop the inbox watcher cleanly: {exc}")
+    """Hand the terminal back, then close each resource on its own budget.
 
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + max(0.1, timeout_seconds)
+    The order is the point. The terminal UI owns the terminal, so it goes first
+    and the tty is reset only once it has let go: prompt_toolkit asks the
+    terminal where the cursor is after every print above the dock and reads the
+    answer itself, and resetting the tty underneath it strands that answer for
+    the shell to inherit as ``;1R``. Everything after the reset — parking memory,
+    closing the agent — is work the user is no longer waiting on.
 
-    async def close_step(label: str, awaitable) -> None:  # noqa: ANN001
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-            warn(f"Shutdown deadline reached before closing {label}.")
-            remaining = 0.01
+    Every step is also timed separately. Under one shared deadline a slow first
+    step left the rest a hundredth of a second, and the shutdown reported
+    deadlines the user had no part in missing. The UI gets the widest budget
+    because prompt_toolkit waits up to a second on the terminal's answer by
+    itself, and cutting that short would strand it just as badly.
+
+    Ending the session only *parks* the durable-memory pass. Performing it costs
+    several model round trips, which no exit budget can honestly contain.
+    """
+
+    async def close_step(label: str, awaitable, timeout: float) -> bool:  # noqa: ANN001
         try:
-            await asyncio.wait_for(awaitable, timeout=remaining)
+            await asyncio.wait_for(awaitable, timeout=max(0.01, timeout))
+            return True
         except TimeoutError:
             warn(f"Timed out while closing {label}.")
         except Exception as exc:  # noqa: BLE001
             warn(f"Could not close {label} cleanly: {exc}")
+        return False
 
-    await close_step("session", agent.end_session(session_id))
-    await close_step("agent", agent.aclose())
+    stopping = [task for task in background if task is not None and not task.done()]
+    for task in stopping:
+        task.cancel()
+    released = True
     if tui is not None:
-        await close_step("terminal UI", tui.close())
+        released = await close_step("terminal UI", tui.close(), tui_timeout_s)
+    if input_guard is not None:
+        try:
+            input_guard.restore()
+            if not released:
+                input_guard.discard_pending_input()
+        except Exception as exc:  # noqa: BLE001
+            warn(f"Could not restore the terminal cleanly: {exc}")
+    if stopping:
+        # A cancelled maintenance drain settles the pass it was running; this is
+        # only the moment the loop needs to let that write land, and it costs
+        # nothing when no drain was in flight.
+        with contextlib.suppress(Exception):
+            await asyncio.wait(stopping, timeout=0.2)
+    try:
+        inbox_watcher.stop()
+    except Exception as exc:  # noqa: BLE001
+        warn(f"Could not stop the inbox watcher cleanly: {exc}")
+    await close_step(
+        "session", agent.enqueue_session_maintenance(session_id), session_timeout_s
+    )
+    await close_step("agent", agent.aclose(), agent_timeout_s)
+
+
+if TYPE_CHECKING:  # pragma: no cover - typing only (runtime import stays lazy)
+    from omni.runtime.task_recovery import RecoveryOutcome
+
+
+@dataclass
+class _ForegroundRetry:
+    """A ``/task retry`` that should run as a foreground REPL turn.
+
+    ``outcome`` is the coordinator result (it already carries the new attempt id
+    and the "created attempt N" message). When ``run`` is True the caller runs a
+    foreground turn for ``outcome.new_id`` reconstructed from the snapshot
+    (``user_input`` + ``file_uris`` + ``interaction_mode``); otherwise the caller
+    just renders ``outcome`` (a wrong-state / redirect) and consumes the command.
+    """
+
+    outcome: RecoveryOutcome
+    run: bool = False
+    user_input: str = ""
+    file_uris: list[str] | None = None
+    interaction_mode: str = ""
+
+
+def _looks_like_task_retry(line: str) -> bool:
+    """True for ``/task retry <id> ...`` — the only foreground-eligible verb."""
+    try:
+        tokens = _split_repl_command_line(line)
+    except ValueError:
+        return False
+    return (
+        len(tokens) >= 3
+        and tokens[0].lstrip("/") == "task"
+        and tokens[1] == "retry"
+    )
+
+
+def _render_repl_recovery_outcome(outcome) -> None:  # noqa: ANN001
+    """Render a non-foreground recovery outcome inside the REPL (never exits)."""
+    if outcome.status == "ok":
+        success(outcome.message)
+    elif outcome.suggested_command:
+        warn(f"{outcome.message}\nTry: {outcome.suggested_command}")
+    else:
+        warn(outcome.message or f"Recovery failed ({outcome.status}).")
+
+
+async def _prepare_foreground_task_retry(
+    agent, state: AppState, line: str, session_id: str,  # noqa: ANN001
+) -> _ForegroundRetry | None:
+    """Turn ``/task retry <task-id>`` into a foreground REPL turn when eligible.
+
+    Only a *top-level task owned by the current workspace* runs inline, so the
+    user watches it stream and answers any ``needs_input`` clarification in the
+    same session. A workflow step (``--step``), a skill execution, or a task owned
+    by another workspace returns ``None`` so the caller falls back to the normal
+    ``omni task retry`` command (which routes to the owning workspace or the
+    recovery worker). A resolvable-but-non-runnable task (wrong state) returns an
+    outcome with ``run=False`` so the caller reports it and consumes the command.
+    """
+    from omni.runtime.task_object_resolver import resolve_task_object
+    from omni.runtime.task_recovery import TaskRecoveryCoordinator
+
+    try:
+        tokens = _split_repl_command_line(line)
+    except ValueError:
+        return None
+    args = tokens[2:]
+    # A stable workflow-step retry is a durable recovery, not a foreground turn.
+    if any(tok == "--step" or tok.startswith("--step=") for tok in args):
+        return None
+    object_id = ""
+    skip = False
+    for tok in args:
+        if skip:
+            skip = False
+            continue
+        if tok == "--notify":
+            skip = True
+            continue
+        if tok.startswith("--"):
+            continue
+        object_id = tok
+        break
+    if not object_id:
+        return None
+
+    resolution = await resolve_task_object(agent.settings, object_id)
+    if resolution.status != "ok" or resolution.object_kind != "task":
+        return None  # non-task / not found → let the standard command explain.
+    owner = getattr(resolution.settings, "paths", None)
+    local = getattr(agent, "paths", None)
+    if owner is None or local is None or owner.project_dir != local.project_dir:
+        return None  # cross-workspace → route through the real command.
+
+    outcome = await TaskRecoveryCoordinator(agent).retry(
+        resolution, run_turn=False, object_id=object_id, session_id=session_id
+    )
+    if outcome.status != "ok":
+        return _ForegroundRetry(outcome=outcome, run=False)
+    new_task = await agent.tasks.get_task(outcome.new_id)
+    snap = dict(getattr(new_task, "input_snapshot_json", None) or {}) if new_task else {}
+    user_input = str(
+        snap.get("user_input") or (new_task.user_input if new_task else "") or ""
+    ).strip()
+    file_uris = [str(u) for u in (snap.get("file_uris") or []) if str(u).strip()]
+    return _ForegroundRetry(
+        outcome=outcome,
+        run=True,
+        user_input=user_input,
+        file_uris=file_uris or None,
+        interaction_mode=str(snap.get("interaction_mode") or "").strip(),
+    )
 
 
 async def _repl_async(state: AppState, *, resume_session_id: str | None = None) -> None:
@@ -1642,21 +1978,28 @@ async def _repl_async(state: AppState, *, resume_session_id: str | None = None) 
         return
     update_check.maybe_refresh_in_background(launch_settings)
     agent = await make_agent(state)
+    # Consolidate what earlier sessions parked on their way out, and what this one
+    # parks at /new, beside the prompt instead of in front of it.
+    maintenance_drain = spawn_maintenance_drain(agent)
     s = agent.settings
     if resume_session_id:
         session_id = resume_session_id
-        warn(f"Resumed session {session_id[:8]}.")
     else:
         session_id = await agent.ensure_session(channel="cli", reuse_latest=False)
     input_guard = _TerminalInputGuard()
     # One catalog (command names + subcommands + options) drives completion on both
     # interactive surfaces, so the menu, the dispatcher, and /help stay in sync.
     commands: CommandCatalog = build_command_catalog(app)
+    # Where omni writes deliverables. Its per-kind subfolders (``figures/`` …)
+    # stay mentionable even when the repository gitignores them, which projects
+    # routinely do precisely because those files are generated.
+    output_base = Path(str(getattr(s.artifacts, "output_dir", ".") or ".")).expanduser()
     tui: ReplTui | None = None
     if resolve_ui_mode(str(getattr(s.display, "ui_mode", "auto") or "auto")) == "tui":
         candidate = ReplTui(
             commands=commands,
             diagnostic_log_path=agent.paths.logs_dir / "omni-tui.log",
+            output_base=output_base,
         )
         try:
             await candidate.start()
@@ -1668,12 +2011,15 @@ async def _repl_async(state: AppState, *, resume_session_id: str | None = None) 
             from omni.cli.approval_prompt import build_tui_approver
 
             agent.approver = build_tui_approver(tui)
-    input_box = tui or ReplInputBox(commands=commands)
-    banner(_repl_banner_text(agent.paths.project_name, s))
+    input_box = tui or ReplInputBox(commands=commands, output_base=output_base)
+    guide(_repl_banner_text(agent.paths.project_name, s))
     _show_repl_quickstart(s.model)
     # Contextual SoulAgent discovery hint: silent unless a persona is active or the
     # project ships a ``scientist-kg/`` (so ordinary sessions look identical).
-    _render_persona_status(agent.paths.local_ops_dir, startup=True)
+    _render_persona_status(agent.paths, startup=True)
+    if resume_session_id:
+        # After the TUI sink is live so the card and tail survive resize reflow.
+        await render_session_resume(agent, session_id)
     restart_notice = consume_restart_notice(os.environ)
     if restart_notice:
         success(restart_notice)
@@ -1684,6 +2030,7 @@ async def _repl_async(state: AppState, *, resume_session_id: str | None = None) 
     controls = _ReplControls(
         interaction_mode=str(getattr(s.interaction, "default_mode", "auto") or "auto"),
         display_verbosity=resolve_verbosity(s),
+        display_debug=resolve_debug(s),
     )
     pending_lines: deque[ReplSubmission] = deque()
     try:
@@ -1723,7 +2070,7 @@ async def _repl_async(state: AppState, *, resume_session_id: str | None = None) 
 
                 agent.approver = build_cli_approver()
                 tui = None
-                input_box = ReplInputBox(commands=commands)
+                input_box = ReplInputBox(commands=commands, output_base=output_base)
                 continue
             if not line:
                 if tui is not None and turn_id:
@@ -1765,17 +2112,34 @@ async def _repl_async(state: AppState, *, resume_session_id: str | None = None) 
                 if tui is not None and turn_id:
                     tui.set_turn_state(turn_id, "control")
                 continue
-            if line == "/soul" or line.startswith("/soul "):
+            if line == "/debug" or line.startswith("/debug "):
                 with use_output_turn(turn_id):
-                    _render_persona_status(agent.paths.local_ops_dir, startup=False)
+                    controls.display_debug = _apply_debug_command(
+                        line, controls.display_debug
+                    )
+                if tui is not None and turn_id:
+                    tui.set_turn_state(turn_id, "control")
+                continue
+            if line in {"/soul", "/soul status"}:
+                with use_output_turn(turn_id):
+                    _render_persona_status(agent.paths, startup=False)
+                if tui is not None and turn_id:
+                    tui.set_turn_state(turn_id, "control")
+                continue
+            if line == "/soul list":
+                with use_output_turn(turn_id):
+                    soul_cmd.render_list(agent.paths)
                 if tui is not None and turn_id:
                     tui.set_turn_state(turn_id, "control")
                 continue
             if line == "/copy" or line.startswith("/copy "):
                 # Copy the last answer to the clipboard (OSC 52). Only meaningful in
                 # the managed dock, which owns the transcript and the terminal.
+                # The notice is bound to this turn so it lands under the `/copy`
+                # line, matching other slash commands (`/mode`, `/verbose`).
                 if tui is not None:
-                    tui.copy_last_answer()
+                    with use_output_turn(turn_id):
+                        tui.copy_last_answer()
                     if turn_id:
                         tui.set_turn_state(turn_id, "control")
                 else:
@@ -1794,6 +2158,33 @@ async def _repl_async(state: AppState, *, resume_session_id: str | None = None) 
             # groups while routing both spellings through the same dispatcher.
             if not line.startswith("/") and first_tok in {"config", "skills"}:
                 line = "/" + line
+            # `/task retry <task-id>` on a local top-level task runs the new
+            # attempt as a *foreground* turn (streamed + interactive) here, so the
+            # user can answer any needs_input clarification in-session instead of
+            # the attempt executing invisibly in a child `omni task retry` process.
+            existing_task_id = ""
+            foreground_file_uris: list[str] | None = None
+            if _looks_like_task_retry(line):
+                prepared = await _prepare_foreground_task_retry(
+                    agent, state, line, session_id
+                )
+                if prepared is not None:
+                    with use_output_turn(turn_id):
+                        if prepared.run:
+                            info(prepared.outcome.message)
+                        else:
+                            _render_repl_recovery_outcome(prepared.outcome)
+                    if prepared.run:
+                        existing_task_id = prepared.outcome.new_id
+                        foreground_file_uris = prepared.file_uris
+                        line = prepared.user_input
+                        if prepared.interaction_mode:
+                            turn_mode = prepared.interaction_mode
+                        # `line` is plain text now → falls through to a live turn.
+                    else:
+                        if tui is not None and turn_id:
+                            tui.set_turn_state(turn_id, "control")
+                        continue
             if line.startswith("/"):
                 try:
                     with use_output_turn(turn_id):
@@ -1815,6 +2206,8 @@ async def _repl_async(state: AppState, *, resume_session_id: str | None = None) 
             display = TurnDisplay(
                 verbosity=controls.display_verbosity,
                 status_line=bool(getattr(agent.settings.display, "status_line", True)),
+                on_stage=_turn_stage_reporter(tui, turn_id),
+                debug=controls.display_debug,
             )
             task_ref = {"task_id": ""}
             render_ack = task_ack_cb(False)
@@ -1823,25 +2216,37 @@ async def _repl_async(state: AppState, *, resume_session_id: str | None = None) 
                 data: dict,
                 task_ref: dict[str, str] = task_ref,
                 render_ack=render_ack,
+                display: TurnDisplay = display,
             ) -> None:  # noqa: ANN001
                 task_ref["task_id"] = str(data.get("task_id") or "")
+                # Keep the owning task id in the live status line for the whole
+                # turn (persists through a later timeout/degrade), then ack.
+                display.set_task(task_ref["task_id"])
                 render_ack(data)
 
             # Stream the answer live only in the managed TUI: it owns an in-place
             # markdown slot, so there is no classic raw-print/markdown double render.
             stream_on = tui is not None and bool(getattr(agent.settings.react, "stream", True))
             exit_requested = False
+            turn_elapsed = 0.0
             try:
                 with use_output_turn(turn_id):
                     display.begin("planning")
+                    # ``@path`` mentions in the line are this turn's attachments;
+                    # a retry snapshot's uris (if any) survive alongside them.
+                    attachments = resolve_turn_attachments(line, extra=foreground_file_uris)
+                    if attachments.missing:
+                        warn(f"No such file, not attached: {', '.join(attachments.missing)}")
                     turn_task = asyncio.create_task(
                         agent.handle_turn(
                             line, session_id=session_id, channel="cli",
+                            file_uris=attachments.file_uris,
                             drain_tasks=not is_daemon_running(agent.paths),
                             on_tool_event=display.tool_event,
                             on_task_ack=capture_ack,
                             on_token=display.token if stream_on else None,
                             interaction_mode=turn_mode,
+                            existing_task_id=existing_task_id,
                         )
                     )
                     if tui is None:
@@ -1878,35 +2283,45 @@ async def _repl_async(state: AppState, *, resume_session_id: str | None = None) 
                         if turn is None:  # pragma: no cover - outcome invariant
                             raise RuntimeError("foreground turn completed without a result")
                     render_turn_diagnostics(turn)
+                    render_turn_outcome(turn)
                     if not should_suppress_assistant_text(turn):
+                        answer = turn_presentation_from_result(turn).assistant_text
                         # In the TUI the answer already streamed into a live slot;
                         # finalize replaces the partial with the authoritative text.
-                        if not display.finalize_answer(turn.text):
-                            assistant_answer(turn.text)
+                        if not display.finalize_answer(answer):
+                            assistant_answer(answer)
                     render_tasks(turn, artifacts_dir=agent.paths.artifacts_dir)
             except Exception:
                 if tui is not None and turn_id:
                     tui.set_turn_state(turn_id, "failed")
                 raise
             finally:
-                input_box.set_last_elapsed(display.end())
+                turn_elapsed = display.end()
+                input_box.set_last_elapsed(turn_elapsed)
                 if tui is not None and not pending_lines:
                     tui.set_busy(False)
             if tui is not None and turn_id:
                 tui.set_turn_state(turn_id, _turn_header_state(turn))
             if exit_requested:
                 break
+            # A checkpoint takes precedence: prompt for it and skip the "done"
+            # block, since a turn awaiting approval has not actually finished.
+            if not await _maybe_prompt_confirmation(
+                turn, tui=tui, pending_lines=pending_lines
+            ):
+                render_deliverables(
+                    turn, elapsed_s=turn_elapsed, verbosity=controls.display_verbosity
+                )
     finally:
         hint = _background_service_exit_hint(agent.paths)
-        try:
-            await _shutdown_repl_resources(
-                agent=agent,
-                session_id=session_id,
-                inbox_watcher=inbox_watcher,
-                tui=tui,
-            )
-        finally:
-            input_guard.restore()
+        await _shutdown_repl_resources(
+            agent=agent,
+            session_id=session_id,
+            inbox_watcher=inbox_watcher,
+            tui=tui,
+            input_guard=input_guard,
+            background=(maintenance_drain,),
+        )
         if hint and not restart_after:
             warn(hint)
         info("Restarting interactive mode..." if restart_after else "Exited interactive mode.")
@@ -1944,7 +2359,7 @@ async def _repl_update(state: AppState, line: str) -> bool:
     if tui is not None:
         try:
             args = _external_repl_command_args(state, line)
-            command_tokens = shlex.split(line[1:] if line.startswith("/") else line)
+            command_tokens = _split_repl_command_line(line)
         except ValueError:
             warn("Could not parse the command; check quotation marks.")
             return False
@@ -1968,7 +2383,7 @@ async def _repl_update(state: AppState, line: str) -> bool:
 def _repl_update_in_terminal(state: AppState, line: str) -> bool:
     try:
         args = _external_repl_command_args(state, line)
-        command_tokens = shlex.split(line[1:] if line.startswith("/") else line)
+        command_tokens = _split_repl_command_line(line)
     except ValueError:
         warn("Could not parse the command; check quotation marks.")
         return False
@@ -2038,6 +2453,7 @@ _REPL_IN_PROCESS_COMMANDS = frozenset({
     "lit",
     "verify",
     "memory",
+    "model",
     "resume",
     "update",
     "upgrade",
@@ -2051,7 +2467,7 @@ _REPL_IN_PROCESS_COMMANDS = frozenset({
 # failure is contained (never sinks the running turn). ``/task`` streams a child
 # ``omni task …`` process; the rest dispatch in-process.
 _REPL_LIVE_DURING_TURN = frozenset({
-    "task", "context", "inbox", "copy", "help", "soul", "verbose", "mode",
+    "task", "context", "inbox", "copy", "help", "soul", "verbose", "debug", "mode",
 })
 
 # Verbs that relaunch the process (``os.execv``) and so cannot be deferred to fire right
@@ -2069,6 +2485,7 @@ def _registered_repl_external_commands() -> set[str]:
 _REPL_EXTERNAL_COMMANDS = _registered_repl_external_commands()
 _REPL_BARE_GROUP_ACTIONS = _registered_repl_bare_group_actions(app)
 _MEMORY_SUBCOMMANDS = _registered_typer_children(memory_cmd.app)
+_MODEL_SUBCOMMANDS = _registered_typer_children(model_cmd.app)
 _UPDATE_SUBCOMMANDS = _registered_typer_children(update_cmd.app)
 _SKILLS_SUBCOMMANDS = _registered_typer_children(skills_cmd.app)
 
@@ -2082,9 +2499,78 @@ def _repl_slash_commands() -> tuple[str, ...]:
     return build_command_catalog(app).slash_names()
 
 
+def _split_repl_command_line(line: str, *, windows: bool | None = None) -> list[str]:
+    """Split REPL argv while preserving unquoted native Windows paths."""
+    source = line[1:] if line.startswith("/") else line
+    is_windows = os.name == "nt" if windows is None else windows
+    if is_windows:
+        source = _protect_unquoted_windows_paths(source)
+    return shlex.split(source, posix=True)
+
+
+def _protect_unquoted_windows_paths(command: str) -> str:
+    """Escape backslashes in unquoted drive-path tokens for POSIX ``shlex``."""
+    out: list[str] = []
+    quote = ""
+    index = 0
+    length = len(command)
+    while index < length:
+        char = command[index]
+        if quote:
+            out.append(char)
+            if char == "\\" and quote == '"' and index + 1 < length:
+                out.append(command[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char == '"' and _is_windows_path_start(command, index + 1):
+            end = command.find('"', index + 1)
+            if end != -1:
+                out.append('"')
+                out.append(command[index + 1 : end].replace("\\", "\\\\"))
+                out.append('"')
+                index = end + 1
+                continue
+        if char in {"'", '"'}:
+            quote = char
+            out.append(char)
+            index += 1
+            continue
+        at_boundary = index == 0 or command[index - 1].isspace()
+        if not at_boundary or not _is_windows_path_start(command, index):
+            out.append(char)
+            index += 1
+            continue
+        end = index
+        while end < length and not command[end].isspace():
+            end += 1
+        out.append(command[index:end].replace("\\", "\\\\"))
+        index = end
+    return "".join(out)
+
+
+def _is_windows_path_start(value: str, index: int) -> bool:
+    """Recognize drive, UNC, rooted, and dot-relative native path prefixes."""
+    if index >= len(value):
+        return False
+    if value[index] == "\\":
+        return True
+    if value.startswith(".\\", index) or value.startswith("..\\", index):
+        return True
+    return (
+        index + 2 < len(value)
+        and value[index].isalpha()
+        and value[index + 1] == ":"
+        and value[index + 2] in {"\\", "/"}
+    )
+
+
 def _session_aware_external_line(line: str, session_id: str) -> str:
     """Translate a slash command to canonical CLI syntax plus REPL defaults."""
-    tokens = shlex.split(line[1:] if line.startswith("/") else line)
+    tokens = _split_repl_command_line(line)
     if not tokens:
         return ""
 
@@ -2166,7 +2652,7 @@ def _parse_verify_session(arg: str, current_session_id: str) -> str:
 
 def _external_repl_command_args(state: AppState, line: str) -> list[str]:
     """Translate `/foo ...` in the REPL to `omni [global flags] foo ...`."""
-    tokens = shlex.split(line[1:] if line.startswith("/") else line)
+    tokens = _split_repl_command_line(line)
     args: list[str] = []
     if state.project:
         args.extend(["--project", state.project])
@@ -2174,6 +2660,8 @@ def _external_repl_command_args(state: AppState, line: str) -> list[str]:
         args.extend(["--profile", state.profile])
     if state.model:
         args.extend(["--model", state.model])
+    if tokens and tokens[0] == "model" and state.trusted is not None:
+        args.append("--trust" if state.trusted else "--no-trust")
     args.extend(tokens)
     return args
 
@@ -2185,7 +2673,7 @@ async def _run_repl_external_command(state: AppState, line: str) -> int:
     except ValueError:
         warn("Could not parse the command; check quotation marks.")
         return 2
-    command_tokens = shlex.split(line[1:] if line.startswith("/") else line)
+    command_tokens = _split_repl_command_line(line)
     policy = classify_repl_command(command_tokens)
     tui = _active_repl_tui()
     if tui is None:
@@ -2257,12 +2745,16 @@ async def _stream_repl_external_command(tui: ReplTui, args: list[str]) -> int:
 
 def _repl_child_env(tui: ReplTui, *, structured: bool = False) -> dict[str, str]:
     """Build a child environment from the live TUI size, never stale shell columns."""
+    from omni.cli.command_surface import REPL, SURFACE_ENV
     from omni.cli.repl_output import TRANSCRIPT_PROTOCOL_ENV
 
     rows, columns = tui.terminal_size()
     env = os.environ.copy()
     env["COLUMNS"] = str(columns)
     env["LINES"] = str(rows)
+    # The child is a subprocess of a shell but its cards land in the REPL, so
+    # they have to name the prompt the reader will actually type at.
+    env[SURFACE_ENV] = REPL
     if structured:
         env[TRANSCRIPT_PROTOCOL_ENV] = "1"
     else:
@@ -2309,8 +2801,8 @@ async def _repl_command(
             warn("Usage: /clear [--screen]")
         else:
             before = await agent.context_snapshot(session_id, include_injected=False)
-            info("Persisting durable memory and starting a clean context...")
-            await agent.end_session(session_id)
+            info("Queueing durable memory and starting a clean context...")
+            await agent.enqueue_session_maintenance(session_id)
             session_id = await agent.ensure_session(channel="cli", reuse_latest=False)
             if not clear_active_output():
                 console.clear()
@@ -2320,7 +2812,7 @@ async def _repl_command(
             )
             info("Previous history, tasks, artifacts, research records, and durable memory remain available.")
     elif cmd == "/new":
-        await agent.end_session(session_id)
+        await agent.enqueue_session_maintenance(session_id)
         session_id = await agent.ensure_session(channel="cli", reuse_latest=False)
         info("Started a new session.")
     elif cmd == "/resume":
@@ -2347,6 +2839,8 @@ async def _repl_command(
             info(f"Steering submitted to task {task.id[:8]}.")
     elif cmd == "/memory":
         await _repl_memory(agent, state, arg)
+    elif cmd == "/model":
+        agent = await _repl_model(agent, state, arg)
     elif cmd == "/compact":
         info("Persisting memory and compacting older conversation history...")
         stats = await agent.compact_session(session_id, keep_last=8)
@@ -2417,7 +2911,7 @@ async def _repl_command(
             if returncode == 0 and command == "skills":
                 _refresh_repl_skill_registry(agent, state)
             elif returncode == 0 and command == "config":
-                tokens = shlex.split(external_line)
+                tokens = _split_repl_command_line(external_line)
                 subcommand = tokens[1] if len(tokens) > 1 else ""
                 home_changed = subcommand == "home" and (
                     len(tokens) > 2 or "--reset" in tokens
@@ -2426,9 +2920,8 @@ async def _repl_command(
                     # Re-exec the whole REPL so its agent, session, inbox watcher,
                     # and daemon checks all resolve the same newly selected home.
                     restart = True
-                elif subcommand in {"set", "model", "embeddings", "unset"}:
-                    await agent.aclose()
-                    agent = await make_agent(state)
+                elif _config_command_changed_settings(tokens):
+                    agent = await _reload_repl_agent(agent, state)
     else:
         warn(f"Unknown command: {cmd}. Use /help.")
 
@@ -2438,6 +2931,123 @@ async def _repl_command(
         restart=restart,
         resume_after_restart=resume_after_restart,
     )
+
+
+def _config_command_changed_settings(tokens: list[str]) -> bool:
+    """Recognize legacy config writes without reloading for status/test/help."""
+    if len(tokens) < 2:
+        return False
+    subcommand = tokens[1]
+    args = tokens[2:]
+    if any(token in {"--help", "-h"} for token in args):
+        return False
+    if subcommand in {"set", "unset"}:
+        return bool(args)
+    if subcommand == "model":
+        return any(token not in {"--test"} for token in args)
+    if subcommand == "vlm":
+        value_options = {
+            "--endpoint",
+            "--base-url",
+            "-u",
+            "--model",
+            "-m",
+            "--api-key",
+            "-k",
+            "--protocol",
+            "--timeout",
+            "--timeout-s",
+            "--enable",
+            "--disable",
+        }
+        return any(
+            token in value_options
+            or any(
+                token.startswith(f"{option}=")
+                for option in value_options
+                if option.startswith("--")
+            )
+            or (token.startswith(("-u", "-m", "-k")) and len(token) > 2)
+            for token in args
+        )
+    if subcommand == "embeddings":
+        return bool(args)
+    return False
+
+
+async def _repl_model(agent, state: AppState, arg: str):  # noqa: ANN001
+    """Run the model facade without introducing session-scoped model state."""
+    if arg.strip():
+        try:
+            tokens = shlex.split(arg)
+        except ValueError:
+            warn("Could not parse /model arguments; check quotation marks.")
+            return agent
+        returncode = await _run_repl_external_command(
+            state,
+            f"/model {arg}",
+        )
+        known = {
+            "status",
+            "explain",
+            "main",
+            "vision",
+            "vlm",
+            "embedding",
+            "embeddings",
+            "help",
+            "use",
+        }
+        role_commands = {"main", "vision", "vlm", "embedding", "embeddings", "use"}
+        read_only_options = {"--test", "--help", "-h"}
+        first = tokens[0] if tokens else ""
+        if first and first not in known:
+            changed = True
+        else:
+            changed = bool(
+                first in role_commands
+                and not any(token in {"--help", "-h"} for token in tokens[1:])
+                and (
+                    first == "use"
+                    or any(token not in read_only_options for token in tokens[1:])
+                )
+            )
+        if returncode != 0 or not changed:
+            return agent
+        return await _reload_repl_agent(agent, state)
+
+    try:
+        tui = _active_repl_tui()
+        if tui is None:
+            edit = model_cmd.prompt_model_edit(state)
+        else:
+            async with tui.suspended():
+                edit = model_cmd.prompt_model_edit(state)
+    except (EOFError, KeyboardInterrupt):
+        console.print()
+        warn("Model configuration cancelled.")
+        return agent
+    if edit is None:
+        return agent
+    try:
+        model_cmd.apply_model_edit(state, edit)
+    except typer.Exit:
+        # Config commands already rendered the validation error. A bad edit must
+        # not exit the parent REPL or rebuild its live agent.
+        return agent
+    return await _reload_repl_agent(agent, state)
+
+
+async def _reload_repl_agent(agent, state: AppState):  # noqa: ANN001
+    """Reload settings while preserving the active REPL approval surface."""
+    await agent.aclose()
+    reloaded = await make_agent(state)
+    tui = _active_repl_tui()
+    if tui is not None:
+        from omni.cli.approval_prompt import build_tui_approver
+
+        reloaded.approver = build_tui_approver(tui)
+    return reloaded
 
 
 async def _repl_memory(agent, state: AppState, arg: str) -> None:  # noqa: ANN001
@@ -2494,7 +3104,7 @@ async def _repl_resume(
         console.print(brief)
         console.rule(style="cyan")
         if thread_session is None:
-            await agent.end_session(session_id)
+            await agent.enqueue_session_maintenance(session_id)
             session_id = await agent.ensure_session(channel="cli", reuse_latest=False)
             info("This research thread has no associated session; started a new one.")
             return session_id
@@ -2510,9 +3120,7 @@ async def _repl_resume(
     target = tokens[0] if tokens else ""
     if target in {"--last", "-l"}:
         sid = rows[0][0].id
-        await agent.touch_session(sid)
-        info(f"Switched to the most recent session {sid[:8]}.")
-        return sid
+        return await _bind_resumed_session(agent, sid)
     if not target:
         data_table(
             "Session history (current workspace)", ["#", "id", "title", "updated", "msgs"],
@@ -2553,9 +3161,14 @@ async def _repl_resume(
             warn(f"Session {target} was not found.")
             return session_id
         sid = sess.id
-    await agent.touch_session(sid)
-    info(f"Switched to session {sid[:8]}.")
-    return sid
+    return await _bind_resumed_session(agent, sid)
+
+
+async def _bind_resumed_session(agent, session_id: str) -> str:  # noqa: ANN001
+    """Touch the session so ``--continue`` keeps it, then echo orientation."""
+    await agent.touch_session(session_id)
+    await render_session_resume(agent, session_id)
+    return session_id
 
 
 if __name__ == "__main__":

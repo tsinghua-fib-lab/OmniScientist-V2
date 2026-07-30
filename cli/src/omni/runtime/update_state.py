@@ -26,12 +26,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit, urlunsplit
 
+from omni.runtime.dist_meta import DIST_NAME as DIST
 from omni.runtime.uninstall import installation_method_for_prefix
 
 if TYPE_CHECKING:
     from omni.config.paths import OmniPaths
-
-DIST = "omniscientist"
 STATE_FILE = "update-state.json"
 STATE_SCHEMA_VERSION = 2
 
@@ -162,7 +161,7 @@ def current_fingerprint() -> InstallationFingerprint:
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
-    ).encode()
+    ).encode("utf-8", errors="backslashreplace")
     return InstallationFingerprint(
         token=hashlib.sha256(material).hexdigest(),
         version=version,

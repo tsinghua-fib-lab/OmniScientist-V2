@@ -2,29 +2,30 @@
 
 from __future__ import annotations
 
-import inspect
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import OperationalError
 
 from omni.agent.plan_revision import queued_workflow_authority
 from omni.runtime import subtask_recovery
-from omni.runtime.deliverable_assessment import bind_deliverable_assessment_identity
 from omni.runtime.notifications import Notifier, TaskNotification
 from omni.runtime.provider_authority import workflow_provider_authorities
 from omni.runtime.task_results import _artifact_uris, _result_summary
 from omni.runtime.workflow_completion import write_back_workflow_result
+from omni.runtime.workflow_lifecycle import write_workflow_finish
 from omni.runtime.workflow_plan import (
     _is_child_task_step,
     _is_native_workflow_step,
     prepare_workflow_plan,
 )
-from omni.runtime.workflow_quality_retry import WorkflowQualityRetryManager
+from omni.runtime.workflow_progress import emit, relayed_fields, traceable
 from omni.runtime.workflow_runtime import WorkflowExecutionError, WorkflowRuntime
 from omni.skills_runtime.context import SKILL_SOURCE_PARAM, ExecContext
+from omni.storage.db import retry_while_busy, sqlite_busy
 from omni.storage.models import (
     SubtaskORM,
     TaskORM,
@@ -40,14 +41,6 @@ ProcessExecution = Callable[..., Awaitable[None]]
 EnqueueLocal = Callable[..., Awaitable[None]]
 ExternalKey = Callable[[str], Awaitable[str]]
 CtxFactory = Callable[[str, str], ExecContext]
-
-
-async def _emit(callback: Any, phase: str, data: dict[str, Any]) -> None:
-    if callback is None:
-        return
-    result = callback(phase, data)
-    if inspect.isawaitable(result):
-        await result
 
 
 class WorkflowRunManager:
@@ -83,10 +76,6 @@ class WorkflowRunManager:
             task_recorder=task_recorder,
             step_executor=self._execute_skill_step,
         )
-        self._quality_retry = WorkflowQualityRetryManager(
-            db=db, registry=registry, process_execution=process_execution,
-            task_recorder=task_recorder,
-        )
 
     def set_notifier(self, notifier: Notifier) -> None:
         self._notifier = notifier
@@ -94,7 +83,6 @@ class WorkflowRunManager:
     def set_task_recorder(self, recorder: Any) -> None:
         self._task_recorder = recorder
         self._executor.set_task_recorder(recorder)
-        self._quality_retry.set_task_recorder(recorder)
 
     async def enqueue(
         self,
@@ -320,13 +308,23 @@ class WorkflowRunManager:
             execution_id = str(data.get("execution_id") or data.get("subtask_id") or "")
             step_row_id = await self._step_row_id(workflow_run_id, step_key)
             event = {"stage": stage, "pct": pct, "ts": datetime.now(UTC).isoformat(), **data}
-            trace.append(event)
-            async with self._db.session() as session:
-                run = await session.get(WorkflowRunORM, workflow_run_id)
-                if run is not None:
-                    run.trace_log = list(trace)
-                    run.current_step_id = step_key
-                    await session.commit()
+            trace.append(traceable(event))
+            try:
+                async with self._db.session() as session:
+                    run = await session.get(WorkflowRunORM, workflow_run_id)
+                    if run is not None:
+                        run.trace_log = list(trace)
+                        run.current_step_id = step_key
+                        await session.commit()
+            except OperationalError as exc:
+                # Progress is advisory. A cancel write must be allowed to win
+                # the one-writer lock instead of queueing behind this update.
+                if not sqlite_busy(exc):
+                    raise
+                logger.debug(
+                    "workflow %s progress write deferred; store busy",
+                    workflow_run_id[:8],
+                )
             if self._task_recorder is not None and task_id and not execution_progress:
                 await self._task_recorder.append_event(
                     task_id,
@@ -342,7 +340,7 @@ class WorkflowRunManager:
                     summary=stage,
                     pct=pct,
                 )
-            await _emit(
+            await emit(
                 on_event,
                 "task_progress",
                 {
@@ -359,7 +357,7 @@ class WorkflowRunManager:
         ctx.subtask_id = ""
         if getattr(ctx, "registry", None) is None:
             ctx.registry = self._registry
-        await _emit(
+        await emit(
             on_event,
             "task_start",
             {
@@ -389,7 +387,7 @@ class WorkflowRunManager:
             task_id=task_id,
         )
         await self._record_completion(task_id, workflow_run_id, status, result, error)
-        await _emit(
+        await emit(
             on_event,
             "task_done",
             {
@@ -491,17 +489,33 @@ class WorkflowRunManager:
         error: str,
         trace: list[dict[str, Any]],
     ) -> None:
-        async with self._db.session() as session:
-            run = await session.get(WorkflowRunORM, workflow_run_id)
-            if run is None:
-                return
-            run.status = status
-            run.result_json = result
-            run.error = error
-            run.trace_log = trace
-            run.current_step_id = ""
-            run.finished_at = _utcnow()
-            await session.commit()
+        await retry_while_busy(
+            lambda: self._write_finish(
+                workflow_run_id,
+                status=status,
+                result=result,
+                error=error,
+                trace=trace,
+            )
+        )
+
+    async def _write_finish(
+        self,
+        workflow_run_id: str,
+        *,
+        status: str,
+        result: dict[str, Any],
+        error: str,
+        trace: list[dict[str, Any]],
+    ) -> None:
+        await write_workflow_finish(
+            self._db,
+            workflow_run_id,
+            status=status,
+            result=result,
+            error=error,
+            trace=trace,
+        )
 
     async def _record_completion(
         self,
@@ -601,11 +615,7 @@ class WorkflowRunManager:
                 skill=skill_name,
                 execution_id=execution_id,
                 execution_progress=True,
-                **(
-                    {"skill_step_id": str(data["skill_step_id"])}
-                    if data.get("skill_step_id")
-                    else {}
-                ),
+                **relayed_fields(data),
             )
 
         await self._process_execution(
@@ -624,20 +634,6 @@ class WorkflowRunManager:
                 "attempt": step_attempt,
             }
         result = dict(execution.result_json or {})
-        bind_deliverable_assessment_identity(result, step)
-        retry_execution = await self._quality_retry.retry(
-            workflow_run_id=workflow_run_id,
-            step=step,
-            execution=execution,
-            input_data=execution_input,
-            result=result,
-            ctx=ctx,
-            child_event=child_event,
-        )
-        if retry_execution is not None:
-            execution = retry_execution
-            result = dict(execution.result_json or {})
-            bind_deliverable_assessment_identity(result, step)
         return {
             "status": execution.status,
             "result": result,

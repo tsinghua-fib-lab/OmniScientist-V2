@@ -15,7 +15,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import httpx
 
@@ -253,8 +254,11 @@ def reference_as_data_url(
             category="input",
             retryable=False,
         )
-    if parsed.scheme == "file":
-        path = Path(unquote(parsed.path))
+    if _is_windows_drive_path(value):
+        # ``urlparse`` reads a native Windows drive letter as a URI scheme.
+        path = Path(value).expanduser()
+    elif parsed.scheme == "file":
+        path = Path(url2pathname(parsed.path))
     elif parsed.scheme:
         raise VlmError(
             "Unsupported reference image URI; use a data URL or local file",
@@ -308,6 +312,11 @@ def reference_as_data_url(
         )
     encoded = base64.b64encode(raw).decode("ascii")
     return f"data:{mime};base64,{encoded}"
+
+
+def _is_windows_drive_path(value: str) -> bool:
+    """Whether ``value`` begins with a native Windows drive prefix."""
+    return len(value) >= 3 and value[0].isalpha() and value[1:3] in {":\\", ":/"}
 
 
 def _valid_image_bytes(raw: bytes, mime: str) -> bool:

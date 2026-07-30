@@ -33,10 +33,11 @@ def _dedup_key(entry: dict[str, Any]) -> str:
 def _coerce_entry(raw: dict[str, Any]) -> dict[str, Any]:
     """Normalise a paper-ish dict into the library schema."""
     published = str(raw.get("published") or raw.get("updated") or "")
-    year = ""
-    m = re.search(r"(\d{4})", published)
-    if m:
-        year = m.group(1)
+    year = str(raw.get("year") or "").strip()
+    if not year:
+        m = re.search(r"(\d{4})", published)
+        if m:
+            year = m.group(1)
     authors = raw.get("authors") or []
     if isinstance(authors, str):
         authors = [a.strip() for a in authors.split(",") if a.strip()]
@@ -50,7 +51,7 @@ def _coerce_entry(raw: dict[str, Any]) -> dict[str, Any]:
         "abs_url": str(raw.get("abs_url") or raw.get("url") or "").strip(),
         "pdf_url": str(raw.get("pdf_url") or "").strip(),
         "summary": _WS_RE.sub(" ", str(raw.get("summary") or "").strip()),
-        "source": str(raw.get("source") or "arxiv").strip(),
+        "source": str(raw.get("source") or raw.get("origin") or "arxiv").strip(),
     }
 
 

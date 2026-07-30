@@ -184,8 +184,17 @@ class HomeService:
         """Whether the daemon may mirror deliverables into ``root``.
 
         Non-interactive parity with the CLI trust gate: global trust disabled ⇒
-        trusted; an already-adopted in-place ``.omni`` ⇒ trusted; otherwise only
-        the persisted ledger / config allowlist decides (never a prompt).
+        trusted; ``root`` itself already adopted as an in-place ``.omni``
+        project ⇒ trusted; otherwise only the persisted ledger / config allowlist
+        decides (never a prompt).
+
+        Adoption is consent for the directory that carries the marker. This used
+        to accept any adopted *ancestor*, which is a containment question
+        standing in for an identity one: it answered "is this below something
+        adopted?" while meaning "was this adopted?". Every directory under an
+        adopted tree inherited a decision the owner made about one folder, and
+        the consequence is not cosmetic — it decides whether the daemon writes a
+        turn's figures and reports into that directory.
         """
         from omni.config import trust as trustmod
         from omni.config.paths import find_project_root
@@ -193,7 +202,7 @@ class HomeService:
         tcfg = self.settings.trust
         if not tcfg.enabled:
             return True
-        if find_project_root(root) is not None:
+        if find_project_root(root) == root.resolve():
             return True
         return trustmod.is_trusted(root, home=self.paths.home, allow=tcfg.allow)
 
@@ -266,8 +275,21 @@ class HomeService:
                 await self._ensure_workspace(ws_settings, anchor=False)
             except Exception:  # noqa: BLE001 - one bad workspace must not sink the service
                 logger.exception("home service: failed to host workspace %s", key)
+        # Control-plane READY is independent of IM HTTP. WeChat/Feishu/DingTalk
+        # connect in the background and report through ``channel_health``;
+        # ``omni update`` / ``omni serve restart`` must not wait for them.
         self._write_runtime(ready=True)
         service_state.clear_start_request(self.paths)
+        if self.enable_channels:
+            anchor = self._ws.get(anchor_key)
+            if anchor is not None:
+                try:
+                    await self._install_channels(anchor, anchor_settings, anchor.agent)
+                except Exception:  # noqa: BLE001 - channels must not sink the gateway
+                    logger.exception(
+                        "home service: channel install failed; control plane is still ready"
+                    )
+                self._write_runtime(ready=True)
         logger.info(
             "home service up: %d workspace runtime(s), anchor=%s, channels=%s",
             len(self._ws), Path(anchor_key).name, "on" if self.enable_channels else "off",
@@ -286,13 +308,12 @@ class HomeService:
             register_workspace(settings.paths)
         except Exception:  # noqa: BLE001 — registry is advisory, never block hosting
             logger.debug("home service: register_workspace failed for %s", key, exc_info=True)
-        ws = _WorkspaceRuntime(key=key, name=settings.paths.project_name, agent=agent, is_anchor=anchor)
-        if anchor and self.enable_channels:
-            await self._install_channels(ws, settings, agent)
-        else:
-            from omni.runtime.notifications import InboxNotifier
+        from omni.runtime.notifications import InboxNotifier
 
-            agent.runtime.set_notifier(InboxNotifier(agent.paths.project_dir / "inbox.jsonl"))
+        # Inbox first so the task runtime can accept work before IM adapters
+        # finish their HTTP handshake. Channel install wraps this notifier later.
+        agent.runtime.set_notifier(InboxNotifier(agent.paths.project_dir / "inbox.jsonl"))
+        ws = _WorkspaceRuntime(key=key, name=settings.paths.project_name, agent=agent, is_anchor=anchor)
         await agent.runtime.start(workers=self.workers)
         self._ws[key] = ws
 

@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>科学家灵魂知识图谱</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/tokens.css">
+  <link rel="stylesheet" href="css/base.css">
+  <link rel="stylesheet" href="css/components.css">
+</head>
+<body>
+  <main class="capsule-shell">
+    <aside class="identity-rail" aria-label="科学家身份">
+      <div class="brand">
+        <span class="brand-orbit" aria-hidden="true"></span>
+        <span>科学家灵魂图谱</span>
+      </div>
+
+      <div class="portrait-wrap">
+        <img id="portrait" class="portrait" alt="" hidden>
+        <div id="portrait-fallback" class="portrait fallback" aria-hidden="true"></div>
+      </div>
+
+      <div class="identity-copy">
+        <p class="kicker">SOUL CAPSULE</p>
+        <h1 id="scientist-name"></h1>
+        <p id="identity-line" class="identity-line"></p>
+      </div>
+
+      <div id="identity-facts" class="identity-facts"></div>
+      <div id="metrics" class="metrics" aria-label="图谱规模"></div>
+
+      <div class="rail-footer">
+        <a id="portrait-credit" class="source-link" hidden>肖像来源</a>
+        <nav class="data-links" aria-label="图谱数据">
+          <a href="../kg/manifest.json">分层图谱</a>
+          <a href="../kg.json">完整导出</a>
+        </nav>
+      </div>
+    </aside>
+
+    <section class="graph-stage" aria-label="人格知识图谱">
+      <header class="stage-header">
+        <div>
+          <p class="kicker">INTERACTIVE KNOWLEDGE GRAPH</p>
+          <h2><span id="graph-name"></span> · 灵魂知识图谱</h2>
+          <p>人格核心、语气原句、思维模式与论文证据</p>
+        </div>
+      </header>
+
+      <div id="knowledge-graph" class="knowledge-graph"></div>
+
+      <div class="graph-legend" aria-label="节点图例">
+        <span><i class="legend-dot core-dot"></i>人格核心</span>
+        <span><i class="legend-dot tone-dot"></i>语气原句</span>
+        <span><i class="legend-dot pattern-dot"></i>思维模式</span>
+        <span><i class="legend-star"></i>原始证据</span>
+        <span><i class="legend-line summary-line"></i>抽象自</span>
+        <span><i class="legend-line reinforce-line"></i>强化</span>
+        <span><i class="legend-line enable-line"></i>前提</span>
+        <span><i class="legend-line tension-line"></i>张力</span>
+      </div>
+    </section>
+
+    <aside id="detail-panel" class="detail-panel" aria-live="polite"></aside>
+  </main>
+
+  <script src="data/overview.js"></script>
+  <script src="data/tone.js"></script>
+  <script src="data/values.js"></script>
+  <script src="data/relations.js"></script>
+  <script src="data/patterns/index.js"></script>
+  <script src="data/patterns/c01.js"></script>
+  <script src="data/patterns/c02.js"></script>
+  <script src="data/patterns/c03.js"></script>
+  <script src="data/patterns/c04.js"></script>
+  <script src="data/patterns/c05.js"></script>
+  <script src="data/patterns/c06.js"></script>
+  <script src="data/patterns/c07.js"></script>
+  <script src="js/graph.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

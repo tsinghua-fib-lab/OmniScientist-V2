@@ -28,13 +28,90 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
+from xml.etree import ElementTree
 
 from omni.config.paths import OmniPaths
 from omni.runtime.daemon import pid_alive
 from omni.runtime.service_state import service_instance_id, singleton_holder_info
+
+# Durable host units (launchd / systemd-user / schtasks) outlive the process that
+# installed them. Tests and other throwaway ``OMNI_HOME`` trees must never register
+# one: a leaked KeepAlive LaunchAgent is how dozens of ``omni serve run`` zombies
+# accumulate on a developer machine. Override only for supervised unit tests.
+_ALLOW_EPHEMERAL_HOST_SERVICE = "OMNI_ALLOW_EPHEMERAL_HOST_SERVICE"
+
+
+class DefinitionStatus(StrEnum):
+    MATCHES = "matches"
+    MISMATCHED = "mismatched"
+    UNKNOWN = "unknown"
+
+
+def is_ephemeral_omni_home(home: Path | str) -> bool:
+    """True when ``home`` lives under a process-temp / pytest tree.
+
+    Such directories are deleted when the creating process ends, so a KeepAlive OS
+    unit keyed to them becomes an orphan the moment the suite finishes.
+    """
+    try:
+        resolved = Path(home).expanduser().resolve()
+    except (OSError, RuntimeError):
+        resolved = Path(home).expanduser()
+    text = str(resolved).replace("\\", "/").lower()
+    if "pytest-" in text or "/pytest_of_" in text or "/pytest-of-" in text:
+        return True
+    markers = (
+        "/tmp/",
+        "/private/tmp/",
+        "/var/folders/",
+        "/private/var/folders/",
+        "/dev/shm/",
+        "/var/tmp/",
+        "/private/var/tmp/",
+    )
+    if any(token in text + "/" for token in markers) or text in {
+        "/tmp",
+        "/private/tmp",
+        "/var/tmp",
+        "/private/var/tmp",
+        "/dev/shm",
+    }:
+        return True
+    if "/appdata/local/temp/" in text or "/appdata/local/tmp/" in text:
+        return True
+    try:
+        tmp_root = Path(tempfile.gettempdir()).resolve()
+        if resolved == tmp_root or tmp_root in resolved.parents:
+            return True
+    except (OSError, RuntimeError):
+        pass
+    return False
+
+
+def allows_ephemeral_host_service() -> bool:
+    """Escape hatch for supervisor unit tests that intentionally use tmp homes."""
+    return os.environ.get(_ALLOW_EPHEMERAL_HOST_SERVICE, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _ephemeral_host_skip(home: Path) -> tuple[bool, str] | None:
+    """Refuse host persistence for storage that cannot outlive the unit."""
+    if allows_ephemeral_host_service() or not is_ephemeral_omni_home(home):
+        return None
+    return (
+        False,
+        "refused durable host supervisor for ephemeral OMNI_HOME "
+        f"({home}); set {_ALLOW_EPHEMERAL_HOST_SERVICE}=1 to override",
+    )
 
 
 def service_label(home: Path, *, style: str = "reverse-dns") -> str:
@@ -158,6 +235,12 @@ def _run(cmd: list[str], *, env: dict[str, str] | None = None, timeout: float = 
     return proc.returncode, (proc.stdout + proc.stderr).strip()
 
 
+def _user_session_uid() -> int:
+    """Return the POSIX uid used by launchd, with an offline-test fallback."""
+    getuid = getattr(os, "getuid", None)
+    return int(getuid()) if getuid is not None else 0
+
+
 def _detached_popen_kwargs() -> dict[str, object]:
     if sys.platform == "win32":
         detached = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
@@ -190,6 +273,25 @@ def _terminate_and_wait(pid: int, *, timeout: float = 12.0) -> bool:
     return not pid_alive(pid)
 
 
+def _launchd_job_status(target: str) -> str:
+    rc, out = _run(["launchctl", "print", target])
+    if rc == 0:
+        return "running" if "state = running" in out.lower() else "loaded"
+    detail = out.lower()
+    absent_markers = (
+        "could not find service",
+        "service could not be found",
+        "not found",
+        "not loaded",
+        "test-not-loaded",
+    )
+    return (
+        "not-installed"
+        if any(marker in detail for marker in absent_markers)
+        else "unknown"
+    )
+
+
 # ── supervisor adapters ──────────────────────────────────────────────────────
 
 
@@ -217,6 +319,13 @@ class Supervisor:
 
     def start(self) -> tuple[bool, str]:  # pragma: no cover - overridden
         raise NotImplementedError
+
+    def definition_status(self) -> DefinitionStatus:
+        """Whether the installed unit launches the current ``SupervisorSpec``."""
+        return DefinitionStatus.MATCHES
+
+    def definition_matches(self) -> bool:
+        return self.definition_status() is DefinitionStatus.MATCHES
 
     def activate(self) -> tuple[bool, str]:
         """Install/register and issue exactly one launch-producing action.
@@ -282,6 +391,8 @@ class DetachedSupervisor(Supervisor):
         return True, "detached: no unit to remove"
 
     def start(self) -> tuple[bool, str]:
+        if skip := _ephemeral_host_skip(self.spec.home):
+            return skip
         self.spec.log_path.parent.mkdir(parents=True, exist_ok=True)
         with self.spec.log_path.open("ab") as log:
             subprocess.Popen(  # noqa: S603 - argv is built from trusted service state.
@@ -293,19 +404,35 @@ class DetachedSupervisor(Supervisor):
             )
         return True, "detached service started"
 
+    def status(self) -> str:
+        # Detached mode has no durable unit. Process ownership is observed by
+        # service_control before this supervisor is consulted.
+        return "stopped"
+
 
 class LaunchdSupervisor(Supervisor):
     id = "launchd"
 
+    def _agents_home(self) -> Path:
+        """Directory that owns ``Library/LaunchAgents``.
+
+        Prefer the ``HOME`` captured into the supervisor spec when the unit was
+        composed. A bare-``omni`` ensure runs on a daemon thread; if that thread
+        outlives a test's ``HOME`` monkeypatch, ``Path.home()`` would otherwise
+        flip to the real user home while ``OMNI_HOME`` is still a throwaway tree.
+        """
+        pinned = (self.spec.env.get("HOME") or "").strip()
+        return Path(pinned).expanduser() if pinned else Path.home()
+
     def _plist_path(self) -> Path:
-        return Path.home() / "Library" / "LaunchAgents" / f"{self.label}.plist"
+        return self._agents_home() / "Library" / "LaunchAgents" / f"{self.label}.plist"
 
     def _legacy_label(self) -> str:
         return f"com.omniscientist.service.{service_instance_id(self.spec.paths)[:10]}"
 
     def _legacy_plist_path(self) -> Path:
         return (
-            Path.home()
+            self._agents_home()
             / "Library"
             / "LaunchAgents"
             / f"{self._legacy_label()}.plist"
@@ -316,15 +443,10 @@ class LaunchdSupervisor(Supervisor):
         return sys.platform == "darwin" and shutil.which("launchctl") is not None
 
     def _domain_target(self) -> str:
-        return f"gui/{os.getuid()}"
+        return f"gui/{_user_session_uid()}"
 
     def _job_status(self, label: str) -> str:
-        rc, out = _run(
-            ["launchctl", "print", f"{self._domain_target()}/{label}"]
-        )
-        if rc != 0:
-            return "not-installed"
-        return "running" if "state = running" in out.lower() else "loaded"
+        return _launchd_job_status(f"{self._domain_target()}/{label}")
 
     def _wait_job_absent(self, label: str, *, timeout: float = 5.0) -> bool:
         deadline = time.time() + max(0.0, timeout)
@@ -370,6 +492,8 @@ class LaunchdSupervisor(Supervisor):
         return True, f"retired legacy LaunchAgent {label}"
 
     def install(self) -> tuple[bool, str]:
+        if skip := _ephemeral_host_skip(self.spec.home):
+            return skip
         legacy_ok, legacy_detail = self._retire_legacy()
         if not legacy_ok:
             return False, legacy_detail
@@ -386,6 +510,23 @@ class LaunchdSupervisor(Supervisor):
             rc, out = _run(["launchctl", "load", "-w", str(path)])
         return (rc == 0), (out or f"installed {path}")
 
+    def definition_status(self) -> DefinitionStatus:
+        path = self._plist_path()
+        try:
+            installed = plistlib.loads(path.read_bytes())
+            expected = plistlib.loads(render_launchd_plist(self.label, self.spec))
+        except FileNotFoundError:
+            return DefinitionStatus.MISMATCHED
+        except OSError:
+            return DefinitionStatus.UNKNOWN
+        except (ValueError, TypeError):
+            return DefinitionStatus.MISMATCHED
+        return (
+            DefinitionStatus.MATCHES
+            if installed == expected
+            else DefinitionStatus.MISMATCHED
+        )
+
     def uninstall(self) -> tuple[bool, str]:
         path = self._plist_path()
         _run(["launchctl", "bootout", self._domain_target(), str(path)])
@@ -401,10 +542,10 @@ class LaunchdSupervisor(Supervisor):
         return legacy_ok, detail
 
     def start(self) -> tuple[bool, str]:
+        if skip := _ephemeral_host_skip(self.spec.home):
+            return skip
         rc, out = _run(["launchctl", "kickstart", "-k", f"{self._domain_target()}/{self.label}"])
-        if rc == 0:
-            return True, "kickstarted launchd service"
-        return self.install()
+        return (rc == 0), (out or "kickstarted launchd service")
 
     def activate(self) -> tuple[bool, str]:
         """Bootstrap+RunAtLoad is itself the one launch action."""
@@ -447,8 +588,14 @@ class SystemdUserSupervisor(Supervisor):
         return f"{self.label}.service"
 
     def _unit_path(self) -> Path:
-        base = os.environ.get("XDG_CONFIG_HOME", "").strip()
-        root = Path(base) if base else Path.home() / ".config"
+        base = (
+            self.spec.env.get("XDG_CONFIG_HOME")
+            or os.environ.get("XDG_CONFIG_HOME")
+            or ""
+        ).strip()
+        pinned_home = (self.spec.env.get("HOME") or "").strip()
+        home = Path(pinned_home).expanduser() if pinned_home else Path.home()
+        root = Path(base).expanduser() if base else home / ".config"
         return root / "systemd" / "user" / self._unit_name()
 
     def _legacy_unit_name(self) -> str:
@@ -525,10 +672,16 @@ class SystemdUserSupervisor(Supervisor):
             return False
         # A user manager needs a session bus; absent it (headless cron, docker)
         # ``systemctl --user`` fails, so fall back to detached.
-        rc, _ = _run(["systemctl", "--user", "is-system-running"], timeout=5.0)
-        return rc in (0, 1)  # 1 == degraded but usable
+        _, out = _run(["systemctl", "--user", "is-system-running"], timeout=5.0)
+        state = out.strip().lower().splitlines()[0] if out.strip() else ""
+        # systemd returns status 1 for both a usable degraded manager and
+        # unusable states such as ``offline``. Trust the machine-readable state
+        # instead of the ambiguous return code.
+        return state in {"running", "degraded"}
 
     def install(self) -> tuple[bool, str]:
+        if skip := _ephemeral_host_skip(self.spec.home):
+            return skip
         legacy_ok, legacy_detail = self._retire_legacy()
         if not legacy_ok:
             return False, legacy_detail
@@ -538,6 +691,19 @@ class SystemdUserSupervisor(Supervisor):
         _run(["systemctl", "--user", "daemon-reload"])
         rc, out = _run(["systemctl", "--user", "enable", "--now", self._unit_name()])
         return (rc == 0), (out or f"installed {path}")
+
+    def definition_status(self) -> DefinitionStatus:
+        try:
+            installed = self._unit_path().read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return DefinitionStatus.MISMATCHED
+        except OSError:
+            return DefinitionStatus.UNKNOWN
+        return (
+            DefinitionStatus.MATCHES
+            if installed == render_systemd_unit(self.label, self.spec)
+            else DefinitionStatus.MISMATCHED
+        )
 
     def uninstall(self) -> tuple[bool, str]:
         legacy_ok, legacy_detail = self._retire_legacy()
@@ -553,10 +719,10 @@ class SystemdUserSupervisor(Supervisor):
         return legacy_ok, detail
 
     def start(self) -> tuple[bool, str]:
+        if skip := _ephemeral_host_skip(self.spec.home):
+            return skip
         rc, out = _run(["systemctl", "--user", "restart", self._unit_name()])
-        if rc == 0:
-            return True, "restarted systemd unit"
-        return self.install()
+        return (rc == 0), (out or "restarted systemd unit")
 
     def activate(self) -> tuple[bool, str]:
         """``enable --now`` installs and starts; do not immediately restart."""
@@ -607,7 +773,18 @@ class SchtasksSupervisor(Supervisor):
     def _task_status(self, label: str) -> str:
         rc, out = _run(["schtasks", "/Query", "/TN", label])
         if rc != 0:
-            return "not-installed"
+            detail = out.lower()
+            absent_markers = (
+                "cannot find",
+                "not found",
+                "does not exist",
+                "test-not-loaded",
+            )
+            return (
+                "not-installed"
+                if any(marker in detail for marker in absent_markers)
+                else "unknown"
+            )
         return "running" if "running" in out.lower() else "stopped"
 
     def _legacy_recorded_home(self, path: Path) -> str:
@@ -654,14 +831,54 @@ class SchtasksSupervisor(Supervisor):
         return sys.platform == "win32" and shutil.which("schtasks") is not None
 
     def install(self) -> tuple[bool, str]:
+        if skip := _ephemeral_host_skip(self.spec.home):
+            return skip
         legacy_ok, legacy_detail = self._retire_legacy()
         if not legacy_ok:
             return False, legacy_detail
         wrapper = self._wrapper_path()
         wrapper.parent.mkdir(parents=True, exist_ok=True)
-        wrapper.write_text(render_startup_cmd(self.spec), encoding="utf-8")
+        wrapper.write_bytes(render_startup_cmd(self.spec).encode("utf-8"))
         rc, out = _run(render_schtasks_create(self.label, wrapper))
         return (rc == 0), (out or f"installed task {self.label}")
+
+    def definition_status(self) -> DefinitionStatus:
+        try:
+            installed = self._wrapper_path().read_bytes()
+        except FileNotFoundError:
+            return DefinitionStatus.MISMATCHED
+        except OSError:
+            return DefinitionStatus.UNKNOWN
+        if installed != render_startup_cmd(self.spec).encode("utf-8"):
+            return DefinitionStatus.MISMATCHED
+        rc, xml = _run(["schtasks", "/Query", "/TN", self.label, "/XML"])
+        if rc != 0:
+            detail = xml.lower()
+            if any(
+                marker in detail
+                for marker in ("cannot find", "not found", "does not exist")
+            ):
+                return DefinitionStatus.MISMATCHED
+            return DefinitionStatus.UNKNOWN
+        try:
+            root = ElementTree.fromstring(xml)
+        except ElementTree.ParseError:
+            return DefinitionStatus.UNKNOWN
+        commands = [
+            (node.text or "").strip().strip('"')
+            for node in root.iter()
+            if node.tag.rsplit("}", 1)[-1] == "Command"
+        ]
+        expected = os.path.normcase(os.path.normpath(str(self._wrapper_path())))
+        matches = any(
+            os.path.normcase(os.path.normpath(command)) == expected
+            for command in commands
+        )
+        return (
+            DefinitionStatus.MATCHES
+            if matches
+            else DefinitionStatus.MISMATCHED
+        )
 
     def uninstall(self) -> tuple[bool, str]:
         legacy_ok, legacy_detail = self._retire_legacy()
@@ -676,10 +893,10 @@ class SchtasksSupervisor(Supervisor):
         return legacy_ok, detail
 
     def start(self) -> tuple[bool, str]:
+        if skip := _ephemeral_host_skip(self.spec.home):
+            return skip
         rc, out = _run(["schtasks", "/Run", "/TN", self.label])
-        if rc == 0:
-            return True, "ran scheduled task"
-        return self.install()
+        return (rc == 0), (out or "ran scheduled task")
 
     def stop(self) -> tuple[bool, str]:
         legacy_ok, legacy_detail = self._retire_legacy()
@@ -750,15 +967,101 @@ def describe_platform() -> dict[str, object]:
     }
 
 
+def _launchd_agents_dir() -> Path:
+    return Path.home() / "Library" / "LaunchAgents"
+
+
+def list_orphan_launchd_agents() -> list[dict[str, str]]:
+    """On-disk LaunchAgents whose ``OMNI_HOME`` is gone or ephemeral.
+
+    This deliberately reports only validated plist files owned by Omni. It does
+    not claim to discover loaded-only launchd jobs.
+    """
+    if sys.platform != "darwin":
+        return []
+    agents = _launchd_agents_dir()
+    if not agents.is_dir():
+        return []
+    orphans: list[dict[str, str]] = []
+    for path in sorted(agents.glob("com.omniscientist.omni.*.plist")):
+        try:
+            payload = plistlib.loads(path.read_bytes())
+        except (OSError, ValueError, TypeError):
+            continue
+        env = payload.get("EnvironmentVariables") or {}
+        omni_home = str(env.get("OMNI_HOME") or "").strip()
+        if not omni_home:
+            continue
+        home_path = Path(omni_home).expanduser()
+        missing = not home_path.exists()
+        ephemeral = is_ephemeral_omni_home(home_path)
+        if not (missing or ephemeral):
+            continue
+        orphans.append(
+            {
+                "label": str(payload.get("Label") or path.stem),
+                "plist": str(path),
+                "omni_home": omni_home,
+                "reason": "missing" if missing else "ephemeral",
+            }
+        )
+    return orphans
+
+
+def prune_orphan_launchd_agents(
+    *,
+    timeout_s: float = 2.0,
+) -> tuple[list[dict[str, str]], list[str]]:
+    """Boot out and delete orphan Omni LaunchAgents, verifying each removal."""
+    if sys.platform != "darwin":
+        return [], []
+    domain = f"gui/{_user_session_uid()}"
+    pruned: list[dict[str, str]] = []
+    failures: list[str] = []
+    for row in list_orphan_launchd_agents():
+        label = row["label"]
+        plist = Path(row["plist"])
+        _run(["launchctl", "bootout", f"{domain}/{label}"])
+        if plist.is_file():
+            _run(["launchctl", "bootout", domain, str(plist)])
+            _run(["launchctl", "unload", "-w", str(plist)])
+        target = f"{domain}/{label}"
+        deadline = time.time() + max(0.0, timeout_s)
+        while True:
+            job_status = _launchd_job_status(target)
+            if job_status == "not-installed" or time.time() >= deadline:
+                break
+            time.sleep(0.1)
+        if job_status != "not-installed":
+            failures.append(
+                f"{label}: could not verify launchd job was unloaded "
+                f"(status={job_status})"
+            )
+            continue
+        try:
+            if plist.is_file():
+                plist.unlink()
+        except OSError as exc:
+            failures.append(f"{label}: could not remove {plist}: {exc}")
+            continue
+        pruned.append(row)
+    return pruned, failures
+
+
 __all__ = [
+    "DefinitionStatus",
     "DetachedSupervisor",
     "LaunchdSupervisor",
     "SchtasksSupervisor",
     "Supervisor",
     "SupervisorSpec",
     "SystemdUserSupervisor",
+    "allows_ephemeral_host_service",
     "describe_platform",
+    "is_ephemeral_omni_home",
+    "list_orphan_launchd_agents",
     "make_supervisor",
+    "prune_orphan_launchd_agents",
     "render_launchd_plist",
     "render_schtasks_create",
     "render_startup_cmd",

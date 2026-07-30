@@ -14,7 +14,7 @@ from omni.runtime.workflow_state import (
 from omni.runtime.workflow_state import (
     workflow_state as build_workflow_state,
 )
-from omni.storage.db import Database
+from omni.storage.db import Database, retry_while_busy
 from omni.storage.models import (
     SubtaskORM,
     WorkflowCheckpointORM,
@@ -141,11 +141,7 @@ class WorkflowStateStore:
             ).scalar_one()
         return str(row_id)
 
-    async def provider_authority(
-        self,
-        workflow_run_id: str,
-        step_key: str,
-    ) -> dict[str, Any]:
+    async def provider_authority(self, workflow_run_id: str, step_key: str) -> dict[str, Any]:
         """Load the immutable provider authority sealed for one logical step."""
         async with self._db.session() as session:
             authority = (
@@ -158,10 +154,7 @@ class WorkflowStateStore:
             ).scalar_one()
         return dict(authority or {})
 
-    async def execution_authority(
-        self,
-        workflow_run_id: str,
-    ) -> dict[str, Any]:
+    async def execution_authority(self, workflow_run_id: str) -> dict[str, Any]:
         """Load the immutable workflow root and its explicit renewal chain."""
         async with self._db.session() as session:
             authority = (
@@ -174,6 +167,14 @@ class WorkflowStateStore:
         return dict(authority or {})
 
     async def persist_step_outcome(
+        self,
+        workflow_run_id: str,
+        record: dict[str, Any],
+    ) -> None:
+        """Write one step's terminal state, waiting out a busy store."""
+        await retry_while_busy(lambda: self._write_step_outcome(workflow_run_id, record))
+
+    async def _write_step_outcome(
         self,
         workflow_run_id: str,
         record: dict[str, Any],
@@ -209,7 +210,9 @@ class WorkflowStateStore:
                 row.child_task_ids = child_task_ids
             row.finished_at = _utcnow()
             if row.status in {"skipped", "cancelled"} and row.current_execution_id:
-                execution = await session.get(SubtaskORM, row.current_execution_id)
+                # Avoid flushing the step mid-read; the write belongs at commit.
+                with session.no_autoflush:
+                    execution = await session.get(SubtaskORM, row.current_execution_id)
                 if execution is not None and execution.status == "scheduled":
                     execution.status = "skipped"
                     execution.error = row.error or row.warning
@@ -254,6 +257,17 @@ class WorkflowStateStore:
         *,
         current_step_id: str = "",
     ) -> None:
+        await retry_while_busy(
+            lambda: self._write_result(workflow_run_id, result, current_step_id=current_step_id)
+        )
+
+    async def _write_result(
+        self,
+        workflow_run_id: str,
+        result: dict[str, Any],
+        *,
+        current_step_id: str = "",
+    ) -> None:
         async with self._db.session() as session:
             run = await session.get(WorkflowRunORM, workflow_run_id)
             if run is not None:
@@ -282,6 +296,23 @@ class WorkflowStateStore:
             workflow_run_id, "", step_records, len(steps)
         )
         payload.setdefault("checkpoint", checkpoint)
+        await retry_while_busy(
+            lambda: self._write_checkpoint(
+                workflow_run_id, task_id, status=status,
+                current_step_id=current_step_id, checkpoint=checkpoint, payload=payload,
+            )
+        )
+
+    async def _write_checkpoint(
+        self,
+        workflow_run_id: str,
+        task_id: str,
+        *,
+        status: str,
+        current_step_id: str,
+        checkpoint: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> None:
         async with self._db.session() as session:
             latest = (
                 await session.execute(

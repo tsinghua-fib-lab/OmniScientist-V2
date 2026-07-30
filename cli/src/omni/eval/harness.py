@@ -28,12 +28,16 @@ from omni.skills_runtime.manifest import DeliveryMode, ExecSpec, SkillEntry, Ski
 # Capabilities the runtime satisfies natively (no skill to register for them).
 _NATIVE_CAPABILITIES = {"synthesis.final", "qa.grounded", "draft.section", "draft.manuscript"}
 
-_VERIFICATION_ALIASES = {
-    "passed": {"passed"},
-    "salvaged": {"salvaged"},
+# Scenario vocabulary → the settlement statuses that satisfy it. ``salvaged`` is
+# the harness's own name for a bounded-but-delivered run, which settles degraded.
+_SETTLEMENT_ALIASES = {
+    "passed": {"succeeded"},
+    "succeeded": {"succeeded"},
+    "salvaged": {"degraded"},
+    "degraded": {"degraded"},
     "failed": {"failed"},
-    "ok": {"passed", "salvaged"},  # "did not hard-fail"
-    "any": {"passed", "salvaged", "failed", ""},
+    "ok": {"succeeded", "degraded"},  # "did not hard-fail"
+    "any": {"succeeded", "degraded", "failed", ""},
 }
 
 
@@ -174,18 +178,38 @@ def _fixture_skill(capability: str, *, fail_mode: str = "") -> SkillEntry:
 def isolated_eval_home() -> Iterator[Path]:
     """Point OMNI_HOME/HOME/CWD at a throwaway dir for one benchmark run.
 
-    Each call uses a fresh ``mkdtemp`` root, so the per-workspace SQLite path is
-    unique and the ``get_database`` cache never returns a stale handle across
-    scenarios — no explicit reset needed.
+    Each call uses a fresh ``mkdtemp`` root and clears the process-wide
+    ``get_database`` cache so a prior scenario cannot leave a live engine bound
+    to a directory pytest later deletes (the autouse ``isolated_home`` fixture
+    uses ``tmp_path``, which is removed after the test).
     """
-    saved_env = {k: os.environ.get(k) for k in ("OMNI_HOME", "HOME", "CODEX_HOME")}
+    saved_env = {
+        key: os.environ.get(key)
+        for key in (
+            "OMNI_HOME",
+            "HOME",
+            "CODEX_HOME",
+            "USERPROFILE",
+            "HOMEDRIVE",
+            "HOMEPATH",
+        )
+    }
     saved_cwd = os.getcwd()
     tmp = Path(tempfile.mkdtemp(prefix="omni-eval-"))
+    # Create both homes up front. ``memory.global_store`` opens
+    # ``$OMNI_HOME/memory.sqlite3`` during agent setup; a missing parent
+    # surfaces as ``unable to open database file``.
     (tmp / "home").mkdir(parents=True, exist_ok=True)
+    (tmp / "omni").mkdir(parents=True, exist_ok=True)
     try:
         os.environ["OMNI_HOME"] = str(tmp / "omni")
         os.environ["HOME"] = str(tmp / "home")
         os.environ["CODEX_HOME"] = str(tmp / "home" / ".codex")
+        if os.name == "nt":
+            eval_home = tmp / "home"
+            os.environ["USERPROFILE"] = str(eval_home)
+            os.environ["HOMEDRIVE"] = eval_home.drive
+            os.environ["HOMEPATH"] = str(eval_home)[len(eval_home.drive) :]
         os.chdir(tmp)
         yield tmp
     finally:
@@ -195,14 +219,24 @@ def isolated_eval_home() -> Iterator[Path]:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = val
+                # The autouse fixture may have pointed OMNI_HOME at a path that
+                # was never created; keep restores openable for any teardown
+                # that still touches the global store.
+                if key == "OMNI_HOME" and val:
+                    Path(val).mkdir(parents=True, exist_ok=True)
 
 
 async def _build_agent():  # noqa: ANN202 - OmniAgent imported lazily to avoid import cost
     from omni.agent.orchestrator import OmniAgent
     from omni.config import load_settings
+    from omni.storage.db import reset_databases
 
+    # Dispose engines from the previous scenario before binding a new home.
+    await reset_databases()
     settings = load_settings(overrides={"model": {"provider": "mock"}})
     settings.paths.ensure_dirs()
+    # Belt-and-suspenders for the global memory/control stores opened in setup.
+    settings.paths.home.mkdir(parents=True, exist_ok=True)
     return await OmniAgent.create(settings)
 
 
@@ -353,64 +387,6 @@ def _safety_outcome(want: str, approval_events: list[str]) -> tuple[bool, str]:
     if want == "auto":
         return "approval.auto" in events, detail
     return (not granted), detail  # blocked / denied
-
-
-async def _seed_skill_tasks(agent, seeds: tuple[dict[str, Any], ...]) -> None:  # noqa: ANN001
-    """Seed historical skill-task outcomes so the evolution loop has signal.
-
-    Each seed is ``{skill, status, goal, error, count}``. A referenced skill is
-    registered (minimally) if absent so ``propose_improvements`` can resolve it —
-    modelling "this installed skill has been failing".
-    """
-    from datetime import UTC, datetime, timedelta
-
-    from omni.storage.models import SubtaskORM
-
-    base = datetime.now(UTC)
-    idx = 0
-    async with agent.db.session() as s:
-        for seed in seeds:
-            name = str(seed.get("skill") or "").strip()
-            status = str(seed.get("status") or "succeeded")
-            goal = str(seed.get("goal") or name or "task")
-            err = str(seed.get("error") or "")
-            count = max(1, int(seed.get("count") or 1))
-            if name and agent.registry.get(name) is None:
-                agent.registry.register(SkillEntry(name=name, description=f"seeded {name}"))
-            for _ in range(count):
-                s.add(SubtaskORM(
-                    skill_name=name, status=status,
-                    input_json={"goal": goal},
-                    result_json={"summary": f"done: {goal[:20]}"},
-                    error=err,
-                    created_at=base + timedelta(seconds=idx),
-                ))
-                idx += 1
-        await s.commit()
-
-
-async def _evolution_outcome(agent, want: str) -> tuple[bool, str]:  # noqa: ANN001
-    """Run the self-evolution loop and judge an ``expect.evolution`` value.
-
-    * ``improves:<skill>`` ⇒ an improvement proposal was queued for ``<skill>``.
-    * ``proposes_new``     ⇒ at least one new-skill candidate was queued.
-    * ``none``             ⇒ nothing queued (insufficient signal — no over-fit).
-    """
-    from omni.skills_runtime.proposals import generate_and_enqueue
-
-    summary = await generate_and_enqueue(agent.db, agent.registry, agent.paths, llm=agent.llm)
-    added = summary.get("added", [])
-    queued = {(p.kind, p.skill_name) for p in added}
-    want = want.strip().lower()
-    detail = f"queued={sorted(f'{k}:{n}' for k, n in queued)} want={want}"
-    if want.startswith("improves:"):
-        target = want.split(":", 1)[1].strip()
-        return (("improve_skill", target) in queued), detail
-    if want in ("proposes_new", "new"):
-        return any(kind == "new_skill" for kind, _ in queued), detail
-    if want in ("none", "empty"):
-        return len(added) == 0, detail
-    return False, detail + " (unknown want)"
 
 
 async def _provenance_capsule_outcome(agent, task_id: str, want: str) -> tuple[bool, str]:  # noqa: ANN001
@@ -1021,12 +997,12 @@ def _evaluate_turn(
         want = str(exp["verification"])
         if want == "any":
             # "verification ran" — exercises the dimension without pinning a
-            # verdict (covers passed/salvaged/failed/pending_child_task/"").
-            add("verification", True, f"verification={result.verification_status!r} (any)")
+            # verdict (covers succeeded/degraded/failed/pending/"").
+            add("verification", True, f"verification={result.settlement_status!r} (any)")
         else:
-            allowed = _VERIFICATION_ALIASES.get(want, {want})
-            add("verification", result.verification_status in allowed,
-                f"verification={result.verification_status!r} want∈{sorted(allowed)}")
+            allowed = _SETTLEMENT_ALIASES.get(want, {want})
+            add("verification", result.settlement_status in allowed,
+                f"verification={result.settlement_status!r} want∈{sorted(allowed)}")
     if "text_contains" in exp:
         for needle in exp["text_contains"]:
             add("text_contains", needle in result.text, f"{needle!r} in text")
@@ -1053,7 +1029,7 @@ async def _run_turns_scenario(scenario: Scenario) -> ScenarioResult:
         _saved_exec = _compute._exec
 
         async def _fake_exec(  # noqa: ANN001, ANN202
-            argv, *, shell, cwd, timeout, cancel_check=None
+            argv, *, shell, cwd, timeout, cancel_check=None, env=None
         ):
             return 0, "STUB-OK"
 
@@ -1074,8 +1050,6 @@ async def _run_turns_scenario(scenario: Scenario) -> ScenarioResult:
                 llm.set_review_script(turn.review)
                 llm.set_answer(turn.answer)
                 agent.approver = _scripted_approver(turn.approve) if turn.tool_calls else None
-                if turn.seed_tasks:
-                    await _seed_skill_tasks(agent, turn.seed_tasks)
                 if turn.seed_memories:
                     await _seed_memories(agent, turn.seed_memories)
                 channel = turn.channel or scenario.channel
@@ -1101,11 +1075,6 @@ async def _run_turns_scenario(scenario: Scenario) -> ScenarioResult:
                         approval_events=approval_events,
                     )
                 )
-                if "evolution" in turn.expect:
-                    ok, detail = await _evolution_outcome(agent, str(turn.expect["evolution"]))
-                    result.checks.append(
-                        CheckOutcome(scenario.id, "self_evolution", "evolution", ok, detail)
-                    )
                 if "provenance_capsule" in turn.expect:
                     ok, detail = await _provenance_capsule_outcome(
                         agent, turn_result.task_id, str(turn.expect["provenance_capsule"])
@@ -1189,6 +1158,9 @@ async def _run_turns_scenario(scenario: Scenario) -> ScenarioResult:
             result.error = f"{type(exc).__name__}: {exc}"
         finally:
             await agent.aclose()
+            from omni.storage.db import reset_databases
+
+            await reset_databases()
             _connectors._get_json = _saved_get_json
             _compute._exec = _saved_exec
     return result

@@ -1,6 +1,6 @@
 """Turn-boundary reader for SoulAgent scientist-persona stomata.
 
-OmniScientist's base identity (``role.md`` under ``~/.omni`` or the bundled
+OmniScientist's base identity (``role.md`` under ``~/.omni`` or the built-in
 default) is loaded once and stays sticky for the process — the correct analogue
 of Codex's session-static ``base_instructions``. The portable, host-neutral
 ``soulagent`` skill writes a *temporary, reversible* scientist persona into
@@ -41,6 +41,7 @@ _WRITING = "writing"
 _READY = "ready"
 _HOST = "omniscientist"
 _STOMA_NAME = "role.md"
+_BACKUP_SUFFIX = ".soulagent.bak"
 
 # A persona write clears ``ready`` and holds ``writing`` only for the moment it
 # takes to rewrite one small file, so a short bounded wait avoids showing a
@@ -91,6 +92,26 @@ class PersonaOverlay:
 EMPTY_OVERLAY = PersonaOverlay("", "", "")
 
 
+def _restore_from_backup(root: Path) -> None:
+    """Complete an unload by restoring the original ``role.md`` from its backup.
+
+    When SoulAgent loads a persona, the original ``role.md`` is backed up to
+    ``role.md.soulagent.bak``.  A proper unload (``core.py unload``) restores
+    it and cleans up.  If for any reason only ``state.json`` was removed but
+    the backup was left behind — an incomplete unload — complete it here so
+    the project reverts to its pre-persona state.
+    """
+    backup = root / (f"{_STOMA_NAME}{_BACKUP_SUFFIX}")
+    if not backup.is_file():
+        return
+    try:
+        target = root / _STOMA_NAME
+        target.write_bytes(backup.read_bytes())
+        backup.unlink()
+    except OSError:
+        pass
+
+
 def load_persona_overlay(working_dir: str | Path | None) -> PersonaOverlay:
     """Read the active SoulAgent persona for ``working_dir``; empty when none.
 
@@ -109,7 +130,13 @@ def load_persona_overlay(working_dir: str | Path | None) -> PersonaOverlay:
     state = _read_json(state_dir / "state.json")
     # Presence of the SoulAgent state — not a bare ``role.md`` — is what makes
     # this a persona stoma, so a user's own project ``role.md`` is left untouched.
-    if not state or state.get("host") != _HOST:
+    if not state:
+        # If state.json is missing but the backup still exists, the unload
+        # was started (state removed) but not completed (role.md not restored).
+        # Complete it now so the project reverts to its pre-persona state.
+        _restore_from_backup(root)
+        return EMPTY_OVERLAY
+    if state.get("host") != _HOST:
         return EMPTY_OVERLAY
     scientist_id = str(state.get("scientist_id") or "").strip()
     if not scientist_id:

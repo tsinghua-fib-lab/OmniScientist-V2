@@ -1,4 +1,13 @@
-"""Regression coverage for multi-stage research requests from CLI/IM channels."""
+"""Multi-stage research requests from CLI/IM channels reach a real workflow run.
+
+The host no longer pre-computes a DAG at planning time. A multi-deliverable
+research request lands on the capable ReAct turn and the *model* sequences the
+work by calling ``run_workflow`` with its own steps. What must not regress is
+the product guarantee at the other end of that call: a durable workflow run
+exists, its persisted steps cover every capability the user asked for, the
+notification channel is the one the request came from, and identifiers the user
+supplied verbatim survive into the step inputs.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +17,7 @@ import pytest
 
 from omni.agent import OmniAgent
 from omni.config import load_settings
+from omni.core.llm.client import ChatWithToolsResult, ToolCall
 from omni.skills_runtime.manifest import DeliveryMode, ExecSpec, SkillEntry, SkillKind
 from tests.conftest import PlanningLLM
 
@@ -53,16 +63,63 @@ def _fixture_capabilities(name: str) -> list[str]:
 
 
 def _needs_topic_plan() -> dict:
+    # The gap carries its question in ``reason`` and answers in the language the
+    # request was written in, which is what a planner actually returns: the
+    # contract offered no ``ask`` field for most of its life, so that is where a
+    # model states what it needs.
     return {
         "intent_type": "needs_input",
         "confidence": 0.86,
         "outputs": ["question"],
-        "missing_inputs": [{"field": "research_topic", "reason": "需要研究主题和目标输出范围"}],
+        "missing_inputs": [
+            {
+                "field": "research_topic",
+                "reason": "the research topic and the target output scope",
+            }
+        ],
         "rationale": "the requested research workflow lacks a concrete research topic",
     }
 
 
-def _workflow_plan(capabilities: list[str], *, arxiv_id: str = "", topic: str = "Transformer architecture") -> dict:
+def _multi_step_plan() -> dict:
+    """Semantic planner classifies the turn as multi-step, and stops there.
+
+    ``workflow`` no longer compiles a DAG: it hands the turn to the capable
+    ReAct plan so the model can sequence the steps against live results.
+    """
+    return {
+        "intent_type": "workflow",
+        "confidence": 0.9,
+        "outputs": ["workflow", "draft.section"],
+        "execution_mode": "background",
+        "provenance_mode": "light",
+        "rationale": "multi-deliverable research request; the model sequences the steps",
+    }
+
+
+_SKILL_FOR_CAPABILITY = {
+    "literature.search": "literature-search",
+    "paper.fetch.arxiv": "arxiv-fetch",
+    "corpus.index": "corpus-index",
+    "qa.grounded": "lit-qa",
+    "review.paper": "paper-review",
+    "artifact.figure": "scientific-figure",
+    "evidence.contradiction_scan": "contradiction-scan",
+}
+
+
+def _workflow_steps(
+    capabilities: list[str],
+    *,
+    arxiv_id: str = "",
+    topic: str = "Transformer architecture",
+) -> list[dict]:
+    """The step list the model hands to ``run_workflow``.
+
+    The model names its own provider per step (``synthesis.final`` is the
+    native writing executor and carries no skill), which is what the workflow
+    tool's contract asks for.
+    """
     steps: list[dict] = []
     previous = ""
     for idx, capability in enumerate(capabilities, start=1):
@@ -81,6 +138,10 @@ def _workflow_plan(capabilities: list[str], *, arxiv_id: str = "", topic: str = 
             input_data = {"query": topic}
         elif capability == "paper.fetch.arxiv":
             input_data = {"identifier": arxiv_id}
+        elif capability == "corpus.index":
+            # The fixture indexer declares no input fields; a model that reads
+            # the provider contract sends none.
+            input_data = {}
         elif capability == "synthesis.final":
             input_data = {"topic": topic, "deliverable": "draft.section"}
         step = {
@@ -88,24 +149,42 @@ def _workflow_plan(capabilities: list[str], *, arxiv_id: str = "", topic: str = 
             "capability": capability,
             "input": input_data,
             "depends_on": [previous] if previous else [],
-            "reason": f"test workflow capability {capability}",
         }
+        if capability in _SKILL_FOR_CAPABILITY:
+            step["skill"] = _SKILL_FOR_CAPABILITY[capability]
+        else:
+            step["provider_type"] = "native_executor"
         steps.append(step)
         previous = step_id
-    return {
-        "intent_type": "workflow",
-        "confidence": 0.9,
-        "workflow_steps": steps,
-        "outputs": ["workflow", "draft.section"],
-        "execution_mode": "background",
-        "provenance_mode": "light",
-        "rationale": "semantic planner proposed a capability workflow",
-    }
+    return steps
 
 
-async def _agent(plans: list[dict] | None = None) -> OmniAgent:
+def _run_workflow_script(steps: list[dict], *, goal: str) -> list[ChatWithToolsResult]:
+    """Script one model turn that submits ``steps`` as a background workflow.
+
+    A background submission is terminal for the ReAct loop, so the turn's final
+    text is the tool's own submission message — no extra model turn is needed.
+    """
+    return [
+        ChatWithToolsResult(
+            tool_calls=[
+                ToolCall(
+                    id="call_workflow",
+                    name="run_workflow",
+                    arguments={"goal": goal, "mode": "background", "steps": steps},
+                )
+            ]
+        )
+    ]
+
+
+async def _agent(
+    plans: list[dict] | None = None,
+    *,
+    script: list[ChatWithToolsResult] | None = None,
+) -> OmniAgent:
     agent = await OmniAgent.create(load_settings())
-    agent.llm = PlanningLLM(plans or [])
+    agent.llm = PlanningLLM(plans or [], script=script)
     for entry in (
         _research_skill("literature-search", required=["query"]),
         _research_skill("arxiv-fetch", required=["identifier"]),
@@ -144,14 +223,70 @@ async def test_multistage_research_prompt_needs_topic_before_task() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_step_may_name_the_capability_and_let_the_registry_pick_the_provider() -> None:
+    """Deleting the planner must not force the model to know every skill name.
+
+    Capability→provider arbitration used to happen while the planner compiled a
+    DAG. It now happens where the model's steps arrive, against the live
+    registry, so a step that says what it needs still resolves to who provides
+    it — and a capability nobody offers still fails loudly rather than silently
+    dropping the deliverable.
+    """
+    steps = [
+        {"id": "search", "capability": "literature.search", "input": {"query": "RAG reranking"}},
+        {
+            "id": "figure",
+            "capability": "artifact.figure",
+            "input": {"input": "architecture of the reranking pipeline"},
+            "depends_on": ["search"],
+        },
+    ]
+    agent = await _agent(
+        [_multi_step_plan()],
+        script=_run_workflow_script(steps, goal="survey RAG reranking and draw the pipeline"),
+    )
+    try:
+        result = await agent.handle_turn(
+            "检索 RAG reranking 文献，并画出流水线架构图。", channel="cli", drain_tasks=False
+        )
+        assert result.submitted_workflow_ids
+        workflow = await agent.runtime.get_workflow_run(result.submitted_workflow_ids[0])
+        assert workflow is not None
+        resolved = {step["capability"]: step["skill_name"] for step in workflow.plan_json["steps"]}
+        # Whichever provider wins, it has to be one that actually declares the
+        # capability — the registry arbitrates, the test does not pin the winner.
+        for capability, skill in resolved.items():
+            assert skill, f"{capability} resolved to no provider"
+            entry = agent.registry.resolve_ref(skill, "")
+            assert entry is not None and capability in (entry.capabilities or [])
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_capability_no_provider_offers_is_refused_not_silently_dropped() -> None:
+    steps = [{"id": "impossible", "capability": "quantum.teleport", "input": {"input": "x"}}]
+    agent = await _agent(
+        [_multi_step_plan()],
+        script=_run_workflow_script(steps, goal="do the impossible"),
+    )
+    try:
+        result = await agent.handle_turn("做点不可能的事。", channel="cli", drain_tasks=False)
+        assert not result.submitted_workflow_ids
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
 async def test_multistage_research_followup_creates_workflow_without_topic_arxiv_fetch() -> None:
-    agent = await _agent([
-        _needs_topic_plan(),
-        _workflow_plan(
-            ["literature.search", "corpus.index", "qa.grounded", "review.paper", "artifact.figure", "synthesis.final"],
-            topic="Transformer architecture NeurIPS",
-        ),
-    ])
+    steps = _workflow_steps(
+        ["literature.search", "corpus.index", "qa.grounded", "review.paper", "artifact.figure", "synthesis.final"],
+        topic="Transformer architecture NeurIPS",
+    )
+    agent = await _agent(
+        [_needs_topic_plan(), _multi_step_plan()],
+        script=_run_workflow_script(steps, goal="Transformer architecture NeurIPS section"),
+    )
     try:
         first = await agent.handle_turn(
             "Prepare a submission section with search, fetch, index, grounded QA, review, figure, writing.",
@@ -166,11 +301,9 @@ async def test_multistage_research_followup_creates_workflow_without_topic_arxiv
             channel="feishu",
             drain_tasks=False,
         )
-        assert result.kind == "workflow"
         assert len(result.submitted_workflow_ids) == 1
         assert isinstance(agent.llm, PlanningLLM)
         assert agent.llm.plan_calls == 2
-        assert agent.llm.calls == 0
 
         workflow = await agent.runtime.get_workflow_run(result.submitted_workflow_ids[0])
         assert workflow is not None
@@ -190,13 +323,15 @@ async def test_multistage_research_followup_creates_workflow_without_topic_arxiv
 
 @pytest.mark.asyncio
 async def test_multistage_research_with_explicit_arxiv_id_includes_arxiv_fetch() -> None:
-    agent = await _agent([
-        _workflow_plan(
-            ["literature.search", "paper.fetch.arxiv", "artifact.figure", "synthesis.final"],
-            arxiv_id="1706.03762",
-            topic="Transformer/RAG related work",
-        )
-    ])
+    steps = _workflow_steps(
+        ["literature.search", "paper.fetch.arxiv", "artifact.figure", "synthesis.final"],
+        arxiv_id="1706.03762",
+        topic="Transformer/RAG related work",
+    )
+    agent = await _agent(
+        [_multi_step_plan()],
+        script=_run_workflow_script(steps, goal="Transformer/RAG related work section"),
+    )
     try:
         result = await agent.handle_turn(
             "写一个 Transformer/RAG 相关研究小节：先做文献检索，再获取 arXiv 1706.03762，"
@@ -204,7 +339,7 @@ async def test_multistage_research_with_explicit_arxiv_id_includes_arxiv_fetch()
             channel="cli",
             drain_tasks=False,
         )
-        assert result.kind == "workflow"
+        assert result.submitted_workflow_ids
         workflow = await agent.runtime.get_workflow_run(result.submitted_workflow_ids[0])
         assert workflow is not None
         steps = workflow.plan_json["steps"]
@@ -255,15 +390,17 @@ async def test_real_user_prompts_can_submit_multi_builtin_skill_workflows(
         "synthesis.final": "synthesis.final",
     }
     capabilities = [capability_plan[skill] for skill in expected_skills]
-    agent = await _agent([_workflow_plan(capabilities, arxiv_id="1706.03762", topic=prompt[:80])])
+    steps = _workflow_steps(capabilities, arxiv_id="1706.03762", topic=prompt[:80])
+    agent = await _agent(
+        [_multi_step_plan()],
+        script=_run_workflow_script(steps, goal=prompt),
+    )
     try:
         result = await agent.handle_turn(prompt, channel=channel, drain_tasks=False)
 
-        assert result.kind == "workflow"
         assert len(result.submitted_workflow_ids) == 1
         assert isinstance(agent.llm, PlanningLLM)
         assert agent.llm.plan_calls == 1
-        assert agent.llm.calls == 0
         workflow = await agent.runtime.get_workflow_run(result.submitted_workflow_ids[0])
         assert workflow is not None
         assert workflow.notify_channel == channel
@@ -274,185 +411,22 @@ async def test_real_user_prompts_can_submit_multi_builtin_skill_workflows(
         await agent.aclose()
 
 
-def _arxiv_fetch_support() -> SkillEntry:
-    """arxiv-fetch faithful to the real skill: support role, arxiv_id-typed input."""
-    script = "import json,sys;print(json.dumps({'status':'ok','summary':'fetched'}))"
-    return SkillEntry(
-        name="arxiv-fetch",
-        description="fetch arXiv abstract by id/url",
-        source="builtin",
-        kind=SkillKind.CLI_EXEC,
-        delivery_mode=DeliveryMode.ASYNC_TASK,
-        role="support",
-        capabilities=["paper.fetch.arxiv"],
-        priority=500,
-        exec_spec=ExecSpec(command=sys.executable, args=["-c", script], stdout_format="json"),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "identifier": {
-                    "type": "string",
-                    "format": "arxiv_id",
-                    "aliases": ["id", "url"],
-                    "x-omni": {"repair_capability": "literature.search"},
-                }
-            },
-            "required": ["identifier"],
-        },
-        output_schema={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]},
-        workflow={"failure_policy": "continue_with_partial"},
-    )
-
-
-@pytest.mark.asyncio
-async def test_arxiv_title_workflow_without_resolvable_id_hands_off_to_react_lookup() -> None:
-    # The reported bug: a multilingual "fetch this title, summarize it, and create
-    # a figure" request used to hard-stop with plan_validation_failed because
-    # arxiv-fetch had no arXiv id — and the earlier fix rewrote it into a lossy
-    # whole-sentence search. Under "look-up before ask/error": in-lane resolution
-    # is offline here (mock provider), so the identifier hands off to the ReAct
-    # floor to act-and-look-up (search → id → fetch), never a lossy rewrite and
-    # never a plan-validation failure. The skill's contract message never leaks.
-    plan = {
-        "intent_type": "workflow",
-        "confidence": 0.88,
-        "workflow_steps": [
-            {"id": "fetch", "capability": "paper.fetch.arxiv",
-             "input": {"identifier": "Attention Is All You Need"},
-             "depends_on": [], "reason": "user asked for the paper abstract"},
-            {"id": "figure", "capability": "artifact.figure",
-             "input": {"input": "query/retriever/reranker/LLM 科研架构图"},
-             "depends_on": ["fetch"], "reason": "architecture diagram"},
-        ],
-        "outputs": ["workflow"],
-        "execution_mode": "background",
-        "provenance_mode": "light",
-        "rationale": "fetch abstract then draw architecture",
-    }
-    agent = await _agent([plan])
-    agent.registry.register(_arxiv_fetch_support())
-    try:
-        result = await agent.handle_turn(
-            "为 RAG 系统综述准备材料：获取 Attention Is All You Need 摘要，"
-            "并生成包含 query、retriever、reranker、LLM 的科研架构图。",
-            channel="cli",
-            drain_tasks=False,
-        )
-
-        assert result.terminated_reason != "plan_validation_failed"
-        # The skill's contract "arXiv id or URL is required" message is a self-heal
-        # signal for the engine — it must never surface as a user-facing warning.
-        assert all("arXiv id or URL is required" not in w for w in result.degraded_warnings)
-
-        events = await agent.tasks.list_events(result.task_id)
-        recovery = [event for event in events if event.event_type == "plan.recovery"]
-        assert recovery
-        assert recovery[-1].output_json["action"] == "react"
-        assert recovery[-1].output_json["rung"] == "4_react_lookup"
-        # The floor is told to resolve the extracted title, not the whole goal,
-        # and never to run a lossy free-text literature search rewrite.
-        notes = recovery[-1].output_json.get("notes") or []
-        assert any("Attention Is All You Need" in note for note in notes)
-    finally:
-        await agent.aclose()
-
-
-def _figure_skill_full() -> SkillEntry:
-    """scientific-figure faithful to the real skill: input/title/figure_kind schema."""
-    script = "import json,sys;print(json.dumps({'status':'ok','summary':'figure'}))"
-    return SkillEntry(
-        name="scientific-figure",
-        description="generate a publication-quality scientific figure",
-        source="builtin",
-        kind=SkillKind.CLI_EXEC,
-        delivery_mode=DeliveryMode.ASYNC_TASK,
-        role="task",
-        capabilities=["artifact.figure", "figure.architecture"],
-        priority=500,
-        exec_spec=ExecSpec(command=sys.executable, args=["-c", script], stdout_format="json"),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "input": {"type": "string"},
-                "title": {"type": "string"},
-                "figure_kind": {"type": "string", "enum": ["generic", "rag", "transformer"]},
-            },
-            "required": ["input"],
-        },
-        output_schema={"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]},
-        workflow={"failure_policy": "continue_with_partial"},
-    )
-
-
-@pytest.mark.asyncio
-async def test_figure_workflow_step_seeds_input_from_capability_inputs_and_goal() -> None:
-    # The reported regression: the real semantic planner emits the figure's
-    # contract fields in ``capability_inputs`` (title/figure_kind)
-    # and leaves the workflow step's ``input`` empty. Once workflow-step inputs
-    # were compiled strictly against the provider schema with no goal fallback,
-    # that empty step failed its ``required: [input]`` contract, was classified
-    # as degradable, and got pruned ("lacks required input") — so no figure was
-    # produced. The planner must now fill the step input explicitly at plan
-    # time: fold in contract-declared capability_inputs and seed the
-    # required free-text ``input`` from the user goal.
-    goal = (
-        "为 RAG 系统综述准备材料：获取 Attention Is All You Need 摘要，"
-        "并生成包含 query、retriever、reranker、LLM 的科研架构图。"
-    )
-    plan = {
-        "intent_type": "workflow",
-        "confidence": 0.9,
-        "workflow_steps": [
-            {"id": "fetch", "capability": "paper.fetch.arxiv",
-             "input": {"identifier": "1706.03762"},
-             "depends_on": [], "reason": "user asked for the paper abstract"},
-            {"id": "generate_rag_architecture", "capability": "artifact.figure",
-             "input": {}, "depends_on": ["fetch"], "reason": "RAG architecture diagram"},
-        ],
-        "capability_inputs": {
-            "artifact.figure": {
-                "title": "RAG Architecture",
-                "figure_kind": "rag",
-            }
-        },
-        "outputs": ["workflow"],
-        "execution_mode": "background",
-        "provenance_mode": "light",
-        "rationale": "fetch abstract then draw the RAG architecture",
-    }
-    agent = await _agent([plan])
-    agent.registry.register(_figure_skill_full())
-    try:
-        result = await agent.handle_turn(goal, channel="cli", drain_tasks=False)
-
-        assert result.kind == "workflow"
-        assert result.submitted_workflow_ids
-        # The figure step must survive (not pruned for "lacks required input").
-        assert not any("lacks required input" in warning for warning in result.degraded_warnings)
-
-        workflow = await agent.runtime.get_workflow_run(result.submitted_workflow_ids[0])
-        assert workflow is not None
-        steps = workflow.plan_json["steps"]
-        assert [step["capability"] for step in steps].count("artifact.figure") == 1
-        figure = next(step for step in steps if step["capability"] == "artifact.figure")
-        # Explicit planner-time population: required free-text input seeded from
-        # the goal, while the model-bound contract field stays unchanged.
-        assert goal in str(figure["input"].get("input") or "")
-        assert figure["input"].get("figure_kind") == "rag"
-        assert figure["input"].get("title") == "RAG Architecture"
-    finally:
-        await agent.aclose()
-
-
 @pytest.mark.asyncio
 async def test_builtin_resolver_keeps_final_synthesis_as_native_deliverable() -> None:
-    agent = await OmniAgent.create(load_settings())
-    agent.llm = PlanningLLM([
-        _workflow_plan(
-            ["literature.search", "corpus.index", "qa.grounded", "review.paper", "artifact.figure", "synthesis.final"],
-            topic="Transformer architecture NeurIPS",
-        )
-    ])
+    """``synthesis.final`` stays a native deliverable, never a matched skill.
+
+    The capability→provider resolver runs when the model's ``run_workflow``
+    steps are enqueued, so the writing step must still bind to the native
+    executor instead of being routed to some superficially similar skill.
+    """
+    steps = _workflow_steps(
+        ["literature.search", "corpus.index", "qa.grounded", "review.paper", "artifact.figure", "synthesis.final"],
+        topic="Transformer architecture NeurIPS",
+    )
+    agent = await _agent(
+        [_multi_step_plan()],
+        script=_run_workflow_script(steps, goal="Transformer architecture NeurIPS section"),
+    )
     try:
         result = await agent.handle_turn(
             "想为transformer 架构的研究主题撰写论文章节，论文的目标期刊是 NeurIPS，"
@@ -461,7 +435,7 @@ async def test_builtin_resolver_keeps_final_synthesis_as_native_deliverable() ->
             channel="feishu",
             drain_tasks=False,
         )
-        assert result.kind == "workflow"
+        assert result.submitted_workflow_ids
         workflow = await agent.runtime.get_workflow_run(result.submitted_workflow_ids[0])
         assert workflow is not None
         writing = next(step for step in workflow.plan_json["steps"] if step["id"] == "final_synthesis")

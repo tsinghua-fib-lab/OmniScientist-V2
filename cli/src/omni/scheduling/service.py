@@ -26,7 +26,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from omni.channels.security import IM_CHANNELS, channel_requires_sensitive_confirm
+from omni.channels.security import channel_requires_sensitive_confirm, is_im_channel
 from omni.core.timefmt import format_local_time
 from omni.runtime.scheduler import Scheduler, parse_cron
 from omni.scheduling.contracts import (
@@ -47,6 +47,13 @@ from omni.scheduling.contracts import (
 )
 from omni.scheduling.presentation import build_summary
 from omni.storage.models import ScheduleActionProposalORM, ScheduleORM, _utcnow
+
+# Past-time admission vs the turn's frozen receipt clock: a few seconds of
+# skew at the boundary must not reject a time the user still meant as future.
+_ADMISSION_GRACE = timedelta(seconds=60)
+# IM once-schedules due this soon cannot survive a WeChat reply + local
+# `omni schedule approve` round-trip. Already-clarified goals skip that gate.
+_NEAR_TERM_APPROVAL = timedelta(minutes=15)
 
 # How long a pending approval proposal stays actionable before it expires. A
 # scheduling request is time-relevant; a week-old "approve this daily digest" is
@@ -189,11 +196,26 @@ class ScheduleService:
         kind, interval_s, cron_expr, first_due, tz_label = norm
 
         # 3. Consent: an IM request with no local approver becomes a durable
-        #    proposal; a local/CLI request is created directly.
+        #    proposal; a local/CLI request is created directly. An already-
+        #    clarified near-term once-schedule skips that round-trip: a
+        #    two-minute WeChat slot plus laptop approve is structurally late.
         if self._requires_proposal(request.actor):
-            return self._finish(
-                await self._propose(request, kind=kind, interval_s=interval_s, cron_expr=cron_expr, tz_label=tz_label)
+            if request.already_clarified and _is_near_term_once(first_due):
+                return self._finish(
+                    await self._materialize(
+                        request,
+                        kind=kind,
+                        interval_s=interval_s,
+                        cron_expr=cron_expr,
+                        first_due=first_due,
+                        tz_label=tz_label,
+                    )
+                )
+            proposed = await self._propose(
+                request, kind=kind, interval_s=interval_s, cron_expr=cron_expr, tz_label=tz_label
             )
+            proposed.near_term = _is_near_term_once(first_due)
+            return self._finish(proposed)
 
         return self._finish(
             await self._materialize(
@@ -250,14 +272,21 @@ class ScheduleService:
                     error="Interval schedules need a positive number of seconds.",
                 )
             return TRIGGER_INTERVAL, int(trig.interval_s), "", None, ""
-        # one-time
-        now = _utcnow()
+        # one-time — prefer the turn's frozen reference_time so past-time
+        # admission agrees with the semantic resolver (never a fresh wall clock
+        # that can disagree mid-turn or break offline tests).
+        now = request.reference_time or _utcnow()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=UTC)
+        else:
+            now = now.astimezone(UTC)
         due_utc, tz_label, error = resolve_once_instant(trig.at, trig.timezone, now=now)
         if error:
             return ScheduleCreateResult(status=STATUS_ERROR, channel=request.actor.channel, error=error)
-        if due_utc is not None and due_utc <= now:
+        if due_utc is not None and due_utc + _ADMISSION_GRACE <= now:
             # Past one-time: never silently create a schedule that already
-            # elapsed. Offer structured recovery instead (L4).
+            # elapsed at *receipt*. Offer structured recovery instead (L4).
+            # Host latency after receipt is not "the user gave a past time".
             return ScheduleCreateResult(
                 status=STATUS_NEEDS_INPUT,
                 channel=request.actor.channel,
@@ -283,7 +312,7 @@ class ScheduleService:
         is not in the turn's process. Everything else (CLI/local) is created
         directly.
         """
-        return actor.channel in IM_CHANNELS and channel_requires_sensitive_confirm(
+        return is_im_channel(actor.channel) and channel_requires_sensitive_confirm(
             self._settings, actor.channel
         )
 
@@ -327,7 +356,9 @@ class ScheduleService:
         enabled, runner_ready = self._readiness()
         grants = list(getattr(sched, "approved_tools", None) or []) if sched else []
         next_run = (
-            format_local_time(sched.next_due_at) if sched and sched.next_due_at else "not scheduled"
+            format_local_time(sched.next_due_at, tz=tz_label)
+            if sched and sched.next_due_at
+            else "not scheduled"
         )
         return ScheduleCreateResult(
             status=STATUS_CREATED,
@@ -335,6 +366,7 @@ class ScheduleService:
             kind=kind,
             spec=_spec_label(kind, interval_s, cron_expr),
             title=request.resolved_title(),
+            goal=request.resolved_goal(),
             next_run_local=next_run,
             timezone=tz_label,
             channel=request.actor.channel or "cli",
@@ -417,6 +449,7 @@ class ScheduleService:
             kind=kind,
             spec=_spec_label(kind, interval_s, cron_expr),
             title=request.resolved_title(),
+            goal=request.resolved_goal(),
             timezone=tz_label,
             channel=request.actor.channel or "cli",
             scheduling_enabled=enabled,
@@ -466,10 +499,25 @@ class ScheduleService:
                 return self._finish(ScheduleCreateResult(status=STATUS_REJECTED, proposal_id=row.id, error=f"Proposal {row.id[:8]} failed its integrity check and was rejected."))
 
         # Re-normalise now (a one-time instant may have lapsed while pending).
+        # A slot that was future at admission and slipped during local approve
+        # runs immediately — the owner is confirming the work, not re-stating
+        # a time they already gave.
         norm = self._normalize(request)
+        slot_elapsed = False
         if isinstance(norm, ScheduleCreateResult):
-            return self._finish(norm)
-        kind, interval_s, cron_expr, first_due, tz_label = norm
+            if "past" in (norm.reason or ""):
+                first_due = _utcnow()
+                kind, interval_s, cron_expr, tz_label = (
+                    TRIGGER_ONCE,
+                    0,
+                    "",
+                    request.trigger.timezone,
+                )
+                slot_elapsed = True
+            else:
+                return self._finish(norm)
+        else:
+            kind, interval_s, cron_expr, first_due, tz_label = norm
         # Materialise back into the *originating* workspace so its runtime fires
         # the schedule and its channel manager delivers the result — not this
         # (possibly unrelated) approving CLI's workspace.
@@ -486,6 +534,7 @@ class ScheduleService:
                 row.result_schedule_id = result.schedule_id
                 await s.commit()
         result.proposal_id = proposal_id
+        result.slot_elapsed = slot_elapsed
         return self._finish(result)
 
     async def deny(self, proposal_id: str, *, decided_by: str = "local") -> ScheduleCreateResult:
@@ -575,6 +624,18 @@ def _shell_quote(part: str) -> str:
     if part and all(c.isalnum() or c in "-_./:=" for c in part):
         return part
     return "'" + part.replace("'", "'\\''") + "'"
+
+
+def _is_near_term_once(first_due: datetime | None, *, now: datetime | None = None) -> bool:
+    """True when a one-time due is already here or due within the IM approve window."""
+    if first_due is None:
+        return False
+    moment = now or _utcnow()
+    if first_due.tzinfo is None:
+        first_due = first_due.replace(tzinfo=UTC)
+    else:
+        first_due = first_due.astimezone(UTC)
+    return (first_due - moment) <= _NEAR_TERM_APPROVAL
 
 
 def _as_utc(value: datetime) -> datetime:

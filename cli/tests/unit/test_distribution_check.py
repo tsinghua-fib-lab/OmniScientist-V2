@@ -17,6 +17,10 @@ def test_distribution_validator_requires_licenses_and_bundled_skills(tmp_path):
     dist.mkdir()
     wheel = dist / "omniscientist-1.0-py3-none-any.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(
+            "omniscientist-1.0.dist-info/METADATA",
+            "Metadata-Version: 2.4\nName: omniscientist\nVersion: 1.0\n",
+        )
         archive.writestr("omniscientist-1.0.dist-info/licenses/LICENSE", "license")
         archive.writestr("omniscientist-1.0.dist-info/licenses/NOTICE", "notice")
         archive.writestr("omni/data/skills/scientific-figure/SKILL.md", "skill")
@@ -26,6 +30,10 @@ def test_distribution_validator_requires_licenses_and_bundled_skills(tmp_path):
     (root / "skills/scientific-figure").mkdir(parents=True)
     for name in ("LICENSE", "NOTICE"):
         (root / name).write_text(name, encoding="utf-8")
+    (root / "PKG-INFO").write_text(
+        "Metadata-Version: 2.4\nName: omniscientist\nVersion: 1.0\n",
+        encoding="utf-8",
+    )
     (root / "skills/scientific-figure/SKILL.md").write_text("skill", encoding="utf-8")
     (root / "skills/scientific-figure/LICENSE.txt").write_text("license", encoding="utf-8")
     (root / "skills/scientific-figure/NOTICE.md").write_text("notice", encoding="utf-8")
@@ -34,6 +42,15 @@ def test_distribution_validator_requires_licenses_and_bundled_skills(tmp_path):
         archive.add(root, arcname=root.name)
 
     assert check_dist.validate(dist) == []
+
+    (root / "PKG-INFO").write_text(
+        "Metadata-Version: 2.5\nName: omniscientist\nVersion: 1.0\n",
+        encoding="utf-8",
+    )
+    with tarfile.open(sdist, "w:gz") as archive:
+        archive.add(root, arcname=root.name)
+    errors = check_dist.validate(dist)
+    assert any("core metadata 2.5" in error and "expected 2.4" in error for error in errors)
 
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr("omni/data/skills/pdf/SKILL.md", "bad")

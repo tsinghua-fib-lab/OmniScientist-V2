@@ -19,11 +19,12 @@ scientist-kg-distiller/
 ├── NOTICE.md
 ├── agents/
 ├── references/
-│   ├── evidence-card.schema.json
-│   ├── kg.schema.json
-│   ├── source-object.schema.json
 │   ├── 设计稿02-学术人格KG设计.md
 │   └── 设计稿03-蒸馏器与KG编码器.md
+├── schemas/
+│   ├── evidence-card.schema.json
+│   ├── kg.schema.json
+│   └── source-object.schema.json
 └── scripts/
     ├── requirements.txt
     └── kg_distiller/
@@ -146,14 +147,22 @@ The complete result is written under:
 ```
 
 `kg/` is the canonical progressively readable store. To expose it to
-SoulAgent, copy only that canonical directory into the target project:
+SoulAgent, pass the exact active scanner root to the distiller:
 
 ```powershell
-Copy-Item `
-  ".\workspace\result\kaiming-he\kg" `
-  ".\target-project\scientist-kg\kaiming-he" `
-  -Recurse
+python scripts/kg_distiller/main.py distill `
+  --scientist-id "kaiming-he" `
+  --project-root ".\workspace" `
+  --step kg `
+  --install-root "$HOME\.omni\scientist-kg"
 ```
+
+The command validates the delivery KG, copies it into an invisible same-volume
+staging directory, validates the staged copy, and atomically exposes it as
+`<install-root>/kaiming-he/`. It holds an installation lock and refuses to
+overwrite any existing local directory. Use a project-local
+`<project-root>/scientist-kg` as `--install-root` only when that compatibility
+directory is the scanner selected by SoulAgent.
 
 Do not use the human-facing capsule as SoulAgent input. Do not copy temporary
 checkpoints into `scientist-kg/`.

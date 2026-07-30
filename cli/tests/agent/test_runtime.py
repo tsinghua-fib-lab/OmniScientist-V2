@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import os
 import sys
 from uuid import uuid4
 
@@ -14,7 +15,7 @@ from omni.agent.plan_revision import (
     provider_authority_renewal_is_valid,
 )
 from omni.config import load_settings
-from omni.runtime.notifications import InboxNotifier
+from omni.runtime.notifications import InboxNotifier, TaskNotification, delivery_key
 from omni.runtime.subtask_recovery import retry_subtask as retry_subtask_recovery
 from omni.runtime.subtask_runtime import SubtaskRuntime
 from omni.skills_runtime.context import ExecContext
@@ -65,6 +66,32 @@ def test_persisted_result_without_owner_does_not_emit_incomplete_task_command():
     assert "/task attach " not in message
 
 
+@pytest.mark.asyncio
+async def test_inbox_and_delivery_key_accept_lone_surrogates(tmp_path):
+    notifier = InboxNotifier(tmp_path / "inbox.jsonl")
+    note = TaskNotification(
+        subtask_id="task-1",
+        skill_name="echo",
+        status="succeeded",
+        summary="bad\udc80name 中文",
+    )
+
+    await notifier.notify(note)
+
+    assert notifier.read_all()[0]["summary"] == note.summary
+    assert delivery_key(
+        channel="cli",
+        external_key="bad\udc80key",
+        kind="task",
+        task_id="task-1",
+    ) == delivery_key(
+        channel="cli",
+        external_key="bad\udc80key",
+        kind="task",
+        task_id="task-1",
+    )
+
+
 def _echo_skill():
     script = "import sys,json;d=json.load(sys.stdin);print(json.dumps({'status':'ok','summary':'did '+str(d.get('q'))}))"
     return SkillEntry(
@@ -101,6 +128,33 @@ async def test_enqueue_and_drain():
     assert "did X" in task.result_json["summary"]
     notes = inbox.read_all()
     assert any(n["subtask_id"] == tid and n["status"] == "succeeded" for n in notes)
+
+
+@pytest.mark.asyncio
+async def test_running_one_skill_leaves_the_callers_context_unsealed():
+    """A turn's context outlives any one execution, so nothing may be sealed on it.
+
+    ``run_skill`` hands the live ReAct context straight to the runtime. When the
+    runtime assigned the executing provider's identity onto *that* object, the
+    seal outlived the execution and the next skill on the same turn was checked
+    against the previous skill's fingerprint — reported, wrongly, as the provider
+    having been rewritten after enqueue.
+    """
+    rt, _ = await _runtime()
+    s = load_settings()
+    turn_ctx = ExecContext(settings=s, paths=s.paths, channel="cli")
+
+    subtask_id = await rt.enqueue("echo_task", {"q": "A"}, "cli")
+    await rt.process(subtask_id, ctx_override=turn_ctx)
+
+    task = await rt.get_subtask(subtask_id)
+    assert task is not None and task.status == "succeeded"
+    # The execution ran under its own sealed authority...
+    assert task.provider_authority_json
+    # ...and left no trace of it on the caller's context.
+    assert not turn_ctx.provider_authority
+    assert turn_ctx.subtask_id == ""
+    assert turn_ctx.workflow_run_id == ""
 
 
 @pytest.mark.asyncio
@@ -170,7 +224,7 @@ async def test_retry_and_resume_record_recovery_schema():
     assert resumed.resume_of == tid
     assert "unknown skill" in resumed.original_error
     assert resumed.recovery_attempt == 1
-    assert resumed.recovery_policy == "resume_in_place"
+    assert resumed.recovery_policy == "requeue_in_place"
     assert provider_authority_renewal_is_valid(
         resumed.provider_authority_json["authority_renewal"]
     )
@@ -248,8 +302,8 @@ async def test_repeated_standalone_resume_preserves_root_and_contiguous_chain():
 
     assert authority["provider_authority_root"] == original_authority
     assert [item["action"] for item in renewals] == [
-        f"resume_subtask:{tid}",
-        f"resume_subtask:{tid}",
+        f"requeue_subtask:{tid}",
+        f"requeue_subtask:{tid}",
     ]
     assert renewals[0] == first_link
     assert renewals[1]["previous_fingerprint"] == renewals[0]["fingerprint"]
@@ -500,7 +554,7 @@ async def test_running_subtask_cannot_be_retried_or_resumed():
         await session.execute(
             update(SubtaskORM)
             .where(SubtaskORM.id == tid)
-            .values(status="running")
+            .values(status="running", owner_pid=os.getpid())
         )
         await session.commit()
 
@@ -540,9 +594,15 @@ async def test_recover_resets_running():
 
     from omni.storage.models import SubtaskORM
     async with rt._db.session() as s:
-        await s.execute(update(SubtaskORM).where(SubtaskORM.id == tid).values(status="running"))
+        await s.execute(
+            update(SubtaskORM)
+            .where(SubtaskORM.id == tid)
+            .values(status="running", owner_pid=2_147_483_647)
+        )
         await s.commit()
     n = await rt.recover()
     assert n >= 1
     task = await rt.get_subtask(tid)
-    assert task.status == "pending"
+    # Standalone orphans settle to a terminal state; they are not silently
+    # re-queued (non-replay-safe skills must not rerun without the user).
+    assert task.status == "interrupted"

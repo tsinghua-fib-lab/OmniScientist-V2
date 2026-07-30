@@ -1,10 +1,19 @@
-"""web_fetch tool with a host allowlist (SSRF guard)."""
+"""The agent's two general web capabilities: search for pages, fetch one.
+
+``web_fetch`` reaches a known URL through a host allowlist (SSRF guard).
+``web_search`` finds URLs when nothing else can ground a query — the last rung
+under the scholarly connectors and the local corpus.
+
+Both hand the model text written by someone else, so both run it through
+:func:`defend_observation` first.
+"""
 
 from __future__ import annotations
 
 import fnmatch
 import ipaddress
 import socket
+from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -100,7 +109,25 @@ def build_web_tools(ctx: ExecContext) -> list[Tool]:
         )
         return guarded
 
-    return [
+    async def web_search(args: dict) -> Any:
+        from omni.research.web_search import run_web_search
+
+        result = await run_web_search(
+            ctx.settings,
+            str(args.get("query", "")),
+            num_results=int(args.get("num_results", 5) or 5),
+            allowed_domains=[str(d) for d in (args.get("allowed_domains") or [])],
+            blocked_domains=[str(d) for d in (args.get("blocked_domains") or [])],
+        )
+        mode = getattr(ctx.settings.security, "injection_defense", "flag")
+        for hit in result.get("results") or []:
+            for field in ("title", "snippet"):
+                text = str(hit.get(field) or "")
+                if text:
+                    hit[field], _hits = defend_observation(text, mode=mode)
+        return result
+
+    tools = [
         Tool(
             ToolSpec("web_fetch", "Fetch a webpage or API response from an allowed host, including arXiv and Semantic Scholar.", {
                 "type": "object",
@@ -110,3 +137,33 @@ def build_web_tools(ctx: ExecContext) -> list[Tool]:
             web_fetch,
         )
     ]
+    # Omitted rather than offered-and-refused when switched off, so the model
+    # spends no turn discovering a capability this deployment does not have.
+    # (Codex drops its web_search spec the same way; OpenClaw returns None.)
+    if getattr(ctx.settings, "web_search", None) is None or ctx.settings.web_search.enabled:
+        tools.append(
+            Tool(
+                ToolSpec(
+                    "web_search",
+                    "Search the open web for pages relevant to a query. Use when the scholarly "
+                    "connectors and the local corpus cannot ground it — for a preprint or tool too "
+                    "recent to be indexed, a project page, or a source whose connector is "
+                    "unavailable. Returns {title, url, snippet}; read a result with web_fetch and "
+                    "cite the URL.",
+                    {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"},
+                            "num_results": {"type": "integer", "description": "1-10; default 5"},
+                            "allowed_domains": {"type": "array", "items": {"type": "string"},
+                                                "description": "Optional: keep only these hosts"},
+                            "blocked_domains": {"type": "array", "items": {"type": "string"},
+                                                "description": "Optional: drop these hosts"},
+                        },
+                        "required": ["query"],
+                    },
+                ),
+                web_search,
+            )
+        )
+    return tools

@@ -8,23 +8,16 @@ authoritative revision, and fail closed if execution diverges from that truth.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from omni.agent.cost import record_cost_event, record_text_cost_event
+from omni.agent.cost import record_text_cost_event
 from omni.agent.input_resolution import apply_identifier_resolution
 from omni.agent.intent_plan import IntentPlan, IntentType
 from omni.agent.interaction_lifecycle import apply_interaction_mode
-from omni.agent.model_plan_repair import (
-    ModelPlanRepairer,
-    RepairProviderContract,
-    repair_provider_contract,
-)
 from omni.agent.model_planner import ModelIntentPlanner
-from omni.agent.plan_lifecycle import (
-    assess_repair_candidate,
-    model_repair_findings,
-    plan_diff,
-)
+from omni.agent.plan_factory import build_assistant_plan
+from omni.agent.plan_lifecycle import plan_diff
 from omni.agent.plan_recovery import (
     ACTION_HARD_STOP,
     ACTION_REACT,
@@ -42,7 +35,7 @@ from omni.agent.plan_revision import (
     deep_clone_plan,
     registry_snapshot_hashes,
 )
-from omni.agent.plan_runner_utils import approval_tools_for_plan, plan_summary
+from omni.agent.plan_runner_utils import approval_tools_for_plan, gap_default, plan_summary
 from omni.agent.plan_validator import (
     SEVERITY_BLOCKING,
     PlanFinding,
@@ -50,12 +43,8 @@ from omni.agent.plan_validator import (
     PlanValidator,
 )
 from omni.agent.planner import IntentPlanner
-from omni.agent.provider_binding import (
-    preserves_legacy_accepted_revision,
-    provider_contract_hash,
-)
+from omni.agent.provider_binding import preserves_legacy_accepted_revision
 from omni.runtime.workflow_plan import WorkflowNeedsInput, prepare_workflow_plan
-from omni.skills_runtime.registry import resolve_step_entry, step_skill_source
 
 
 @dataclass(slots=True)
@@ -143,16 +132,6 @@ class PlanPipeline:
             plan=plan,
             proposed_revision=proposed_revision,
             task_id=task_id,
-            catalog_hash=catalog_hash,
-            contract_hash=contract_hash,
-            on_tool_event=on_tool_event,
-            forward=forward,
-        )
-        plan, validation, current_revision = await self._model_repair(
-            llm=llm,
-            plan=plan,
-            validation=validation,
-            current_revision=current_revision,
             catalog_hash=catalog_hash,
             contract_hash=contract_hash,
             on_tool_event=on_tool_event,
@@ -333,7 +312,94 @@ class PlanPipeline:
                     turn_context=turn_context,
                     context_summary=planner_context,
                 )
+        if approved_plan is None:
+            plan, repeat_event = await self._rerun_rather_than_ask(
+                plan, user_message=user_message, task_id=task_id
+            )
+            if repeat_event is not None:
+                events.append(repeat_event)
         return deep_clone_plan(apply_interaction_mode(plan, mode)), events, approval_bound_hash
+
+    async def _rerun_rather_than_ask(
+        self, plan: IntentPlan, *, user_message: str, task_id: str
+    ) -> tuple[IntentPlan, dict[str, Any] | None]:
+        """Never ask reuse-or-rerun; always run again; hint if a twin is fresh.
+
+        "You asked for this before — shall I reuse it or run it again?" is not a
+        missing input. Codex and Claude Code do not detect duplicates: a repeat
+        is a new turn. Asking costs a round trip and the question has already
+        been dropped on the way to the user (cff3eeda).
+
+        Only an exact repeat of a *succeeded* turn qualifies. A near-miss is a
+        different request. Age no longer chooses retrieve vs rerun — the turn
+        always runs. A twin inside the window is mentioned to the user as a
+        footnote so they can open the earlier task; it is not a model instruction
+        and not a degraded warning.
+        """
+        finished, fresh = await self._finished_twin(user_message, exclude_id=task_id)
+        event: dict[str, Any] | None = None
+        if plan.intent_type is IntentType.NEEDS_INPUT and finished:
+            plan = build_assistant_plan(
+                plan.user_message,
+                task_id=task_id,
+                rationale=(
+                    "this request succeeded before; running it again instead of asking "
+                    "whether to reuse or re-run it"
+                ),
+                confidence=max(plan.confidence, 0.6),
+            )
+            event = {
+                "event_type": "plan.rerun.preferred",
+                "status": "succeeded",
+                "name": "react_fallback",
+                "output_json": {
+                    "twin_task_id": finished,
+                    "fresh": fresh,
+                    "replaced": "needs_input",
+                },
+                "summary": (
+                    f"an identical request already succeeded as {finished[:8]}; "
+                    "running it again rather than asking the user to choose"
+                ),
+            }
+        if fresh and finished:
+            notice = identical_twin_notice(finished, user_message)
+            plan.user_notices = list(dict.fromkeys([*plan.user_notices, notice]))
+            plan.twin_task_id = finished
+        return plan, event
+
+    async def _finished_twin(
+        self, user_message: str, *, exclude_id: str = ""
+    ) -> tuple[str, bool]:
+        """Id of a succeeded turn answering this exact request, and its freshness."""
+        wanted = " ".join((user_message or "").split()).casefold()
+        if not wanted or self.tasks is None:
+            return "", False
+        try:
+            rows = await self.tasks.list_tasks(limit=50, status="succeeded", kind="turn")
+        except Exception:  # noqa: BLE001 - a history read must never block planning.
+            return "", False
+        skip = (exclude_id or "").strip()
+        for row in rows:
+            said = " ".join(str(getattr(row, "user_input", "") or "").split()).casefold()
+            if said != wanted:
+                continue
+            found = str(getattr(row, "id", "") or "")
+            if not found or found == skip:
+                continue
+            return found, self._within_retrieval_window(row)
+        return "", False
+
+    def _within_retrieval_window(self, row: Any) -> bool:
+        minutes = int(getattr(getattr(self.settings, "planner", None), "retrieval_window_minutes", 30))
+        if minutes <= 0:
+            return False
+        finished = getattr(row, "finished_at", None) or getattr(row, "created_at", None)
+        if not isinstance(finished, datetime):
+            return False
+        if finished.tzinfo is None:
+            finished = finished.replace(tzinfo=UTC)
+        return datetime.now(UTC) - finished <= timedelta(minutes=minutes)
 
     async def _plan_with_model(
         self,
@@ -395,11 +461,20 @@ class PlanPipeline:
                     ),
                 }
             ]
-        return planner.plan_from_proposal(
+        plan = planner.plan_from_proposal(
             user_message,
             proposal,
             task_id=task_id,
-        ), [
+        )
+        # A gap the planner defaulted its way past is not asked, but it is not
+        # forgotten either: it rides along so the turn can run on the value and
+        # name it in the answer. Only a plan that is *not* asking needs this —
+        # on a needs_input plan the gaps are the question itself.
+        if plan.intent_type is not IntentType.NEEDS_INPUT and not plan.missing_inputs:
+            plan.missing_inputs = [
+                dict(gap) for gap in proposal.missing_inputs if gap_default(gap)
+            ]
+        return plan, [
             {
                 "event_type": "plan.model.proposed",
                 "status": "succeeded",
@@ -472,104 +547,6 @@ class PlanPipeline:
         )
         return candidate, validation, revision
 
-    async def _model_repair(
-        self,
-        *,
-        llm: Any,
-        plan: IntentPlan,
-        validation: PlanValidationResult,
-        current_revision: PlanRevision,
-        catalog_hash: str,
-        contract_hash: str,
-        on_tool_event: Any,
-        forward: Any,
-    ) -> tuple[IntentPlan, PlanValidationResult, PlanRevision]:
-        eligible = model_repair_findings(
-            self.settings,
-            plan,
-            validation.findings,
-            registry=self.registry,
-        )
-        if not eligible:
-            return plan, validation, current_revision
-        provider_contracts, eligible = self._repair_providers(plan, eligible)
-        if not eligible:
-            return plan, validation, current_revision
-        repairer = ModelPlanRepairer(llm)
-        repair_result = await repairer.repair(
-            plan,
-            eligible,
-            revision=current_revision,
-            provider_contracts=provider_contracts,
-        )
-        attempt = repairer.last_attempt
-        if attempt.sent and attempt.response is not None:
-            await record_cost_event(
-                self.tasks,
-                self.settings,
-                llm,
-                plan.task_id,
-                attempt.response,
-                system=attempt.system_prompt,
-                user_message=attempt.user_prompt,
-                component="model_plan_repair",
-            )
-        if repair_result is None:
-            if attempt.sent:
-                await self._record_rejected_revision(
-                    task_id=plan.task_id,
-                    candidate=plan,
-                    base_revision=current_revision,
-                    validation=validation,
-                    reason=(
-                        attempt.reason
-                        or "bounded model repair unavailable or malformed"
-                    ),
-                    on_tool_event=on_tool_event,
-                    forward=forward,
-                )
-            return plan, validation, current_revision
-        repaired_validation = self._validate(repair_result.plan)
-        decision = assess_repair_candidate(
-            plan,
-            repair_result.plan,
-            current_revision=current_revision,
-            before_validation=validation,
-            after_validation=repaired_validation,
-            targeted_finding_ids=set(repair_result.patch.finding_ids),
-        )
-        if not decision.accepted:
-            await self._record_rejected_revision(
-                task_id=plan.task_id,
-                candidate=repair_result.plan,
-                base_revision=current_revision,
-                validation=repaired_validation,
-                reason=decision.reason,
-                on_tool_event=on_tool_event,
-                forward=forward,
-            )
-            return plan, validation, current_revision
-        revision = create_revision(
-            repair_result.plan,
-            revision=current_revision.revision + 1,
-            parent_hash=current_revision.content_hash,
-            source="model_repair",
-            stage="candidate",
-            finding_ids=sorted(repair_result.patch.finding_ids),
-            diff=list(decision.diff),
-            catalog_hash=catalog_hash,
-            contract_hash=contract_hash,
-        )
-        candidate = await self._record_revision(
-            revision,
-            status=repaired_validation.status,
-            event_type="plan.revision.candidate",
-            on_tool_event=on_tool_event,
-            forward=forward,
-            reason="one bounded model repair selected as candidate",
-        )
-        return candidate, repaired_validation, revision
-
     async def _recover_and_accept(
         self,
         *,
@@ -630,7 +607,6 @@ class PlanPipeline:
                 final_candidate,
                 recovery_validation,
                 self.registry,
-                allow_repair=False,
             )
             if recovery.action == ACTION_HARD_STOP:
                 event = recovery_event(recovery, recovery_validation)
@@ -899,36 +875,6 @@ class PlanPipeline:
                 await forward(on_tool_event, item)
         return plan
 
-    async def _record_rejected_revision(
-        self,
-        *,
-        task_id: str,
-        candidate: IntentPlan,
-        base_revision: PlanRevision,
-        validation: PlanValidationResult,
-        reason: str,
-        on_tool_event: Any,
-        forward: Any,
-    ) -> None:
-        event = {
-            "event_type": "plan.revision.rejected",
-            "status": "rejected",
-            "name": "model_repair",
-            "output_json": {
-                "base_revision": base_revision.revision_id,
-                "base_hash": base_revision.content_hash,
-                "candidate_hash": canonical_plan_hash(candidate),
-                "diff": plan_diff(base_revision.plan, candidate),
-                "findings": [
-                    finding.to_dict() for finding in validation.findings
-                ],
-                "reason": reason,
-            },
-            "summary": reason[:220],
-        }
-        await self.tasks.append_event(task_id, **event)
-        await forward(on_tool_event, event)
-
     def _materialize_workflow(
         self,
         plan: IntentPlan,
@@ -969,157 +915,16 @@ class PlanPipeline:
             return candidate, blocked
         return candidate, self._validate_structural(candidate)
 
-    def _repair_providers(
-        self,
-        plan: IntentPlan,
-        findings: list[PlanFinding],
-    ) -> tuple[dict[str, RepairProviderContract], list[PlanFinding]]:
-        """Bundle each exact selected provider contract covered by the repair."""
-        contracts: dict[str, RepairProviderContract] = {}
-        eligible: list[PlanFinding] = []
-        for finding in findings:
-            entry = self._finding_provider(plan, finding)
-            if entry is None or not self._finding_matches_provider(
-                plan,
-                finding,
-                entry,
-            ):
-                continue
-            schema = getattr(entry, "input_schema", None)
-            if not isinstance(schema, dict) or not finding.field_path:
-                continue
-            contract = repair_provider_contract(
-                entry,
-                binding_id=finding.provider_binding_id,
-            )
-            contracts[finding.finding_id] = contract
-            eligible.append(finding)
-        return contracts, eligible
 
-    @staticmethod
-    def _finding_matches_provider(
-        plan: IntentPlan,
-        finding: PlanFinding,
-        entry: Any,
-    ) -> bool:
-        """Require the finding, sealed consumer, and live provider to agree."""
-        source = str(getattr(entry, "source", "") or "")
-        contract_hash = provider_contract_hash(entry)
-        if (
-            not finding.provider_binding_id
-            or not finding.provider_source
-            or not finding.provider_contract_hash
-            or finding.provider_source != source
-            or finding.provider_contract_hash != contract_hash
-        ):
-            return False
-        if finding.scope == "step":
-            consumer = next(
-                (
-                    step
-                    for step in plan.workflow_steps
-                    if str(step.get("id") or "") == finding.step_id
-                ),
-                {},
-            )
-        else:
-            consumer = next(
-                (
-                    binding
-                    for binding in plan.provider_bindings
-                    if str(binding.get("provider_binding_id") or "")
-                    == finding.provider_binding_id
-                ),
-                {},
-            )
-        return bool(
-            consumer
-            and str(consumer.get("provider_binding_id") or "")
-            == finding.provider_binding_id
-            and str(
-                consumer.get("provider_name")
-                or consumer.get("skill_name")
-                or consumer.get("skill")
-                or ""
-            )
-            == str(getattr(entry, "name", "") or "")
-            and str(consumer.get("provider_source") or "") == source
-            and str(
-                consumer.get("provider_contract_hash")
-                or consumer.get("contract_hash")
-                or ""
-            )
-            == contract_hash
-        )
+def identical_twin_notice(task_id: str, user_message: str) -> str:
+    """User-facing footnote for a fresh identical succeeded turn.
 
-    def _finding_provider(self, plan: IntentPlan, finding: PlanFinding) -> Any:
-        skill_name = str(finding.skill_name or "")
-        step = (
-            next(
-                (
-                    item
-                    for item in plan.workflow_steps
-                    if str(item.get("id") or "") == finding.step_id
-                ),
-                {},
-            )
-            if finding.step_id
-            else {}
-        )
-        if not skill_name and step:
-            skill_name = str(step.get("skill_name") or step.get("skill") or "")
-        entry = (
-            resolve_step_entry(self.registry, step)
-            if step
-            else None
-        )
-        if step and step_skill_source(step) and entry is None:
-            return None
-        if entry is None and skill_name:
-            selection = next(
-                (
-                    item
-                    for item in plan.selected_skills
-                    if item.skill == skill_name
-                ),
-                None,
-            )
-            selected_source = (
-                str(getattr(selection, "skill_source", "") or "")
-                if selection is not None
-                else ""
-            )
-            entry = resolve_step_entry(
-                self.registry,
-                {
-                    "skill_name": skill_name,
-                    "skill_source": selected_source,
-                },
-            )
-            if selected_source and entry is None:
-                return None
-        if entry is None and finding.capability:
-            selection = next(
-                (
-                    item
-                    for item in plan.selected_skills
-                    if finding.capability in item.matched_capabilities
-                ),
-                None,
-            )
-            if selection is not None:
-                selected_source = str(
-                    getattr(selection, "skill_source", "") or ""
-                )
-                entry = resolve_step_entry(
-                    self.registry,
-                    {
-                        "skill_name": selection.skill,
-                        "skill_source": selected_source,
-                    },
-                )
-                if selected_source and entry is None:
-                    return None
-        if entry is None and finding.capability:
-            entry, _ = self.registry.resolve_capability(finding.capability)
-        return entry
+    Not a model instruction and not a degraded warning. The executing turn
+    still produces new artifacts; this only names the earlier task.
+    """
+    short = (task_id or "")[:8]
+    _ = user_message
+    return (
+        f"An identical request succeeded recently as `{short}`. "
+        f"This turn is producing a new result; `/task show {short}` opens the earlier one."
+    )

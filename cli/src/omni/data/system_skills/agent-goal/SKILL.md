@@ -20,7 +20,7 @@ metadata:
     allow_implicit_invocation: false
     priority: 0
     execution:
-      max_iterations: 12
+      max_iterations: 20
       max_tool_calls: 40
       max_seconds: 900
     input_schema:
