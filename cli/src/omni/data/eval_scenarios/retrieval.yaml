@@ -1,0 +1,9 @@
+# Retrieval-quality slice: runs the real search_corpus pipeline over the bundled
+# gold set (same as `omni bench`) so retrieval lives on the capability scoreboard.
+
+- id: retrieval_recall
+  title: "Offline retrieval recall over the bundled gold set"
+  type: retrieval
+  tags: [retrieval]
+  k: 3
+  min_recall: 0.8

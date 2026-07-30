@@ -1,0 +1,66 @@
+{
+  "store_version": "1.0.0",
+  "scientist_id": "fengli-xu",
+  "bundle": "../kg.json",
+  "bundle_sha256": "4fcf62b12df07e315767ce7c59f6bf6542232d8ae7067be8c0b14b2d92601524",
+  "files": [
+    {
+      "path": "meta.json",
+      "sha256": "1dfcf906c16c63ddd7e8e7f4ce1a668d475bd0cf53a7b47212e9d5528427d0a3"
+    },
+    {
+      "path": "identity.json",
+      "sha256": "274c29c5d052c1d4907f7bd2784daa0647b6117de3106a7ee5e4f60844fe3e32"
+    },
+    {
+      "path": "l3-stances.json",
+      "sha256": "b31736d383866618981a6b2c225950d3760fd8a7a6af8ac57bf0a683465fdc98"
+    },
+    {
+      "path": "l2-patterns.json",
+      "sha256": "d9b272a7c1245fdea6181d41114731e9ba01b152aa79c173af14a2ea320e666c"
+    },
+    {
+      "path": "edges.json",
+      "sha256": "5d72bdcfcc1c97fab851fb7df2cb7871342b6cbedaeee7374492225caf4babc2"
+    },
+    {
+      "path": "l1-evidence/index.json",
+      "sha256": "6cbc841f5365edd67978579de36167c2e51f237cb0ccac836a720e829eb53018"
+    },
+    {
+      "path": "l1-evidence/c01.jsonl",
+      "sha256": "5b0f92000142fe990b2060301da8d91a7d72f155cfa66fe75e660470e7d50dc6"
+    },
+    {
+      "path": "l1-evidence/c02.jsonl",
+      "sha256": "768ae993fd7f994546271b29bd4516d8797e3e01a32be90c863b5e9ebccde643"
+    },
+    {
+      "path": "l1-evidence/c03.jsonl",
+      "sha256": "3028c87c14e35b2c99d76354e018f0a3da4bdc1d74d4a1ec12b0c73d37a91f24"
+    },
+    {
+      "path": "l1-evidence/c04.jsonl",
+      "sha256": "3a5e21898593e49d656001aca9f27aa98ddcaad15d8617d45c0b09e3965ed4c6"
+    },
+    {
+      "path": "l1-evidence/c05.jsonl",
+      "sha256": "a1afa95a99e7e0fb981e2be3522f6740bb7f197d25ac616de86c27ca0d6bc150"
+    },
+    {
+      "path": "l1-evidence/c06.jsonl",
+      "sha256": "07388f1272b2c0c1e191ee2177a4379baf87c22d2d9ad54b93197aa101aa47ef"
+    },
+    {
+      "path": "l1-evidence/c07.jsonl",
+      "sha256": "207279de098b55c4d23cd3d37de576d99a635bd4b5c5fcc3f8bddf7c493edc6d"
+    }
+  ],
+  "counts": {
+    "L1": 191,
+    "L2": 7,
+    "L3": 4
+  },
+  "evidence_index_sha256": "6cbc841f5365edd67978579de36167c2e51f237cb0ccac836a720e829eb53018"
+}

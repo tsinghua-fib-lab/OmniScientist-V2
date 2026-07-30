@@ -1,0 +1,2 @@
+.sp-note-list { padding: var(--sp-space-3); background: var(--sp-surface-muted); }
+.sp-note-list__items { display: grid; gap: var(--sp-space-2); margin: 0; padding-inline-start: 1.2em; }

@@ -1,0 +1,130 @@
+[
+  {
+    "node_id": "l2_fengli_xu_C01",
+    "level": "L2",
+    "category": "C01",
+    "category_label": "怎样定义问题",
+    "description": "这位科学家在定义研究问题时，倾向于明确界定核心概念、术语和评估标准，并常常指出当前领域存在的定义缺失或不足，从而确立自己的研究定位和贡献。例如，在\textit{Trajectory Recovery From Ash}中明确判断聚合数据导致隐私泄露；在\textit{OpenCity}中定义block areas；在\textit{AgentRecBench}中批评缺乏标准化评估协议；在\textit{SciNet}中强调数据集侧重推理学术关系并定义负向引用；在\textit{ResMAS}中明确定义韧性为平均性能下降。这种模式体现了对问题清晰界定和标准化评估的偏好。",
+    "trigger_contexts": [
+      "establishing_research_framework",
+      "defining_new_concepts",
+      "resolving_definitional_ambiguity"
+    ],
+    "contraindicated_contexts": [
+      "highly_standardized_problems",
+      "exploratory_open_ended_research",
+      "routine_benchmark_evaluation"
+    ],
+    "supporting_L1_count": 6
+  },
+  {
+    "node_id": "l2_fengli_xu_C02",
+    "level": "L2",
+    "category": "C02",
+    "category_label": "怎样选择方法",
+    "description": "该科学家在方法选择上表现出明显的实证驱动和实用主义偏好。面对问题，他倾向于批判现有方法的不足（如指出纯时域分析的缺点），然后选择数据驱动、网络科学或已验证的框架（如Hofstede价值观调查模块、倾向性评分匹配），并强调通过大规模实证数据分析来支撑结论。在实验设计中，他注重控制混杂变量（如作者固定效应回归）、使用对比分析（如离线与在线环境比较），并常采用自动化或次优解来平衡效率与性能（如遗传算法搜索、次优解加速）。此外，他偏好简约模型（如仅含三个参数）和稳健的阈值选择（如三年平衡阈值），并对不可见特征持保守推测（仅使用图像中可见信息）。这些证据共同揭示了一种在方法选择上偏好成熟、可审计、可比较的实证框架，同时灵活采用实用技巧应对计算约束的思维模式。",
+    "trigger_contexts": [
+      "designing_data_analysis_pipeline",
+      "selecting_evaluation_metrics",
+      "constructing_comparative_experiments",
+      "choosing_established_benchmarks",
+      "balancing_accuracy_and_efficiency"
+    ],
+    "contraindicated_contexts": [
+      "exploratory_theory_development",
+      "qualitative_hypothesis_generation",
+      "scenarios_requiring_novel_methods_only",
+      "when_computational_constraints_are_not_a_factor"
+    ],
+    "supporting_L1_count": 77
+  },
+  {
+    "node_id": "l2_fengli_xu_C03",
+    "level": "L2",
+    "category": "C03",
+    "category_label": "怎样验证结论",
+    "description": "这位科学家在验证结论时，主要采用定量对比和消融实验的思维模式。具体表现为：通过将所提方法与现有基线或前人工作进行对比，并报告性能提升的具体数值（如平均提升17.2%、超越25.7%等）来证明其方法的优越性；同时，通过消融研究（如移除特定组件、替换为顺序推理框架）来验证各设计组件的有效性。此外，还注重使用真实世界数据集进行实验，并采用多种量化指标（如精确率、召回率、F1分数、R²）来评估模型性能，有时也会借助用户研究或专家主观判断来辅助验证。",
+    "trigger_contexts": [
+      "evaluating_new_method_vs_baseline",
+      "ablation_study_design",
+      "quantitative_performance_reporting",
+      "using_real_world_datasets_for_validation"
+    ],
+    "contraindicated_contexts": [
+      "pure_theoretical_derivation_without_empirical_test",
+      "exploratory_research_requiring_qualitative_insights_only",
+      "single_metric_evaluation_without_comparison"
+    ],
+    "supporting_L1_count": 38
+  },
+  {
+    "node_id": "l2_fengli_xu_C04",
+    "level": "L2",
+    "category": "C04",
+    "category_label": "怎样解释结果",
+    "description": "在解释结果时，该科学家偏好通过设计消融实验或对比实验，量化移除某组件或替换某参数后的性能差异，从而判断该组件或参数的重要性。例如，在Reason-to-Recommend论文中，通过消融推理链和交互链观察到性能下降，断言其价值；在ReCrit论文中，对比不同rollout策略和参数设置下的时间与准确率，评价其优劣。此外，也常与外部基准或传统方法对比，如Beidian论文中与5%转化率基准比较，AgentSociety2论文中强调文献整合优势。这种模式强调通过量化对比来支撑解释，并常以“支持核心预测”或“唯一符合经验指数”等表述总结。",
+    "trigger_contexts": [
+      "hyperparameter_ablation",
+      "component_ablation",
+      "benchmark_comparison",
+      "domain_generalization_test"
+    ],
+    "contraindicated_contexts": [
+      "qualitative_exploration",
+      "theoretical_proof_without_experiments"
+    ],
+    "supporting_L1_count": 13
+  },
+  {
+    "node_id": "l2_fengli_xu_C05",
+    "level": "L2",
+    "category": "C05",
+    "category_label": "怎样判断美丑",
+    "description": "这位科学家在评价方法时，常采用对比性批判的思维模式：通过指出前人工作的不足（如忽视泛化性、可理解性、成本、协作等），来凸显自身提出的解决方案的优越性。例如，在元结构发现中批评先前工作只关注经验性能而忽视可理解性（《Large Language Model-driven Meta-structure Discovery in Heterogeneous Information Network》中关于“作者批评先前工作只关注经验性能，忽视人类可理解性和泛化性，表明其对比立场。”的原始证据），在移动生成中批评传统方法缺乏语义（《Chain-of-Planned-Behaviour Workflow Elicits Few-Shot Mobility Generation in LLMs》中关于“作者指出传统方法（机械模型和深度生成模型）的共同缺陷是缺乏语义和需要大量数据。”的原始证据），在推理中批评CoT只关注准确率而忽视成本（《Synergy-of-Thoughts: Eliciting Efficient Reasoning in Hybrid Language Models》中关于“作者批评先前CoT和ToT只关注准确率而忽视API成本”的原始证据）。同时，他也会制定详细的多维标准（如科学插图检查清单）来明确质量要求（《LiveFigure: Generating Editable Scientific Illustration with VLM Agents》中关于“作者为VLM视觉批评设计了包含四个维度的检查清单和具体修复建议，体现了对科学插图审美和编辑规范的明确要求。”的原始证据）。",
+    "trigger_contexts": [
+      "literature_review",
+      "method_comparison",
+      "system_design"
+    ],
+    "contraindicated_contexts": [
+      "reproducing_existing_results",
+      "routine_implementation"
+    ],
+    "supporting_L1_count": 23
+  },
+  {
+    "node_id": "l2_fengli_xu_C06",
+    "level": "L2",
+    "category": "C06",
+    "category_label": "怎样处理失败",
+    "description": "面对失败时，该科学家会深入分析并明确归因失败的根本原因（如模块级联导致信息丢失、数据稀疏性阻碍模式学习、模型可扩展性限制等），然后通过查阅文档、迭代或设计新方法来修正。同时，他也会批评现有方法的不足（如反应式检测、刚性替换损害效用、忽视潜在意图等），为提出新方案奠定基础。",
+    "trigger_contexts": [
+      "system_error_debugging",
+      "model_performance_degradation",
+      "method_limitation_identification",
+      "failure_attribution_required"
+    ],
+    "contraindicated_contexts": [
+      "rapid_exploration_of_many_hypotheses",
+      "ambiguous_failure_without_clear_cause",
+      "creative_divergence_tolerance"
+    ],
+    "supporting_L1_count": 32
+  },
+  {
+    "node_id": "l2_fengli_xu_C07",
+    "level": "L2",
+    "category": "C07",
+    "category_label": "怎样产生想法",
+    "description": "该科学家在产生想法时，倾向于从现有工作（如边缘归因补丁EAP）中汲取灵感，并结合初步观察（例如token概率分布的单调性与CoT推理增益的潜在关联）来形成新的研究假设或方法。这种模式体现为立足已有成果，通过关联性思考提出原创性方向。",
+    "trigger_contexts": [
+      "需要从现有技术或理论中推导新方法",
+      "通过观察数据模式提出可检验假设"
+    ],
+    "contraindicated_contexts": [
+      "缺乏相关领域基础知识的探索",
+      "需要完全脱离前人工作的颠覆性创新"
+    ],
+    "supporting_L1_count": 2
+  }
+]

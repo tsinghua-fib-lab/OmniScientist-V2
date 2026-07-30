@@ -1,0 +1,8 @@
+{
+  "schema": "scientific-poster.component.v1",
+  "id": "claim",
+  "version": "1.0.0",
+  "level": "atom",
+  "purpose": "Give one source-grounded scientific claim a strong visual hierarchy.",
+  "semantic_roles": ["claim", "summary", "contribution"]
+}

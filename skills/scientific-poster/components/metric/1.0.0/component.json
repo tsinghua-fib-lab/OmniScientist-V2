@@ -1,0 +1,8 @@
+{
+  "schema": "scientific-poster.component.v1",
+  "id": "metric",
+  "version": "1.0.0",
+  "level": "atom",
+  "purpose": "Pair one reported metric with its condition, unit, and uncertainty.",
+  "semantic_roles": ["metric", "evidence", "result"]
+}

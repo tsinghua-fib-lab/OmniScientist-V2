@@ -1,0 +1,204 @@
+# Capability-selection scenarios keep two questions separate: provider choices
+# come from the validated plan, while execution checks come only from submitted
+# or drained work. Explicit fixtures make the execution cases offline.
+
+- id: ideation_livefigure_workflow
+  title: "Search, ideation, and editable one-slide figure resolve active capabilities"
+  channel: cli
+  tags: [capability_selection]
+  fixtures: [literature.search, research.ideation, figure.editable.pptx]
+  turns:
+    - user: "检索关于 RAG 幻觉的文献，提出研究方向，并做成单页可编辑科研图。"
+      plan:
+        intent_type: workflow
+        confidence: 0.9
+        workflow_steps:
+          - {id: lit, capability: literature.search, input: {query: "RAG hallucination"}}
+          - {id: idea, capability: research.ideation, depends_on: [lit], input: {input: "RAG hallucination research directions"}}
+          - {id: figure, capability: figure.editable.pptx, depends_on: [idea], input: {input: "one-slide editable RAG research figure"}}
+        outputs: [artifact.pptx]
+        execution_mode: background
+        rationale: "search, ideate, then render an editable scientific figure"
+      expect:
+        kind: workflow
+        capabilities_include: [literature.search, research.ideation, figure.editable.pptx]
+
+- id: complete_research_deck_routing
+  title: "A complete research talk resolves the multi-slide deck capability"
+  channel: cli
+  tags: [capability_selection]
+  turns:
+    - user: "为 RAG 事实一致性组会生成一套完整幻灯片。"
+      plan:
+        intent_type: single_skill_task
+        required_capabilities: [slides.generate]
+        capability_inputs:
+          slides.generate: {topic: "RAG factual consistency group meeting"}
+        outputs: [artifact.slides]
+        execution_mode: background
+        confidence: 0.93
+        rationale: "the user requested a complete multi-slide research deck"
+      expect:
+        skill_selected: research-pptx
+
+- id: scientific_poster_routing
+  title: "A complete conference poster resolves the scientific-poster provider"
+  channel: cli
+  tags: [routing, capability_selection]
+  turns:
+    - user: "Turn my supplied paper into a complete conference poster with an HTML preview."
+      plan:
+        intent_type: single_skill_task
+        required_capabilities: [poster.scientific]
+        capability_inputs:
+          poster.scientific: {input: "Create an evidence-grounded conference poster from the supplied paper."}
+        outputs: [artifact.poster]
+        execution_mode: background
+        confidence: 0.96
+        rationale: "the requested deliverable is a complete scientific poster"
+      expect:
+        skill_selected: scientific-poster
+        capabilities_include: [poster.scientific]
+
+- id: paper_review_routing
+  title: "Pre-submission critique resolves the paper-review provider"
+  channel: cli
+  tags: [routing, capability_selection]
+  turns:
+    - user: "Review this paper for NeurIPS before submission and identify likely reject reasons."
+      plan:
+        intent_type: single_skill_task
+        required_capabilities: [review.paper]
+        capability_inputs:
+          review.paper: {input: "paper.pdf", venue: "NeurIPS", mode: standard}
+        outputs: [review]
+        execution_mode: background
+        confidence: 0.96
+        rationale: "the user requested a venue-aware pre-submission paper review"
+      expect:
+        skill_selected: paper-review
+        capabilities_include: [review.paper]
+
+- id: review_response_routing
+  title: "Journal revision correspondence resolves the review-response provider"
+  channel: cli
+  tags: [routing, capability_selection]
+  turns:
+    - user: "Draft a point-by-point response to these reviewer comments for our major revision."
+      plan:
+        intent_type: single_skill_task
+        required_capabilities: [review.response]
+        capability_inputs:
+          review.response: {input: "reviewer comments and author notes", mode: draft}
+        outputs: [response_letter]
+        execution_mode: background
+        confidence: 0.96
+        rationale: "the user requested author correspondence responding to received reviews"
+      expect:
+        skill_selected: review-response
+        capabilities_include: [review.response]
+
+- id: openalex_search_routing
+  title: "Broad scholarly search resolves to the active OpenAlex provider"
+  channel: cli
+  tags: [routing, capability_selection]
+  turns:
+    - user: "用 OpenAlex 查找单细胞基础模型论文。"
+      plan:
+        intent_type: single_skill_task
+        required_capabilities: [literature.search]
+        capability_inputs:
+          literature.search: {query: "single-cell foundation models"}
+        outputs: [sources]
+        execution_mode: background
+        confidence: 0.94
+        rationale: "the active OpenAlex provider searches cross-disciplinary scholarly works"
+      expect:
+        skill_selected: openalex-search
+        capabilities_include: [literature.search]
+
+- id: arxiv_fetch_routing
+  title: "A concrete arXiv identifier resolves to the active fetch provider"
+  channel: cli
+  tags: [routing, capability_selection]
+  turns:
+    - user: "获取 arXiv 1706.03762 的论文信息。"
+      plan:
+        intent_type: single_skill_task
+        required_capabilities: [paper.fetch.arxiv]
+        capability_inputs:
+          paper.fetch.arxiv: {identifier: "1706.03762"}
+        outputs: [paper]
+        execution_mode: background
+        confidence: 0.98
+        rationale: "a concrete arXiv identifier should use the dedicated fetch provider"
+      expect:
+        skill_selected: arxiv-fetch
+        capabilities_include: [paper.fetch.arxiv]
+
+- id: livefigure_missing_vlm_configuration
+  title: "Editable LiveFigure execution returns one missing-VLM action"
+  channel: cli
+  tags: [capability_selection, configuration, safety]
+  turns:
+    - user: "做一页可编辑的 PPT 科研架构图。"
+      drain: true
+      plan:
+        intent_type: single_skill_task
+        required_capabilities: [figure.editable.pptx]
+        capability_inputs:
+          figure.editable.pptx: {input: "one-slide editable research architecture figure"}
+        outputs: [artifact.pptx]
+        execution_mode: background
+        confidence: 0.95
+        rationale: "the user explicitly requested an editable one-slide PPT figure"
+      expect:
+        skill_selected: livefigure
+        skills_executed_exclude: [livefigure, scientific-figure]
+        action_required: {kind: configure, command: "omni config vlm"}
+
+- id: native_synthesis_drain
+  title: "Research workflow drains to a native synthesis draft offline"
+  channel: cli
+  tags: [capability_selection, execution]
+  fixtures: [literature.search, paper.fetch.arxiv, artifact.figure]
+  turns:
+    - user: "做一个小型综述：检索文献、取一篇 arXiv 论文、画架构图，最后写成研究段落。"
+      plan:
+        intent_type: workflow
+        confidence: 0.92
+        workflow_steps:
+          - {id: lit, capability: literature.search, input: {query: "retrieval augmented generation"}}
+          - {id: paper, capability: paper.fetch.arxiv, depends_on: [lit], input: {identifier: "1706.03762"}}
+          - {id: fig, capability: artifact.figure, depends_on: [paper], input: {input: "RAG architecture figure"}}
+          - {id: final, capability: synthesis.final, depends_on: [fig], input: {deliverable: draft.section}}
+        outputs: [draft.section]
+        execution_mode: background
+        provenance_mode: light
+        rationale: "end-to-end offline drain"
+      drain: true
+      expect:
+        kind: workflow
+        capabilities_include: [synthesis.final]
+        capabilities_executed: [synthesis.final]
+
+# Prompt-only skills carry no capability slot, so the deterministic explicit
+# ``$name`` boundary (not the capability arbitrator) is their routing path. These
+# keep the active-skill manifest and the routing corpus in exact agreement.
+- id: soulagent_explicit_routing
+  title: "An explicit $soulagent request routes to the persona runtime"
+  channel: cli
+  tags: [routing]
+  turns:
+    - user: "$soulagent 请以这位科学家的人格来协助我。"
+      expect:
+        skill_selected: soulagent
+
+- id: scientist_kg_distiller_explicit_routing
+  title: "An explicit $scientist-kg-distiller request routes to the KG distiller"
+  channel: cli
+  tags: [routing]
+  turns:
+    - user: "$scientist-kg-distiller 为这位科学家构建可追溯的学术人格知识图谱。"
+      expect:
+        skill_selected: scientist-kg-distiller

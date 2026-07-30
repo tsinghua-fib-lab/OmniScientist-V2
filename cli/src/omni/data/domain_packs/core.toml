@@ -1,0 +1,16 @@
+name = "core"
+title = "Core Research"
+description = "Cross-domain evidence retrieval, claim binding, review, and reproducible delivery."
+guidance = "Define the question and evidence standard first. Bind important claims to sources and preserve provenance and reproduction entry points."
+connectors = ["openalex", "crossref", "arxiv"]
+artifact_types = ["evidence-table", "research-notebook", "repro-bundle"]
+
+[[specialists]]
+role = "evidence-auditor"
+description = "Audit claims, sources, counterevidence, and citation fidelity."
+tools = ["search_corpus", "citation_neighbors"]
+
+[[specialists]]
+role = "reproducibility-reviewer"
+description = "Audit input snapshots, seeds, environments, commands, and artifact hashes."
+tools = ["read_file"]

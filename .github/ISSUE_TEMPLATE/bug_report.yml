@@ -1,0 +1,21 @@
+name: Bug report
+description: Report a reproducible OmniScientist defect
+body:
+  - type: textarea
+    attributes:
+      label: Reproduction
+      description: Include commands, expected behavior, and actual behavior. Remove secrets and private data.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Environment
+      description: Include OS, Python version, install method, and sanitized `omni doctor` output.
+    validations:
+      required: true
+  - type: checkboxes
+    attributes:
+      label: Security check
+      options:
+        - label: This is not a security vulnerability (security reports must follow SECURITY.md).
+          required: true

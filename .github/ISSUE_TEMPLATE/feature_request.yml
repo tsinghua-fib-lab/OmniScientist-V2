@@ -1,0 +1,13 @@
+name: Feature request
+description: Propose a focused, testable improvement
+body:
+  - type: textarea
+    attributes:
+      label: User problem
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Proposed behavior and acceptance criteria
+    validations:
+      required: true

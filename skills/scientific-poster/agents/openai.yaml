@@ -1,0 +1,4 @@
+interface:
+  display_name: "Scientific Poster"
+  short_description: "Evidence-grounded HTML conference posters with live review."
+  default_prompt: "Use $scientific-poster to turn my paper into an evidence-grounded top-conference HTML poster and review it live before recording approval."

@@ -1,0 +1,56 @@
+{
+  "scientist_name": "Kaiming He",
+  "aliases": [
+    "Kaiming He",
+    "He Kaiming"
+  ],
+  "occupations": [
+    "artificial intelligence researcher",
+    "university teacher"
+  ],
+  "research_fields": [
+    "computer vision",
+    "self-supervised learning"
+  ],
+  "education_history": [
+    {
+      "institution": "Tsinghua University",
+      "start_year": null,
+      "end_year": null,
+      "degree": "bachelor's degree"
+    },
+    {
+      "institution": "The Chinese University of Hong Kong",
+      "start_year": null,
+      "end_year": null,
+      "degree": "Doctor of Philosophy"
+    }
+  ],
+  "employment_history": [
+    {
+      "organization": "Microsoft Research Asia",
+      "start_year": 2011,
+      "end_year": 2016
+    },
+    {
+      "organization": "Massachusetts Institute of Technology",
+      "start_year": 2024,
+      "end_year": null
+    },
+    {
+      "organization": "Facebook",
+      "start_year": 2016,
+      "end_year": 2024
+    }
+  ],
+  "institutions": [
+    "Tsinghua University",
+    "The Chinese University of Hong Kong",
+    "Microsoft Research Asia",
+    "Massachusetts Institute of Technology",
+    "Facebook"
+  ],
+  "sources": [
+    "https://www.wikidata.org/wiki/Q94960976"
+  ]
+}

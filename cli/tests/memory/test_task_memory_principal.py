@@ -1,0 +1,114 @@
+"""P2-G regression: background task memory writes must respect the principal.
+
+A background task submitted by an IM peer completes asynchronously and writes
+M2 (task_result) + M5 (artifact) memory. Before the fix those writes defaulted to
+the machine owner (``local``), so a peer's async result leaked into the owner's
+recallable memory. These tests pin the completion path to the owning session's
+principal and assert cross-principal isolation on the cross-session M5 layer.
+"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+from sqlalchemy import select
+
+from omni.agent.orchestrator import OmniAgent
+from omni.config import load_settings
+from omni.memory.service import MemoryLayer
+from omni.storage.models import MemoryEntryORM, SubtaskORM
+
+
+async def _make_agent():
+    # per_peer is the mode whose contract is strict isolation ("zero cross-talk");
+    # under the default ``owner`` mode an authorized IM identity maps to the owner
+    # by design, so the "leak" these tests guard against is only a leak here.
+    settings = load_settings(
+        overrides={"model": {"provider": "mock"}, "memory": {"channel_identity": "per_peer"}}
+    )
+    settings.paths.ensure_dirs()
+    return await OmniAgent.create(settings)
+
+
+async def _complete_task_for(agent, *, channel: str, external_key: str) -> str:
+    """Run a background task to success under (channel, external_key); return subtask_id."""
+    session_id = await agent.ensure_session(channel=channel, external_key=external_key)
+    rt = agent.runtime
+    async with rt._db.session() as s:
+        task = SubtaskORM(
+            session_id=session_id,
+            project="test",
+            skill_name="demo-skill",
+            status="running",
+            input_json={"input": "x"},
+            notify_channel="",
+        )
+        s.add(task)
+        await s.commit()
+        await s.refresh(task)
+        subtask_id = task.id
+    result = {
+        "status": "ok",
+        "summary": "produced a figure",
+        "artifacts": [{"uri": "artifact://p2g-fig-1", "label": "figure"}],
+    }
+    await rt._complete_subtask(  # noqa: SLF001 - exercise the completion chokepoint.
+        subtask_id,
+        result,
+        [],
+        "",
+        SimpleNamespace(name="demo-skill"),
+        session_id,
+        status="succeeded",
+        persist_message=True,
+    )
+    return subtask_id
+
+
+async def _entries_for_task(agent, subtask_id: str) -> list[MemoryEntryORM]:
+    async with agent.runtime._db.session() as s:
+        return list(
+            (
+                await s.execute(select(MemoryEntryORM).where(MemoryEntryORM.scope_id == subtask_id))
+            ).scalars().all()
+        )
+
+
+@pytest.mark.asyncio
+async def test_background_task_memory_is_written_under_peer_principal():
+    agent = await _make_agent()
+    try:
+        subtask_id = await _complete_task_for(agent, channel="wechat", external_key="wx-p2g")
+        entries = await _entries_for_task(agent, subtask_id)
+        layers = {e.layer for e in entries}
+        principals = {e.principal for e in entries}
+
+        assert MemoryLayer.TASK.value in layers, "M2 task_result memory not written"
+        assert MemoryLayer.ARTIFACT.value in layers, "M5 artifact memory not written"
+        # The whole point of the fix: not the owner ("local").
+        assert principals == {"wechat:wx-p2g"}, principals
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_owner_cannot_recall_peer_task_artifact_memory():
+    agent = await _make_agent()
+    try:
+        await _complete_task_for(agent, channel="wechat", external_key="wx-peer")
+
+        def labels(scored):
+            return " ".join(s.entry.summary for s in scored)
+
+        peer_hits = await agent.memory.recall_scoped(
+            "产物", layers=[MemoryLayer.ARTIFACT.value], principal="wechat:wx-peer"
+        )
+        owner_hits = await agent.memory.recall_scoped(
+            "产物", layers=[MemoryLayer.ARTIFACT.value], principal="local"
+        )
+
+        assert "demo-skill" in labels(peer_hits), "peer must recall its own artifact memory"
+        assert "demo-skill" not in labels(owner_hits), "owner must NOT see the peer's artifact memory (leak)"
+    finally:
+        await agent.aclose()

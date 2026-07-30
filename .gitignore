@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+node_modules/
+
+# venvs
+.venv/
+venv/
+env/
+
+# local data / runtime
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+.omni/
+inbox.jsonl
+
+# secrets (never commit)
+secrets.toml
+*.secrets.toml
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+.cursor/
+*.swp
+.agents/
+.codex/
+artifacts/
+figures/
+reports/
+scripts/

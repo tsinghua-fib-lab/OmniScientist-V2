@@ -1,0 +1,59 @@
+cff-version: 1.2.0
+message: "If you use OmniScientist V2 in research, please cite both the software release and the OmniScientist paper."
+title: "OmniScientist V2"
+type: software
+authors:
+  - name: "OmniScientist Contributors"
+version: "2.0.0rc1"
+url: "https://github.com/tsinghua-fib-lab/OmniScientist-V2"
+repository-code: "https://github.com/tsinghua-fib-lab/OmniScientist-V2"
+license: Apache-2.0
+preferred-citation:
+  type: article
+  title: "OmniScientist: Toward a Co-evolving Ecosystem of Human and AI Scientists"
+  authors:
+    - given-names: Chenyang
+      family-names: Shao
+    - given-names: Dehao
+      family-names: Huang
+    - given-names: Yu
+      family-names: Li
+    - given-names: Keyu
+      family-names: Zhao
+    - given-names: Weiquan
+      family-names: Lin
+    - given-names: Yining
+      family-names: Zhang
+    - given-names: Qingbin
+      family-names: Zeng
+    - given-names: Zhiyu
+      family-names: Chen
+    - given-names: Tianxing
+      family-names: Li
+    - given-names: Yifei
+      family-names: Huang
+    - given-names: Taozhong
+      family-names: Wu
+    - given-names: Xinyang
+      family-names: Liu
+    - given-names: Ruotong
+      family-names: Zhao
+    - given-names: Mengsheng
+      family-names: Zhao
+    - given-names: Jiaoyang
+      family-names: Li
+    - given-names: Xuhua
+      family-names: Zhang
+    - given-names: Yue
+      family-names: Wang
+    - given-names: Yuanyi
+      family-names: Zhen
+    - given-names: Fengli
+      family-names: Xu
+    - given-names: Yong
+      family-names: Li
+    - given-names: Tie-Yan
+      family-names: Liu
+  year: 2025
+  doi: "10.48550/arXiv.2511.16931"
+  url: "https://arxiv.org/abs/2511.16931"

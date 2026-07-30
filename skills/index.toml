@@ -1,0 +1,14 @@
+schema_version = 1
+active = [
+  "arxiv-fetch",
+  "openalex-search",
+  "paper-review",
+  "review-response",
+  "scientist-kg-distiller",
+  "scientific-figure",
+  "scientific-poster",
+  "livefigure",
+  "research-ideation",
+  "research-pptx",
+  "soulagent",
+]

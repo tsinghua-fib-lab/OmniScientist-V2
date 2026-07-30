@@ -1,0 +1,8 @@
+{
+  "schema": "scientific-poster.component.v1",
+  "id": "sources",
+  "version": "1.0.0",
+  "level": "composite",
+  "purpose": "Keep citations, contact, acknowledgements, and provenance compact and legible.",
+  "semantic_roles": ["provenance", "sources", "contact"]
+}

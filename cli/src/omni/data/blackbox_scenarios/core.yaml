@@ -1,0 +1,151 @@
+# Product-quality scenarios. Unlike eval_scenarios, these files may contain
+# only natural-language user turns and observable expectations: no plan, model
+# answer, tool-call script, fixture, or reviewer verdict is accepted by loader.
+
+- id: memory_preference_cli
+  title: "CLI user asks Omni to remember a research-writing preference"
+  channel: cli
+  persona: scientist
+  tags: [memory, deterministic]
+  turns:
+    - user: "请记住：这个项目的参考文献默认使用 Vancouver 格式。"
+      expect:
+        task_status: succeeded
+        intent_type: memory_update
+        max_tool_calls: 0
+        no_absolute_paths: true
+
+- id: product_storage_architecture
+  title: "User asks how Omni stores sessions, memory, and artifacts"
+  channel: cli
+  persona: general
+  tags: [product_qa, self_knowledge]
+  requires_model: true
+  turns:
+    - user: "你的存储架构是如何实现的？请说明会话、长期记忆和科研产物分别存在哪里。"
+      expect:
+        task_status: succeeded
+        output_contains_any: ["SQLite", "文件系统", "filesystem"]
+        tools_include: [docs_search]
+        terminated_reason_exclude: [max_iterations, max_tool_calls]
+        max_tool_calls: 6
+        no_absolute_paths: true
+
+- id: memory_preference_dingtalk
+  title: "DingTalk user asks Omni to remember a response preference"
+  channel: dingtalk
+  persona: general
+  tags: [memory, deterministic, channel]
+  turns:
+    - user: "帮我记住：后续实验汇报先给结论，再给证据和局限。"
+      expect:
+        task_status: succeeded
+        intent_type: memory_update
+        events_include: [presentation.sent]
+        max_tool_calls: 0
+        no_absolute_paths: true
+
+- id: paper_reference_needs_input
+  title: "Ambiguous paper request asks for a resolvable identifier"
+  channel: feishu
+  persona: scientist
+  tags: [needs_input, routing, channel]
+  requires_model: true
+  turns:
+    - user: "帮我获取《那篇关于检索增强的论文》，精读后给审稿意见。"
+      expect:
+        task_status: needs_input
+        kind: needs_input
+        intent_type: needs_input
+        tools_exclude: [arxiv-fetch]
+        no_absolute_paths: true
+
+- id: rag_multi_skill_workflow
+  title: "Researcher asks for search, grounded synthesis, figure, and writing"
+  channel: cli
+  persona: scientist
+  tags: [workflow, multi_skill, provenance, artifact]
+  requires_model: true
+  requires_network: true
+  turns:
+    - user: "调研 RAG 如何降低事实性幻觉：检索近五年论文并基于证据回答，再生成包含 query、retriever、reranker、LLM 与引用输出的科研架构图，最后写成一段可放进论文的方法综述。"
+      expect:
+        task_status: succeeded
+        capabilities_include: [literature.search, qa.grounded, artifact.figure, synthesis.final]
+        min_submitted_tasks: 1
+        min_artifacts: 1
+        verification_status: passed
+        no_absolute_paths: true
+
+- id: arxiv_ideation_workflow
+  title: "Researcher fetches an arXiv paper and pressure-tests follow-up ideas"
+  channel: wechat
+  persona: scientist
+  tags: [workflow, paper, ideation, channel]
+  requires_model: true
+  requires_network: true
+  turns:
+    - user: "请获取 arXiv:1706.03762，并基于论文提出几个后续研究方向，逐项压力测试新颖性与可行性。"
+      expect:
+        task_status: succeeded
+        capabilities_include: [paper.fetch.arxiv, research.ideation]
+        verification_status: passed
+        no_absolute_paths: true
+
+- id: multi_database_literature_search
+  title: "Researcher searches several scholarly databases before synthesis"
+  channel: cli
+  persona: scientist
+  tags: [literature, multi_source, budget, no_progress]
+  requires_model: true
+  requires_network: true
+  turns:
+    - user: "请分别检索 arXiv、OpenAlex 和 Crossref 中近五年关于 RAG 降低事实性幻觉的研究，去重后比较各来源覆盖差异，并基于找到的论文给出带引用的小结。某一个来源暂时无结果时继续检查其它来源，不要重复同一查询。"
+      expect:
+        task_status: succeeded
+        capabilities_include: [literature.search]
+        terminated_reason_exclude: [no_progress, max_tool_calls, max_iterations]
+        max_tool_calls: 12
+        verification_status: passed
+        no_absolute_paths: true
+
+- id: artifact_revision_followup
+  title: "Researcher revises a generated figure in the same session"
+  channel: cli
+  persona: scientist
+  tags: [artifact, multi_turn, rework]
+  requires_model: true
+  turns:
+    - user: "生成一张 RAG 架构科研图，包含 query、retriever、reranker、LLM 和 cited answer。"
+      expect:
+        task_status: succeeded
+        min_artifacts: 1
+    - user: "把刚才图里的 reranker 节点改成深绿色，其它内容保持不变。"
+      rework: true
+      expect:
+        task_status: succeeded
+        min_artifacts: 1
+        no_absolute_paths: true
+
+- id: historical_agent_run_followup
+  title: "Researcher inspects a prior topic by its human-readable title"
+  channel: cli
+  persona: scientist
+  tags: [workflow, multi_turn, agent_run, reference_resolution]
+  requires_model: true
+  requires_network: true
+  turns:
+    - user: "RAG 系统综述 & Transformer 架构图。请先检索文献，再生成综述和科研架构图。"
+      expect:
+        task_status: succeeded
+        capabilities_include: [literature.search, artifact.figure]
+        min_artifacts: 1
+        verification_status: passed
+    - user: "我想了解我前面问的 RAG 系统综述 & Transformer 架构图，看看这个任务的产出是什么"
+      expect:
+        task_status: succeeded
+        kind: text
+        tools_include: [search_tasks]
+        output_contains: ["task:"]
+        max_tool_calls: 3
+        no_absolute_paths: true

@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scientist-kg.local/evidence-card.schema.json",
+  "title": "Scientist Evidence Card",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "card_id",
+    "source_id",
+    "source_title",
+    "source_type",
+    "year",
+    "excerpt",
+    "location",
+    "observation",
+    "fact_type",
+    "author_role"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "card_id": {"type": "string", "pattern": "^l1_.+_[0-9]{4,}$"},
+    "source_id": {"type": "string", "pattern": "^src_[0-9]{4,}$"},
+    "source_title": {"type": "string", "minLength": 1},
+    "source_type": {
+      "enum": ["paper", "talk", "code", "interview", "homepage"]
+    },
+    "year": {
+      "anyOf": [
+        {"type": "integer", "minimum": 1800, "maximum": 2200},
+        {"type": "null"}
+      ]
+    },
+    "excerpt": {"type": "string", "minLength": 1},
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["section", "start_char", "end_char"],
+      "properties": {
+        "section": {"type": "string", "minLength": 1},
+        "page": {"type": "integer", "minimum": 1},
+        "start_char": {"type": "integer", "minimum": 0},
+        "end_char": {"type": "integer", "minimum": 1}
+      }
+    },
+    "observation": {"type": "string", "minLength": 1},
+    "fact_type": {
+      "enum": [
+        "explicit_judgment",
+        "practical_habit",
+        "contrast_stance",
+        "failure_attribution"
+      ]
+    },
+    "author_role": {
+      "enum": [
+        "first",
+        "corresponding",
+        "speaker",
+        "small_team_core",
+        "middle",
+        "last",
+        "author"
+      ]
+    }
+  }
+}

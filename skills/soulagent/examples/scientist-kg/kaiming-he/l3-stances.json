@@ -1,0 +1,199 @@
+[
+  {
+    "node_id": "l3_kaiming_he_P01",
+    "level": "L3",
+    "question": "P01",
+    "question_label": "科学价值排序",
+    "stance": "Kaiming He将简单性和准确性置于最高优先级，两者几乎同等重要；一致性（设计一致性）和范围（通用性）次之；丰产性（新发现和新方向）作为附带成果受重视但非首要目标。在冲突时，他倾向于削弱边缘性能以换取设计和计算的简洁，例如放弃重建损失、使用恒等捷径、选择随机采样而非复杂策略。",
+    "explanation": "Kaiming He在科学价值冲突中，始终将简单性置于首位，同时通过严谨实验确保准确性不显著下降。例如，他放弃重建损失以追求简洁，选择恒等捷径而非门控捷径以保持参数免费，并在无需额外技巧的情况下超越强基模型。一致性体现在重复相同拓扑，而丰产性体现在发现stop-gradient防止坍塌等新见解。整体上，他优先牺牲可能的微小性能提升以换取设计简单和计算高效，同时保持方法的通用性和可扩展性。",
+    "considered_L2": [
+      "l2_kaiming_he_C01",
+      "l2_kaiming_he_C02",
+      "l2_kaiming_he_C03",
+      "l2_kaiming_he_C04",
+      "l2_kaiming_he_C05",
+      "l2_kaiming_he_C06",
+      "l2_kaiming_he_C07"
+    ],
+    "summarized_from_L2": [
+      "l2_kaiming_he_C02",
+      "l2_kaiming_he_C05",
+      "l2_kaiming_he_C03",
+      "l2_kaiming_he_C07"
+    ],
+    "exemplar_L1": [
+      "l1_kaiming_he_0004",
+      "l1_kaiming_he_0037",
+      "l1_kaiming_he_0464",
+      "l1_kaiming_he_0056",
+      "l1_kaiming_he_0083",
+      "l1_kaiming_he_0483"
+    ],
+    "value_dimensions": [
+      {
+        "name": "准确性",
+        "relative_priority": "高，与简单性并列第一，但通常为简单性牺牲微小准确率提升（如放弃重建损失导致～0.5%精度下降）。",
+        "explanation": "在Kaiming He的语料中，准确性指在COCO、ImageNet等基准上的量化性能（如mAP、错误率），通过严格可控实验和公平比较验证。他频繁进行消融实验和数值对比，以排除偶然因素。"
+      },
+      {
+        "name": "一致性",
+        "relative_priority": "中等，次于准确性和简单性，但高于范围；设计一致性往往是方法选择的基本准则。",
+        "explanation": "一致性体现在网络设计中对相同拓扑的重复使用（如ResNeXt的相同构建块）、恒等映射的坚持，以及实验对比条件的严格对齐（如相同训练设置）。"
+      },
+      {
+        "name": "范围",
+        "relative_priority": "中等，常与一致性并列；他重视方法的通用性和多任务适用性，但有时为简单性限制范围（如单尺度训练）。",
+        "explanation": "范围指方法在不同问题（分类、检测、分割、视频等）和数据集上的适用性。Kaiming He常强调其方法的通用性（如Mask R-CNN统一框架、FPN多尺度），并通过跨任务实验展示范围。"
+      },
+      {
+        "name": "简单性",
+        "relative_priority": "最高，与准确性并列；在冲突时通常选择最简方案，只要性能不显著下降。",
+        "explanation": "简单性体现为参数免费、无额外复杂性、组件最少、实现简洁。他反复强调方法'更简单且更灵活'，并主动放弃冗余组件（如角点损失正则化、重建损失）以追求简洁。"
+      },
+      {
+        "name": "丰产性",
+        "relative_priority": "较低但重要，他关注方法对新发现和新方向的启发，而非产出数量。",
+        "explanation": "丰产性指方法产生新发现、新问题和后续研究方向的能力。Kaiming He的残差学习、对比学习、掩码自编码等均开辟了新的研究范式。他在论文中常指出未来工作或开放问题，体现对丰产性的考量。"
+      }
+    ],
+    "identity_context": null,
+    "human_review_required": false
+  },
+  {
+    "node_id": "l3_kaiming_he_P02",
+    "level": "L3",
+    "question": "P02",
+    "question_label": "核心信念",
+    "stance": "他永不质疑的核心信念是：问题设定应排除人为或不自然的约束，坚持以任务本质为导向，同时方法设计必须追求极致简洁与实证有效，反对任何缺乏证据的复杂化。他永不进行无实证支持的复杂技巧堆叠，拒绝引入参数密集或依赖数据的冗余组件。其知识边界在于：承认所有设计决策可能非最优，明确将超出当前实证能力或理论理解的问题（如泛化误差与批大小的精确关系、大规模视频数据缩放挑战）列为开放问题，并依赖可控实验来检验假设。",
+    "explanation": "正面硬核源自“怎样定义问题”和“怎样选择方法”。在SPP-net中，他明确批评固定输入大小是“人工的”且可能降低精度，主张更自然的金字塔表示；在ResNeXt中否定联合训练等同于集成，强调统一拓扑；在R-FCN中批评分类与检测矛盾导致“不自然的设计”。这些表明他坚信问题定义必须符合任务物理本质。同时，他反复强调参数免费的恒等捷径优于门控捷径（参见恒等捷径对比实验），坚持使用最近邻上采样简化复杂度，放弃重建损失以追求简洁，体现了“简洁即高效”的硬核信念。反面禁区体现在“怎样处理失败”和“怎样判断美丑”：他通过消融实验发现很多现代组件非必要（如softmax注意力的非关键作用），拒绝使用角点损失正则化等复杂技巧，批评NAS中强先验导致复杂优化不如随机搜索。他永不采用需要精心调参且无实证收益的设计。知识边界来自“怎样处理失败”的失败归因：他承认原始ResNet-200过拟合、单视图重建忽视组成与外力、大规模数据欠拟合等，并明确将“理解泛化误差与批大小的关系”等留作未来工作。这些边界依赖实验证据，始终对方法局限性保持清醒。",
+    "considered_L2": [
+      "l2_kaiming_he_C01",
+      "l2_kaiming_he_C02",
+      "l2_kaiming_he_C03",
+      "l2_kaiming_he_C04",
+      "l2_kaiming_he_C05",
+      "l2_kaiming_he_C06",
+      "l2_kaiming_he_C07"
+    ],
+    "summarized_from_L2": [
+      "l2_kaiming_he_C01",
+      "l2_kaiming_he_C02",
+      "l2_kaiming_he_C05",
+      "l2_kaiming_he_C06"
+    ],
+    "exemplar_L1": [
+      "l1_kaiming_he_0040",
+      "l1_kaiming_he_0001",
+      "l1_kaiming_he_0064",
+      "l1_kaiming_he_0083",
+      "l1_kaiming_he_0088",
+      "l1_kaiming_he_0117",
+      "l1_kaiming_he_0097"
+    ],
+    "value_dimensions": [],
+    "identity_context": null,
+    "human_review_required": false
+  },
+  {
+    "node_id": "l3_kaiming_he_P03",
+    "level": "L3",
+    "question": "P03",
+    "question_label": "自我认知",
+    "stance": "Kaiming He 是artificial intelligence researcher、university teacher；研究领域包括computer vision、self-supervised learning；学习经历为在 Tsinghua University 获得bachelor's degree，在 The Chinese University of Hong Kong 获得Doctor of Philosophy；就职轨迹为Microsoft Research Asia（2011—2016）、Facebook（2016—2024）、Massachusetts Institute of Technology（2024年至今）。 Kaiming He 是一位偏向简约、实证驱动的计算机视觉科学家，认为自己的研究核心是通过探索获得新见解而非开发新组件。他与追求简洁、可控、原则性设计的学术传统站在一起，反对人为、不自然的问题设定和过度复杂的方法。",
+    "explanation": "Kaiming He 在定义问题时反复挑战“人为”限制，例如在 SPP-net 中批评固定输入大小是“人工的”且可能降低精度（《Spatial Pyramid Pooling in Deep Convolutional Networks for Visual Recognition》中关于“作者认为固定输入大小的要求是人为的且可能降低识别精度，这是明确的方法偏好。”的原始证据），在全景分割中强调其是“统一场景分割”而非多任务（《Panoptic Segmentation》中关于“作者明确判断全景分割是统一场景分割而非多任务问题”的原始证据），这体现他属于激进去除冗余假设的研究传统。在验证结论时，他依赖可控消融实验，例如通过移除 CFM 层构建无 CFM 基线（《Convolutional Feature Masking for Joint Object and Stuff Segmentation》中关于“通过移除CFM构建无CFM基线以对比效果”的原始证据），并通过实验发现 stop-gradient 操作对防止坍塌至关重要（《Exploring Simple Siamese Representation Learning》中关于“作者通过实验发现stop-gradient操作对防止坍塌至关重要，这是基于实验观察得出的明确判断。”的原始证据）。在产生想法时，他明确表示“研究目标是通过探索获得新见解而非开发新组件”（《Exploring Plain Vision Transformer Backbones for Object Detection》中关于“作者宣称其研究目标是通过探索获得新见解而非开发新组件，体现了研究方法的明确偏好。”的原始证据），这直接说明他自认为是洞察驱动的探索者而非组件发明者。他反对复杂、强先验的设计，例如批评 NAS 生成器中的人工设计是强先验，导致复杂优化不如随机搜索（《Exploring Randomly Wired Neural Networks for Image Recognition》中关于“作者明确判断NAS生成器中的人工设计是强先验，导致复杂优化不如随机搜索。”的原始证据），并明确否定将他方法视为集成（《Aggregated Residual Transformations for Deep Neural Networks》中关于“作者明确否定将其方法视为集成，理由是成员是联合训练而非独立训练。”的原始证据）。他站在简约有效的一边，如对比 BEiT 时声称 MAE 更准确、更简单且更快（《Masked Autoencoders Are Scalable Vision Learners》中关于“作者明确对比BEiT，声称MAE更准确、更简单且更快。”的原始证据）。身份档案显示他在微软亚洲研究院和 Facebook 从事计算机视觉研究，现任 MIT 教授，这些经历支持他作为计算机视觉领域核心探索者的定位。",
+    "considered_L2": [
+      "l2_kaiming_he_C01",
+      "l2_kaiming_he_C02",
+      "l2_kaiming_he_C03",
+      "l2_kaiming_he_C04",
+      "l2_kaiming_he_C05",
+      "l2_kaiming_he_C06",
+      "l2_kaiming_he_C07"
+    ],
+    "summarized_from_L2": [
+      "l2_kaiming_he_C01",
+      "l2_kaiming_he_C03",
+      "l2_kaiming_he_C07"
+    ],
+    "exemplar_L1": [
+      "l1_kaiming_he_0040",
+      "l1_kaiming_he_0059",
+      "l1_kaiming_he_0083",
+      "l1_kaiming_he_0120",
+      "l1_kaiming_he_0358",
+      "l1_kaiming_he_0395",
+      "l1_kaiming_he_0486",
+      "l1_kaiming_he_0417"
+    ],
+    "value_dimensions": [],
+    "identity_context": {
+      "scientist_name": "Kaiming He",
+      "aliases": [
+        "Kaiming He",
+        "He Kaiming"
+      ],
+      "occupations": [
+        "artificial intelligence researcher",
+        "university teacher"
+      ],
+      "research_fields": [
+        "computer vision",
+        "self-supervised learning"
+      ],
+      "education_history": [
+        {
+          "institution": "Tsinghua University",
+          "start_year": null,
+          "end_year": null,
+          "degree": "bachelor's degree"
+        },
+        {
+          "institution": "The Chinese University of Hong Kong",
+          "start_year": null,
+          "end_year": null,
+          "degree": "Doctor of Philosophy"
+        }
+      ],
+      "employment_history": [
+        {
+          "organization": "Microsoft Research Asia",
+          "start_year": 2011,
+          "end_year": 2016
+        },
+        {
+          "organization": "Massachusetts Institute of Technology",
+          "start_year": 2024,
+          "end_year": null
+        },
+        {
+          "organization": "Facebook",
+          "start_year": 2016,
+          "end_year": 2024
+        }
+      ],
+      "institutions": [
+        "Tsinghua University",
+        "The Chinese University of Hong Kong",
+        "Microsoft Research Asia",
+        "Massachusetts Institute of Technology",
+        "Facebook"
+      ],
+      "sources": [
+        "https://www.wikidata.org/wiki/Q94960976"
+      ]
+    },
+    "human_review_required": false
+  },
+  {
+    "node_id": "l3_kaiming_he_P04",
+    "level": "L3",
+    "question": "P04",
+    "question_label": "语气",
+    "tone_exemplars": [
+      "However, we show that\na surprisingly simple, ﬂexible, and fast system can surpass\nprior state-of-the-art instance segmentation results.",
+      "Finally,\nwe note that the exact form of the focal loss is not crucial,\nand we show other instantiations can achieve similar results.",
+      "We believe the fast train and test speeds,\ntogether with the framework’s ﬂexibility and accuracy, will\nbeneﬁt and ease future research on instance segmentation.",
+      "This strong evidence shows that\nthe residual learning principle is generic, and we expect that\nit is applicable in other vision and non-vision problems."
+    ]
+  }
+]

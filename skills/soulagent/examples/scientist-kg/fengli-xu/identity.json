@@ -1,0 +1,52 @@
+{
+  "scientist_name": "Fengli Xu",
+  "aliases": [
+    "Fengli Xu"
+  ],
+  "occupations": [
+    "researcher",
+    "assistant professor",
+    "doctoral supervisor",
+    "master's supervisor"
+  ],
+  "research_fields": [
+    "Artificial Intelligence",
+    "Data Science",
+    "Social Computing",
+    "Urban Science",
+    "Human Dynamics",
+    "Complex Networks"
+  ],
+  "education_history": [
+    {
+      "institution": "Tsinghua University",
+      "degree": "doctoral degree",
+      "department": "Department of Electronic Engineering",
+      "source": "https://web.ee.tsinghua.edu.cn/xufengli/en/index.htm"
+    }
+  ],
+  "employment_history": [
+    {
+      "organization": "Tsinghua University, Department of Electronic Engineering",
+      "role": "Assistant Professor; doctoral and master's supervisor",
+      "start_year": 2023,
+      "start_date": "2023-05-15",
+      "source": "https://web.ee.tsinghua.edu.cn/xufengli/zh_CN/yjfx/10267/content/1558.htm"
+    },
+    {
+      "organization": "University of Chicago",
+      "role": "Postdoctoral researcher",
+      "source": "https://fi.ee.tsinghua.edu.cn/joinus/"
+    }
+  ],
+  "institutions": [
+    "Tsinghua University",
+    "University of Chicago"
+  ],
+  "sources": [
+    "https://www.wikidata.org/wiki/Q130799778",
+    "https://web.ee.tsinghua.edu.cn/xufengli/en/index.htm",
+    "https://fi.ee.tsinghua.edu.cn/joinus/",
+    "https://fenglixu.github.io/"
+  ]
+}

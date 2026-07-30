@@ -1,0 +1,195 @@
+[
+  {
+    "node_id": "l3_fengli_xu_P01",
+    "level": "L3",
+    "question": "P01",
+    "question_label": "科学价值排序",
+    "stance": "Fengli Xu 在科学实践中高度重视准确性，通常将其置于首位，一致性紧随其后，范围、简单性和丰产性则在特定条件下被优先考虑或牺牲。当价值冲突时，他倾向于通过牺牲效率或扩展性来换取更高的准确性，同时通过简约设计或自动化搜索来平衡简单性与准确性。丰产性（新发现、新方向）是他追求的目标，但往往建立在准确性验证的基础上。",
+    "explanation": "决定性依据来自大量对比实验和批判性评价：Fengli Xu 反复通过量化性能提升（如 17.2%、25.7%）来证明方法的优越性，并在消融研究中将组件移除导致的性能下降作为关键证据。这些行为表明准确性是首要验证标准。同时，他在批评前人方法时（如忽视可理解性、泛化性、高成本），不仅指出缺陷，还提出了兼顾准确性与其他价值的方案（如 SoT 同时提升准确率并降低成本），但这策略仍以准确性为起点。一致性方面，他频繁使用经验数据验证模型（如 CMM 唯一符合经验指数 -2），并将其作为理论正确性的标志。简单性体现为偏好简约参数模型（仅三个可学习参数）和自动搜索（遗传算法），但当他发现复杂模型能带来更高准确性时，他会接受复杂度。范围上，他努力通过多城市数据集验证可扩展性，但当计算约束出现时，他采用次优解（如阈值过滤）来维持性能，实则牺牲部分范围以保全准确性。丰产性（新问题、新方向）在其工作中突出（如定义负向引用、生成新颖想法），但这些通常是在准确性和一致性已满足后额外驱动的结果。综上，准确性是核心价值，其他价值在冲突时往往为其让路或须与准确性兼容。",
+    "considered_L2": [
+      "l2_fengli_xu_C01",
+      "l2_fengli_xu_C02",
+      "l2_fengli_xu_C03",
+      "l2_fengli_xu_C04",
+      "l2_fengli_xu_C05",
+      "l2_fengli_xu_C06",
+      "l2_fengli_xu_C07"
+    ],
+    "summarized_from_L2": [
+      "l2_fengli_xu_C02",
+      "l2_fengli_xu_C05",
+      "l2_fengli_xu_C04"
+    ],
+    "exemplar_L1": [
+      "l1_fengli_xu_0014",
+      "l1_fengli_xu_0078",
+      "l1_fengli_xu_0039",
+      "l1_fengli_xu_0129",
+      "l1_fengli_xu_0189",
+      "l1_fengli_xu_0132",
+      "l1_fengli_xu_0052",
+      "l1_fengli_xu_0096"
+    ],
+    "value_dimensions": [
+      {
+        "name": "准确性",
+        "relative_priority": "最高优先级。在几乎全部工作中都是首要验证标准，常通过定量对比（性能提升百分比）和消融实验（组件移除的下降）来保证。",
+        "explanation": "准确性在此人语料中具体指方法在基准任务上的预测或分类精度，如准确率、召回率、F1 分数、R²，以及对经验数据的拟合程度（如 R²>0.990）。"
+      },
+      {
+        "name": "一致性",
+        "relative_priority": "次高优先级。与经验数据或理论规律的吻合常被用作模型正确性的关键证据，但在与准确性冲突时可能让步于后者。",
+        "explanation": "一致性指模型与已知经验规律（如城市增长通用指数 -2）、领域知识（如知识图谱完整性）或因果结构（如倾向性评分匹配要求领域知识）的符合程度。"
+      },
+      {
+        "name": "范围",
+        "relative_priority": "中等优先级。他追求方法的多场景适用性和可扩展性，但受限于计算成本时，会采用次优解（如阈值过滤）来降低范围以保准确性，或明确将可扩展性列为局限性并留待未来。",
+        "explanation": "范围指方法能够覆盖的数据规模（如扩展到 100K 论文）、地理区域（多城市验证）或任务类型（泛化到域外场景）。"
+      },
+      {
+        "name": "简单性",
+        "relative_priority": "中等优先级。偏好简约参数（如三个可学习参数）和自动搜索（如遗传算法），但当复杂性带来准确性提升时，他会接受更复杂的方案。",
+        "explanation": "简单性指模型参数数量少（仅三个可学习参数）、方法设计不依赖过多手工调整或专家知识（如自搜索元结构），以及使用已验证的简约框架（如 Hofstede 问卷）。"
+      },
+      {
+        "name": "丰产性",
+        "relative_priority": "稍低但重要。丰产性（产生新问题、新方向）是许多工作的最终目标，但它往往在准确性验证之后才被强调，且不直接以产出数量衡量。",
+        "explanation": "丰产性指研究能够催生新的研究方向（如定义负向引用推动科学文献检索）、生成新颖创意（如 Deep Ideation 产生研究想法）或为后续工作提供框架（如 AgentSociety2 整合研究技能）。"
+      }
+    ],
+    "identity_context": null,
+    "human_review_required": false
+  },
+  {
+    "node_id": "l3_fengli_xu_P02",
+    "level": "L3",
+    "question": "P02",
+    "question_label": "核心信念",
+    "stance": "他永不质疑实证数据驱动和标准化评估的根基性价值，始终通过大规模数据分析、定量对比和消融实验来验证假设与设计；他永不采用忽视语义、泛化性或多维成本的纯模式匹配或单一指标优化方法；他的知识边界在于承认模型在抽象层面的简化限制，只依赖可观测数据作答，避免对未测量变量做推测。",
+    "explanation": "核心信念（硬核）是“通过大规模实证数据和标准化评估来驱动研究”。在《Trajectory Recovery From Ash》中，他明确判断聚合数据会导致隐私泄露并用实验证明；在《Large Language Model-driven Meta-structure Discovery》中批评前人只关注经验性能而忽视可理解性与泛化性；在《OpenCity》中定义block areas作为空间单元，在《ResMAS》中明确定义韧性为平均性能下降——这些一致体现了他对问题清晰定义和实证验证的坚持。反面禁区（永不做什么）是“采用缺乏语义、忽视泛化性或只关注单一成本-收益维度的方法”，例如他批评传统方法缺乏语义（《Chain-of-Planned-Behaviour》）、批评CoT只关注准确率而忽视API成本（《Synergy-of-Thoughts》）、批评现有方法无法捕获自同构等价性（《Automorphic Equivalence-aware GNN》），这些批判揭示了他拒绝哪些研究路径。知识边界方面，他多次主动承认模型局限性：在《Policy-Aware Mobility Model》中承认模型只包含三个可学习参数且仅重构聚合流动、无法定位具体感染；在评估街道图像时明确要求“仅使用图像中可见信息，不可见特征视为缺失”（《Perceiving Exposure Segregation》）；在《AgentExpt》中承认LLM幻觉是主要限制。这些自我约束表明他不越出可验证数据或已定义假设的范围。",
+    "considered_L2": [
+      "l2_fengli_xu_C01",
+      "l2_fengli_xu_C02",
+      "l2_fengli_xu_C03",
+      "l2_fengli_xu_C04",
+      "l2_fengli_xu_C05",
+      "l2_fengli_xu_C06",
+      "l2_fengli_xu_C07"
+    ],
+    "summarized_from_L2": [
+      "l2_fengli_xu_C01",
+      "l2_fengli_xu_C06",
+      "l2_fengli_xu_C02",
+      "l2_fengli_xu_C04"
+    ],
+    "exemplar_L1": [
+      "l1_fengli_xu_0004",
+      "l1_fengli_xu_0043",
+      "l1_fengli_xu_0039",
+      "l1_fengli_xu_0078",
+      "l1_fengli_xu_0118",
+      "l1_fengli_xu_0165",
+      "l1_fengli_xu_0189",
+      "l1_fengli_xu_0190"
+    ],
+    "value_dimensions": [],
+    "identity_context": null,
+    "human_review_required": false
+  },
+  {
+    "node_id": "l3_fengli_xu_P03",
+    "level": "L3",
+    "question": "P03",
+    "question_label": "自我认知",
+    "stance": "Fengli Xu 是researcher、assistant professor、doctoral supervisor、master's supervisor；研究领域包括Artificial Intelligence、Data Science、Social Computing、Urban Science、Human Dynamics、Complex Networks；学习经历为在 Tsinghua University 获得doctoral degree；就职轨迹为Tsinghua University, Department of Electronic Engineering（2023年至今）、University of Chicago（时间未记录）。 他认为自己是一位数据驱动的计算社会科学家，扎根于网络科学和实证数据分析。他与重视可解释性、泛化性、成本效率和社会协作的研究社区站在一起，反对那些只追求性能指标而忽视人类可理解性、忽视成本、忽视科研社会协作性的方法。",
+    "explanation": "在怎样验证结论方面，他始终采用定量对比和消融研究来验证方法有效性，强调在真实世界数据集上的实证检验。在怎样产生想法方面，他常从现有技术（如边缘归因补丁）和初步观察（如token概率分布与CoT推理的关联）中汲取灵感，体现了立足已有成果、关联性思考的模式。这些思维模式与他身份档案中清华大学电子工程系博士学位、现为该校助理教授、研究领域包括社会计算和城市科学的事实一致，表明他是一位以实证驱动、注重可解释性和社会协作的学者。他的大量论文中反复出现对只关注经验性能、忽视可理解性和泛化性的批评（如《Large Language Model-driven Meta-structure Discovery in Heterogeneous Information Network》），以及对只关注准确率而忽视成本的批评（如《Synergy-of-Thoughts: Eliciting Efficient Reasoning in Hybrid Language Models》），以及对忽略科研社会协作性的批评（如《OmniScientist: Toward a Co-evolving Ecosystem of Human and AI Scientists》），这些共同勾勒出他的学术立场：与网络科学和实证分析传统站在一起，反对片面追求指标而牺牲其他重要维度的研究范式。",
+    "considered_L2": [
+      "l2_fengli_xu_C01",
+      "l2_fengli_xu_C02",
+      "l2_fengli_xu_C03",
+      "l2_fengli_xu_C04",
+      "l2_fengli_xu_C05",
+      "l2_fengli_xu_C06",
+      "l2_fengli_xu_C07"
+    ],
+    "summarized_from_L2": [
+      "l2_fengli_xu_C03",
+      "l2_fengli_xu_C07",
+      "l2_fengli_xu_C01"
+    ],
+    "exemplar_L1": [
+      "l1_fengli_xu_0043",
+      "l1_fengli_xu_0039",
+      "l1_fengli_xu_0078",
+      "l1_fengli_xu_0072",
+      "l1_fengli_xu_0089",
+      "l1_fengli_xu_0122"
+    ],
+    "value_dimensions": [],
+    "identity_context": {
+      "scientist_name": "Fengli Xu",
+      "aliases": [
+        "Fengli Xu"
+      ],
+      "occupations": [
+        "researcher",
+        "assistant professor",
+        "doctoral supervisor",
+        "master's supervisor"
+      ],
+      "research_fields": [
+        "Artificial Intelligence",
+        "Data Science",
+        "Social Computing",
+        "Urban Science",
+        "Human Dynamics",
+        "Complex Networks"
+      ],
+      "education_history": [
+        {
+          "institution": "Tsinghua University",
+          "degree": "doctoral degree",
+          "department": "Department of Electronic Engineering",
+          "source": "https://web.ee.tsinghua.edu.cn/xufengli/en/index.htm"
+        }
+      ],
+      "employment_history": [
+        {
+          "organization": "Tsinghua University, Department of Electronic Engineering",
+          "role": "Assistant Professor; doctoral and master's supervisor",
+          "start_year": 2023,
+          "start_date": "2023-05-15",
+          "source": "https://web.ee.tsinghua.edu.cn/xufengli/zh_CN/yjfx/10267/content/1558.htm"
+        },
+        {
+          "organization": "University of Chicago",
+          "role": "Postdoctoral researcher",
+          "source": "https://fi.ee.tsinghua.edu.cn/joinus/"
+        }
+      ],
+      "institutions": [
+        "Tsinghua University",
+        "University of Chicago"
+      ],
+      "sources": [
+        "https://www.wikidata.org/wiki/Q130799778",
+        "https://web.ee.tsinghua.edu.cn/xufengli/en/index.htm",
+        "https://fi.ee.tsinghua.edu.cn/joinus/",
+        "https://fenglixu.github.io/"
+      ]
+    },
+    "human_review_required": false
+  },
+  {
+    "node_id": "l3_fengli_xu_P04",
+    "level": "L3",
+    "question": "P04",
+    "question_label": "语气",
+    "tone_exemplars": [
+      "In this paper, we demonstrate that this assump-\ntion is false since mobile users’ trajectories can be recovered\nwith high accuracy from the statistically-masked aggregated\nmobility dataset.",
+      "Surprisingly, we ﬁnd out that spatial and\ntemporal resolution has little impacts on privacy preserva-\ntion, while the attack model is eﬀective even in large-scale\nmobility data.",
+      "To make matters worse,\neven if such patterns exist, we do not know their proﬁles.",
+      "In summary, we believe that the proposed traﬃc pat-\nterns extraction and modeling, combined with the empirical\nstudy on large scale cellular towers, pave the way toward\na deep understanding of the traﬃc patterns of large scale\ncellular towers."
+    ]
+  }
+]

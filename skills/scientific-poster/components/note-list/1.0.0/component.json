@@ -1,0 +1,8 @@
+{
+  "schema": "scientific-poster.component.v1",
+  "id": "note-list",
+  "version": "1.0.0",
+  "level": "atom",
+  "purpose": "Group concise limitations, assumptions, or practical discussion notes.",
+  "semantic_roles": ["limitations", "notes", "discussion"]
+}

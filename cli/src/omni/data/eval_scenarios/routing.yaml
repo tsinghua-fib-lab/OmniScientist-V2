@@ -1,0 +1,83 @@
+# Routing & intent-recognition scenarios: does the agent pick the right intent
+# and keep deterministic gates deterministic? Each turn supplies the planner JSON
+# the model *should* emit, so the run is offline and repeatable.
+
+- id: research_workflow_plan
+  title: "Multi-step research section routes to a workflow"
+  channel: cli
+  tags: [routing, capability_selection]
+  turns:
+    - user: "写一个 Transformer/RAG 研究小节：先做文献检索，再获取 arXiv 1706.03762，生成架构图，最后输出论文段落。"
+      plan:
+        intent_type: workflow
+        confidence: 0.93
+        workflow_steps:
+          - {id: lit, capability: literature.search, input: {query: "retrieval augmented generation"}}
+          - {id: paper, capability: paper.fetch.arxiv, depends_on: [lit], input: {identifier: "1706.03762"}}
+          - {id: fig, capability: artifact.figure, depends_on: [paper], input: {input: "RAG architecture figure"}}
+          - {id: final, capability: synthesis.final, depends_on: [fig], input: {deliverable: draft.section}}
+        outputs: [draft.section]
+        execution_mode: background
+        provenance_mode: light
+        rationale: "capability-level research workflow with final synthesis"
+      expect:
+        kind: workflow
+        capabilities_include: [literature.search, artifact.figure, synthesis.final]
+
+- id: paper_title_needs_input
+  title: "Title-only paper request asks for an identifier instead of fetching"
+  channel: cli
+  tags: [routing, guardrails]
+  turns:
+    - user: "帮我获取《Attention Is All You Need》的摘要并生成一张架构图。"
+      plan:
+        intent_type: needs_input
+        confidence: 0.88
+        missing_inputs:
+          - {field: paper_identifier, reason: "title-only paper needs a resolved DOI/arXiv id before fetching"}
+        outputs: [question]
+        execution_mode: ask
+        rationale: "title-only paper reference must be resolved before fetching"
+      expect:
+        kind: needs_input
+        skills_exclude: [arxiv-fetch]
+
+- id: memory_write_gate
+  title: "Explicit remember request becomes a structured memory update"
+  channel: cli
+  tags: [routing]
+  turns:
+    - user: "帮我记住：本项目研究 RAG reranker 对事实一致性的影响。"
+      plan:
+        intent_type: memory_update
+        required_capabilities: [memory.update]
+        capability_inputs:
+          memory.update:
+            content: "本项目研究 RAG reranker 对事实一致性的影响。"
+        outputs: [memory]
+        execution_mode: direct
+        confidence: 0.98
+        rationale: "The user explicitly asked to retain a project research fact."
+      expect:
+        planner_calls: 1
+        text_contains: ["Remembered:"]
+        skills_exclude: [arxiv-fetch, openalex-search]
+
+- id: wechat_research_workflow
+  title: "The same research request routes to a workflow on WeChat too"
+  channel: wechat
+  tags: [routing]
+  turns:
+    - user: "写一个 RAG 研究小节：先检索文献，再画一张系统架构图，最后写成论文段落。"
+      plan:
+        intent_type: workflow
+        confidence: 0.9
+        workflow_steps:
+          - {id: lit, capability: literature.search, input: {query: "retrieval augmented generation"}}
+          - {id: fig, capability: artifact.figure, depends_on: [lit], input: {input: "RAG architecture figure"}}
+          - {id: final, capability: synthesis.final, depends_on: [fig], input: {deliverable: draft.section}}
+        outputs: [draft.section]
+        execution_mode: background
+        rationale: "IM channel research workflow"
+      expect:
+        kind: workflow

@@ -1,0 +1,4 @@
+interface:
+  display_name: "SoulAgent"
+  short_description: "按当前科学任务裁剪科学家知识图谱并动态覆写运行时人格造口"
+  default_prompt: "Use $soulagent to load a scientist KG and refresh the task-specific runtime persona."

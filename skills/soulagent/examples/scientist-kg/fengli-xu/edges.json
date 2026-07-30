@@ -1,0 +1,875 @@
+{
+  "summarizes": [
+    {
+      "from": "l3_fengli_xu_P01",
+      "to": "l2_fengli_xu_C02"
+    },
+    {
+      "from": "l3_fengli_xu_P01",
+      "to": "l2_fengli_xu_C05"
+    },
+    {
+      "from": "l3_fengli_xu_P01",
+      "to": "l2_fengli_xu_C04"
+    },
+    {
+      "from": "l3_fengli_xu_P02",
+      "to": "l2_fengli_xu_C01"
+    },
+    {
+      "from": "l3_fengli_xu_P02",
+      "to": "l2_fengli_xu_C06"
+    },
+    {
+      "from": "l3_fengli_xu_P02",
+      "to": "l2_fengli_xu_C02"
+    },
+    {
+      "from": "l3_fengli_xu_P02",
+      "to": "l2_fengli_xu_C04"
+    },
+    {
+      "from": "l3_fengli_xu_P03",
+      "to": "l2_fengli_xu_C03"
+    },
+    {
+      "from": "l3_fengli_xu_P03",
+      "to": "l2_fengli_xu_C07"
+    },
+    {
+      "from": "l3_fengli_xu_P03",
+      "to": "l2_fengli_xu_C01"
+    }
+  ],
+  "supports": [
+    {
+      "from": "l2_fengli_xu_C05",
+      "to": "l1_fengli_xu_0001"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0002"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0003"
+    },
+    {
+      "from": "l2_fengli_xu_C01",
+      "to": "l1_fengli_xu_0004"
+    },
+    {
+      "from": "l2_fengli_xu_C05",
+      "to": "l1_fengli_xu_0005"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0006"
+    },
+    {
+      "from": "l2_fengli_xu_C05",
+      "to": "l1_fengli_xu_0007"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0008"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0009"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0010"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0011"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0012"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0013"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0014"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0015"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0016"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0017"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0018"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0019"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0020"
+    },
+    {
+      "from": "l2_fengli_xu_C05",
+      "to": "l1_fengli_xu_0021"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0022"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0023"
+    },
+    {
+      "from": "l2_fengli_xu_C05",
+      "to": "l1_fengli_xu_0024"
+    },
+    {
+      "from": "l2_fengli_xu_C05",
+      "to": "l1_fengli_xu_0025"
+    },
+    {
+      "from": "l2_fengli_xu_C05",
+      "to": "l1_fengli_xu_0026"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0027"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0028"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0029"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0030"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0031"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0032"
+    },
+    {
+      "from": "l2_fengli_xu_C01",
+      "to": "l1_fengli_xu_0033"
+    },
+    {
+      "from": "l2_fengli_xu_C05",
+      "to": "l1_fengli_xu_0034"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0035"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0036"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0037"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0038"
+    },
+    {
+      "from": "l2_fengli_xu_C05",
+      "to": "l1_fengli_xu_0039"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0040"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0041"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0042"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0043"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0044"
+    },
+    {
+      "from": "l2_fengli_xu_C05",
+      "to": "l1_fengli_xu_0045"
+    },
+    {
+      "from": "l2_fengli_xu_C05",
+      "to": "l1_fengli_xu_0046"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0047"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0048"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0049"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0050"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0051"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0052"
+    },
+    {
+      "from": "l2_fengli_xu_C04",
+      "to": "l1_fengli_xu_0053"
+    },
+    {
+      "from": "l2_fengli_xu_C04",
+      "to": "l1_fengli_xu_0054"
+    },
+    {
+      "from": "l2_fengli_xu_C04",
+      "to": "l1_fengli_xu_0055"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0056"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0057"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0058"
+    },
+    {
+      "from": "l2_fengli_xu_C05",
+      "to": "l1_fengli_xu_0059"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0060"
+    },
+    {
+      "from": "l2_fengli_xu_C05",
+      "to": "l1_fengli_xu_0061"
+    },
+    {
+      "from": "l2_fengli_xu_C01",
+      "to": "l1_fengli_xu_0062"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0063"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0064"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0065"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0066"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0067"
+    },
+    {
+      "from": "l2_fengli_xu_C05",
+      "to": "l1_fengli_xu_0068"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0069"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0070"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0071"
+    },
+    {
+      "from": "l2_fengli_xu_C05",
+      "to": "l1_fengli_xu_0072"
+    },
+    {
+      "from": "l2_fengli_xu_C05",
+      "to": "l1_fengli_xu_0073"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0074"
+    },
+    {
+      "from": "l2_fengli_xu_C05",
+      "to": "l1_fengli_xu_0075"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0076"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0077"
+    },
+    {
+      "from": "l2_fengli_xu_C05",
+      "to": "l1_fengli_xu_0078"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0079"
+    },
+    {
+      "from": "l2_fengli_xu_C05",
+      "to": "l1_fengli_xu_0080"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0081"
+    },
+    {
+      "from": "l2_fengli_xu_C05",
+      "to": "l1_fengli_xu_0082"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0083"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0084"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0085"
+    },
+    {
+      "from": "l2_fengli_xu_C05",
+      "to": "l1_fengli_xu_0086"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0087"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0088"
+    },
+    {
+      "from": "l2_fengli_xu_C07",
+      "to": "l1_fengli_xu_0089"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0090"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0091"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0092"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0093"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0094"
+    },
+    {
+      "from": "l2_fengli_xu_C05",
+      "to": "l1_fengli_xu_0095"
+    },
+    {
+      "from": "l2_fengli_xu_C04",
+      "to": "l1_fengli_xu_0096"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0097"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0098"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0099"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0100"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0101"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0102"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0103"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0104"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0105"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0106"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0107"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0108"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0109"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0110"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0111"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0112"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0113"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0114"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0115"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0116"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0117"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0118"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0119"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0120"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0121"
+    },
+    {
+      "from": "l2_fengli_xu_C07",
+      "to": "l1_fengli_xu_0122"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0123"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0124"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0125"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0126"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0127"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0128"
+    },
+    {
+      "from": "l2_fengli_xu_C04",
+      "to": "l1_fengli_xu_0129"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0130"
+    },
+    {
+      "from": "l2_fengli_xu_C01",
+      "to": "l1_fengli_xu_0131"
+    },
+    {
+      "from": "l2_fengli_xu_C01",
+      "to": "l1_fengli_xu_0132"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0133"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0134"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0135"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0136"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0137"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0138"
+    },
+    {
+      "from": "l2_fengli_xu_C04",
+      "to": "l1_fengli_xu_0139"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0140"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0141"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0142"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0143"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0144"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0145"
+    },
+    {
+      "from": "l2_fengli_xu_C04",
+      "to": "l1_fengli_xu_0146"
+    },
+    {
+      "from": "l2_fengli_xu_C04",
+      "to": "l1_fengli_xu_0147"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0148"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0149"
+    },
+    {
+      "from": "l2_fengli_xu_C05",
+      "to": "l1_fengli_xu_0150"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0151"
+    },
+    {
+      "from": "l2_fengli_xu_C04",
+      "to": "l1_fengli_xu_0152"
+    },
+    {
+      "from": "l2_fengli_xu_C04",
+      "to": "l1_fengli_xu_0153"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0154"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0155"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0156"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0157"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0158"
+    },
+    {
+      "from": "l2_fengli_xu_C04",
+      "to": "l1_fengli_xu_0159"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0160"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0161"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0162"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0163"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0164"
+    },
+    {
+      "from": "l2_fengli_xu_C01",
+      "to": "l1_fengli_xu_0165"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0166"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0167"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0168"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0169"
+    },
+    {
+      "from": "l2_fengli_xu_C04",
+      "to": "l1_fengli_xu_0170"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0171"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0172"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0173"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0174"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0175"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0176"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0177"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0178"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0179"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0180"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0181"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0182"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0183"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0184"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0185"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0186"
+    },
+    {
+      "from": "l2_fengli_xu_C04",
+      "to": "l1_fengli_xu_0187"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l1_fengli_xu_0188"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0189"
+    },
+    {
+      "from": "l2_fengli_xu_C06",
+      "to": "l1_fengli_xu_0190"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l1_fengli_xu_0191"
+    }
+  ],
+  "reinforces": [
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l2_fengli_xu_C03",
+      "reason": "怎样选择方法强调实证驱动、对比分析、控制混杂变量，并通过大规模数据分析支撑结论；怎样验证结论也依赖定量对比和消融实验来评估性能。两者都体现通过系统实证对比确保方法有效性的同一认知姿态，缺少任何一方都会使该姿态不完整。"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l2_fengli_xu_C04",
+      "reason": "怎样选择方法注重利用实证框架和对比实验来设计方法；怎样解释结果同样通过消融和对比实验量化组件重要性，揭示机制。两者都指向基于量化对比的分析逻辑，激活方法选择时自然需要解释支撑，缺失解释会使选择成果流于表面。"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l2_fengli_xu_C04",
+      "reason": "怎样验证结论通过将新方法与基线对比、消融研究来证明优越性；怎样解释结果也通过类似实验量化各组件贡献。两者共享通过系统对比理解模型行为的逻辑，缺少验证的解读缺乏根据，缺少解读的验证则沦为数字。"
+    }
+  ],
+  "enables": [
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l2_fengli_xu_C03",
+      "reason": "理解怎样选择方法后，才能理解怎样验证结论：“怎样选择方法”描述该科学家倾向于选择数据驱动、网络科学等实证框架，“怎样验证结论”描述中验证结论时采用的“所提方法”正是“怎样选择方法”选择的结果，如与现有基线对比和消融实验都依赖于先选择的方法。"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l2_fengli_xu_C04",
+      "reason": "理解怎样选择方法后，才能理解怎样解释结果：“怎样解释结果”中的消融实验和对比实验涉及的方法组件（如推理链）是“怎样选择方法”所选方法的一部分，只有理解了方法选择才能理解解释结果时对这些组件的量化分析。"
+    },
+    {
+      "from": "l2_fengli_xu_C02",
+      "to": "l2_fengli_xu_C06",
+      "reason": "理解怎样选择方法后，才能理解怎样处理失败：“怎样处理失败”中分析的失败原因如模块级联、数据稀疏性等，都是“怎样选择方法”所选方法的具体实现问题，若不理解方法选择就无法完整理解失败归因。"
+    },
+    {
+      "from": "l2_fengli_xu_C03",
+      "to": "l2_fengli_xu_C04",
+      "reason": "理解怎样验证结论后，才能理解怎样解释结果：“怎样解释结果”的解释依赖于消融实验和对比实验的结果，这些结果正是“怎样验证结论”验证过程的输出，只有先理解验证结论才能理解后续的解释。"
+    }
+  ],
+  "tension": [
+    {
+      "between": [
+        "l2_fengli_xu_C02",
+        "l2_fengli_xu_C03"
+      ],
+      "context": "limited_computational_resources",
+      "reason": "在计算资源有限时，怎样选择方法倾向于采用实用技巧和简约模型以平衡效率，而怎样验证结论需要通过对比基线和消融实验进行全面验证，双方对计算资源的分配形成直接竞争，不能同时主导。"
+    },
+    {
+      "between": [
+        "l2_fengli_xu_C02",
+        "l2_fengli_xu_C04"
+      ],
+      "context": "limited_time_for_experiments",
+      "reason": "在实验时间紧张时，怎样选择方法偏好快速可行的方案，而怎样解释结果要求设计消融实验量化组件贡献，两者在时间使用上竞争，难以兼顾。"
+    },
+    {
+      "between": [
+        "l2_fengli_xu_C03",
+        "l2_fengli_xu_C06"
+      ],
+      "context": "constrained_experiment_schedule",
+      "reason": "在实验排期紧张时，怎样验证结论需要执行多项对比实验，而怎样处理失败要求深入分析失败原因并迭代修正，两者争夺有限的实验时间和资源。"
+    }
+  ]
+}

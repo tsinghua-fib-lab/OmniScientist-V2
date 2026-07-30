@@ -1,0 +1,4 @@
+.sp-table { margin: 0; overflow: hidden; }
+.sp-table__grid { inline-size: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.sp-table__grid th, .sp-table__grid td { padding: var(--sp-space-2); border-block-end: var(--sp-rule) solid var(--sp-line); text-align: start; }
+.sp-table__caption { margin-block-start: var(--sp-space-2); color: var(--sp-muted); }

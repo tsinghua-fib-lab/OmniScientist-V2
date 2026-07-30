@@ -1,0 +1,182 @@
+# PyPI Trusted Publisher binds this exact filename (`release.yml`) and the
+# `pypi` environment below to tsinghua-fib-lab/OmniScientist-V2.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  compatibility:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.11", "3.12", "3.13"]
+        # Linux 3.12 runs the same suite under coverage in build.
+        exclude:
+          - os: ubuntu-latest
+            python: "3.12"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - run: uv sync --project cli --all-extras
+      - run: uv run --project cli ruff check cli/src cli/tests
+      - run: uv run --project cli pytest -q -m "not release_gate"
+
+  build:
+    needs: compatibility
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          python-version: "3.12"
+      - name: Verify tag matches the immutable package version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: >-
+          python -c "import os, re, runpy;
+          version=str(runpy.run_path('cli/src/omni/__init__.py').get('__version__', ''));
+          assert version, 'Could not read omni.__version__';
+          assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:rc[0-9]+)?', version),
+          f'Only stable or rc versions can be published: {version}';
+          expected='v'+version;
+          actual=os.environ['RELEASE_TAG'];
+          assert actual == expected, f'Tag {actual} must exactly match package version {expected}'"
+      - name: Verify GitHub is the declared release authority
+        env:
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: >-
+          python -c "import os, pathlib, tomllib;
+          CANONICAL_REPOSITORY_SLUG = 'tsinghua-fib-lab/OmniScientist-V2';
+          actual_repo=os.environ['RELEASE_REPOSITORY'];
+          assert actual_repo == CANONICAL_REPOSITORY_SLUG,
+          f'Releases are only allowed from {CANONICAL_REPOSITORY_SLUG}, not {actual_repo}';
+          data=tomllib.loads(pathlib.Path('cli/pyproject.toml').read_text(encoding='utf-8'));
+          url=data['project']['urls'].get('Repository', '');
+          expected='https://github.com/'+CANONICAL_REPOSITORY_SLUG;
+          assert url.rstrip('/') == expected,
+          f'Set project.urls.Repository to the release repository: {expected}'"
+      - run: uv sync --project cli --all-extras
+      - run: uv run --project cli ruff check cli/src cli/tests
+      - name: Initialize fail-closed changed-code coverage report
+        env:
+          OMNI_DIFF_COVERAGE_REPORT: ${{ runner.temp }}/changed-code-coverage.json
+          OMNI_DIFF_COVERAGE_CANDIDATE: ${{ github.sha }}
+        run: >-
+          uv run --project cli python -c
+          "import os;
+          from omni.eval.diff_coverage_gate import initialize_fail_closed_report;
+          initialize_fail_closed_report(
+          os.environ['OMNI_DIFF_COVERAGE_REPORT'],
+          base_ref='previous-tag',
+          candidate_ref=os.environ['OMNI_DIFF_COVERAGE_CANDIDATE'],
+          failure_stage='release_coverage_tests_not_started')"
+      - name: Run reactive binding release gate
+        run: >-
+          uv run --project cli pytest -q
+          cli/tests/eval/test_reactive_binding_release_gate.py
+          cli/tests/eval/test_objective_provider_quality_offline_corpus.py
+      - name: Measure the offline release test suite
+        id: coverage-tests
+        continue-on-error: true
+        run: >-
+          uv run --project cli coverage run --branch --source=omni
+          -m pytest -q -m "not release_gate"
+      - name: Export release line coverage evidence
+        if: always()
+        env:
+          OMNI_DIFF_COVERAGE_DATA: ${{ runner.temp }}/coverage.json
+        run: >-
+          uv run --project cli coverage json
+          -o "$OMNI_DIFF_COVERAGE_DATA"
+      - name: Enforce at least 80% changed-code coverage since the previous tag
+        if: always()
+        env:
+          OMNI_DIFF_COVERAGE_DATA: ${{ runner.temp }}/coverage.json
+          OMNI_DIFF_COVERAGE_REPORT: ${{ runner.temp }}/changed-code-coverage.json
+          OMNI_DIFF_COVERAGE_CANDIDATE: ${{ github.sha }}
+          OMNI_DIFF_COVERAGE_TEST_OUTCOME: ${{ steps.coverage-tests.outcome }}
+          # Immutable bootstrap for the first v* release. Once a prior tag
+          # exists, the resolver always prefers that tag instead.
+          OMNI_DIFF_COVERAGE_BOOTSTRAP_BASE: 2b7dfe46a0028fe643126f12ba83a5e8c4f9bb94
+        run: >-
+          uv run --project cli python cli/scripts/check_diff_coverage.py
+          --coverage-json "$OMNI_DIFF_COVERAGE_DATA"
+          --report "$OMNI_DIFF_COVERAGE_REPORT"
+          --base-ref previous-tag
+          --fallback-base-ref "$OMNI_DIFF_COVERAGE_BOOTSTRAP_BASE"
+          --candidate-ref "$OMNI_DIFF_COVERAGE_CANDIDATE"
+          --minimum-percent 80
+          --test-outcome "$OMNI_DIFF_COVERAGE_TEST_OUTCOME"
+      - run: uv build --no-sources cli --out-dir dist
+      - run: python cli/scripts/check_dist.py dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: changed-code-coverage
+          path: ${{ runner.temp }}/changed-code-coverage.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: distributions
+          path: dist/*
+
+  smoke:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: .smoke/bin/python
+            omni: .smoke/bin/omni
+          - os: macos-latest
+            python: .smoke/bin/python
+            omni: .smoke/bin/omni
+          - os: windows-latest
+            python: .smoke/Scripts/python.exe
+            omni: .smoke/Scripts/omni.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: distributions
+          path: dist
+      - name: Install wheel in an isolated environment
+        run: >-
+          python -c "import glob, subprocess;
+          subprocess.run(['uv', 'venv', '.smoke'], check=True);
+          subprocess.run(['uv', 'pip', 'install', '--python', r'${{ matrix.python }}',
+          glob.glob('dist/*.whl')[0]], check=True)"
+      - name: Smoke test installed CLI
+        run: >-
+          python -c "import subprocess;
+          exe=r'${{ matrix.omni }}';
+          subprocess.run([exe, '--version'], check=True);
+          subprocess.run([exe, 'update', '--help'], check=True)"
+
+  publish:
+    needs: smoke
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: distributions
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # release/v1

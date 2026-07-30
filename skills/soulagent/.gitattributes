@@ -1,0 +1,2 @@
+examples/scientist-kg/**/*.json text eol=lf
+examples/scientist-kg/**/*.jsonl text eol=lf

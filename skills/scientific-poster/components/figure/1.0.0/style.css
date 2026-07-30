@@ -1,0 +1,5 @@
+.sp-figure { display: flex; flex-direction: column; gap: var(--sp-space-2); margin: 0; }
+.sp-figure__media { display: grid; place-items: center; min-block-size: 12rem; }
+.sp-figure__media img, .sp-figure__media svg { max-inline-size: 100%; block-size: auto; }
+.sp-figure__takeaway { font-weight: 700; }
+.sp-figure__caption { color: var(--sp-muted); }

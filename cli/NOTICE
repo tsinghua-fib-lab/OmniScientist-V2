@@ -1,0 +1,121 @@
+OmniScientist V2
+Copyright (c) OmniScientist Contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+================================================================================
+Third-party attributions
+================================================================================
+
+Project lineage: OmniScientist / HelixForge
+--------------------------------------------------------------------------------
+This repository is the official next-generation implementation of the
+OmniScientist project introduced in:
+
+    Chenyang Shao et al.
+    "OmniScientist: Toward a Co-evolving Ecosystem of Human and AI Scientists"
+    arXiv:2511.16931 (2025)
+    https://doi.org/10.48550/arXiv.2511.16931
+
+Some runtime and storage components were migrated and substantially simplified
+from the maintainers' earlier OmniScientist HelixForge codebase. The copyright
+holder has authorized their redistribution in this project under Apache-2.0.
+Files that retain this lineage identify it in their module documentation.
+
+OpenAI Playwright skill
+--------------------------------------------------------------------------------
+File: skills/playwright/SKILL.md
+
+This instruction skill is adapted from the Apache-2.0 licensed Playwright skill
+published in the OpenAI skills repository. OmniScientist changed its metadata,
+dependency guidance, and runtime instructions for the portable SKILL.md format.
+
+    Copyright (c) Microsoft Corporation.
+
+Licensed under the Apache License, Version 2.0, reproduced in LICENSE.
+
+OpenClaw summarize skill
+--------------------------------------------------------------------------------
+File: skills/summarize/SKILL.md
+
+This instruction skill is adapted from OpenClaw's summarize skill. OmniScientist
+changed its metadata and runtime guidance for portable use.
+
+    MIT License
+    Copyright (c) 2026 OpenClaw Foundation
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+WeChat iLink bot connector
+--------------------------------------------------------------------------------
+File: cli/src/omni/channels/weixin_ilink.py
+
+This module is an independently maintained Python (httpx) implementation of the
+Weixin (WeChat) "iLink bot" HTTP/JSON wire protocol. Its compatibility
+behavior — endpoints
+(get_bot_qrcode / get_qrcode_status / getupdates / sendmessage / notifystart /
+notifystop), request headers (iLink-App-Id, iLink-App-ClientVersion,
+AuthorizationType, X-WECHAT-UIN, Authorization), the base_info envelope, the
+QR login state machine, and the get_updates_buf / context_token semantics — was
+adapted from the documentation and transport source of the MIT-licensed package:
+
+    @tencent-weixin/openclaw-weixin
+    https://www.npmjs.com/package/@tencent-weixin/openclaw-weixin
+
+OmniScientist does not depend on, bundle, or import that npm package. It speaks
+the compatible backend protocol with its own Python client and uses the shared
+"WeChat ClawBot" liteapp bot identity (iLink-App-Id: bot, bot_type=3).
+
+The MIT License of @tencent-weixin/openclaw-weixin is reproduced below.
+
+    MIT License
+
+    Copyright (c) Tencent Holdings Limited and the
+    @tencent-weixin/openclaw-weixin contributors
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+Compliance note: this experimental interoperability connector accesses Tencent's
+bot backend through a non-OpenClaw client. It is disabled unless the user
+explicitly selects ``--method ilink`` and accepts its warning. It is not endorsed
+or supported by Tencent or OpenClaw; the backend may rate-limit or deny the
+client, and use may be subject to WeChat terms and account restrictions. A
+managed WeCom integration is the supported production path.
+
+Trademark notice
+--------------------------------------------------------------------------------
+Claude, Claude Code, OpenAI, Codex, OpenClaw, WeChat, Feishu and DingTalk are
+trademarks of their respective owners. Compatibility references are nominative;
+OmniScientist is not endorsed by or affiliated with those owners unless stated.

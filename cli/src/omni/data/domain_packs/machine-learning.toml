@@ -1,0 +1,16 @@
+name = "machine-learning"
+title = "Machine Learning"
+description = "Machine-learning papers, system architectures, benchmarks, and ablation studies."
+guidance = "Separate methodological contributions from implementation. Evaluate strong baselines, leakage, ablations, statistical uncertainty, and compute budgets."
+connectors = ["arxiv", "semanticscholar", "openalex", "crossref"]
+artifact_types = ["architecture-figure", "benchmark-table", "ablation-report", "repro-bundle"]
+
+[[specialists]]
+role = "ml-method-reviewer"
+description = "Audit method novelty, baseline fairness, ablations, and generalization boundaries."
+tools = ["search_literature", "search_corpus"]
+
+[[specialists]]
+role = "ml-systems-engineer"
+description = "Translate algorithm designs into data flows, service boundaries, observability, and performance tradeoffs."
+tools = ["read_file", "search_corpus"]

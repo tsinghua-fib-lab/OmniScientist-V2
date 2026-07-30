@@ -1,0 +1,8 @@
+{
+  "schema": "scientific-poster.layout-policy.v1",
+  "id": "conference-method-led",
+  "version": "1.0.0",
+  "purpose": "Method-led conference composition for papers with substantial architecture or procedure.",
+  "page_modes": ["portrait", "landscape"],
+  "strategies": ["method-led", "narrative-flow", "adaptive-columns"]
+}

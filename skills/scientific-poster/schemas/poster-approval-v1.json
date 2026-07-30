@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "scientific-poster.poster-approval.v1",
+  "type": "object",
+  "required": ["schema", "source_html_uri", "source_html_origin_uri", "source_html_sha256", "grounding_source_sha256", "source_figure_manifest_sha256", "approved", "approved_at", "session_id", "decision"],
+  "properties": {
+    "schema": {"const": "scientific-poster.poster-approval.v1"},
+    "source_html_uri": {"const": "bundle:poster.html"},
+    "source_html_origin_uri": {"type": "string", "minLength": 1, "maxLength": 2048},
+    "source_html_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "grounding_source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_figure_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "approved": {"const": true},
+    "approved_at": {"type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z$", "maxLength": 64},
+    "session_id": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S"},
+    "decision": {
+      "type": "object",
+      "required": ["mode", "session_id", "host_event_id", "target_kind", "target_sha256", "user_message_sha256", "event_sha256"],
+      "properties": {
+        "mode": {"const": "portable-operator"},
+        "session_id": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "\\S"},
+        "host_event_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+        "target_kind": {"const": "poster"},
+        "target_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "user_message_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "event_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

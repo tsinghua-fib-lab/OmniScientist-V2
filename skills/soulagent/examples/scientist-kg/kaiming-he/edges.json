@@ -1,0 +1,2092 @@
+{
+  "summarizes": [
+    {
+      "from": "l3_kaiming_he_P01",
+      "to": "l2_kaiming_he_C02"
+    },
+    {
+      "from": "l3_kaiming_he_P01",
+      "to": "l2_kaiming_he_C05"
+    },
+    {
+      "from": "l3_kaiming_he_P01",
+      "to": "l2_kaiming_he_C03"
+    },
+    {
+      "from": "l3_kaiming_he_P01",
+      "to": "l2_kaiming_he_C07"
+    },
+    {
+      "from": "l3_kaiming_he_P02",
+      "to": "l2_kaiming_he_C01"
+    },
+    {
+      "from": "l3_kaiming_he_P02",
+      "to": "l2_kaiming_he_C02"
+    },
+    {
+      "from": "l3_kaiming_he_P02",
+      "to": "l2_kaiming_he_C05"
+    },
+    {
+      "from": "l3_kaiming_he_P02",
+      "to": "l2_kaiming_he_C06"
+    },
+    {
+      "from": "l3_kaiming_he_P03",
+      "to": "l2_kaiming_he_C01"
+    },
+    {
+      "from": "l3_kaiming_he_P03",
+      "to": "l2_kaiming_he_C03"
+    },
+    {
+      "from": "l3_kaiming_he_P03",
+      "to": "l2_kaiming_he_C07"
+    }
+  ],
+  "supports": [
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0001"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0002"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0003"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0004"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0005"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0006"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0007"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0008"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0009"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0010"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0011"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0012"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0013"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0014"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0015"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0016"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0017"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0018"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0019"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0020"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0021"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0022"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0023"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0024"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0025"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0026"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0027"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0028"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0029"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0030"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0031"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0032"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0033"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0034"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0035"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0036"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0037"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0038"
+    },
+    {
+      "from": "l2_kaiming_he_C07",
+      "to": "l1_kaiming_he_0039"
+    },
+    {
+      "from": "l2_kaiming_he_C01",
+      "to": "l1_kaiming_he_0040"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0041"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0042"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0043"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0044"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0045"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0046"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0047"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0048"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0049"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0050"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0051"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0052"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0053"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0054"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0055"
+    },
+    {
+      "from": "l2_kaiming_he_C07",
+      "to": "l1_kaiming_he_0056"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0057"
+    },
+    {
+      "from": "l2_kaiming_he_C07",
+      "to": "l1_kaiming_he_0058"
+    },
+    {
+      "from": "l2_kaiming_he_C01",
+      "to": "l1_kaiming_he_0059"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0060"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0061"
+    },
+    {
+      "from": "l2_kaiming_he_C07",
+      "to": "l1_kaiming_he_0062"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0063"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0064"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0065"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0066"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0067"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0068"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0069"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0070"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0071"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0072"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0073"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0074"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0075"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0076"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0077"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0078"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0079"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0080"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0081"
+    },
+    {
+      "from": "l2_kaiming_he_C01",
+      "to": "l1_kaiming_he_0082"
+    },
+    {
+      "from": "l2_kaiming_he_C07",
+      "to": "l1_kaiming_he_0083"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0084"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0085"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0086"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0087"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0088"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0089"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0090"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0091"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0092"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0093"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0094"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0095"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0096"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0097"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0098"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0099"
+    },
+    {
+      "from": "l2_kaiming_he_C07",
+      "to": "l1_kaiming_he_0100"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0101"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0102"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0103"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0104"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0105"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0106"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0107"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0108"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0109"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0110"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0111"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0112"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0113"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0114"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0115"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0116"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0117"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0118"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0119"
+    },
+    {
+      "from": "l2_kaiming_he_C01",
+      "to": "l1_kaiming_he_0120"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0121"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0122"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0123"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0124"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0125"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0126"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0127"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0128"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0129"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0130"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0131"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0132"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0133"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0134"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0135"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0136"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0137"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0138"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0139"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0140"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0141"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0142"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0143"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0144"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0145"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0146"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0147"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0148"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0149"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0150"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0151"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0152"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0153"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0154"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0155"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0156"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0157"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0158"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0159"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0160"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0161"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0162"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0163"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0164"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0165"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0166"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0167"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0168"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0169"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0170"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0171"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0172"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0173"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0174"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0175"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0176"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0177"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0178"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0179"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0180"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0181"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0182"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0183"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0184"
+    },
+    {
+      "from": "l2_kaiming_he_C07",
+      "to": "l1_kaiming_he_0185"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0186"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0187"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0188"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0189"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0190"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0191"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0192"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0193"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0194"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0195"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0196"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0197"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0198"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0199"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0200"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0201"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0202"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0203"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0204"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0205"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0206"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0207"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0208"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0209"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0210"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0211"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0212"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0213"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0214"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0215"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0216"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0217"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0218"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0219"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0220"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0221"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0222"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0223"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0224"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0225"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0226"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0227"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0228"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0229"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0230"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0231"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0232"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0233"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0234"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0235"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0236"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0237"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0238"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0239"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0240"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0241"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0242"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0243"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0244"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0245"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0246"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0247"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0248"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0249"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0250"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0251"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0252"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0253"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0254"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0255"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0256"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0257"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0258"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0259"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0260"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0261"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0262"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0263"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0264"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0265"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0266"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0267"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0268"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0269"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0270"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0271"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0272"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0273"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0274"
+    },
+    {
+      "from": "l2_kaiming_he_C07",
+      "to": "l1_kaiming_he_0275"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0276"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0277"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0278"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0279"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0280"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0281"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0282"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0283"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0284"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0285"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0286"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0287"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0288"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0289"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0290"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0291"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0292"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0293"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0294"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0295"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0296"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0297"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0298"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0299"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0300"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0301"
+    },
+    {
+      "from": "l2_kaiming_he_C01",
+      "to": "l1_kaiming_he_0302"
+    },
+    {
+      "from": "l2_kaiming_he_C01",
+      "to": "l1_kaiming_he_0303"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0304"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0305"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0306"
+    },
+    {
+      "from": "l2_kaiming_he_C01",
+      "to": "l1_kaiming_he_0307"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0308"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0309"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0310"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0311"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0312"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0313"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0314"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0315"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0316"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0317"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0318"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0319"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0320"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0321"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0322"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0323"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0324"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0325"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0326"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0327"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0328"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0329"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0330"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0331"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0332"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0333"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0334"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0335"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0336"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0337"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0338"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0339"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0340"
+    },
+    {
+      "from": "l2_kaiming_he_C01",
+      "to": "l1_kaiming_he_0341"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0342"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0343"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0344"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0345"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0346"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0347"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0348"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0349"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0350"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0351"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0352"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0353"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0354"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0355"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0356"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0357"
+    },
+    {
+      "from": "l2_kaiming_he_C07",
+      "to": "l1_kaiming_he_0358"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0359"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0360"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0361"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0362"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0363"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0364"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0365"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0366"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0367"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0368"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0369"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0370"
+    },
+    {
+      "from": "l2_kaiming_he_C07",
+      "to": "l1_kaiming_he_0371"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0372"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0373"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0374"
+    },
+    {
+      "from": "l2_kaiming_he_C01",
+      "to": "l1_kaiming_he_0375"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0376"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0377"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0378"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0379"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0380"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0381"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0382"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0383"
+    },
+    {
+      "from": "l2_kaiming_he_C07",
+      "to": "l1_kaiming_he_0384"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0385"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0386"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0387"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0388"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0389"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0390"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0391"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0392"
+    },
+    {
+      "from": "l2_kaiming_he_C01",
+      "to": "l1_kaiming_he_0393"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0394"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0395"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0396"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0397"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0398"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0399"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0400"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0401"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0402"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0403"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0404"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0405"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0406"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0407"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0408"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0409"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0410"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0411"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0412"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0413"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0414"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0415"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0416"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0417"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0418"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0419"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0420"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0421"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0422"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0423"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0424"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0425"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0426"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0427"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0428"
+    },
+    {
+      "from": "l2_kaiming_he_C07",
+      "to": "l1_kaiming_he_0429"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0430"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0431"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0432"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0433"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0434"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0435"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0436"
+    },
+    {
+      "from": "l2_kaiming_he_C01",
+      "to": "l1_kaiming_he_0437"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0438"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0439"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0440"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0441"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0442"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0443"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0444"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0445"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0446"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0447"
+    },
+    {
+      "from": "l2_kaiming_he_C01",
+      "to": "l1_kaiming_he_0448"
+    },
+    {
+      "from": "l2_kaiming_he_C07",
+      "to": "l1_kaiming_he_0449"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0450"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0451"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0452"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0453"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0454"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0455"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0456"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0457"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0458"
+    },
+    {
+      "from": "l2_kaiming_he_C07",
+      "to": "l1_kaiming_he_0459"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0460"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0461"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0462"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0463"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0464"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0465"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0466"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0467"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0468"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0469"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0470"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0471"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0472"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0473"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0474"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0475"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0476"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0477"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0478"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0479"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0480"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0481"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0482"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0483"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l1_kaiming_he_0484"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0485"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0486"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l1_kaiming_he_0487"
+    },
+    {
+      "from": "l2_kaiming_he_C05",
+      "to": "l1_kaiming_he_0488"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0489"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0490"
+    },
+    {
+      "from": "l2_kaiming_he_C06",
+      "to": "l1_kaiming_he_0491"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0492"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l1_kaiming_he_0493"
+    }
+  ],
+  "reinforces": [
+    {
+      "from": "l2_kaiming_he_C01",
+      "to": "l2_kaiming_he_C02",
+      "reason": "在'怎样定义问题'中，该科学家识别并挑战问题设定中的不自然之处，追求更统一或本质的表述；在'怎样选择方法'中，他偏好简约实用的设计，避免多余复杂性。两者共同体现了他基于实证、追求高效稳健的认知风格：定义问题为方法选择提供方向，方法选择使定义得以落地，缺少任一侧面都会使他的科学姿态变得不完整。"
+    },
+    {
+      "from": "l2_kaiming_he_C01",
+      "to": "l2_kaiming_he_C07",
+      "reason": "在'怎样定义问题'中，他通过批评人为约束重新界定问题；在'怎样产生想法'中，他基于直觉或观察提出假设和设计原则。两者都是创新思维的起点，共同推动他形成模块化、解耦的实用主义研究路径，缺少任一方都会削弱他的创新驱动特征。"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l2_kaiming_he_C03",
+      "reason": "在'怎样选择方法'中，他反复基于实验结果进行判断，确保对比条件一致；在'怎样验证结论'中，他设计可控对比实验和消融研究，严格控制变量。两者都是严谨实验方法的核心，共同构成他依赖实证检验假说的认知姿态，缺一不可。"
+    },
+    {
+      "from": "l2_kaiming_he_C02",
+      "to": "l2_kaiming_he_C05",
+      "reason": "在'怎样选择方法'中，他表现出强烈的简约偏好，选择参数免费、无额外复杂性的设计；在'怎样判断美丑'中，他以简洁性和简单性为审美标准，基于实证结果选择组件。两者都指向对高效、易实现方案的执着，缺少任一方会导致对他方法偏好的理解残缺。"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l2_kaiming_he_C06",
+      "reason": "在'怎样验证结论'中，他通过消融研究隔离变量影响；在'怎样处理失败'中，他归因于特征图分辨率、超参数等技术细节。两者都依赖系统化实验分析来诊断问题，共同体现他面对实验结果的归因能力，缺少任一方都会使他的实证态度不完整。"
+    },
+    {
+      "from": "l2_kaiming_he_C04",
+      "to": "l2_kaiming_he_C06",
+      "reason": "在'怎样解释结果'中，他基于数据指出哪些因素有效或无效并解释原因；在'怎样处理失败'中，他从技术层面进行归因分析。两者都是对实验结果的深入解读，共同构成他因果分析驱动的认知风格，缺少任一方都会使他的判断缺乏全面性。"
+    }
+  ],
+  "enables": [
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l2_kaiming_he_C04",
+      "reason": "怎样验证结论的核心是设计可控对比实验与消融研究以获取实验数据，而怎样解释结果强调基于实验数据和详细对比做出判断。因此，要理解解释结果必须先理解验证结论的实验方法。"
+    },
+    {
+      "from": "l2_kaiming_he_C03",
+      "to": "l2_kaiming_he_C05",
+      "reason": "怎样验证结论提供了通过可控实验获取实证结果的方法，而怎样判断美丑依赖于实证结果来选择组件。因此，理解判断美丑必须先理解验证结论的实验设计。"
+    }
+  ],
+  "tension": [
+    {
+      "between": [
+        "l2_kaiming_he_C02",
+        "l2_kaiming_he_C03"
+      ],
+      "context": "limited_experimental_budget",
+      "reason": "在实验资源有限时，“怎样选择方法”倾向于简化实验步骤以快速做出决策，而“怎样验证结论”要求进行多次可控对比实验以确保公平比较，二者对实验次数的需求直接冲突。"
+    },
+    {
+      "between": [
+        "l2_kaiming_he_C02",
+        "l2_kaiming_he_C07"
+      ],
+      "context": "project_time_constraints",
+      "reason": "在项目时间紧迫的约束下，“怎样选择方法”优先采用简单可靠的设计以节省时间，而“怎样产生想法”鼓励探索新颖架构，两者在时间分配上存在竞争。"
+    },
+    {
+      "between": [
+        "l2_kaiming_he_C04",
+        "l2_kaiming_he_C05"
+      ],
+      "context": "tradeoff_between_performance_and_simplicity",
+      "reason": "在需要平衡性能与简洁性的情境中，“怎样解释结果”依据实验数据强调性能提升的重要性，而“怎样判断美丑”坚持简洁优先的设计审美，两者在决策标准上产生直接冲突。"
+    }
+  ]
+}

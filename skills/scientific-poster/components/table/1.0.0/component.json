@@ -1,0 +1,8 @@
+{
+  "schema": "scientific-poster.component.v1",
+  "id": "table",
+  "version": "1.0.0",
+  "level": "composite",
+  "purpose": "Present a compact scientific comparison while preserving labels and units.",
+  "semantic_roles": ["table", "evidence", "comparison"]
+}

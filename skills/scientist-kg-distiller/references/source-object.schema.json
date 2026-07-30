@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://scientist-kg.local/source-object.schema.json",
+  "title": "Scientist SourceObject",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source_id",
+    "scientist_id",
+    "title",
+    "year",
+    "source_type",
+    "full_text",
+    "authors",
+    "author_role",
+    "provenance",
+    "identity_binding",
+    "quality"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "source_id": {"type": "string", "pattern": "^src_[0-9]{4,}$"},
+    "scientist_id": {"type": "string", "minLength": 1},
+    "title": {"type": "string", "minLength": 1},
+    "year": {
+      "anyOf": [
+        {"type": "integer", "minimum": 1800, "maximum": 2200},
+        {"type": "null"}
+      ]
+    },
+    "source_type": {
+      "enum": ["paper", "talk", "code", "interview", "homepage"]
+    },
+    "full_text": {"type": "string", "minLength": 200},
+    "authors": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "author_role": {
+      "enum": [
+        "first",
+        "corresponding",
+        "speaker",
+        "small_team_core",
+        "middle",
+        "last",
+        "author"
+      ]
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["origin", "sha256"],
+      "properties": {
+        "origin": {"type": "string", "minLength": 1},
+        "url": {"type": ["string", "null"]},
+        "local_path": {"type": ["string", "null"]},
+        "doi": {"type": ["string", "null"]},
+        "arxiv_id": {"type": ["string", "null"]},
+        "provider_ids": {"type": "object"},
+        "retrieved_at": {"type": "string"},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      },
+      "additionalProperties": true
+    },
+    "identity_binding": {
+      "type": "object",
+      "required": ["accepted", "score", "evidence"],
+      "properties": {
+        "accepted": {"const": true},
+        "score": {"type": "number", "minimum": 0, "maximum": 1},
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        }
+      },
+      "additionalProperties": true
+    },
+    "quality": {
+      "type": "object",
+      "required": ["status", "character_count"],
+      "properties": {
+        "status": {"const": "usable"},
+        "character_count": {"type": "integer", "minimum": 200},
+        "has_section_markers": {"type": "boolean"}
+      },
+      "additionalProperties": true
+    }
+  }
+}

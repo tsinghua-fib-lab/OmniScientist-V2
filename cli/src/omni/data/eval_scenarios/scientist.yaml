@@ -1,0 +1,321 @@
+# Persona: scientist — real research workflows a researcher would actually type.
+# These drive the agent through realistic researcher interactions and,
+# together with the seed corpus, close the capability-coverage net for the
+# research-facing active capabilities (literature, ideation, figures,
+# editable PPTX, and complete slide decks). Each turn ships the planner JSON the model
+# should emit so the run stays offline + deterministic.
+
+- id: sci_review_section
+  title: "Scientist: literature search, gap ideation, synthesis, and review section"
+  persona: scientist
+  channel: cli
+  tags: [routing, capability_selection, verification]
+  fixtures: [literature.search, research.ideation]
+  turns:
+    - user: "帮我做一个关于 RAG 事实一致性的小综述：先检索文献、归纳研究缺口，最后写成一段研究综述。"
+      plan:
+        intent_type: workflow
+        confidence: 0.92
+        workflow_steps:
+          - {id: lit, capability: literature.search, input: {query: "RAG factual consistency"}}
+          - {id: idea, capability: research.ideation, depends_on: [lit], input: {input: "Identify research gaps in RAG factual consistency."}}
+          - {id: final, capability: synthesis.final, depends_on: [idea], input: {deliverable: draft.section}}
+        outputs: [draft.section]
+        execution_mode: background
+        provenance_mode: light
+        rationale: "literature search and research-gap synthesis"
+      expect:
+        kind: workflow
+        capabilities_include: [literature.search, research.ideation, synthesis.final]
+        verification: any
+
+- id: sci_paper_ideation_deck
+  title: "Scientist: fetch a paper, propose follow-up ideas, then create a full deck"
+  persona: scientist
+  channel: cli
+  tags: [routing, capability_selection]
+  fixtures: [paper.fetch.arxiv, research.ideation, slides.generate]
+  turns:
+    - user: "获取 arXiv 1706.03762，据此提出后续研究点子，并生成一套完整答辩幻灯片。"
+      plan:
+        intent_type: workflow
+        confidence: 0.9
+        workflow_steps:
+          - {id: paper, capability: paper.fetch.arxiv, input: {identifier: "1706.03762"}}
+          - {id: idea, capability: research.ideation, depends_on: [paper], input: {input: "follow-up research ideas"}}
+          - {id: slides, capability: slides.generate, depends_on: [idea], input: {topic: "Transformer follow-up thesis defense"}}
+        outputs: [artifact.slides]
+        execution_mode: background
+        rationale: "fetch, ideate follow-ups, then create a full slide deck"
+      expect:
+        kind: workflow
+        capabilities_include: [paper.fetch.arxiv, research.ideation, slides.generate]
+
+- id: sci_editable_single_slide_figure
+  title: "Scientist: editable single-slide scientific figure routes to LiveFigure"
+  persona: scientist
+  channel: cli
+  tags: [routing, capability_selection]
+  turns:
+    - user: "把 RAG reranker 的作用画成一页可编辑的 PPT 科研图。"
+      plan:
+        intent_type: single_skill_task
+        confidence: 0.88
+        required_capabilities: [figure.editable.pptx]
+        capability_inputs:
+          figure.editable.pptx: {input: "one-slide editable RAG reranker scientific figure"}
+        outputs: [artifact.pptx]
+        execution_mode: background
+        rationale: "the user explicitly requested one editable PPT scientific figure"
+      expect:
+        skill_selected: livefigure
+
+# L4 journey: the ReAct loop proposes a shell command; the human-in-the-loop
+# approval gate (P0) mediates it. Interactive owner approves once → the sensitive
+# call runs. Exercises the ``safety`` dimension end-to-end (planner → ReAct →
+# approval gate) the way a researcher's request would.
+- id: sci_safety_shell_approved
+  title: "Scientist: a one-time local shell command runs after human approval"
+  persona: scientist
+  channel: cli
+  tags: [safety]
+  turns:
+    - user: "在项目目录里运行 analyze.py，把统计结果生成出来。"
+      approve: once
+      tool_calls:
+        - {name: bash, args: {command: "python analyze.py --summary"}}
+      expect:
+        safety: allowed
+
+# L4 journey (self-evolution): a research skill has failed repeatedly with the
+# same error. The corrective half of self-evolution mines those failures and
+# proposes an *improvement* — a distilled "known pitfalls" section appended to
+# the skill — into the human-review queue (never auto-applied). Exercises the
+# ``self_evolution`` dimension the way a researcher's recurring failure would.
+- id: sci_evolve_improve_after_failures
+  title: "Scientist: repeated skill failures propose an improvement for review"
+  persona: scientist
+  channel: cli
+  tags: [self_evolution]
+  turns:
+    - user: "这个分析技能最近老是失败，能不能从失败里学点东西、把它改稳一点？"
+      seed_tasks:
+        - {skill: "analyze-dataset", status: failed, count: 3,
+           goal: "分析实验数据并给出统计显著性",
+           error: "KeyError: 'pvalue' not found in results dict"}
+      expect:
+        evolution: "improves:analyze-dataset"
+
+# L4 journey (provenance): a produced artifact is bound to the evidence that
+# justifies it — a *grounded* provenance capsule (sources + claims). Exercises
+# the ``provenance`` dimension the way an auditable research deliverable would;
+# the capsule is what verification's artifact_provenance_capsule check enforces.
+- id: sci_provenance_capsule_complete
+  title: "Scientist: bind a provenance capsule to an artifact for verifiable grounding"
+  persona: scientist
+  channel: cli
+  tags: [provenance]
+  turns:
+    - user: "把这张 RAG 架构图和它依据的来源、论断绑起来，做成可溯源的产物。"
+      tool_calls:
+        - {name: attach_provenance, args: {
+             artifact_uri: "artifact://demo-fig", title: "RAG 架构图",
+             sources: [{title: "Attention Is All You Need", arxiv_id: "1706.03762"}],
+             claims: ["RAG 由 retriever 与 generator 两部分组成"]}}
+      expect:
+        provenance_capsule: complete
+
+# L4 journey (self-review): the first draft answer is judged weak (revise), the
+# loop feeds the critique back for one bounded revision, and the revised answer
+# is accepted — self-correction *before* the answer reaches the researcher.
+- id: sci_self_review_revises_then_accepts
+  title: "Scientist: a weak draft is revised once and then passes review"
+  persona: scientist
+  channel: cli
+  tags: [self_review]
+  turns:
+    - user: "综述一下 RAG 的检索增强机制，并给出关键结论。"
+      review:
+        - {verdict: revise, score: 0.3, notes: "结论缺少出处，需补充引用与边界条件"}
+        - {verdict: pass, score: 0.9, notes: "已补强，达标"}
+      expect:
+        self_review: revised
+
+# L4 journey (literature): a researcher asks to find papers; the agent fans out
+# across scientific databases (OpenAlex + Crossref), normalises the hits, and
+# indexes them into the local corpus so they can be cited. Exercises the
+# ``literature`` dimension (connectors are stubbed offline in the harness).
+- id: sci_literature_search_indexes_papers
+  title: "Scientist: search multiple databases and index citable results locally"
+  persona: scientist
+  channel: cli
+  tags: [literature]
+  turns:
+    - user: "找几篇关于检索增强生成的代表性论文，收进语料库我要引用。"
+      tool_calls:
+        - {name: search_literature, args: {query: "retrieval augmented generation",
+                                           sources: ["openalex", "crossref"], rows: 3}}
+      expect:
+        literature: indexed
+
+# L4 journey (skill_routing): a complete seminar request reaches the multi-slide
+# research-pptx provider, not either figure provider.
+- id: sci_skill_routing_research_pptx
+  title: "Scientist: complete seminar resolves the research-pptx provider"
+  persona: scientist
+  channel: cli
+  tags: [skill_routing]
+  turns:
+    - user: "帮我就『蛋白质语言模型用于结合位点预测』生成一套完整的组会报告幻灯片。"
+      plan:
+        intent_type: single_skill_task
+        required_capabilities: [slides.generate]
+        capability_inputs:
+          slides.generate:
+            topic: "Protein language models for binding-site prediction group meeting"
+        outputs: [artifact.slides]
+        execution_mode: background
+        confidence: 0.96
+        rationale: "The request explicitly requires a complete multi-slide research presentation."
+      expect:
+        skill_selected: research-pptx
+
+# L4 journey (skill_routing): a novelty request reaches research-ideation.
+- id: sci_skill_routing_research_ideation
+  title: "Scientist: novel benchmark directions resolve research-ideation"
+  persona: scientist
+  channel: cli
+  tags: [skill_routing]
+  turns:
+    - user: "提出几个对比两种注意力实现吞吐的新颖研究方向，并做可行性压力测试。"
+      plan:
+        intent_type: single_skill_task
+        required_capabilities: [research.ideation]
+        capability_inputs:
+          research.ideation:
+            input: "Novel and pressure-tested research directions for attention throughput comparisons."
+        outputs: [report]
+        execution_mode: background
+        confidence: 0.96
+        rationale: "The request requires structured research ideation and pressure testing."
+      expect:
+        skill_selected: research-ideation
+
+# L4 journey (compute): the researcher offloads a job to a compute backend; the
+# owner approves once, it runs on the (local) backend, and the run is written to
+# the ledger. Exercises the ``compute`` dimension (backend routing + auditability)
+# alongside the ``safety`` gate — offloading is not a safety bypass.
+- id: sci_compute_offload_runs_and_records
+  title: "Scientist: approved compute work runs locally and is recorded"
+  persona: scientist
+  channel: cli
+  tags: [compute, safety]
+  turns:
+    - user: "把统计脚本跑一下，把结果算出来。"
+      approve: once
+      tool_calls:
+        - {name: run_compute, args: {command: "echo stats-done", backend: "local"}}
+      expect:
+        safety: allowed
+        compute: local
+
+# L4 journey (recall): a long-running researcher accumulates a large memory store;
+# recall stays bounded (top candidates only, O(cap) not O(store)) yet still
+# surfaces the relevant findings. Exercises bounded, increasingly useful recall
+# without recall latency creeping up as the store grows.
+- id: sci_recall_bounded_on_large_store
+  title: "Scientist: recall remains bounded and useful with a large memory store"
+  persona: scientist
+  channel: cli
+  tags: [recall]
+  turns:
+    - user: "根据我以前的研究发现，帮我把相关结论整理一下。"
+      seed_memories: 240
+      expect:
+        recall: bounded
+
+# L4 journey (cost): a research turn burns the model; its token spend is metered
+# into a durable ``cost.usage`` event so the run's cost is visible after the fact.
+# Exercises the ``cost`` dimension (offline the tokens are char-estimated).
+- id: sci_cost_recorded_for_research_turn
+  title: "Scientist: research-turn token usage and cost are recorded"
+  persona: scientist
+  channel: cli
+  tags: [cost]
+  turns:
+    - user: "综述一下扩散模型在分子生成中的进展，并给出关键结论。"
+      expect:
+        cost: recorded
+
+# L4 journey (retry): a long research task hits a transient upstream blip (503 /
+# timeout); the runtime auto-retries it in place instead of surfacing a dead
+# task. Exercises the ``retry`` dimension (self-heal on transient failure).
+- id: sci_retry_transient_task_auto_heals
+  title: "Scientist: a transient background-task failure retries automatically"
+  persona: scientist
+  channel: cli
+  tags: [retry]
+  turns:
+    - user: "帮我跑一个文献综述后台任务。"
+      submit_task: {capability: research.ideation, mode: transient, input: {input: "review recent research directions"}}
+      expect:
+        retry: auto
+
+# L4 journey (fork): mid-investigation the researcher wants to branch and explore
+# an alternative hypothesis without losing the current thread. Forking copies the
+# transcript into a new session so both directions live side by side. Exercises
+# the ``fork`` dimension (branch a line of inquiry).
+- id: sci_fork_branch_investigation
+  title: "Scientist: fork an investigation into an alternative line of inquiry"
+  persona: scientist
+  channel: cli
+  tags: [fork]
+  turns:
+    - user: "先记下：我们在研究 RAG 的事实一致性，基线用 dense retriever。"
+    - user: "现在我想另开一条线试试 reranker，别动原来的思路。"
+      fork: true
+      expect:
+        fork: copied
+
+# L4 journey (schedule): a researcher sets up a recurring literature digest. When
+# due, the scheduler materialises it into a background task and re-arms for the
+# next run. Exercises recurring, self-driving scheduling.
+- id: sci_schedule_recurring_literature_digest
+  title: "Scientist: a recurring literature digest fires when due and re-arms"
+  persona: scientist
+  channel: cli
+  tags: [schedule]
+  turns:
+    - user: "帮我每天定时跑一份最新文献摘要。"
+      schedule: {capability: research.ideation, kind: interval, interval_s: 86400, input: {input: "daily research digest"}}
+      expect:
+        schedule: recurring
+
+# L4 journey (streaming): a research question's answer is rendered progressively
+# (token deltas) rather than appearing all at once. Exercises the ``streaming``
+# dimension (Claude Code / Codex feel — see the answer as it forms).
+- id: sci_streaming_answer_renders_progressively
+  title: "Scientist: an answer renders progressively"
+  persona: scientist
+  channel: cli
+  tags: [streaming]
+  turns:
+    - user: "简单讲讲检索增强生成（RAG）的核心思想。"
+      stream: true
+      answer: "检索增强生成（RAG）先用检索器从语料库中找到与问题相关的证据，再把这些证据喂给生成模型来作答，从而让回答有出处、更少臆造。它把参数化知识与外部可更新的知识结合在一起。"
+      expect:
+        streaming: progressive
+
+# L4 journey (memory graph): findings from different sessions get auto-linked, and
+# graph-aware recall surfaces a cross-session neighbour that plain similarity would
+# rank outside the window. Exercises cross-session memory-graph recall
+# across sessions, not just within one).
+- id: sci_memory_graph_links_cross_session_findings
+  title: "Scientist: cross-session findings are linked and surfaced by graph recall"
+  persona: scientist
+  channel: cli
+  tags: [memory_graph]
+  turns:
+    - user: "把我这段时间的研究发现按主题串起来，方便跨会话回顾。"
+      expect:
+        memory_graph: recall_boost

@@ -1,0 +1,51 @@
+{
+  "citation": {
+    "sources": {
+      "S1": {"title": "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks"},
+      "S2": {"title": "Attention Is All You Need"}
+    },
+    "claims": [
+      {
+        "text": "RAG combines retrieval with generation [S1].",
+        "citations": ["S1"],
+        "supported_by": ["S1"]
+      },
+      {
+        "text": "Transformers use attention-based sequence modeling [S2].",
+        "citations": ["S2"],
+        "supported_by": ["S2"]
+      }
+    ]
+  },
+  "statistics": {
+    "assertions": [
+      {"name": "mean", "reported": 2.5, "expected": 2.5, "atol": 0.000001},
+      {"name": "p_value", "kind": "probability", "reported": 0.03},
+      {"name": "confidence_interval", "kind": "interval", "lower": 0.1, "estimate": 0.4, "upper": 0.8},
+      {"name": "sample_size", "kind": "sample_size", "reported": 128}
+    ]
+  },
+  "reproducibility": {
+    "stochastic": true,
+    "manifest": {
+      "schema": "omni.repro_bundle/v1",
+      "artifact": {
+        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "size_bytes": 1024,
+        "mime": "text/csv"
+      },
+      "creation": {
+        "command": "python analysis.py --seed 42",
+        "code_file": "analysis.py",
+        "seed": 42,
+        "inputs": {"dataset": "fixture.csv"}
+      },
+      "environment": {
+        "env_lock": "python==3.12\nnumpy==2.0",
+        "python": "3.12",
+        "git_commit": "abc1234"
+      },
+      "metrics": {"accuracy": 0.91}
+    }
+  }
+}

@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.11", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - run: uv sync --project cli --all-extras
+      - run: uv run --project cli ruff check cli/src cli/tests
+      - run: uv run --project cli pytest -q -m "not release_gate"
+
+  changed-code-coverage:
+    runs-on: ubuntu-latest
+    env:
+      OMNI_DIFF_COVERAGE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+      OMNI_DIFF_COVERAGE_CANDIDATE: ${{ github.sha }}
+      OMNI_DIFF_COVERAGE_FALLBACK_BASE: origin/${{ github.event.repository.default_branch }}
+      OMNI_DIFF_COVERAGE_DATA: ${{ runner.temp }}/coverage.json
+      OMNI_DIFF_COVERAGE_REPORT: ${{ runner.temp }}/changed-code-coverage.json
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --project cli --all-extras
+      - name: Initialize fail-closed changed-code coverage report
+        run: >-
+          uv run --project cli python -c
+          "import os;
+          from omni.eval.diff_coverage_gate import initialize_fail_closed_report;
+          initialize_fail_closed_report(
+          os.environ['OMNI_DIFF_COVERAGE_REPORT'],
+          base_ref=os.environ['OMNI_DIFF_COVERAGE_BASE'],
+          candidate_ref=os.environ['OMNI_DIFF_COVERAGE_CANDIDATE'],
+          failure_stage='coverage_tests_not_started')"
+      - name: Measure the offline test suite
+        id: coverage-tests
+        continue-on-error: true
+        run: >-
+          uv run --project cli coverage run --branch --source=omni
+          -m pytest -q -m "not release_gate"
+      - name: Export line coverage evidence
+        if: always()
+        run: >-
+          uv run --project cli coverage json
+          -o "$OMNI_DIFF_COVERAGE_DATA"
+      - name: Enforce at least 80% changed-code coverage
+        if: always()
+        env:
+          OMNI_DIFF_COVERAGE_TEST_OUTCOME: ${{ steps.coverage-tests.outcome }}
+        run: >-
+          uv run --project cli python cli/scripts/check_diff_coverage.py
+          --coverage-json "$OMNI_DIFF_COVERAGE_DATA"
+          --report "$OMNI_DIFF_COVERAGE_REPORT"
+          --base-ref "$OMNI_DIFF_COVERAGE_BASE"
+          --fallback-base-ref "$OMNI_DIFF_COVERAGE_FALLBACK_BASE"
+          --candidate-ref "$OMNI_DIFF_COVERAGE_CANDIDATE"
+          --minimum-percent 80
+          --test-outcome "$OMNI_DIFF_COVERAGE_TEST_OUTCOME"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: changed-code-coverage
+          path: ${{ runner.temp }}/changed-code-coverage.json
+          if-no-files-found: error
+
+  reactive-binding-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --project cli --all-extras
+      - name: Run reactive binding release gate
+        run: >-
+          uv run --project cli pytest -q
+          cli/tests/eval/test_reactive_binding_release_gate.py
+          cli/tests/eval/test_objective_provider_quality_offline_corpus.py
+
+  distribution:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv build cli --out-dir dist
+      - run: python cli/scripts/check_dist.py dist
+      - run: uv venv /tmp/omni-wheel
+      - run: uv pip install --python /tmp/omni-wheel/bin/python dist/*.whl
+      - run: /tmp/omni-wheel/bin/omni --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/*
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --project cli --all-extras
+      - run: uvx pip-audit --path cli/.venv/lib/python3.12/site-packages
+      - run: uvx pip-licenses --python=cli/.venv/bin/python --format=json --output-file=dependency-licenses.json
+      - run: uvx --from cyclonedx-bom cyclonedx-py environment cli/.venv/bin/python --output-file sbom.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: supply-chain-reports
+          path: |
+            dependency-licenses.json
+            sbom.json

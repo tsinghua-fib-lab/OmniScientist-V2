@@ -1,0 +1,140 @@
+[
+  {
+    "node_id": "l2_kaiming_he_C01",
+    "level": "L2",
+    "category": "C01",
+    "category_label": "怎样定义问题",
+    "description": "该科学家在定义问题时，倾向于识别并挑战现有问题设定中的“人为”或“不自然”之处，主张更统一或更符合任务本质的问题表述。例如，在SPP-net中指出固定输入大小是“人为的”且可能降低精度；在全景分割中强调其是“统一场景分割”而非多任务；在ResNeXt中否定将联合训练视为集成；在R-FCN中批评“不自然的设计”源于分类与检测的矛盾。他常通过对比现有方法忽略的物理原理、近似假设或缺失维度来重新定义问题，如单视图重建中忽视组成与外力、预训练忽略本体感觉等。",
+    "trigger_contexts": [
+      "problem_definition_review",
+      "identifying_artificial_constraints",
+      "redefining_multitask_as_unified",
+      "critiquing_implicit_assumptions"
+    ],
+    "contraindicated_contexts": [
+      "well_established_problem_frameworks",
+      "standard_benchmark_evaluation",
+      "incremental_improvement_without_redefinition"
+    ],
+    "supporting_L1_count": 12
+  },
+  {
+    "node_id": "l2_kaiming_he_C02",
+    "level": "L2",
+    "category": "C02",
+    "category_label": "怎样选择方法",
+    "description": "该科学家在选择方法时表现出强烈的简约与实用偏好。他倾向于选择参数免费、无额外复杂性的设计（如恒等捷径而非门控捷径），并反复声明方法“更简单且更灵活”。在超参数选择上，他频繁基于实验结果进行明确判断：例如为处理小目标调整锚框尺度、为提升稳定性固定BN层、根据收敛情况设计学习率预热策略。他还积极追求实验公平性，确保对比条件一致（如同等训练轮数和学习率调度），并优先复用已有代码库和默认设置（如线性缩放规则、AdamW优化器），仅在必要时加以调整。这种思维模式强调结果驱动、避免多余复杂组件（如放弃角点损失正则化、使用最近邻上采样），显示出对高效、稳健、可复现方法的执着。",
+    "trigger_contexts": [
+      "model_architecture_design",
+      "hyperparameter_tuning",
+      "comparative_experiment_setup",
+      "training_strategy_selection",
+      "simplification_or_pruning"
+    ],
+    "contraindicated_contexts": [
+      "novel_complex_mechanism_exploration",
+      "task_requiring_high_customization",
+      "scenario_where_simplification_causes_bottleneck",
+      "theoretical_derivation_heavy_work"
+    ],
+    "supporting_L1_count": 205
+  },
+  {
+    "node_id": "l2_kaiming_he_C03",
+    "level": "L2",
+    "category": "C03",
+    "category_label": "怎样验证结论",
+    "description": "该科学家验证结论时，核心思维是设计可控对比实验与消融研究，通过严格控制变量（如相同训练设置、数据增强、评价指标）确保公平比较，并采用稳健统计（多次运行取中位数）来排除随机干扰。例如，他通过移除CFM层构建无CFM基线、比较不同掩码比例、在相同时间成本下逐步修改基线模型等，以确凿证据证明假设或改进的有效性。",
+    "trigger_contexts": [
+      "evaluate_new_component_effectiveness",
+      "isolate_variable_influence",
+      "fair_comparison_with_baseline"
+    ],
+    "contraindicated_contexts": [
+      "limited_resources_for_repeated_runs",
+      "incomparable_or_uncontrolled_baselines",
+      "trivial_or_well_established_conclusions"
+    ],
+    "supporting_L1_count": 64
+  },
+  {
+    "node_id": "l2_kaiming_he_C04",
+    "level": "L2",
+    "category": "C04",
+    "category_label": "怎样解释结果",
+    "description": "该科学家在解释结果时，习惯基于实验数据和详细对比做出明确判断，经常指出哪些因素有效、哪些无效，并解释背后的原因。他偏好简洁高效的设计，关注核心组件而非所有细节，并重视计算效率、鲁棒性和公平比较。例如，他通过实验判断多尺度检测更优、单纯增加锚点不足、注意力行为不是关键等。他倾向于采用分布级比较和统一指标，并经常对比不同方法以突出自己方案的优越性。",
+    "trigger_contexts": [
+      "explaining_performance_differences",
+      "comparing_design_choices",
+      "identifying_critical_factors",
+      "evaluating_compute_performance_tradeoffs",
+      "critiquing_existing_methods"
+    ],
+    "contraindicated_contexts": [
+      "pure_theoretical_derivation",
+      "blindly_following_convention",
+      "ignoring_computational_cost",
+      "overlooking_experimental_evidence"
+    ],
+    "supporting_L1_count": 108
+  },
+  {
+    "node_id": "l2_kaiming_he_C05",
+    "level": "L2",
+    "category": "C05",
+    "category_label": "怎样判断美丑",
+    "description": "科学家在回答“怎样判断美丑”时表现出明确的方法审美判断，核心偏好是简洁性（如放弃重建损失以求简洁）和简单性（如简单随机采样优于复杂策略）。他重视数据增强和正则化对抗过拟合，倾向于基于实证结果选择组件（如双线性插值优于最近邻，层归一化和dropout重要）。他批判NAS中人工设计强先验导致复杂优化不如随机搜索，强调解码器设计对表示语义的关键作用，并认为线性可分性不是唯一评估标准。总体上，他以实用和实证为导向，追求高效、稳定且易于工程实现的设计。",
+    "trigger_contexts": [
+      "designing_simple_and_effective_methods",
+      "choosing_between_complex_and_simple_alternatives",
+      "evaluating_component_design_choices",
+      "preventing_overfitting_with_limited_data",
+      "questioning_overly_complex_optimization",
+      "standardizing_network_output_formats"
+    ],
+    "contraindicated_contexts": [
+      "tasks_requiring_complex_deliberate_optimization",
+      "scenarios_where_simplicity_sacrifices_necessary_performance",
+      "problems_need_ing_non_empirical_theoretical_analysis"
+    ],
+    "supporting_L1_count": 27
+  },
+  {
+    "node_id": "l2_kaiming_he_C06",
+    "level": "L2",
+    "category": "C06",
+    "category_label": "怎样处理失败",
+    "description": "面对失败时，习惯于从技术层面进行归因分析，例如将性能不佳归因于特征图分辨率不足、数据规模小、超参数选择不当、训练数据分布不匹配、特定模块设计缺陷等，并据此提出改进方向或承认当前知识的局限。",
+    "trigger_contexts": [
+      "model_performance_degradation",
+      "training_divergence_or_instability",
+      "ablation_study_negative_result",
+      "failure_case_analysis",
+      "method_comparison_suboptimal"
+    ],
+    "contraindicated_contexts": [
+      "exploratory_ideation_phase",
+      "rapid_prototyping_requirement",
+      "no_clear_failure_observed",
+      "context_lacking_detailed_technical_debugging_capability"
+    ],
+    "supporting_L1_count": 63
+  },
+  {
+    "node_id": "l2_kaiming_he_C07",
+    "level": "L2",
+    "category": "C07",
+    "category_label": "怎样产生想法",
+    "description": "该科学家在产生想法时，倾向于基于直觉或观察提出明确的设计假设和指导原则，并通过实验验证或调整。例如，在MoCo中假设字典应大且一致，在ResNeXt中重复相同拓扑的构建块，在残差网络中重新安排激活函数实现恒等映射，在SimSiam中通过实验发现stop-gradient防坍塌，在SlowFast中基于直觉设计低通道容量的Fast pathway，在Pixel Mean Flows中将输出空间与损失空间分离，在Improved Mean Flows中主张减少tokenizer成本，在Plain ViT中通过探索获得新见解而非开发新组件，并强调解耦预训练与微调。这种思维模式注重模块化、解耦和实用性，常从现有方法中汲取灵感（如MAE的稀疏计算），并乐于从全局池化转向更精细的建模。",
+    "trigger_contexts": [
+      "designing_new_neural_network_architectures",
+      "improving_existing_methods_with_heuristic_principles",
+      "exploring_unsupervised_or_self_supervised_learning_techniques"
+    ],
+    "contraindicated_contexts": [
+      "applying_highly_standardized_and_unmodifiable_models",
+      "tasks_requiring_rigid_adherence_to_existing_protocols_without_room_for_assumptions"
+    ],
+    "supporting_L1_count": 14
+  }
+]

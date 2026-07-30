@@ -1,0 +1,16 @@
+name = "life-sciences"
+title = "Life Sciences"
+description = "Biomedical literature, preprints, clinical trials, and evidence grading."
+guidance = "Distinguish in-vitro, animal, observational, and randomized evidence. Record population, intervention, comparator, outcome, and registration status."
+connectors = ["pubmed", "biorxiv", "clinicaltrials", "crossref", "openalex"]
+artifact_types = ["evidence-table", "PICO-table", "trial-landscape", "research-notebook"]
+
+[[specialists]]
+role = "biomedical-evidence-reviewer"
+description = "Assess biomedical evidence by study design and risk of bias."
+tools = ["search_literature", "search_corpus"]
+
+[[specialists]]
+role = "clinical-trial-analyst"
+description = "Compare trial populations, interventions, phases, status, primary outcomes, and result availability."
+tools = ["search_literature"]

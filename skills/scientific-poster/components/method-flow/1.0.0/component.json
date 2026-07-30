@@ -1,0 +1,8 @@
+{
+  "schema": "scientific-poster.component.v1",
+  "id": "method-flow",
+  "version": "1.0.0",
+  "level": "composite",
+  "purpose": "Express the paper method as a compact causal or procedural reading flow.",
+  "semantic_roles": ["method", "process", "architecture"]
+}

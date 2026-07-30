@@ -1,0 +1,4 @@
+interface:
+  display_name: "Paper Review"
+  short_description: "Balanced venue-aligned pre-submission reviews for AI papers."
+  default_prompt: "Use $paper-review to review this paper for the target AI venue and produce a balanced pre-submission review."

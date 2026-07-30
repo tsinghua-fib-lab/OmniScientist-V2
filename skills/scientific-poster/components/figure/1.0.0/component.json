@@ -1,0 +1,8 @@
+{
+  "schema": "scientific-poster.component.v1",
+  "id": "figure",
+  "version": "1.0.0",
+  "level": "composite",
+  "purpose": "Frame a decisive paper figure with takeaway, caption, and source context.",
+  "semantic_roles": ["figure", "evidence", "visual-result"]
+}
