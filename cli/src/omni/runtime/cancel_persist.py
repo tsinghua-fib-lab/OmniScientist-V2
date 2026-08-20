@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar, Token
 from typing import Any, TypeVar
 
 from sqlalchemy.exc import OperationalError
@@ -22,29 +23,98 @@ from omni.storage.db import busy_retry_budget, sqlite_busy
 
 T = TypeVar("T")
 
-_LOCKS: dict[int, asyncio.Lock] = {}
+
+class _PersistLock:
+    """Reentrant per-task lock so finish_task can run inside persist_best_effort."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._owner: object | None = None
+        self._depth = 0
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    def held_by_other(self) -> bool:
+        return self._lock.locked() and self._owner is not asyncio.current_task()
+
+    async def acquire(self) -> None:
+        task = asyncio.current_task()
+        if self._owner is not None and self._owner is task:
+            self._depth += 1
+            return
+        await self._lock.acquire()
+        self._owner = task
+        self._depth = 1
+
+    def release(self) -> None:
+        task = asyncio.current_task()
+        if self._owner is not task:
+            raise RuntimeError("persist lock released by a non-owner")
+        self._depth -= 1
+        if self._depth > 0:
+            return
+        self._owner = None
+        self._lock.release()
+
+    async def __aenter__(self) -> _PersistLock:
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        self.release()
 
 
-def persist_lock() -> asyncio.Lock:
-    """One writer at a time per event loop.
+_LOCKS: dict[tuple[int, int], _PersistLock] = {}
+_PERSIST_TOKEN: ContextVar[object | None] = ContextVar("omni_persist_token", default=None)
 
-    Windows SQLite keeps the aiosqlite worker lock after a cancelled task
-    dies. Overlapping cancel persists then raise ``database is locked`` and
-    replace ``CancelledError`` with a tool failure.
+
+def persist_lock(token: object | None = None) -> _PersistLock:
+    """One writer at a time per event loop and persist token.
+
+    ``token`` should be the store being written (the ``Database``). Two
+    isolated workspaces on the same loop must not share a lock: dropping
+    ``react.finished`` because another black-box attempt is finishing is
+    how Windows release cells lose half the self-knowledge repeats.
+
+    ``token is None`` stays the loop-wide cancel lock used by skill-side
+    ``persist_best_effort``. Windows SQLite keeps the aiosqlite worker lock
+    after a cancelled task dies; overlapping cancel persists then raise
+    ``database is locked`` and replace ``CancelledError`` with a tool failure.
+
+    The lock is reentrant for the current task: ``persist_best_effort`` already
+    holds it when a cancelled skill refreshes the parent and ``finish_task``
+    queues again.
     """
     loop = asyncio.get_running_loop()
-    lock = _LOCKS.get(id(loop))
+    resolved = token if token is not None else _PERSIST_TOKEN.get()
+    key = (id(loop), id(resolved) if resolved is not None else 0)
+    lock = _LOCKS.get(key)
     if lock is None:
-        lock = asyncio.Lock()
-        _LOCKS[id(loop)] = lock
+        lock = _PersistLock()
+        _LOCKS[key] = lock
     return lock
 
 
 @asynccontextmanager
-async def exclusive_persist() -> AsyncIterator[None]:
+async def exclusive_persist(token: object | None = None) -> AsyncIterator[None]:
     """Serialize a cancel/terminal write with other persist helpers."""
-    async with persist_lock():
+    async with persist_lock(token):
         yield
+
+
+@asynccontextmanager
+async def persist_scope(token: object) -> AsyncIterator[None]:
+    """Bind skill-side persist helpers to this store for the current task.
+
+    ``persist_best_effort`` takes no database argument. Isolated attempts on
+    the same loop must still serialize against *their* store, not a neighbor's.
+    """
+    reset: Token[object | None] = _PERSIST_TOKEN.set(token)
+    try:
+        yield
+    finally:
+        _PERSIST_TOKEN.reset(reset)
 
 
 def pause_cancellation() -> int:
@@ -78,14 +148,25 @@ def ignore_cancellation() -> Iterator[None]:
         resume_cancellation(held)
 
 
-async def run_uncancelled(work: Callable[[], Awaitable[T]]) -> T:
-    """Run ``work`` on a sibling task this task's re-cancels cannot abort."""
+async def run_uncancelled(
+    work: Callable[[], Awaitable[T]],
+    *,
+    serialize: bool = True,
+) -> T:
+    """Run ``work`` on a sibling task this task's re-cancels cannot abort.
 
-    async def locked() -> T:
-        async with persist_lock():
-            return await work()
+    ``serialize=False`` still outlives ``Task.cancel()`` but does not hold
+    :func:`persist_lock` for the whole body. Parent settle uses that so each
+    busy retry can release the writer lock for the cancelled skill.
+    """
 
-    worker = asyncio.ensure_future(locked())
+    async def body() -> T:
+        if serialize:
+            async with persist_lock():
+                return await work()
+        return await work()
+
+    worker = asyncio.ensure_future(body())
     try:
         while True:
             pause_cancellation()
@@ -154,6 +235,7 @@ __all__ = [
     "pause_cancellation",
     "persist_best_effort",
     "persist_lock",
+    "persist_scope",
     "resume_cancellation",
     "run_uncancelled",
 ]

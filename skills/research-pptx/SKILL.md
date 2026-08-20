@@ -26,6 +26,11 @@ metadata:
     delivery_mode: async_task
     kind: python_engine
     priority: 100
+    execution:
+      # Own wall clock: a full deck (PDF/topic → outline → Node render) routinely
+      # exceeds the undeclared 600s fallback. 15 minutes stays under the
+      # python_engine ceiling; do not inherit skills.default_seconds.
+      max_seconds: 900
     deliverables:
       - artifact.slides
     capabilities:

@@ -520,7 +520,7 @@ async def test_channel_inbound_routes_to_agent_and_echoes_context_token(settings
         "message_id": 42,
         "item_list": [{"type": 1, "text_item": {"text": "hi there"}}],
     }
-    await channel._handle_ilink_message(msg)
+    await channel.handle_ilink_message(msg)
 
     assert agent.turns and agent.turns[0]["text"] == "hi there"
     assert len(fake.sent) == 1
@@ -528,6 +528,24 @@ async def test_channel_inbound_routes_to_agent_and_echoes_context_token(settings
     assert to == "user@im.wechat"
     assert ctx == "ctx-1"
     assert "通道回答" in text
+
+
+@pytest.mark.asyncio
+async def test_session_timeout_stops_the_adapter(settings):
+    from omni.channels.wechat import WeChatAuthExpired, WeChatChannel
+
+    cfg = settings.paths.channels_dir / "wechat.toml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text('mode = "ilink"\n', encoding="utf-8")
+
+    class ExpiredClient(_FakeIlinkClient):
+        async def get_updates(self, buf: str) -> dict[str, Any]:
+            return {"ret": 0, "errcode": -14, "errmsg": "session timeout"}
+
+    channel = WeChatChannel(settings, _DummyAgent(), client=ExpiredClient())  # type: ignore[arg-type]
+    channel._cfg["bot_token"] = "expired-token"
+    with pytest.raises(WeChatAuthExpired, match="login expired"):
+        await channel.start()
 
 
 @pytest.mark.asyncio
@@ -551,10 +569,10 @@ async def test_channel_dedupes_message_id_and_ignores_bot_messages(settings):
         "message_id": 7,
         "item_list": [{"type": 1, "text_item": {"text": "repeat"}}],
     }
-    await channel._handle_ilink_message(msg)
-    await channel._handle_ilink_message(dict(msg))  # same message_id -> deduped
+    await channel.handle_ilink_message(msg)
+    await channel.handle_ilink_message(dict(msg))  # same message_id -> deduped
     # bot's own echoed message must never trigger a turn
-    await channel._handle_ilink_message(
+    await channel.handle_ilink_message(
         {"message_type": 2, "from_user_id": "", "item_list": [{"type": 1, "text_item": {"text": "echo"}}]}
     )
 
@@ -576,7 +594,7 @@ async def test_channel_shows_typing_indicator_around_turn(settings):
     fake = _FakeIlinkClient()
     channel = WeChatChannel(settings, agent, client=fake)  # type: ignore[arg-type]
 
-    await channel._handle_ilink_message(
+    await channel.handle_ilink_message(
         {
             "message_type": 1,
             "from_user_id": "user@im.wechat",
@@ -605,7 +623,7 @@ async def test_channel_typing_can_be_disabled(settings):
     agent = _DummyAgent()
     fake = _FakeIlinkClient()
     channel = WeChatChannel(settings, agent, client=fake)  # type: ignore[arg-type]
-    await channel._handle_ilink_message(
+    await channel.handle_ilink_message(
         {
             "message_type": 1,
             "from_user_id": "user@im.wechat",
@@ -657,7 +675,7 @@ async def test_channel_inbound_media_downloads_and_notes_path(settings):
     fake = _FakeIlinkClient()
     channel = WeChatChannel(settings, agent, client=fake)  # type: ignore[arg-type]
 
-    await channel._handle_ilink_message(
+    await channel.handle_ilink_message(
         {
             "message_type": 1,
             "from_user_id": "user@im.wechat",
@@ -692,7 +710,7 @@ async def test_channel_media_only_message_still_handled(settings):
     agent = _DummyAgent()
     fake = _FakeIlinkClient()
     channel = WeChatChannel(settings, agent, client=fake)  # type: ignore[arg-type]
-    await channel._handle_ilink_message(
+    await channel.handle_ilink_message(
         {
             "message_type": 1,
             "from_user_id": "user@im.wechat",
@@ -902,7 +920,6 @@ def test_login_scan_is_not_gated_behind_a_confirmation_prompt(settings, monkeypa
     def _no_prompts(*args: Any, **kwargs: Any) -> bool:
         raise AssertionError("login must not ask for confirmation before showing the QR")
 
-    monkeypatch.setattr(channel_cmd, "confirm", _no_prompts)
     monkeypatch.setattr(render, "confirm", _no_prompts)
 
     channel_cmd._login_wechat_ilink(
@@ -935,3 +952,33 @@ def test_login_no_wait_writes_template_without_token(settings):
     configured, reason = channel_config_state(settings, "wechat")
     assert configured is False
     assert "bot_token" in reason
+
+
+def test_leftover_self_hosted_wechat_bridge_is_not_configured(settings):
+    """Abandoned :8088 / WeCom files are incomplete; users must scan the iLink QR."""
+    from omni.channels.manager import channel_config_state
+
+    cfg = settings.paths.channels_dir / "wechat.toml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text(
+        'mode = "gateway"\n'
+        'gateway_url = "http://127.0.0.1:8088"\n'
+        'inbox_path = "/messages"\n'
+        'send_path = "/send"\n',
+        encoding="utf-8",
+    )
+    configured, reason = channel_config_state(settings, "wechat")
+    assert configured is False
+    assert "bot_token" in reason
+
+
+def test_ilink_bot_token_alone_is_configured(settings):
+    from omni.channels.manager import channel_config_state
+
+    settings.paths.channels_dir.mkdir(parents=True, exist_ok=True)
+    (settings.paths.channels_dir / "wechat.toml").write_text('mode = "ilink"\n', encoding="utf-8")
+    settings.paths.secrets_file.write_text(
+        '[channels.wechat]\nbot_token = "tok-only"\n', encoding="utf-8"
+    )
+    configured, reason = channel_config_state(settings, "wechat")
+    assert configured is True, reason

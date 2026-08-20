@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy.exc import OperationalError
+
 from omni.agent.capabilities import CAPABILITY_TASK_INSPECT, CAPABILITY_TASK_REVIEW
 from omni.agent.intent_plan import IntentPlan
 from omni.agent.plan_result import PlanExecutionResult
@@ -24,6 +26,7 @@ from omni.runtime.remaining import (
     survey_closer_eligible,
 )
 from omni.runtime.task_title import short_task_title
+from omni.storage.db import sqlite_busy
 
 
 @dataclass
@@ -1239,9 +1242,18 @@ class TurnExecution:
             # injected at a ReAct boundary.
             result._delivered_control_ids = control.delivered_control_ids  # type: ignore[attr-defined]
             if result.terminated_reason == "cancelled":
-                await self._settle_cancelled_children(
-                    result.task_id or acknowledged["task_id"]
-                )
+                from omni.runtime.cancel_persist import run_uncancelled
+
+                async def settle_returned() -> None:
+                    task_id = result.task_id or acknowledged["task_id"]
+                    await self._settle_cancelled_children(task_id)
+                    still_open = getattr(self._tasks, "has_active_children", None)
+                    if callable(still_open) and await still_open(task_id):
+                        await asyncio.sleep(0.35)
+                        await self._settle_cancelled_children(task_id)
+
+                # wait_for() can cancel this wrapper; the checkpoint must land.
+                await run_uncancelled(settle_returned, serialize=False)
             return result
         except ExecutionCancelled:
             result = await self._stopped_result(
@@ -1279,8 +1291,15 @@ class TurnExecution:
         if not task_id:
             return
         settler = getattr(self._tasks, "settle_open_children_for_cancel", None)
-        if callable(settler):
+        if not callable(settler):
+            return
+        try:
             await settler(task_id)
+        except OperationalError as exc:
+            # A leftover aiosqlite lock must not replace user cancel with a
+            # store failure. The child row is retried by the skill persist.
+            if not sqlite_busy(exc):
+                raise
 
     async def _cancelled_result(
         self,
@@ -1319,10 +1338,12 @@ class TurnExecution:
             if cancelled
             else f"Interrupted before completing: {user_message[:160]}"
         )
-        if cancelled:
-            await self._settle_cancelled_children(task_id)
-        task = await self._tasks.get_task(task_id) if task_id else None
-        if task is not None and task.status in {"running", "recovering"}:
+        from omni.runtime.cancel_persist import run_uncancelled
+
+        async def persist_stop() -> None:
+            task = await self._tasks.get_task(task_id) if task_id else None
+            if task is None or task.status not in {"running", "recovering"}:
+                return
             if session_id:
                 await self._persist_message(
                     session_id,
@@ -1339,12 +1360,30 @@ class TurnExecution:
                 output_json={"kind": "partial", "terminated_reason": reason},
                 summary=summary,
             )
+            # Close the ReAct span. complete_react never ran on this path.
+            await self._tasks.append_event(
+                task_id,
+                event_type="react.finished",
+                status=reason,
+                name="react",
+                output_json={"kind": "partial", "terminated_reason": reason},
+                summary=f"react partial: {reason}",
+            )
             await self._task_controller.finish_turn(
                 task_id,
                 kind="partial",
                 text=text,
                 task_status=reason,
             )
+
+        if cancelled:
+            # serialize=False so settle can drop persist_lock between busy
+            # retries. Still a sibling: wait_for(8) must not abort the sleep.
+            async def settle() -> None:
+                await self._settle_cancelled_children(task_id)
+
+            await run_uncancelled(settle, serialize=False)
+        await run_uncancelled(persist_stop)
         return TurnResult(
             text=text,
             session_id=session_id,

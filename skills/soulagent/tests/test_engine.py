@@ -108,7 +108,7 @@ class SoulAgentEngineTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [request["max_tokens"] for request in llm.requests],
-            [512, 3072],
+            [512, 8192],
         )
 
     async def test_host_completion_timeout_cancels_the_model_request(self) -> None:
@@ -126,12 +126,12 @@ class SoulAgentEngineTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.to_thread(completion, "sensor", "task")
         await asyncio.wait_for(llm.cancelled.wait(), timeout=1)
 
-    async def test_host_completion_rejects_truncated_results(self) -> None:
+    async def test_host_completion_keeps_nonempty_truncated_text(self) -> None:
         module = _engine_module()
 
         class _TruncatedLLM:
             async def chat_with_tools(self, messages, tools, **kwargs):
-                result = _Result("partial")
+                result = _Result("partial persona")
                 result.finish_reason = "length"
                 return result
 
@@ -142,8 +142,42 @@ class SoulAgentEngineTest(unittest.IsolatedAsyncioTestCase):
             max_tokens=module.PERSONA_DECODER_MAX_TOKENS,
             timeout_seconds=1,
         )
-        with self.assertRaisesRegex(RuntimeError, "拒绝使用被截断的结果"):
+        text = await asyncio.to_thread(completion, "decoder", "subgraph")
+        self.assertEqual(text, "partial persona")
+
+    async def test_host_completion_rejects_empty_truncated_results(self) -> None:
+        module = _engine_module()
+
+        class _EmptyTruncatedLLM:
+            async def chat_with_tools(self, messages, tools, **kwargs):
+                result = _Result("")
+                result.finish_reason = "length"
+                return result
+
+        completion = module._OmniCompletion(
+            _EmptyTruncatedLLM(),
+            asyncio.get_running_loop(),
+            stage_label="任务化人格生成",
+            max_tokens=module.PERSONA_DECODER_MAX_TOKENS,
+            timeout_seconds=1,
+        )
+        with self.assertRaisesRegex(RuntimeError, "未得到可用文本"):
             await asyncio.to_thread(completion, "decoder", "subgraph")
+
+    def test_who_am_i_questions_are_status_and_restore_is_unload(self) -> None:
+        module = _engine_module()
+        cases = {
+            "人格状态": "status",
+            "当前人格": "status",
+            "你现在是谁的人格？": "status",
+            "你当前是谁的人格?": "status",
+            "whose persona is this": "status",
+            "restore yourself": "unload",
+            "think like Fengli Xu": "activate",
+        }
+        for request, expected in cases.items():
+            with self.subTest(request=request):
+                self.assertEqual(module._infer_action(request, None), expected)
 
     def test_explicit_scientist_name_requires_a_named_persona(self) -> None:
         module = _engine_module()
@@ -307,7 +341,7 @@ class SoulAgentEngineTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 [request["max_tokens"] for request in engine.ctx.llm.requests[:2]],
-                [512, 3072],
+                [512, 8192],
             )
 
             unchanged = await engine.execute(input=request)
@@ -413,6 +447,65 @@ class SoulAgentEngineTest(unittest.IsolatedAsyncioTestCase):
             _assert_engine_contract(unloaded)
             self.assertFalse((project / "role.md").exists())
             self.assertFalse((project / ".soulagent" / "state.json").exists())
+
+    def test_state_root_stays_on_working_dir_when_parent_has_scientist_kg(self) -> None:
+        module = _engine_module()
+        with tempfile.TemporaryDirectory(prefix="persona-root-") as temporary:
+            repo = Path(temporary)
+            (repo / "scientist-kg").mkdir()
+            subdir = repo / "subdir"
+            subdir.mkdir()
+            ctx = SimpleNamespace(
+                working_dir=subdir,
+                paths=SimpleNamespace(workspace_root=repo, home=repo / ".omni"),
+            )
+            self.assertEqual(module._resolve_project_root(ctx, None), subdir.resolve())
+            self.assertEqual(
+                module._resolve_project_root(ctx, str(subdir)),
+                subdir.resolve(),
+            )
+            self.assertEqual(
+                module._resolve_kg_root(ctx, subdir.resolve(), None),
+                (repo / ".omni" / "scientist-kg").resolve(),
+            )
+
+    async def test_status_and_unload_do_not_follow_parent_persona_state(self) -> None:
+        module = _engine_module()
+        with tempfile.TemporaryDirectory(prefix="persona-isolate-") as temporary:
+            repo = Path(temporary)
+            (repo / "scientist-kg").mkdir()
+            lock = repo / ".soulagent" / "lock"
+            lock.mkdir(parents=True)
+            (lock / "ready").touch()
+            (repo / ".soulagent" / "state.json").write_text(
+                '{"host":"omniscientist","scientist_id":"fengli-xu","scientist_name":"Fengli Xu"}',
+                encoding="utf-8",
+            )
+            (repo / "role.md").write_text("parent persona", encoding="utf-8")
+            subdir = repo / "subdir"
+            subdir.mkdir()
+            engine = module.SoulAgentEngine()
+            engine.ctx = SimpleNamespace(
+                llm=_FakeLLM(),
+                working_dir=subdir,
+                paths=SimpleNamespace(workspace_root=repo, home=repo / ".omni"),
+            )
+
+            status = await engine.execute(input="当前人格", action="status")
+            self.assertEqual(Path(status["project_root"]), subdir.resolve())
+            self.assertFalse(status["active"])
+            self.assertEqual(status["outcome"]["code"], "inactive")
+
+            unloaded = await engine.execute(input="恢复你自己", action="unload")
+            self.assertEqual(Path(unloaded["project_root"]), subdir.resolve())
+            self.assertEqual(unloaded["outcome"]["code"], "already_inactive")
+            self.assertTrue((repo / ".soulagent" / "state.json").is_file())
+            self.assertEqual(
+                (repo / "role.md").read_text(encoding="utf-8"),
+                "parent persona",
+            )
+            _assert_engine_contract(status)
+            _assert_engine_contract(unloaded)
 
 
 if __name__ == "__main__":

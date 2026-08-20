@@ -4,11 +4,41 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) and semanti
 
 ## Unreleased
 
+### Fixed
+
+- In-flight model cancel still writes ``react.finished`` so the ReAct span
+  closes (Python 3.11+ no longer drops the persist tail after ``Task.cancel()``).
+  On Windows the event is queued like ``finish_task`` so a busy store cannot
+  drop the closed span.
+- Parent cancel settle is capped and memoized so a Linux busy store cannot
+  hold a cancelled turn past the 8s workflow-cancel wait.
+- Windows workflow-cancel now finishes after ``wait_for`` cancels the turn
+  mid-settle. Advisory events yield the persist lock (and skip the busy
+  queue once the execute task is already cancelling) so the checkpoint can
+  land inside the 8s budget.
+
 ### Added
 
 - ``cli/scripts/release_selfcheck.sh`` recreates a GitHub Release cell on this
   machine: a minutes-long hot suite, an ubuntu/3.11 Docker cell, and
   ``--dispatch`` of Actions ``Release preflight`` for the Windows matrix.
+- ``release_selfcheck.sh --plan`` prints the ``release.yml`` job map
+  (compatibility / build / smoke / publish) against the local stand-ins.
+  ``--dispatch --wait`` blocks until the GitHub 9-cell preflight finishes.
+  The hot list includes the in-flight model-cancel cell that fails on this OS.
+
+## [2.0.0rc5] - 2026-08-20
+
+### Fixed
+
+- Vite's ``esbuild`` postinstall is explicitly allowed in ``web/pnpm-workspace.yaml``,
+  so ``pnpm install --frozen-lockfile`` no longer fails on pnpm 11
+  (``ERR_PNPM_IGNORED_BUILDS``) during ``omni web`` packaging.
+
+### Changed
+
+- Bumped the release candidate to `2.0.0rc5` (Git tag `v2.0.0rc5`).
+  PyPI will not replace `2.0.0rc4`.
 
 ## [2.0.0rc4] - 2026-08-17
 

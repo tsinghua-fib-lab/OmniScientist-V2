@@ -467,7 +467,9 @@ class WeixinIlinkClient:
         except httpx.TimeoutException:
             return {"status": "wait"}
         except httpx.HTTPError as exc:  # transient gateway error -> keep waiting
-            logger.debug("poll_qr_status transient error: %s", exc)
+            # The exception request URL includes the opaque QR capability as a
+            # query parameter.  Log only the class, never the URL/string.
+            logger.debug("poll_qr_status transient %s", type(exc).__name__)
             return {"status": "wait"}
 
     async def wait_for_login(

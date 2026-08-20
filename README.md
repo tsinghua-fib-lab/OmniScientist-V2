@@ -19,7 +19,7 @@ for software and paper citation metadata.
 For the full design and how it compares to Claude Code/Codex and other open-source research
 agents, see [`cli/docs/research-agent-design.md`](cli/docs/research-agent-design.md).
 
-The current repository metadata reports package version `2.0.0rc4` (Git tag `v2.0.0rc4`). This is
+The current repository metadata reports package version `2.0.0rc5` (Git tag `v2.0.0rc5`). This is
 a temporary prerelease identity, not the stable release line: the first stable V2 release will be
 `2.0.0`, followed by compatible `2.0.x` patch releases. Once the stable release is published,
 normal installations and updates should not pin a version; the package manager resolves the latest
@@ -50,6 +50,22 @@ pipx install OmniScientist-V2
 
 omni
 ```
+
+The browser surface is an optional package extra for direct package-manager installs:
+
+```bash
+uv tool install "OmniScientist-V2[web]"
+# or: pip install "OmniScientist-V2[web]"
+omni web
+```
+
+On the Web home screen, **Scientist persona** lets you choose an installed
+SoulAgent persona and describe the current research task. The same controls are
+available under **Settings → Scientist personas** for search, activation,
+task-specific refresh, switching, and restoring standard Omni. Web and CLI read
+the same workspace-scoped persona catalog and active state; every change runs as
+a normal, auditable SoulAgent Task, and an in-progress change is resumed after a
+page refresh instead of being submitted twice.
 
 These unpinned commands install the latest stable release. Until `2.0.0` is published, use the
 checkout installer below or intentionally select a prerelease for testing. An exact stable version
@@ -87,7 +103,11 @@ pipx upgrade OmniScientist-V2
 From a downloaded/cloned source tree, the repository installer deploys the local checkout snapshot,
 including uncommitted work. It creates an isolated `uv tool` and bootstraps `uv` when needed. A copy
 of the script run without its checkout installs PyPI; the moving `master` channel is development-only
-and must be selected explicitly. The default extras include MCP, vector retrieval, and channel SDKs.
+and must be selected explicitly. The default extras include MCP, vector retrieval, channel SDKs,
+and the loopback Web runtime.
+Local snapshot and editable deployments compile the checkout's `web/` source before changing the
+Python installation. If Node.js plus pnpm/npm cannot produce the SPA, deployment stops instead of
+silently packaging an older `web/dist`.
 
 ```bash
 git clone https://github.com/tsinghua-fib-lab/OmniScientist-V2.git
@@ -131,7 +151,7 @@ Manual alternatives:
 ```bash
 # Editable contributor install
 uv venv --python 3.12 .venv
-uv pip install -e "./cli[dev,mcp,vec,channels]" --python .venv
+uv pip install -e "./cli[dev,mcp,vec,channels,web]" --python .venv
 ```
 
 The base package includes the Python dependencies required by active built-in Skills. The first
@@ -145,6 +165,11 @@ missing LiveFigure VLM remains a separate `needs_input` condition.
 Git URL installs require an immutable semantic release tag or full commit hash; mutable branches
 are rejected except through the explicit development channel. Use the checkout installer for
 unpublished source changes.
+
+Direct `git+...#subdirectory=cli` installs contain the Python package only: the generated SPA lives
+outside that subdirectory and is not stored in git. To use `omni web`, install a published wheel
+with the `[web]` extra, or clone the full repository and run its installer so the frontend and
+backend are built and installed together.
 
 ### Maintainer release flow
 
@@ -189,21 +214,27 @@ Do not discover OS-specific SQLite/cancel failures on the tagged Release job. Re
 GitHub cells locally first (dirty trees are allowed):
 
 ```bash
+# GitHub release.yml jobs vs what this machine can run.
+cli/scripts/release_selfcheck.sh --plan
+
 # Minutes: this OS, the tests that recently failed only on release runners.
+# Dirty tree OK — run this before commit.
 cli/scripts/release_selfcheck.sh
 
 # GitHub ubuntu-latest × 3.11 (linux/amd64 Docker; same SQLite PRAGMA as CI).
 cli/scripts/release_selfcheck.sh --linux
 
 # One full compatibility cell on this OS (~45 minutes; isolated venv).
+# Same commands as release.yml job "compatibility" + the build-job gates.
 cli/scripts/release_selfcheck.sh --full
 
 # Real 9-cell matrix, including Windows. Needs a pushed SHA. No tag, no PyPI.
-cli/scripts/release_selfcheck.sh --dispatch
+cli/scripts/release_selfcheck.sh --dispatch --wait
 ```
 
 Windows cannot be reproduced on this machine. `--dispatch` is `workflow_dispatch` of
-`Release preflight`. `release.sh --preflight` remains the local wheel+full-pytest cell.
+`Release preflight` (`--wait` blocks until the matrix finishes). `release.sh --preflight`
+remains the local wheel+full-pytest cell.
 
 The release script requires remote `master` to equal local `HEAD`, validates and pushes
 `v<version>`. The tag workflow reruns all nine OS/Python combinations (Linux/Python 3.12 in the
@@ -517,9 +548,10 @@ omitted secret (the REPL does not expand shell variables such as `$FEISHU_APP_SE
 ```
 
 Credentials are stored without any extra flag: the macOS Keychain where it exists, and
-`<OMNI_HOME>/secrets.toml` (mode 0600, keep it user-only) on Linux and Windows. WeChat
-speaks Tencent's official ClawBot bot API, so Tencent's ClawBot terms govern the paired account.
-Self-hosted `--method gateway` and `--method wecom` remain available for existing deployments.
+`<OMNI_HOME>/secrets.toml` otherwise (mode 0600 on POSIX; the user-directory ACL on
+Windows, which is not POSIX 0600). WeChat
+uses the official ClawBot iLink QR — scan that code. Self-hosted `:8088` bridges and
+WeCom are not supported. Tencent's ClawBot terms govern the paired account.
 
 ### 2. Pair and verify
 
@@ -545,7 +577,7 @@ The equivalent REPL checks are `/channel list`, `/channel test feishu`, `/serve 
 
 - **Enablement** — `<OMNI_HOME>/config.toml` under `[channels] enabled = ["cli", "feishu", …]`.
 - **Per-channel settings** — `<OMNI_HOME>/channels/<name>.toml` (mode, endpoints, allowlist/pairing).
-- **Secrets** — macOS Keychain where available, otherwise `<OMNI_HOME>/secrets.toml` (mode 0600).
+- **Secrets** — macOS Keychain where available, otherwise `<OMNI_HOME>/secrets.toml` (mode 0600 on POSIX; the user-directory ACL on Windows).
 - Prefer `omni channel login` / `omni channel add` over hand-editing: they write secure
   allowlist/pairing defaults for you. `omni config path` prints the exact file locations.
 

@@ -75,9 +75,10 @@ def complete_chat(
         choices = decoded.get("choices") if isinstance(decoded, dict) else None
         choice = choices[0] if choices else {}
         content = choice.get("message", {}).get("content")
-        if str(choice.get("finish_reason") or "") == "length":
+        truncated = str(choice.get("finish_reason") or "") == "length"
+        if truncated and (not isinstance(content, str) or not content.strip()):
             raise LLMClientError(
-                f"LLM API 输出达到 {max_tokens} tokens 上限，拒绝使用截断结果"
+                f"LLM API 输出达到 {max_tokens} tokens 上限，且未得到可用文本"
             )
     except urllib.error.HTTPError as exc:
         raise LLMClientError(f"LLM API 返回 HTTP {exc.code}") from exc

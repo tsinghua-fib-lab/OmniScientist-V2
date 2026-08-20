@@ -153,6 +153,49 @@ async def test_append_event_drops_when_the_store_stays_locked() -> None:
 
 
 @pytest.mark.asyncio
+async def test_append_event_does_not_queue_behind_busy_after_cancel() -> None:
+    agent = await OmniAgent.create(load_settings())
+    run = await agent.tasks.create_task(
+        session_id="", channel="cli", user_input="cancel me"
+    )
+    real_session = agent.tasks._db.session
+    attempts = {"n": 0}
+
+    @asynccontextmanager
+    async def always_busy():
+        attempts["n"] += 1
+        raise OperationalError(
+            "INSERT task_events", {}, Exception("database is locked")
+        )
+        yield  # pragma: no cover
+
+    async def cancelled_write() -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel()
+        try:
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            agent.tasks._db.session = always_busy
+            event = await agent.tasks.append_event(
+                run.id,
+                event_type="react.tool.done",
+                status="succeeded",
+                name="run_workflow",
+            )
+            assert event is None
+            raise
+
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.create_task(cancelled_write())
+        assert attempts["n"] == 1
+    finally:
+        agent.tasks._db.session = real_session
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
 async def test_append_event_does_not_retry_a_non_busy_operational_error() -> None:
     agent = await OmniAgent.create(load_settings())
     run = await agent.tasks.create_task(

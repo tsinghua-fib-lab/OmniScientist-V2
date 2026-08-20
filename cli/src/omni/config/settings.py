@@ -67,6 +67,9 @@ _PROJECT_FORBIDDEN_PREFIXES = (
     # The home-level background service is a machine-global, owner-controlled
     # decision; a cloned project must never enable/disable or reconfigure it.
     "service.",
+    # Web-process admission is an owner preference; a cloned repo must not
+    # cap or uncap the owner's loopback UI.
+    "web.",
     "artifacts.output_dir",
     # Global-memory routing and IM identity are owner/machine decisions: a
     # cloned repo must not be able to divert the owner's cross-workspace memory
@@ -756,6 +759,18 @@ class ChannelsCfg(BaseModel):
     enabled: list[str] = Field(default_factory=lambda: ["cli"])
 
 
+class WebCfg(BaseModel):
+    """Loopback web surface knobs. CLI, IM, and the agent runtime ignore these.
+
+    ``max_inflight_turns`` caps concurrent *running* turns started by one
+    ``omni web`` process in a single workspace. ``0`` means unlimited — the
+    same policy as opening many CLI windows on that workspace. Session and
+    window counts are never capped.
+    """
+
+    max_inflight_turns: int = 10
+
+
 class ServiceCfg(BaseModel):
     """Home-level background service preferences (machine-global control plane).
 
@@ -881,6 +896,7 @@ class OmniSettings(BaseModel):
     schedules: SchedulesCfg = Field(default_factory=SchedulesCfg)
     channels: ChannelsCfg = Field(default_factory=ChannelsCfg)
     service: ServiceCfg = Field(default_factory=ServiceCfg)
+    web: WebCfg = Field(default_factory=WebCfg)
     observability: ObservabilityCfg = Field(default_factory=ObservabilityCfg)
     update: UpdateCfg = Field(default_factory=UpdateCfg)
     trust: TrustCfg = Field(default_factory=TrustCfg)

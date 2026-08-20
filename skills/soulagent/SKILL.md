@@ -254,11 +254,13 @@ The pipeline is fixed:
 kg_preflight → task_sensor → graph_pruner → kg_decoder → stoma_writer
 ```
 
-Under the Omni host adapter, keep the small JSON task sensor and the persona
-decoder on separate bounded model calls: 512 output tokens / 30 seconds for
-task sensing, and 3072 output tokens / 60 seconds for persona decoding. Cancel
-the in-flight host future on timeout and never accept an output-cap-truncated
-persona.
+These output bounds belong to this Skill's host adapter, not the Omni agent
+loop. Keep the small JSON task sensor and the persona decoder on separate
+bounded model calls: 512 output tokens / 30 seconds for task sensing, and 8192
+output tokens / 120 seconds for persona decoding. Cancel the in-flight host
+future on timeout. If a decoder reply hits the output cap or fails validation,
+inject canonical P01-P04 sections and retry once in compact form. Never commit
+a persona that is missing required headings or verbatim kernel text.
 
 The decoder may verbalize only the selected subgraph. It must not select new nodes, invent
 evidence, expose internal IDs, write back to the KG, or modify this Skill.

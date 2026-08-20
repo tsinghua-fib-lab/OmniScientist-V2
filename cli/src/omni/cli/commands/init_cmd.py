@@ -271,16 +271,9 @@ def first_run_setup_required(state: AppState) -> bool:
     model supplied by a profile or environment variables is equally valid and
     must not be overwritten by an unsolicited wizard.
     """
-    settings = state.settings()
-    if settings.paths.config_file.is_file():
-        return False
-    model = settings.model
-    return not (
-        _normalize_provider(model.provider) != "mock"
-        and bool(model.base_url)
-        and bool(model.model)
-        and model.model != "omni-mock"
-    )
+    from omni.config.user_edits import setup_required
+
+    return setup_required(state.settings())
 
 
 def first_run_setup_message(home: Path) -> str:

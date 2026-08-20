@@ -26,6 +26,8 @@ def test_distribution_validator_requires_licenses_and_bundled_skills(tmp_path):
         archive.writestr("omni/data/skills/scientific-figure/SKILL.md", "skill")
         archive.writestr("omni/data/skills/scientific-figure/LICENSE.txt", "license")
         archive.writestr("omni/data/skills/scientific-figure/NOTICE.md", "notice")
+        archive.writestr("omni/data/web/index.html", "<!doctype html>")
+        archive.writestr("omni/data/web/version.json", '{"version": "1.0"}\n')
     root = tmp_path / "omniscientist-1.0"
     (root / "skills/scientific-figure").mkdir(parents=True)
     for name in ("LICENSE", "NOTICE"):
@@ -37,6 +39,9 @@ def test_distribution_validator_requires_licenses_and_bundled_skills(tmp_path):
     (root / "skills/scientific-figure/SKILL.md").write_text("skill", encoding="utf-8")
     (root / "skills/scientific-figure/LICENSE.txt").write_text("license", encoding="utf-8")
     (root / "skills/scientific-figure/NOTICE.md").write_text("notice", encoding="utf-8")
+    (root / "web/dist").mkdir(parents=True)
+    (root / "web/dist/index.html").write_text("<!doctype html>", encoding="utf-8")
+    (root / "web/dist/version.json").write_text('{"version": "1.0"}\n', encoding="utf-8")
     sdist = dist / "omniscientist-1.0.tar.gz"
     with tarfile.open(sdist, "w:gz") as archive:
         archive.add(root, arcname=root.name)
@@ -58,3 +63,74 @@ def test_distribution_validator_requires_licenses_and_bundled_skills(tmp_path):
     assert any("missing LICENSE" in error for error in errors)
     assert any("bundled skill" in error and "missing LICENSE.txt" in error for error in errors)
     assert any("non-redistributable pdf skill" in error for error in errors)
+
+
+def test_distribution_validator_requires_bundled_web_ui(tmp_path):
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    wheel = dist / "omniscientist-1.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(
+            "omniscientist-1.0.dist-info/METADATA",
+            "Metadata-Version: 2.4\nName: omniscientist\nVersion: 1.0\n",
+        )
+        archive.writestr("omniscientist-1.0.dist-info/licenses/LICENSE", "license")
+        archive.writestr("omniscientist-1.0.dist-info/licenses/NOTICE", "notice")
+        archive.writestr("omni/data/skills/scientific-figure/SKILL.md", "skill")
+        archive.writestr("omni/data/skills/scientific-figure/LICENSE.txt", "license")
+        archive.writestr("omni/data/skills/scientific-figure/NOTICE.md", "notice")
+    root = tmp_path / "omniscientist-1.0"
+    (root / "skills/scientific-figure").mkdir(parents=True)
+    for name in ("LICENSE", "NOTICE"):
+        (root / name).write_text(name, encoding="utf-8")
+    (root / "PKG-INFO").write_text(
+        "Metadata-Version: 2.4\nName: omniscientist\nVersion: 1.0\n",
+        encoding="utf-8",
+    )
+    (root / "skills/scientific-figure/SKILL.md").write_text("skill", encoding="utf-8")
+    (root / "skills/scientific-figure/LICENSE.txt").write_text("license", encoding="utf-8")
+    (root / "skills/scientific-figure/NOTICE.md").write_text("notice", encoding="utf-8")
+    sdist = dist / "omniscientist-1.0.tar.gz"
+    with tarfile.open(sdist, "w:gz") as archive:
+        archive.add(root, arcname=root.name)
+
+    errors = check_dist.validate(dist)
+    assert any("missing bundled web UI" in error for error in errors)
+
+
+def test_distribution_validator_requires_web_ui_version_to_match_package(tmp_path):
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    wheel = dist / "omniscientist-1.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(
+            "omniscientist-1.0.dist-info/METADATA",
+            "Metadata-Version: 2.4\nName: omniscientist\nVersion: 1.0\n",
+        )
+        archive.writestr("omniscientist-1.0.dist-info/licenses/LICENSE", "license")
+        archive.writestr("omniscientist-1.0.dist-info/licenses/NOTICE", "notice")
+        archive.writestr("omni/data/skills/scientific-figure/SKILL.md", "skill")
+        archive.writestr("omni/data/skills/scientific-figure/LICENSE.txt", "license")
+        archive.writestr("omni/data/skills/scientific-figure/NOTICE.md", "notice")
+        archive.writestr("omni/data/web/index.html", "<!doctype html>")
+        archive.writestr("omni/data/web/version.json", '{"version": "0.9"}\n')
+    root = tmp_path / "omniscientist-1.0"
+    (root / "skills/scientific-figure").mkdir(parents=True)
+    for name in ("LICENSE", "NOTICE"):
+        (root / name).write_text(name, encoding="utf-8")
+    (root / "PKG-INFO").write_text(
+        "Metadata-Version: 2.4\nName: omniscientist\nVersion: 1.0\n",
+        encoding="utf-8",
+    )
+    (root / "skills/scientific-figure/SKILL.md").write_text("skill", encoding="utf-8")
+    (root / "skills/scientific-figure/LICENSE.txt").write_text("license", encoding="utf-8")
+    (root / "skills/scientific-figure/NOTICE.md").write_text("notice", encoding="utf-8")
+    (root / "web/dist").mkdir(parents=True)
+    (root / "web/dist/index.html").write_text("<!doctype html>", encoding="utf-8")
+    (root / "web/dist/version.json").write_text('{"version": "1.0"}\n', encoding="utf-8")
+    sdist = dist / "omniscientist-1.0.tar.gz"
+    with tarfile.open(sdist, "w:gz") as archive:
+        archive.add(root, arcname=root.name)
+
+    errors = check_dist.validate(dist)
+    assert any("web UI 0.9" in error and "package 1.0" in error for error in errors)

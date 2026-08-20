@@ -185,8 +185,11 @@ class Database:
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
-        async with self._sessionmaker() as session:
+        session = self._sessionmaker()
+        try:
             yield session
+        finally:
+            await _close_session_despite_cancel(session)
 
     async def healthcheck(self) -> bool:
         try:
@@ -198,6 +201,44 @@ class Database:
 
     async def dispose(self) -> None:
         await self.engine.dispose()
+
+
+async def _close_session(session: AsyncSession) -> None:
+    try:
+        await session.close()
+    except Exception:
+        pass
+
+
+async def _close_session_despite_cancel(session: AsyncSession) -> None:
+    """Check the connection in even when the caller task is being cancelled.
+
+    Windows keeps the aiosqlite write lock if a cancelled task abandons a
+    session. The parent cancel settler then finds the workflow still
+    ``running`` after the turn already returned ``cancelled``.
+    """
+    task = asyncio.current_task()
+    if task is None or task.cancelling() == 0:
+        await _close_session(session)
+        return
+    worker = asyncio.ensure_future(_close_session(session))
+    held = 0
+    try:
+        while True:
+            while task.cancelling() > 0:
+                task.uncancel()
+                held += 1
+            try:
+                await asyncio.shield(worker)
+                return
+            except asyncio.CancelledError:
+                if worker.done():
+                    return
+    finally:
+        if not worker.done():
+            await asyncio.gather(worker, return_exceptions=True)
+        for _ in range(held):
+            task.cancel()
 
 
 def sqlite_busy(exc: BaseException) -> bool:
@@ -226,6 +267,7 @@ async def retry_while_busy(
     *,
     attempts: int = 15,
     backoff_seconds: float = 0.05,
+    max_backoff_seconds: float = 0.08,
 ) -> T:
     """Run ``write`` again while SQLite says another writer holds the lock.
 
@@ -241,13 +283,14 @@ async def retry_while_busy(
     if cap is not None:
         attempts = min(attempts, cap)
         backoff_seconds = min(backoff_seconds, 0.02)
+        max_backoff_seconds = min(max_backoff_seconds, 0.02)
     for attempt in range(attempts):
         try:
             return await write()
         except OperationalError as exc:
             if not sqlite_busy(exc) or attempt == attempts - 1:
                 raise
-            await asyncio.sleep(min(0.08, backoff_seconds * (attempt + 1)))
+            await asyncio.sleep(min(max_backoff_seconds, backoff_seconds * (attempt + 1)))
     raise AssertionError("unreachable: the loop above either returns or raises")
 
 

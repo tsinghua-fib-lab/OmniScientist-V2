@@ -22,7 +22,7 @@
   cli\scripts\install.ps1 -Method env
   cli\scripts\install.ps1 -Method env -ForceCondaBase
   cli\scripts\install.ps1 -OnConflict migrate
-  cli\scripts\install.ps1 -Extras "mcp,vec,channels"
+  cli\scripts\install.ps1 -Extras "mcp,vec,channels,web"
   cli\scripts\install.ps1 -IndexUrl pypi
   cli\scripts\install.ps1 -Remote -Ref <tag-or-commit>
 #>
@@ -35,7 +35,7 @@ param(
     [switch]$ForceCondaBase,
     [ValidateSet("ask", "upgrade", "migrate", "cancel")]
     [string]$OnConflict = "ask",
-    [string]$Extras = "mcp,vec,channels",
+    [string]$Extras = "mcp,vec,channels,web",
     [string]$IndexUrl = "",
     [switch]$Local,
     [switch]$Pypi,
@@ -471,6 +471,18 @@ function Test-CondaBasePython([string]$Python) {
     return $false
 }
 
+function Prepare-LocalWebUi {
+    if ($SourceMode -ne "local") { return }
+    $webPackage = Join-Path (Split-Path $RepoDir -Parent) "web\package.json"
+    if (-not (Test-Path $webPackage)) { return }
+    $buildScript = Join-Path $RepoDir "scripts\build_web_ui.ps1"
+    if (-not (Test-Path $buildScript)) {
+        throw "Local Web UI source exists, but its build script is missing: $buildScript"
+    }
+    Write-Host "-> Building the loopback SPA from this checkout"
+    & $buildScript
+}
+
 function Install-IntoEnv([string]$Python) {
     if ((Test-CondaBasePython $Python) -and -not $ForceCondaBase) {
         Write-Error "Refusing to install OmniScientist into Conda base. Use uv, a dedicated env, or explicitly add -ForceCondaBase."
@@ -671,6 +683,7 @@ Wait-PreviousUninstall
 Write-Host "-> Checking existing Omni installations"
 $existing = @(Get-OmniInstallations)
 Resolve-DuplicateInstallations $existing
+Prepare-LocalWebUi
 
 switch ($Method) {
     "uv" { Install-UvTool }

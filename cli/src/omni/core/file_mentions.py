@@ -196,6 +196,20 @@ def resolve_mention(raw: str, *, cwd: Path) -> Mention:
     return Mention(raw=raw, path=_absolute(raw, cwd), exists=False)
 
 
+def format_mention(path: Path | str) -> str:
+    """Render a path as an ``@`` mention the parser will accept.
+
+    Paths with whitespace use the quoted form (``@"a b/c.md"``) that
+    :func:`iter_mention_tokens` already understands. The marker stays in the
+    submitted text so planner grounding, field resolvers, and history see the
+    same attachment the REPL would have typed.
+    """
+    text = str(path)
+    if any(char.isspace() for char in text):
+        return f'@"{text}"'
+    return f"@{text}"
+
+
 def strip_mention_marker(path: str) -> str:
     """Drop a leading ``@`` from a path argument.
 

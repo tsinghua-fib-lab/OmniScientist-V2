@@ -38,7 +38,7 @@ COMMANDS = frozenset({
     "current", "doctor", "eval", "evidence", "exec", "hypo", "init", "lit", "mcp",
     "memory", "model", "profile", "project", "replay", "resume", "run", "schedule", "serve",
     "session", "skills", "soul", "source", "status", "task", "terminal", "terminal-setup",
-    "trust", "uninstall", "update", "upgrade", "verify", "why",
+    "trust", "uninstall", "update", "upgrade", "verify", "web", "why",
 })
 
 # A canonical command: a slash that opens a word, naming a command, and stopping

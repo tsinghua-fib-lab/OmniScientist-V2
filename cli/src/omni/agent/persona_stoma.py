@@ -26,6 +26,7 @@ Protocol mirrored from ``skills/soulagent`` (``origin/hyw``):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from dataclasses import dataclass
@@ -92,6 +93,21 @@ class PersonaOverlay:
 EMPTY_OVERLAY = PersonaOverlay("", "", "")
 
 
+@dataclass(frozen=True)
+class PersonaIdentity:
+    """Committed SoulAgent identity without reading the persona prose."""
+
+    scientist_id: str
+    scientist_name: str
+
+    @property
+    def active(self) -> bool:
+        return bool(self.scientist_id)
+
+
+EMPTY_IDENTITY = PersonaIdentity("", "")
+
+
 def _restore_from_backup(root: Path) -> None:
     """Complete an unload by restoring the original ``role.md`` from its backup.
 
@@ -112,7 +128,11 @@ def _restore_from_backup(root: Path) -> None:
         pass
 
 
-def load_persona_overlay(working_dir: str | Path | None) -> PersonaOverlay:
+def load_persona_overlay(
+    working_dir: str | Path | None,
+    *,
+    repair_incomplete_unload: bool = True,
+) -> PersonaOverlay:
     """Read the active SoulAgent persona for ``working_dir``; empty when none.
 
     Reads strictly inside the project root and never reads or writes ``~/.omni``.
@@ -127,14 +147,20 @@ def load_persona_overlay(working_dir: str | Path | None) -> PersonaOverlay:
         return EMPTY_OVERLAY
 
     state_dir = root / _STATE_DIR
-    state = _read_json(state_dir / "state.json")
+    state_path = state_dir / "state.json"
     # Presence of the SoulAgent state — not a bare ``role.md`` — is what makes
     # this a persona stoma, so a user's own project ``role.md`` is left untouched.
-    if not state:
+    if not state_path.is_file():
         # If state.json is missing but the backup still exists, the unload
         # was started (state removed) but not completed (role.md not restored).
         # Complete it now so the project reverts to its pre-persona state.
-        _restore_from_backup(root)
+        if repair_incomplete_unload and not (state_dir / _LOCK_DIR / _WRITING).exists():
+            _restore_from_backup(root)
+        return EMPTY_OVERLAY
+    if not _await_ready(state_dir / _LOCK_DIR):
+        return EMPTY_OVERLAY
+    state = _read_json(state_path)
+    if not state:
         return EMPTY_OVERLAY
     if state.get("host") != _HOST:
         return EMPTY_OVERLAY
@@ -142,18 +168,71 @@ def load_persona_overlay(working_dir: str | Path | None) -> PersonaOverlay:
     if not scientist_id:
         return EMPTY_OVERLAY
 
-    if not _await_ready(state_dir / _LOCK_DIR):
-        return EMPTY_OVERLAY
     text = _read_stoma(root)
     if not text.strip():
         return EMPTY_OVERLAY
+    confirmed = _read_json(state_path)
+    if confirmed != state or not _ready_now(state_dir / _LOCK_DIR):
+        return EMPTY_OVERLAY
+    expected_hash = str(state.get("persona_sha256") or "").strip()
+    if expected_hash and not _matches_persona_hash(text, expected_hash):
+        return EMPTY_OVERLAY
     return PersonaOverlay(scientist_id, str(state.get("scientist_name") or "").strip(), text)
+
+
+def load_persona_identity(
+    working_dir: str | Path | None,
+    *,
+    repair_incomplete_unload: bool = False,
+) -> PersonaIdentity:
+    """Read only the committed SoulAgent identity for status surfaces.
+
+    Unlike :func:`load_persona_overlay`, this metadata probe never opens the
+    project ``role.md`` body.  The ready/writing protocol plus a non-empty file
+    stat is enough for Web and other status surfaces to report the active
+    scientist without repeatedly loading sensitive persona prose.
+    """
+    if not working_dir:
+        return EMPTY_IDENTITY
+    try:
+        root = Path(working_dir).resolve()
+    except OSError:
+        return EMPTY_IDENTITY
+
+    state_dir = root / _STATE_DIR
+    state_path = state_dir / "state.json"
+    if not state_path.is_file():
+        if repair_incomplete_unload and not (state_dir / _LOCK_DIR / _WRITING).exists():
+            _restore_from_backup(root)
+        return EMPTY_IDENTITY
+    if not _await_ready(state_dir / _LOCK_DIR):
+        return EMPTY_IDENTITY
+    state = _read_json(state_path)
+    if not state:
+        return EMPTY_IDENTITY
+    if state.get("host") != _HOST:
+        return EMPTY_IDENTITY
+    scientist_id = str(state.get("scientist_id") or "").strip()
+    if not scientist_id:
+        return EMPTY_IDENTITY
+    try:
+        stoma = root / _STOMA_NAME
+        if not stoma.is_file() or stoma.stat().st_size <= 0:
+            return EMPTY_IDENTITY
+    except OSError:
+        return EMPTY_IDENTITY
+    if _read_json(state_path) != state or not _ready_now(state_dir / _LOCK_DIR):
+        return EMPTY_IDENTITY
+    return PersonaIdentity(
+        scientist_id,
+        str(state.get("scientist_name") or "").strip(),
+    )
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     return loaded if isinstance(loaded, dict) else None
 
@@ -173,6 +252,23 @@ def _await_ready(lock_dir: Path) -> bool:
     return ready.exists() and not writing.exists()
 
 
+def _ready_now(lock_dir: Path) -> bool:
+    return (lock_dir / _READY).exists() and not (lock_dir / _WRITING).exists()
+
+
+def _matches_persona_hash(text: str, expected_hash: str) -> bool:
+    encoded = text.encode("utf-8")
+    if hashlib.sha256(encoded).hexdigest() == expected_hash:
+        return True
+    # SoulAgent releases before the joint state/stoma commit hashed the decoded
+    # text before ``stoma_writer`` appended its canonical final newline. Keep
+    # those already-active personas readable while all new writes hash the
+    # exact persisted payload.
+    if text.endswith("\n"):
+        return hashlib.sha256(text[:-1].encode("utf-8")).hexdigest() == expected_hash
+    return False
+
+
 def _read_stoma(root: Path) -> str:
     """Read the ``omniscientist`` host stoma (``<root>/role.md``), or ``""``.
 
@@ -181,7 +277,7 @@ def _read_stoma(root: Path) -> str:
     """
     try:
         return (root / _STOMA_NAME).read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeError):
         return ""
 
 
@@ -207,6 +303,36 @@ class PersonaStatus:
     @property
     def active(self) -> bool:
         return self.overlay.active
+
+
+def load_base_role(*, role: str = "", role_file: Path | None = None) -> str:
+    """Sticky OmniScientist identity; complete an interrupted persona unload first.
+
+    ``role`` may be inline text or a path. Otherwise read ``role.md`` under the
+    Omni home, restoring ``role.md.soulagent.bak`` when an unload left the
+    backup behind. The orchestrator loads this once per process.
+    """
+    from omni.data import DEFAULT_ROLE
+
+    cfg_role = (role or "").strip()
+    if cfg_role:
+        path = Path(cfg_role).expanduser()
+        if path.is_file():
+            return path.read_text(encoding="utf-8")
+        return cfg_role
+    if role_file is not None:
+        target = Path(role_file)
+        _restore_from_backup(target.parent)
+        if target.is_file():
+            return target.read_text(encoding="utf-8")
+    return DEFAULT_ROLE
+
+
+def load_turn_persona_overlay(paths: Any, *, channel: str) -> str:
+    """Rendered overlay for one ReAct turn, rooted at the opened folder."""
+    from omni.personas.roots import persona_overlay_root
+
+    return load_persona_overlay(persona_overlay_root(paths, channel=channel)).render()
 
 
 def persona_status(working_dir: str | Path | None) -> PersonaStatus:

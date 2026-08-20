@@ -58,6 +58,20 @@ async def test_hypothesis_claim_evidence_graph():
     # prefix resolution
     assert (await store.get_claim(claim.id[:8])).id == claim.id
 
+    other = await store.add_hypothesis("Other session hypothesis", session_id="s2")
+    await store.add_claim("Other claim", session_id="s2", hypothesis_id=other.id)
+    scoped = await store.list_hypotheses(session_id="s1")
+    assert [row.id for row in scoped] == [hyp.id]
+    scoped_claims = await store.list_claims(session_id="s1")
+    assert [row.id for row in scoped_claims] == [claim.id]
+    scoped_sources = await store.list_sources(session_id="s1")
+    assert [row.id for row in scoped_sources] == [src.id]
+    counts = await store.counts(session_id="s1")
+    assert counts["hypotheses"] == 1
+    assert counts["claims"] == 1
+    assert counts["sources"] == 1
+    assert counts["evidence"] == 1
+
 
 @pytest.mark.asyncio
 async def test_runs_and_counts():

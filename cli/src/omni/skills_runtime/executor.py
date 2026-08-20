@@ -35,6 +35,7 @@ from omni.core.termination import (
     termination_reason_label,
 )
 from omni.core.tool_result import command_result_status, owned_result_outcome
+from omni.personas.roots import bind_soulagent_project_root
 from omni.runtime.execution_policy import skill_requires_approval
 from omni.runtime.hooks import execution_policy_active, execution_policy_covers
 from omni.runtime.tool_gateway import ToolGateway
@@ -1257,6 +1258,10 @@ async def _execute_skill_unchecked(
             f"`omni skills trust {entry.name} --yes` before execution"
         )
     merged = {**ctx.base_input(), **(input_data or {})}
+    if entry.name == "soulagent":
+        merged = bind_soulagent_project_root(
+            merged, ctx.paths, channel=getattr(ctx, "channel", "") or "cli"
+        )
     await _emit_progress(progress_callback, "skill.start", 0.0, skill=entry.name, kind=entry.kind.value)
     try:
         if entry.kind == SkillKind.PYTHON_ENGINE:

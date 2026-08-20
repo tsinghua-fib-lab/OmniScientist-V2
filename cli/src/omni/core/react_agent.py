@@ -677,6 +677,11 @@ class ReActLoopAgent:
                     watchdog=watchdog,
                 )
             except asyncio.CancelledError:
+                if not control.cancel_requested:
+                    raise
+                # Outer ExecutionControl cancelled this task. Consume that so
+                # the orchestrator can still write execution.finished / react.finished.
+                _clear_task_cancellation()
                 return self._cancelled_result(
                     trace,
                     total_usage,
@@ -1886,33 +1891,49 @@ def _contract_hunt_pressure(trace: list[ToolInvocationRecord]) -> int:
     Once ``find_skill`` has handed back an ``input_schema``, further
     ``docs_search`` / ``glob`` / a repeat lookup that returns the same skill
     are the same loop: the next action is ``run_skill``. A disjoint second
-    card is preparing another consume, so it resets the streak. Codex keeps
-    tools available in that case; Omni only stops the BUG-11 re-probe.
+    card is preparing another consume, so it resets the streak. Docs-only
+    retrieval (no contract in the trailing window) is how a product question
+    reads ``architecture.md``; that is not a hunt. Codex keeps tools available
+    in the disjoint-card case; Omni only stops the BUG-11 re-probe.
     """
     if any(
         record.name in _CONTRACT_CONSUME_TOOLS and record.status == "succeeded"
         for record in trace
     ):
         return 0
-    trailing = 0
-    active: frozenset[str] | None = None
+    window: list[ToolInvocationRecord] = []
     for record in reversed(trace):
         if record.name in _CONTRACT_CONSUME_TOOLS:
             break
         if record.name not in _CONTRACT_HUNT_TOOLS:
             break
+        window.append(record)
+    active: frozenset[str] | None = None
+    contract_idx: int | None = None
+    for index, record in enumerate(window):
+        if record.name != "find_skill":
+            continue
+        names = _find_skill_contract_names(record.result)
+        if names:
+            active = names
+            contract_idx = index
+            break
+    if active is None or contract_idx is None:
+        return 0
+    trailing = 0
+    for index, record in enumerate(window):
         if record.name == "find_skill":
             names = _find_skill_contract_names(record.result)
-            if names:
-                if active is None:
-                    active = names
-                    trailing += 1
-                elif names & active:
-                    trailing += 1
-                else:
-                    break
+            if names and names & active:
+                trailing += 1
                 continue
-        trailing += 1
+            if names:
+                break
+            if index < contract_idx:
+                trailing += 1
+            continue
+        if index < contract_idx:
+            trailing += 1
     return trailing
 
 
@@ -2086,6 +2107,15 @@ def _salvage_content(reason: str, trace: list[ToolInvocationRecord], user_messag
         "Next: add concrete constraints and retry, or use /task to inspect submitted background work.",
     ]
     return "\n".join(lines)
+
+
+def _clear_task_cancellation() -> None:
+    """Drop pending Task.cancel() so a cancelled LLM call can still persist."""
+    task = asyncio.current_task()
+    if task is None:
+        return
+    while task.cancelling() > 0:
+        task.uncancel()
 
 
 def _brief(value: Any, limit: int = 180) -> str:

@@ -14,7 +14,10 @@ import asyncio
 import contextlib
 import logging
 
-from omni.agent.conversation_store import ConversationStore
+from omni.agent.conversation_store import (
+    PERSONA_CONTROL_EXTERNAL_KEY,
+    ConversationStore,
+)
 from omni.agent.cost import record_text_cost_event
 from omni.config.settings import OmniSettings
 from omni.core.llm import LLMClient
@@ -65,6 +68,10 @@ class TurnMemory:
         *,
         task_id: str = "",
     ) -> None:
+        if str(user_message or "").lstrip().startswith("$soulagent "):
+            row = await self._store.get_session(session_id)
+            if row is not None and (row.external_key or "") == PERSONA_CONTROL_EXTERNAL_KEY:
+                return
         principal = await self._store.principal_for_session(session_id)
         tool_names = sorted({n for n in result.tool_names()}) if result.tool_trace else []
         # What was asked, attributed to the task that answered it — not what the

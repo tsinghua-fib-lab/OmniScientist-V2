@@ -930,6 +930,7 @@ class TaskRecorder:
         # default ``/task`` ledger. False restores the legacy "one task per
         # request" behaviour.
         self._classify_conversational = classify_conversational
+        self._cancel_checkpointed: set[str] = set()
 
     @property
     def db(self) -> Database:
@@ -1211,6 +1212,18 @@ class TaskRecorder:
     ) -> TaskEventORM | None:
         if not task_id:
             return None
+        from omni.runtime.cancel_persist import persist_lock
+
+        # Another task is writing the cancel checkpoint. Waiting on SQLite
+        # behind it is what keeps Windows workflow-cancel past the 8s wait_for.
+        # The current task may already hold the lock (finish_turn / persist_stop).
+        if persist_lock(self._db).held_by_other():
+            logger.warning(
+                "task.event.busy task=%s type=%s dropped",
+                task_id[:8],
+                event_type,
+            )
+            return None
         payload = {
             "event_type": event_type,
             "status": status,
@@ -1268,8 +1281,10 @@ class TaskRecorder:
                     await s.refresh(event)
                     return event
 
+            writer = asyncio.current_task()
+            busy_attempts = 1 if writer is not None and writer.cancelling() else 3
             try:
-                event = await retry_while_busy(_write_event, attempts=3)
+                event = await retry_while_busy(_write_event, attempts=busy_attempts)
             except IntegrityError:
                 if attempt + 1 >= _EVENT_SEQ_ATTEMPTS:
                     logger.warning(
@@ -1290,6 +1305,85 @@ class TaskRecorder:
             _log_event_row(event)
             return event
         return None
+
+    async def ensure_event(
+        self,
+        task_id: str,
+        *,
+        event_type: str,
+        status: str = "",
+        name: str = "",
+        output_json: Any | None = None,
+        summary: str = "",
+    ) -> TaskEventORM | None:
+        """Write a cancel-path event that must not vanish behind a busy store.
+
+        ``append_event`` drops after three busy attempts so progress stays
+        advisory. ``react.finished`` on user cancel is the closed ReAct span
+        Windows release cells assert; queue it like ``finish_task``.
+        """
+        if not task_id or not event_type:
+            return None
+        from omni.runtime.cancel_persist import exclusive_persist
+
+        payload = {
+            "event_type": event_type,
+            "status": status,
+            "name": name,
+            "output_json": output_json,
+            "summary": summary,
+        }
+
+        async def write() -> TaskEventORM | None:
+            async with exclusive_persist(self._db), self._event_seq_lock, self._db.session() as session:
+                existing = (
+                    await session.execute(
+                        select(TaskEventORM)
+                        .where(
+                            TaskEventORM.task_id == task_id,
+                            TaskEventORM.event_type == event_type,
+                        )
+                        .order_by(TaskEventORM.seq.desc())
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if existing is not None:
+                    return existing
+                max_seq = (
+                    await session.execute(
+                        select(func.max(TaskEventORM.seq)).where(
+                            TaskEventORM.task_id == task_id
+                        )
+                    )
+                ).scalar_one_or_none()
+                event = _event_row(task_id, int(max_seq or 0) + 1, payload)
+                session.add(event)
+                with session.no_autoflush:
+                    task = await session.get(TaskORM, task_id)
+                if task is not None:
+                    _apply_event_projection(
+                        task,
+                        event,
+                        raw_output=output_json,
+                    )
+                await session.commit()
+                await session.refresh(event)
+                return event
+
+        try:
+            event = await retry_while_busy(write, attempts=5, max_backoff_seconds=0.15)
+        except OperationalError as exc:
+            if not sqlite_busy(exc):
+                raise
+            logger.warning(
+                "task.event.ensure.busy task=%s type=%s dropped",
+                task_id[:8],
+                event_type,
+            )
+            return None
+        if event is not None:
+            _log_event_row(event)
+        return event
 
     async def link_workflow(self, task_id: str, workflow_run_id: str) -> None:
         """Attach one durable workflow run to its user-request task."""
@@ -1422,37 +1516,31 @@ class TaskRecorder:
         """
         if not task_id:
             return
-        parent_task_id = ""
-        kind = "turn"
-        async with self._db.session() as s:
-            task = await s.get(TaskORM, task_id)
-            if task is None:
-                return
-            if task.status in _TERMINAL_TASK_STATUSES and task.status != status:
-                logger.warning(
-                    "refusing to re-settle task %s: %s is already terminal, "
-                    "proposed %s (reopen for recovery to move off a terminal status)",
-                    task_id[:8],
-                    task.status,
-                    status,
+        from omni.runtime.cancel_persist import exclusive_persist
+
+        # Cancel-path skill/workflow writes hold the aiosqlite worker lock
+        # after the asyncio task is gone. Queue one attempt at a time so a
+        # busy retry releases the persist lock and lets those writers finish.
+        async def write() -> tuple[str, str] | None:
+            async with exclusive_persist(self._db):
+                return await self._write_terminal_task(
+                    task_id, status=status, summary=summary, error=error
                 )
-                return
-            parent_task_id = task.parent_task_id or ""
-            kind = task.kind or "turn"
-            task.status = status
-            task.steering_status = "sealed"
-            if (
-                self._classify_conversational
-                and status == "succeeded"
-                and _is_conversational_turn(task)
-                and await _left_no_trace(s, task_id)
-            ):
-                task.kind = "chat"
-            task.summary = summary or task.summary
-            task.error = (error or task.error) if status in {"failed", "degraded"} else error
-            task.current_stage = f"task.{status}"
-            task.finished_at = _utcnow()
-            await s.commit()
+
+        try:
+            written = await retry_while_busy(write, max_backoff_seconds=0.3)
+        except OperationalError as exc:
+            if not sqlite_busy(exc) or status not in {"cancelled", "interrupted"}:
+                raise
+            logger.warning(
+                "task.finish.busy task=%s status=%s dropped",
+                task_id[:8],
+                status,
+            )
+            return
+        if written is None:
+            return
+        parent_task_id, kind = written
         await self.append_event(
             task_id,
             event_type=f"task.{status}",
@@ -1479,6 +1567,50 @@ class TaskRecorder:
             )
         await self._reindex(task_id)
         logger.info("task.finished task=%s status=%s summary=%s", task_id[:8], status, _clip(summary or error, 180))
+
+    async def _write_terminal_task(
+        self,
+        task_id: str,
+        *,
+        status: str,
+        summary: str,
+        error: str,
+    ) -> tuple[str, str] | None:
+        """Write the sealed terminal row. Return ``(parent_task_id, kind)`` or skip."""
+        async with self._db.session() as s:
+            task = await s.get(TaskORM, task_id)
+            if task is None:
+                return None
+            if task.status in _TERMINAL_TASK_STATUSES and task.status != status:
+                logger.warning(
+                    "refusing to re-settle task %s: %s is already terminal, "
+                    "proposed %s (reopen for recovery to move off a terminal status)",
+                    task_id[:8],
+                    task.status,
+                    status,
+                )
+                return None
+            parent_task_id = task.parent_task_id or ""
+            kind = task.kind or "turn"
+            task.status = status
+            task.steering_status = "sealed"
+            if (
+                self._classify_conversational
+                and status == "succeeded"
+                and _is_conversational_turn(task)
+                and await _left_no_trace(s, task_id)
+            ):
+                task.kind = "chat"
+            task.summary = summary or task.summary
+            task.error = (error or task.error) if status in {"failed", "degraded"} else error
+            task.current_stage = f"task.{status}"
+            task.finished_at = _utcnow()
+            try:
+                await s.commit()
+            except OperationalError:
+                await s.rollback()
+                raise
+        return parent_task_id, kind
 
     async def settle_task(
         self,
@@ -2543,6 +2675,19 @@ class TaskRecorder:
                 )
             ).scalars().first()
 
+    async def list_tasks_for_session(self, session_id: str) -> list[TaskORM]:
+        """Every task that names this conversation, including archived rows."""
+        if not session_id:
+            return []
+        async with self._db.session() as s:
+            return list(
+                (
+                    await s.execute(
+                        select(TaskORM).where(TaskORM.session_id == session_id)
+                    )
+                ).scalars().all()
+            )
+
     async def latest_task_for_session(self, session_id: str) -> TaskORM | None:
         """Newest turn for one conversation, regardless of status.
 
@@ -2660,10 +2805,66 @@ class TaskRecorder:
         """
         if not task_id:
             return
+        if task_id in self._cancel_checkpointed:
+            return
         from omni.runtime.cancel_persist import exclusive_persist
 
-        async with exclusive_persist():
-            await retry_while_busy(lambda: self._write_open_children_cancelled(task_id))
+        # Release the persist lock between busy retries so the cancelled
+        # skill can finish its own ``persist_best_effort`` write. A leftover
+        # aiosqlite lock must not fail the already-cancelled turn.
+        # Cap attempts so Linux release cells stay inside the 8s cancel wait;
+        # two delayed writes cover the Windows leftover-lock window.
+        # Do not wrap this in run_uncancelled: callers already do, and a
+        # nested sibling would deadlock on persist_lock.
+        async def write() -> None:
+            async with exclusive_persist(self._db):
+                await self._write_open_children_cancelled(task_id)
+
+        try:
+            await retry_while_busy(write, attempts=5, max_backoff_seconds=0.15)
+            if not await self.has_active_children(task_id):
+                self._cancel_checkpointed.add(task_id)
+                return
+        except OperationalError as exc:
+            if not sqlite_busy(exc):
+                raise
+        for delay in (0.15, 0.3, 0.6):
+            try:
+                await asyncio.sleep(delay)
+                await write()
+                if not await self.has_active_children(task_id):
+                    self._cancel_checkpointed.add(task_id)
+                return
+            except OperationalError as exc:
+                if not sqlite_busy(exc):
+                    raise
+        logger.warning("task.children.cancel.busy task=%s dropped", task_id[:8])
+
+    async def has_active_children(self, task_id: str) -> bool:
+        async with self._db.session() as session:
+            workflow = (
+                await session.execute(
+                    select(WorkflowRunORM.id)
+                    .where(
+                        WorkflowRunORM.task_id == task_id,
+                        WorkflowRunORM.status.in_(_ACTIVE_EXECUTION_STATUSES),
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if workflow is not None:
+                return True
+            child = (
+                await session.execute(
+                    select(SubtaskORM.id)
+                    .where(
+                        SubtaskORM.task_id == task_id,
+                        SubtaskORM.status.in_(_ACTIVE_EXECUTION_STATUSES),
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            return child is not None
 
     async def _write_open_children_cancelled(self, task_id: str) -> None:
         from omni.runtime.workflow_lifecycle import (
@@ -2711,7 +2912,11 @@ class TaskRecorder:
                 }
                 row.finished_at = now
                 row.owner_pid = 0
-            await session.commit()
+            try:
+                await session.commit()
+            except OperationalError:
+                await session.rollback()
+                raise
 
     async def list_subtasks_by_ids(self, task_ids: list[str]) -> list[SubtaskORM]:
         if not task_ids:

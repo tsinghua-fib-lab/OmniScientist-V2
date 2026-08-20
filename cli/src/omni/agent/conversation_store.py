@@ -1,9 +1,9 @@
 """Session + transcript persistence for agent turns.
 
 The orchestrator decides *what* happens in a turn; this store owns the durable
-conversation state around it: sessions (create/list/get/fork/touch), the message
-transcript, the compaction-aware prompt history the ReAct loop consumes, and the
-per-session memory-principal cache. It is a narrow collaborator — it depends only
+conversation state around it: sessions (create/list/get/fork/touch/delete), the
+message transcript, the compaction-aware prompt history the ReAct loop consumes,
+and the per-session memory-principal cache. It is a narrow collaborator — it depends only
 on the workspace database plus the project name and channel-identity policy — so
 the turn logic never reaches into SQLAlchemy directly.
 """
@@ -11,20 +11,43 @@ the turn logic never reaches into SQLAlchemy directly.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import OperationalError
 
 from omni.agent.session_ops import copy_session_branch
 from omni.memory.service import principal_of as _principal_of
 from omni.storage.db import Database, retry_while_busy, sqlite_busy
-from omni.storage.models import ConversationMessageORM, SessionORM, _utcnow
+from omni.storage.models import (
+    MESSAGE_ORDER_ASC,
+    MESSAGE_ORDER_DESC,
+    ConversationMessageORM,
+    SessionFocusORM,
+    SessionORM,
+    _utcnow,
+)
+
+
+@dataclass(frozen=True)
+class SessionDeleteOutcome:
+    """Result of deleting a conversation thread and its associated turns."""
+
+    session_id: str
+    deleted: bool
+    deleted_task_ids: tuple[str, ...] = ()
+    code: str = ""
+    message: str = ""
 
 logger = logging.getLogger(__name__)
 
 # Owner / CLI identity for memory isolation (see MemoryService.PRINCIPAL_OWNER).
 _PRINCIPAL_OWNER = "local"
+
+# Web persona.start reuses this hidden session so protocol turns never join a
+# research transcript. CLI/Agent listings and resume must not surface it.
+PERSONA_CONTROL_EXTERNAL_KEY = "persona-control"
 
 
 class ConversationStore:
@@ -90,7 +113,7 @@ class ConversationStore:
             rows = (await s.execute(
                 select(ConversationMessageORM)
                 .where(ConversationMessageORM.session_id == session_id)
-                .order_by(ConversationMessageORM.created_at.desc()).limit(400)
+                .order_by(*MESSAGE_ORDER_DESC).limit(400)
             )).scalars().all()
         return list(reversed(rows))
 
@@ -141,7 +164,7 @@ class ConversationStore:
             rows = (await s.execute(
                 select(ConversationMessageORM)
                 .where(ConversationMessageORM.session_id == session_id)
-                .order_by(ConversationMessageORM.created_at.asc())
+                .order_by(*MESSAGE_ORDER_ASC)
             )).scalars().all()
         return [
             r for r in rows
@@ -221,6 +244,7 @@ class ConversationStore:
             q = (
                 select(SessionORM, counts.c.n)
                 .join(counts, counts.c.session_id == SessionORM.id, isouter=True)
+                .where(SessionORM.external_key != PERSONA_CONTROL_EXTERNAL_KEY)
                 .order_by(SessionORM.updated_at.desc())
                 .limit(limit)
             )
@@ -252,7 +276,7 @@ class ConversationStore:
                 await s.execute(
                     select(ConversationMessageORM)
                     .where(ConversationMessageORM.session_id == session_id)
-                    .order_by(ConversationMessageORM.created_at.asc())
+                    .order_by(*MESSAGE_ORDER_ASC)
                 )
             ).scalars().all()
         return list(rows)
@@ -288,3 +312,48 @@ class ConversationStore:
         )
         self._session_principal[new_id] = self.principal_of(src.channel, src.external_key)
         return new_id
+
+    async def set_session_title(self, session_id: str, title: str) -> SessionORM | None:
+        """Set the owner-authored title without bumping ``updated_at``.
+
+        ``SessionORM.updated_at`` has ``onupdate=_utcnow``. A Core UPDATE that
+        only writes ``title`` leaves that column alone so a rename is not
+        mistaken for recent activity.
+        """
+        async with self._db.session() as s:
+            row = await s.get(SessionORM, session_id)
+            if row is None:
+                return None
+            kept_updated_at = row.updated_at
+            await s.execute(
+                update(SessionORM)
+                .where(SessionORM.id == session_id)
+                .values(title=title, updated_at=kept_updated_at)
+            )
+            await s.commit()
+        return await self.get_session(session_id)
+
+    async def delete_session(self, session_id: str) -> bool:
+        """Remove the session row, its transcript, and session-focus pointers.
+
+        Tasks are *not* deleted here: they are a separate durable record and
+        must go through :meth:`omni.runtime.task_recorder.TaskRecorder.delete_tasks`
+        so active work stays fail-closed and artifact files survive.
+        """
+        row = await self.get_session(session_id)
+        if row is None:
+            return False
+        sid = row.id
+        async with self._db.session() as s:
+            await s.execute(
+                delete(ConversationMessageORM).where(
+                    ConversationMessageORM.session_id == sid
+                )
+            )
+            await s.execute(
+                delete(SessionFocusORM).where(SessionFocusORM.session_id == sid)
+            )
+            await s.execute(delete(SessionORM).where(SessionORM.id == sid))
+            await s.commit()
+        self._session_principal.pop(sid, None)
+        return True

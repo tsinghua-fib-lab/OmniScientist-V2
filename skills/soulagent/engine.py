@@ -42,8 +42,10 @@ _core = _load_core()
 
 TASK_SENSOR_MAX_TOKENS = 512
 TASK_SENSOR_TIMEOUT_SECONDS = 30.0
-PERSONA_DECODER_MAX_TOKENS = 3072
-PERSONA_DECODER_TIMEOUT_SECONDS = 60.0
+# Skill-local decoder budget, not the agent ReAct reply cap. Keep in sync with
+# ``kg_decoder.DECODER_MAX_TOKENS`` / ``DECODER_TIMEOUT_SECONDS``.
+PERSONA_DECODER_MAX_TOKENS = 8192
+PERSONA_DECODER_TIMEOUT_SECONDS = 120.0
 
 
 class _OmniCompletion:
@@ -86,14 +88,16 @@ class _OmniCompletion:
                 f"SoulAgent {self._stage_label}超时"
                 f"（{self._timeout_seconds:g} 秒），已取消本次模型请求"
             ) from exc
-        if str(getattr(result, "finish_reason", "") or "") == "length":
-            raise RuntimeError(
-                f"SoulAgent {self._stage_label}达到输出上限"
-                f"（{self._max_tokens} tokens），拒绝使用被截断的结果"
-            )
         content = str(getattr(result, "content", "") or "").strip()
         if not content:
+            if str(getattr(result, "finish_reason", "") or "") == "length":
+                raise RuntimeError(
+                    f"SoulAgent {self._stage_label}达到输出上限"
+                    f"（{self._max_tokens} tokens），且未得到可用文本"
+                )
             raise RuntimeError(f"SoulAgent {self._stage_label}收到宿主模型空文本")
+        # A length stop with text is not discarded here. ``kg_decoder`` injects
+        # canonical sections and retries once in compact form if validation fails.
         return content
 
 
@@ -150,38 +154,36 @@ def _infer_action(text: str, explicit: Any) -> str:
         return "unload"
     if any(phrase in lowered for phrase in ("有哪些科学家", "列出科学家", "人格列表", "list scientists")):
         return "list"
-    if any(phrase in lowered for phrase in ("人格状态", "当前人格", "soulagent status")):
+    if any(
+        phrase in lowered
+        for phrase in (
+            "人格状态",
+            "当前人格",
+            "谁的人格",
+            "现在是谁的人格",
+            "当前是谁的人格",
+            "soulagent status",
+            "whose persona",
+        )
+    ):
         return "status"
     return "activate"
 
 
-def _resolve_project_root(
-    ctx: Any, explicit: Any, *, prefer_scientist_kg: bool = True
-) -> Path:
-    candidates: list[Path] = []
+def _resolve_project_root(ctx: Any, explicit: Any) -> Path:
+    """Return the exact folder that owns persona state.
+
+    An explicit ``project_root`` is used as-is. Otherwise the host working
+    directory (the folder the user opened or launched in) wins. A parent
+    ``scientist-kg`` must not move this root; KG lookup is a separate step.
+    """
     if str(explicit or "").strip():
-        candidates.append(Path(str(explicit)).expanduser())
+        return Path(str(explicit)).expanduser().resolve()
     if ctx is not None:
         working_dir = getattr(ctx, "working_dir", None)
         if working_dir:
-            candidates.append(Path(working_dir))
-        paths = getattr(ctx, "paths", None)
-        workspace_root = getattr(paths, "workspace_root", None) if paths else None
-        if workspace_root:
-            candidates.append(Path(workspace_root))
-    candidates.append(Path.cwd())
-
-    resolved: list[Path] = []
-    for candidate in candidates:
-        path = candidate.resolve()
-        if path not in resolved:
-            resolved.append(path)
-    if prefer_scientist_kg:
-        for path in resolved:
-            if (path / "scientist-kg").is_dir():
-                return path
-    # Preserve the most relevant path in the error instead of writing elsewhere.
-    return resolved[0]
+            return Path(working_dir).expanduser().resolve()
+    return Path.cwd().resolve()
 
 
 def _resolve_kg_root(ctx: Any, project_root: Path, explicit: Any) -> Path:
@@ -356,11 +358,7 @@ class SoulAgentEngine:
         request_text = str(input_data.get("input") or "").strip()
         action = _infer_action(request_text, input_data.get("action"))
         ctx = getattr(self, "ctx", None)
-        project_root = _resolve_project_root(
-            ctx,
-            input_data.get("project_root"),
-            prefer_scientist_kg=action not in {"status", "unload"},
-        )
+        project_root = _resolve_project_root(ctx, input_data.get("project_root"))
         kg_root = _resolve_kg_root(ctx, project_root, input_data.get("kg_root"))
         state = _core._read_state(project_root)
         if action == "status":

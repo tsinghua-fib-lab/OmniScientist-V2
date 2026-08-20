@@ -1,4 +1,4 @@
-"""`omni session` — list, inspect, resume and export research sessions."""
+"""`omni session` — list, inspect, resume, export, and delete research sessions."""
 
 from __future__ import annotations
 
@@ -7,12 +7,12 @@ from pathlib import Path
 
 import typer
 
-from omni.cli.render import data_table, error, info, success
+from omni.cli.render import data_table, error, info, success, warn
 from omni.cli.runner import run_one_shot
 from omni.cli.state import AppState, make_agent, run_async
 from omni.cli.timefmt import format_local_iso, format_local_time
 
-app = typer.Typer(help="Inspect, resume, fork, and export sessions.", no_args_is_help=True)
+app = typer.Typer(help="Inspect, resume, fork, export, and delete sessions.", no_args_is_help=True)
 
 
 @app.command("list")
@@ -186,6 +186,77 @@ def export_cmd(
         console.print(text)
 
 
+@app.command("rm")
+def rm_cmd(
+    ctx: typer.Context,
+    session: str,
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Confirm deletion when the session has associated tasks"
+    ),
+) -> None:
+    """Delete a session, its transcript, and the tasks that belong to it.
+
+    Artifact files are kept (same as ``/task rm``). A running or recovering
+    task blocks deletion.
+    """
+    state: AppState = ctx.obj
+
+    async def _preview():
+        agent = await make_agent(state)
+        try:
+            sess = await agent.get_session(session)
+            if sess is None:
+                return None, 0, []
+            msgs = await agent.session_messages(sess.id)
+            tasks = await agent.tasks.list_tasks_for_session(sess.id)
+            return sess, len(msgs), tasks
+        finally:
+            await agent.aclose()
+
+    sess, n_msgs, tasks = run_async(_preview())
+    if sess is None:
+        error(f"Session {session} was not found.")
+        raise typer.Exit(1)
+    if tasks and not yes:
+        info(
+            f"Session {sess.id[:8]} · {sess.channel} · {n_msgs} messages · "
+            f"{len(tasks)} task(s). Deleting the session also deletes those "
+            "tasks; artifact files are kept."
+        )
+        warn("Re-run with --yes to confirm.")
+        raise typer.Exit(0)
+
+    async def _delete():
+        agent = await make_agent(state)
+        try:
+            return await agent.delete_session(sess.id)
+        finally:
+            await agent.aclose()
+
+    outcome = run_async(_delete())
+    if not outcome.deleted:
+        error(outcome.message or f"Could not delete session {sess.id[:8]}.")
+        raise typer.Exit(1)
+    extra = (
+        f" and {len(outcome.deleted_task_ids)} task(s)"
+        if outcome.deleted_task_ids
+        else ""
+    )
+    success(f"Deleted session {outcome.session_id[:8]}{extra}.")
+
+
+@app.command("delete")
+def delete_cmd(
+    ctx: typer.Context,
+    session: str,
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Confirm deletion when the session has associated tasks"
+    ),
+) -> None:
+    """Alias for ``session rm``."""
+    rm_cmd(ctx, session, yes=yes)
+
+
 @app.command("help")
 def help_cmd() -> None:
     """Show session subcommands and common examples (`/session help` in the REPL)."""
@@ -198,10 +269,11 @@ def help_cmd() -> None:
             ["resume <id> [prompt]", "Resume a session once, or enter interactive mode", "/session resume 1a2b3c"],
             ["fork <id> [prompt]", "Fork a session into an independent conversation branch", "/session fork 1a2b3c --up-to 9f8e"],
             ["export <id>", "Export a session as Markdown or JSON", "/session export 1a2b3c -f json -o out.json"],
+            ["rm/delete <id>", "Delete a session and its tasks; --yes if it has tasks", "/session rm 1a2b3c --yes"],
             ["help", "Show this session command reference", "/session help"],
         ],
     )
-    info("Options: `--up-to <msg>` / `--title` on fork; `--format md|json` and `--output <file>` on export; `--quiet` on resume/fork.")
+    info("Options: `--up-to <msg>` / `--title` on fork; `--format md|json` and `--output <file>` on export; `--quiet` on resume/fork; `--yes` on rm.")
 
 
 def _to_markdown(sess, msgs) -> str:  # noqa: ANN001

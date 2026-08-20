@@ -219,6 +219,31 @@ def _docs_record(query: str = "params") -> ToolInvocationRecord:
     )
 
 
+def _read_record(doc: str = "architecture.md") -> ToolInvocationRecord:
+    return ToolInvocationRecord(
+        name="docs_read",
+        arguments={"name": doc},
+        result={"status": "ok", "text": f"bundled {doc}"},
+    )
+
+
+def test_docs_only_retrieval_is_not_a_hunt() -> None:
+    assert (
+        _contract_hunt_pressure(
+            [
+                _read_record(),
+                _docs_record("storage architecture"),
+                _docs_record("sqlite workspace"),
+            ]
+        )
+        == 0
+    )
+
+
+def test_docs_before_a_contract_do_not_count_as_a_hunt() -> None:
+    assert _contract_hunt_pressure([_read_record(), _find_record("research-pptx")]) == 1
+
+
 def test_two_disjoint_find_skill_cards_are_not_a_hunt() -> None:
     assert (
         _contract_hunt_pressure(
@@ -274,6 +299,59 @@ def test_a_successful_consume_clears_hunt_pressure() -> None:
         )
         == 0
     )
+
+
+@pytest.mark.asyncio
+async def test_docs_only_retrieval_can_read_architecture_and_finish() -> None:
+    async def invoker(name: str, args: dict) -> dict:
+        if name == "docs_read":
+            doc = str(args.get("name") or "catalog")
+            return {"status": "ok", "text": f"bundled {doc}: SQLite plus the filesystem."}
+        return {"status": "ok", "matches": [{"doc": "architecture.md"}]}
+
+    llm = ScriptedLLM(
+        [
+            ChatWithToolsResult(
+                tool_calls=[
+                    ToolCall("1", "docs_read", {}),
+                    ToolCall("2", "docs_search", {"query": "storage architecture"}),
+                    ToolCall("3", "docs_search", {"query": "sqlite workspace"}),
+                ]
+            ),
+            ChatWithToolsResult(
+                tool_calls=[ToolCall("4", "docs_read", {"name": "architecture.md"})]
+            ),
+            ChatWithToolsResult(content="Storage is SQLite plus the filesystem."),
+        ]
+    )
+    tools = [
+        ToolSpec(
+            "docs_read",
+            "read",
+            {"type": "object", "properties": {"name": {"type": "string"}}},
+        ),
+        ToolSpec(
+            "docs_search",
+            "docs",
+            {"type": "object", "properties": {"query": {"type": "string"}}},
+        ),
+    ]
+    result = await ReActLoopAgent(
+        llm, invoker, max_iterations=8, no_progress_threshold=2
+    ).run(
+        system_prompt="s",
+        user_message="详细分析你的存储架构吧",
+        tools=tools,
+    )
+    assert [record.name for record in result.tool_trace] == [
+        "docs_read",
+        "docs_search",
+        "docs_search",
+        "docs_read",
+    ]
+    assert result.terminated_reason == "done"
+    assert result.content == "Storage is SQLite plus the filesystem."
+    assert "run_skill" not in (result.content or "")
 
 
 @pytest.mark.asyncio

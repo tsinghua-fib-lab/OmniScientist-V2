@@ -82,6 +82,23 @@ class TaskController:
             if started_at.tzinfo is None:
                 started_at = started_at.replace(tzinfo=UTC)
             elapsed_ms = max(0.0, (datetime.now(UTC) - started_at).total_seconds() * 1000)
+        if terminal_status in {"cancelled", "interrupted"}:
+            # Checkpoint open children before the advisory event storm so a
+            # Windows leftover lock cannot keep the workflow ``running``.
+            settler = getattr(self._tasks, "settle_open_children_for_cancel", None)
+            if callable(settler):
+                await settler(task_id)
+            # ``append_event`` may drop on Windows busy; this span must land.
+            ensurer = getattr(self._tasks, "ensure_event", None)
+            if callable(ensurer):
+                await ensurer(
+                    task_id,
+                    event_type="react.finished",
+                    status=terminal_status,
+                    name="react",
+                    output_json={"kind": kind or "partial", "terminated_reason": terminal_status},
+                    summary=f"react partial: {terminal_status}",
+                )
         await self._tasks.append_event(
             task_id,
             event_type="assistant.message",
