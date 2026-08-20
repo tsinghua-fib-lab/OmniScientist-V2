@@ -11,7 +11,7 @@ in SQLite and the filesystem. Local persistence does **not** mean that every ope
 - **Research connectors:** search terms, paper identifiers, DOIs, and configured contact email may
   be sent to arXiv, OpenAlex, Crossref, Unpaywall, PubMed, or Semantic Scholar.
 - **IM channels:** inbound messages and outbound answers/files pass through Feishu, DingTalk,
-  WeCom/operator gateways, or an explicitly enabled experimental iLink connector.
+  or the official WeChat ClawBot iLink API.
 - **Update checks:** the installed version may query the configured package/repository endpoint.
 
 OmniScientist does not provide telemetry or a hosted account service by default. Third-party

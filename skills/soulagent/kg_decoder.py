@@ -10,6 +10,15 @@ class DecoderError(RuntimeError):
 
 
 DECODER_CONTRACT_VERSION = 3
+# Skill-local decoder budget (portable runner + Omni adapter). Not the agent loop cap.
+DECODER_MAX_TOKENS = 8192
+DECODER_TIMEOUT_SECONDS = 120.0
+COMPACT_RETRY_HINT = (
+    "\n\n【压缩重试】上次输出被截断或结构不完整。"
+    "必须包含全部五个三级标题。"
+    "每个思维模式最多两句；证据每条一行「标题：观察」。"
+    "不要重复核心原则，不要写传记。"
+)
 
 
 SYSTEM_PROMPT = """你是KG解码器。基于下列科学家的认知图谱子图，为当前科学任务生成一段人格描述文本。
@@ -21,6 +30,7 @@ SYSTEM_PROMPT = """你是KG解码器。基于下列科学家的认知图谱子�
 4. 以当前任务为语境，针对用户此刻在做的具体科学任务说明该怎么做。
 5. 写中文，自然、可读。
 6. 核心原则与表达语气均由程序注入原文，不需要生成、归纳、改写或模仿。
+7. 控制篇幅：每个思维模式 2-3 句；证据来源每条一行「论文标题：观察」。不要写传记，不要重复核心原则。
 
 输出结构：
 ## 当前人格：{scientist_name}
@@ -119,8 +129,8 @@ def _call_openai(system_prompt: str, user_prompt: str) -> str:
         return complete_chat(
             system_prompt,
             user_prompt,
-            max_tokens=3072,
-            timeout_seconds=60,
+            max_tokens=DECODER_MAX_TOKENS,
+            timeout_seconds=DECODER_TIMEOUT_SECONDS,
         )
     except LLMClientError as exc:
         raise DecoderError(f"LLM 解码 API 调用失败：{exc}") from exc
@@ -154,6 +164,25 @@ def validate_persona(text: str, subgraph: dict[str, Any]) -> None:
         raise DecoderError("解码结果没有逐字保留核心原则：" + ", ".join(missing_stances))
 
 
+def _inject_canonical_sections(text: str, subgraph: dict[str, Any]) -> str:
+    """Replace model-written P01-P04 sections with verbatim KG text."""
+    tone_text = "\n\n".join(
+        f"- {value}" for value in subgraph["philosophy_kernel"]["tone_exemplars"]
+    )
+    stances_text = "\n\n".join(
+        f"{stance.get('question_label', '')}：{stance['stance']}"
+        for stance in subgraph["philosophy_kernel"]["stances"]
+    )
+    text = _replace_section(text, "### 表达语气", tone_text)
+    return _replace_section(text, "### 核心原则", stances_text)
+
+
+def _finalize_persona(text: str, subgraph: dict[str, Any]) -> str:
+    finalized = _inject_canonical_sections(text, subgraph)
+    validate_persona(finalized, subgraph)
+    return finalized
+
+
 def decode_subgraph(
     subgraph: dict[str, Any],
     task_frame: dict[str, Any],
@@ -165,16 +194,16 @@ def decode_subgraph(
         raise DecoderError("人格内核缺少 3-5 条语气原句")
     system_prompt = SYSTEM_PROMPT.replace("{scientist_name}", scientist_name)
     user_prompt = build_decoder_input(subgraph, task_frame)
-    text = (completion_fn or _call_openai)(system_prompt, user_prompt).strip()
-
-    # P01-P04 are canonical KG text. The LLM never generates or transforms them.
-    tone_text = "\n\n".join(f"- {value}" for value in tone_exemplars)
-    stances_text = "\n\n".join(
-        f"{stance.get('question_label', '')}：{stance['stance']}"
-        for stance in subgraph["philosophy_kernel"]["stances"]
-    )
-    text = _replace_section(text, "### 表达语气", tone_text)
-    text = _replace_section(text, "### 核心原则", stances_text)
-
-    validate_persona(text, subgraph)
-    return text
+    complete = completion_fn or _call_openai
+    first = complete(system_prompt, user_prompt).strip()
+    try:
+        return _finalize_persona(first, subgraph)
+    except DecoderError as first_error:
+        compact = complete(system_prompt, user_prompt + COMPACT_RETRY_HINT).strip()
+        try:
+            return _finalize_persona(compact, subgraph)
+        except DecoderError as retry_error:
+            raise DecoderError(
+                "任务化人格生成两次均未得到完整结果"
+                f"（首次：{first_error}；压缩重试：{retry_error}）"
+            ) from retry_error

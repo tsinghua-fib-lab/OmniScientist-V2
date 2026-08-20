@@ -16,12 +16,10 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
-
 from omni.agent.artifact_revision_router import ArtifactRevisionRouter
 from omni.agent.artifact_targets import ArtifactTargetResolver
 from omni.agent.capabilities import CAPABILITY_ARTIFACT_REVISE, CAPABILITY_TASK_INSPECT
-from omni.agent.conversation_store import ConversationStore
+from omni.agent.conversation_store import ConversationStore, SessionDeleteOutcome
 from omni.agent.cost import react_usage_limits, record_cost_event
 from omni.agent.intent_plan import IntentPlan, IntentType
 from omni.agent.interaction_lifecycle import (
@@ -29,7 +27,7 @@ from omni.agent.interaction_lifecycle import (
     build_approval_gate,
     react_tool_policy,
 )
-from omni.agent.persona_stoma import load_persona_overlay
+from omni.agent.persona_stoma import load_base_role, load_turn_persona_overlay
 from omni.agent.plan_executor import PlanExecutor
 from omni.agent.plan_fallthrough import (
     history_with_failed_attempt,
@@ -91,7 +89,6 @@ from omni.core.tool_policy import (
     policy_max_tool_calls,
 )
 from omni.core.vlm import VlmGateway
-from omni.data import DEFAULT_ROLE
 from omni.memory.compiler import MemoryCompiler
 from omni.memory.files import load_curated_memory
 from omni.memory.notebook import read_recent
@@ -252,7 +249,7 @@ class OmniAgent:
         # Inert in an interactive window, which never starts the runtime; a
         # long-lived service is where parked memory work would otherwise pile up.
         self.runtime.add_tick_hook(maintenance_tick(self))
-        self._role = self._load_role()
+        self._role = load_base_role(role=self.settings.role or "", role_file=self.paths.role_file)
         self._ready = False
         # Interactive CLI approvals use per-session stores; daemon/IM/headless
         # calls fail closed without an approver.
@@ -313,30 +310,6 @@ class OmniAgent:
         """
         self._external_tools = list(tools)
         self._external_tools_authoritative = authoritative
-
-    def _load_role(self) -> str:
-        cfg_role = (self.settings.role or "").strip()
-        if cfg_role:
-            from pathlib import Path
-            p = Path(cfg_role).expanduser()
-            if p.is_file():
-                return p.read_text(encoding="utf-8")
-            return cfg_role
-        # Complete any incomplete SoulAgent persona unload before reading
-        # the base identity: if a backup file exists but state.json is gone,
-        # restore the original role.md from the backup so the agent does not
-        # start with a stale scientist persona as its base identity.
-        role_file = self.paths.role_file
-        backup = role_file.parent / (role_file.name + ".soulagent.bak")
-        if backup.is_file():
-            try:
-                role_file.write_bytes(backup.read_bytes())
-                backup.unlink()
-            except OSError:
-                pass
-        if role_file.is_file():
-            return role_file.read_text(encoding="utf-8")
-        return DEFAULT_ROLE
 
     # ── sessions ──
     async def ensure_session(
@@ -407,6 +380,69 @@ class OmniAgent:
         """Branch a session into a new one, copying its transcript (P2)."""
         return await self.conversations.fork_session(
             session_id, up_to_message=up_to_message, title=title,
+        )
+
+    async def rename_session(self, session_id: str, title: str) -> SessionORM | None:
+        """Set the owner-authored session title without touching ``updated_at``."""
+        return await self.conversations.set_session_title(session_id, title)
+
+    async def delete_session(self, session_id: str) -> SessionDeleteOutcome:
+        """Delete a conversation and the tasks that belong to it.
+
+        A session is the transcript. Each turn is a Task keyed by
+        ``tasks.session_id`` (a weak string, not an FK). Throwing the thread
+        away also removes those turns via :meth:`TaskRecorder.delete_tasks`
+        with ``force=True`` so completed / needs-input history does not linger
+        as orphans. Running or recovering work still blocks. Artifact *files*
+        survive, the same as ``/task rm``.
+        """
+        row = await self.conversations.get_session(session_id)
+        if row is None:
+            return SessionDeleteOutcome(
+                session_id=session_id,
+                deleted=False,
+                code="not_found",
+                message=f"session not found: {session_id}",
+            )
+        sid = row.id
+        tasks = await self.tasks.list_tasks_for_session(sid)
+        deleted_ids: tuple[str, ...] = ()
+        if tasks:
+            outcome = await self.tasks.delete_tasks(
+                [task.id for task in tasks], force=True
+            )
+            if outcome.concurrent_write:
+                return SessionDeleteOutcome(
+                    session_id=sid,
+                    deleted=False,
+                    code="concurrent_write",
+                    message="session deletion could not reserve the workspace; retry after it settles",
+                )
+            if outcome.blocked_tasks or outcome.blocked_executions:
+                return SessionDeleteOutcome(
+                    session_id=sid,
+                    deleted=False,
+                    code="busy",
+                    message="session has active work; cancel or wait before deleting",
+                )
+            if outcome.missing_ids or outcome.protected_tasks:
+                return SessionDeleteOutcome(
+                    session_id=sid,
+                    deleted=False,
+                    code="busy",
+                    message="session tasks could not be deleted; nothing was removed",
+                )
+            deleted_ids = tuple(outcome.deleted_ids)
+        if not await self.conversations.delete_session(sid):
+            return SessionDeleteOutcome(
+                session_id=sid,
+                deleted=False,
+                deleted_task_ids=deleted_ids,
+                code="not_found",
+                message=f"session not found: {sid}",
+            )
+        return SessionDeleteOutcome(
+            session_id=sid, deleted=True, deleted_task_ids=deleted_ids
         )
 
     # ── exec context + tools ──
@@ -1285,7 +1321,7 @@ class OmniAgent:
         remaining_block = await remaining_retry_context(self.tasks, self.artifacts, task_id)
         assumptions = assumption_block(plan.missing_inputs)
         clarification_block = await self._open_clarifications_block(ctx)
-        persona_overlay = load_persona_overlay(ctx.working_dir).render()
+        persona_overlay = load_turn_persona_overlay(self.paths, channel=ctx.channel)
         system = build_system_prompt(
             role=self._role, tools=tool_specs, persona_overlay=persona_overlay,
             memory_block="\n\n".join(
@@ -1488,12 +1524,7 @@ class OmniAgent:
         """Estimate the bounded context carried into the next model turn."""
         from omni.config.settings import resolve_max_input_tokens
 
-        async with self.db.session() as s:
-            rows = list((await s.execute(
-                select(ConversationMessageORM)
-                .where(ConversationMessageORM.session_id == session_id)
-                .order_by(ConversationMessageORM.created_at.asc())
-            )).scalars().all())
+        rows = await self.session_messages(session_id)
         active = self._normal_rows(rows)
         history = await self._history(session_id)
         blocks: dict[str, str] = {}

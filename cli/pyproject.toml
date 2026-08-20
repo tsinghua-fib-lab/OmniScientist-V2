@@ -71,6 +71,10 @@ channels = [
     "dingtalk-stream>=0.24.3",
     "cryptography>=42",  # WeChat iLink CDN media (AES-128-ECB upload/download)
 ]
+web = [
+    "starlette>=0.41",
+    "uvicorn>=0.32",
+]
 dev = [
     "coverage>=7.6",
     "pytest>=8.0",
@@ -88,6 +92,8 @@ all = [
     "lark-oapi>=1.6.8",
     "dingtalk-stream>=0.24.3",
     "cryptography>=42",
+    "starlette>=0.41",
+    "uvicorn>=0.32",
 ]
 
 [project.scripts]
@@ -113,16 +119,19 @@ artifacts = [
     "src/omni/data/**/*.json",
     "src/omni/data/**/*.yaml",
     "src/omni/data/skills/**/*",
+    "src/omni/data/web/**/*",
 ]
 
 # The built-in skills are a *separate* top-level collection (``<repo>/skills``),
 # a sibling of this Python project (``<repo>/cli``) so CLI code and skill content
 # stay independent. A custom build hook (``hatch_build.py``) force-includes that
-# sibling into the wheel under ``omni/data/skills``. Paper Review's review
-# corpora and derived FAISS generations are deliberately excluded from both
-# wheel and sdist artifacts; first use fetches them from the pinned data-only
-# Git repository. Editable/source checkouts resolve the sibling (including its
-# Git-tracked data) at runtime (see ``omni/data/__init__.py``).
+# sibling into the wheel under ``omni/data/skills``, and the prebuilt loopback
+# SPA under ``omni/data/web`` when ``web/dist`` exists (CI runs
+# ``cli/scripts/build_web_ui.sh`` first). Paper Review's review corpora and
+# derived FAISS generations are deliberately excluded from both wheel and sdist
+# artifacts; first use fetches them from the pinned data-only Git repository.
+# Editable/source checkouts resolve the sibling (including its Git-tracked data)
+# at runtime (see ``omni/data/__init__.py``).
 [tool.hatch.build.targets.wheel.hooks.custom]
 path = "hatch_build.py"
 

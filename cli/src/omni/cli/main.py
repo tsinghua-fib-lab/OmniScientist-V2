@@ -2,7 +2,7 @@
 
 `omni` (no args) → interactive REPL. `omni "<prompt>"` → one-shot. Subcommands
 (`model`, `config`, `skills`, `soul`, `mcp`, `project`, `memory`, `task`, `artifacts`, `profile`, `session`,
-`channel`, `cite`, `exec`, `replay`, `init`, `doctor`, `terminal`, `serve`, `uninstall`) work as usual,
+`channel`, `cite`, `exec`, `replay`, `init`, `doctor`, `terminal`, `serve`, `web`, `uninstall`) work as usual,
 as do the research commands (`lit`, `verify`, `bench`, `hypo`, `claim`,
 `evidence`, `run`, `source`). The REPL exposes the same verbs as slash commands
 (`/lit`, `/verify`, `/bench`, `/hypo`, …); `/lit`, `/verify`, `/bench` run
@@ -73,6 +73,7 @@ from omni.cli.commands import (
     uninstall_cmd,
     update_cmd,
     verify_cmd,
+    web_cmd,
 )
 from omni.cli.live_display import (
     VERBOSITY_LEVELS,
@@ -476,6 +477,7 @@ app.command("eval", help=eval_cmd.app_help)(eval_cmd.eval_command)
 app.command("exec")(exec_cmd.exec_command)
 app.command("replay")(replay_cmd.replay_command)
 app.command("trust", help=trust_cmd.app_help)(trust_cmd.trust_command)
+app.command("web", help=web_cmd.app_help)(web_cmd.web_command)
 app.add_typer(update_cmd.app, name="update")
 app.command("upgrade", hidden=True)(update_cmd.update_command)
 app.command("uninstall")(uninstall_cmd.uninstall_command)
@@ -1038,7 +1040,7 @@ def _repl_quickstart_rows() -> list[tuple[str, str, str, str]]:
         ("/compact", "none", "Compact older turns and report estimated token savings", "/compact"),
         ("/context", "none", "Show the session context budget and injected sections", "/context"),
         ("/resume", _typer_children_summary(resume_cmd.app), "Resume workspace sessions", "/resume --last"),
-        ("/session", _typer_children_summary(session_cmd.app), "Inspect, resume, fork, and export sessions", "/session list"),
+        ("/session", _typer_children_summary(session_cmd.app), "Inspect, resume, fork, export, and delete sessions", "/session list"),
         ("/project", _typer_children_summary(project_cmd.app), "Manage project workspaces", "/project list"),
         ("/mcp", _typer_children_summary(mcp_cmd.app), "Expose Omni capabilities to Codex or Claude Code", "/mcp install"),
         ("/profile", _typer_children_summary(profile_cmd.app), "Manage model and credential profiles", "/profile list"),

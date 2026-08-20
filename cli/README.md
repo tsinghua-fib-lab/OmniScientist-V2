@@ -8,7 +8,7 @@ WeChat / Feishu / DingTalk channels.
 This CLI is the official next-generation implementation of the OmniScientist framework described
 in [Shao et al., *OmniScientist: Toward a Co-evolving Ecosystem of Human and AI
 Scientists*](https://doi.org/10.48550/arXiv.2511.16931). The current checkout reports package
-version `2.0.0rc4` (planned Git tag `v2.0.0rc4`).
+version `2.0.0rc5` (planned Git tag `v2.0.0rc5`).
 
 > This folder (`cli/`) is the Python application. The research **skills** are a
 > separate, independent top-level collection in

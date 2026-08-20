@@ -327,3 +327,57 @@ async def test_persist_workflow_done_swallows_busy_checkpoint() -> None:
         total=2,
         result={"skills_used": ["slow-step"], "status": "cancelled"},
     )
+
+
+@pytest.mark.asyncio
+async def test_finish_task_retries_when_the_first_write_finds_the_store_busy() -> None:
+    db = await _db("finish-task-busy")
+    rec = TaskRecorder(db, project="finish-task-busy")
+    async with db.session() as session:
+        session.add(TaskORM(id="task-1", user_input="cancel me", status="running"))
+        await session.commit()
+
+    write = rec._write_terminal_task
+    attempts: list[int] = []
+
+    async def busy_once(*args, **kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise _locked()
+        return await write(*args, **kwargs)
+
+    rec._write_terminal_task = busy_once  # type: ignore[method-assign]
+    await rec.finish_task("task-1", status="cancelled", summary="stopped")
+
+    assert len(attempts) == 2
+    async with db.session() as session:
+        task = await session.get(TaskORM, "task-1")
+        assert task is not None and task.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_finish_task_waits_for_the_cancel_persist_queue() -> None:
+    from omni.runtime.cancel_persist import persist_lock
+
+    db = await _db("finish-task-queue")
+    rec = TaskRecorder(db, project="finish-task-queue")
+    async with db.session() as session:
+        session.add(TaskORM(id="task-1", user_input="cancel me", status="running"))
+        await session.commit()
+
+    lock = persist_lock()
+    await lock.acquire()
+    settling = asyncio.create_task(
+        rec.finish_task("task-1", status="cancelled", summary="stopped")
+    )
+    await asyncio.sleep(0.05)
+    try:
+        async with db.session() as session:
+            task = await session.get(TaskORM, "task-1")
+            assert task is not None and task.status == "running"
+    finally:
+        lock.release()
+    await settling
+    async with db.session() as session:
+        task = await session.get(TaskORM, "task-1")
+        assert task is not None and task.status == "cancelled"

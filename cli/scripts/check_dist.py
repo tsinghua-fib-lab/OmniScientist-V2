@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import tarfile
 import zipfile
@@ -93,6 +94,34 @@ def validate(dist: Path) -> list[str]:
                     )
         if any("/skills/pdf/" in "/" + name for name in names):
             errors.append(f"{archive.name}: contains removed non-redistributable pdf skill")
+        web_ui = "omni/data/web/index.html" if wheel else "web/dist/index.html"
+        if not _has_suffix(names, web_ui):
+            errors.append(f"{archive.name}: missing bundled web UI {web_ui}")
+        stamp_name = "omni/data/web/version.json" if wheel else "web/dist/version.json"
+        stamp_member = next(
+            (name for name in names if name == stamp_name or name.endswith("/" + stamp_name)),
+            None,
+        )
+        if stamp_member is None:
+            errors.append(f"{archive.name}: missing bundled web UI version stamp {stamp_name}")
+        elif metadata_members:
+            metadata_pkg_version = str(
+                BytesParser(policy=compat32)
+                .parsebytes(_read_member(archive, metadata_members[0]))
+                .get("Version")
+                or ""
+            )
+            try:
+                stamped = json.loads(_read_member(archive, stamp_member))
+                ui_version = str((stamped or {}).get("version") or "")
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                ui_version = ""
+            if not ui_version:
+                errors.append(f"{archive.name}: web UI version stamp is empty")
+            elif metadata_pkg_version and ui_version != metadata_pkg_version:
+                errors.append(
+                    f"{archive.name}: web UI {ui_version} does not match package {metadata_pkg_version}"
+                )
     return errors
 
 

@@ -11,7 +11,7 @@ from sqlalchemy import select
 
 from omni.runtime.session_focus import ActiveTarget, SessionFocusService
 from omni.runtime.task_results import _collect_artifacts
-from omni.storage.models import ConversationMessageORM
+from omni.storage.models import MESSAGE_ORDER_DESC, ConversationMessageORM
 
 
 class ArtifactTargetResolver:
@@ -63,7 +63,7 @@ class ArtifactTargetResolver:
                 await session.execute(
                     select(ConversationMessageORM)
                     .where(ConversationMessageORM.session_id == session_id)
-                    .order_by(ConversationMessageORM.created_at.desc())
+                    .order_by(*MESSAGE_ORDER_DESC)
                     .limit(40)
                 )
             ).scalars().all()
@@ -92,7 +92,7 @@ class ArtifactTargetResolver:
                 await session.execute(
                     select(ConversationMessageORM)
                     .where(ConversationMessageORM.session_id == session_id)
-                    .order_by(ConversationMessageORM.created_at.desc())
+                    .order_by(*MESSAGE_ORDER_DESC)
                     .limit(80)
                 )
             ).scalars().all()

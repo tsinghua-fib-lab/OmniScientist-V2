@@ -295,6 +295,44 @@ def doctor(ctx: typer.Context) -> None:
             ]
         )
 
+    # Web extra + packaged/checkout SPA. Node is not required for a wheel that
+    # already ships omni/data/web; doctor only reports whether the files exist.
+    try:
+        import starlette  # noqa: F401
+        import uvicorn  # noqa: F401
+        checks.append(["Web extra", _OK, "starlette + uvicorn installed"])
+    except ImportError:
+        checks.append(
+            [
+                "Web extra",
+                _WARN,
+                "install `OmniScientist-V2[web]` to enable `omni web`",
+            ]
+        )
+    from omni.web.static import package_version, spa_version, web_dist_dir
+
+    web_ui = web_dist_dir()
+    if web_ui is not None:
+        ui_ver = spa_version(web_ui)
+        pkg_ver = package_version()
+        detail = str(web_ui)
+        if ui_ver:
+            detail = f"{detail} (UI {ui_ver})"
+        status = _OK
+        if ui_ver and pkg_ver and ui_ver != pkg_ver:
+            status = _WARN
+            detail = f"{detail}; does not match OmniScientist {pkg_ver}"
+        checks.append(["Web UI", status, detail])
+    else:
+        checks.append(
+            [
+                "Web UI",
+                _WARN,
+                "SPA not packaged; from a checkout run `pnpm -C web build`, "
+                "or install a wheel built after that step",
+            ]
+        )
+
     # optional bins — Node and npm are separate: research-pptx setup needs both,
     # but a ready renderer cache only needs Node at render time.
     from omni.skills_runtime.runtime_setup import (

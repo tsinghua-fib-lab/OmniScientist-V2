@@ -11,6 +11,7 @@ plus one end-to-end run of the real skill pipeline into the adapter.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -20,7 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from omni.agent.persona_stoma import EMPTY_OVERLAY, load_persona_overlay
+import omni.agent.persona_stoma as persona_stoma
+from omni.agent.persona_stoma import EMPTY_OVERLAY, load_base_role, load_persona_overlay
 from omni.core.system_prompt import build_system_prompt
 
 SKILLS_ROOT = Path(__file__).resolve().parents[3] / "skills"
@@ -57,6 +59,16 @@ def _write_stoma(
         (lock / "writing").touch()
 
 
+def test_overlay_does_not_inherit_a_parent_folder_persona(tmp_path: Path) -> None:
+    parent = tmp_path / "repo"
+    child = parent / "subdir"
+    child.mkdir(parents=True)
+    _write_stoma(parent, text="parent persona")
+    assert load_persona_overlay(parent).active is True
+    assert load_persona_overlay(child) is EMPTY_OVERLAY
+    assert load_persona_overlay(child).active is False
+
+
 def test_no_soulagent_state_yields_no_overlay(tmp_path: Path) -> None:
     # Bare working dir, and a bare project ``role.md`` with no ``.soulagent`` state
     # (a user's own file) must both be ignored — presence of state is the gate.
@@ -64,6 +76,48 @@ def test_no_soulagent_state_yields_no_overlay(tmp_path: Path) -> None:
     (tmp_path / "role.md").write_text("my own notes", encoding="utf-8")
     assert load_persona_overlay(tmp_path).active is False
     assert load_persona_overlay(None) is EMPTY_OVERLAY
+
+
+def test_non_utf8_state_and_stoma_fail_open(tmp_path: Path) -> None:
+    state = tmp_path / ".soulagent" / "state.json"
+    state.parent.mkdir(parents=True)
+    state.write_bytes(b"\xff\xfe")
+    assert load_persona_overlay(tmp_path) is EMPTY_OVERLAY
+
+    _write_stoma(tmp_path)
+    (tmp_path / "role.md").write_bytes(b"\xff\xfe")
+    assert load_persona_overlay(tmp_path) is EMPTY_OVERLAY
+
+
+def test_read_only_probe_does_not_repair_an_incomplete_unload(tmp_path: Path) -> None:
+    role = tmp_path / "role.md"
+    backup = tmp_path / "role.md.soulagent.bak"
+    role.write_text("temporary persona", encoding="utf-8")
+    backup.write_text("original project role", encoding="utf-8")
+
+    overlay = load_persona_overlay(tmp_path, repair_incomplete_unload=False)
+
+    assert overlay is EMPTY_OVERLAY
+    assert role.read_text(encoding="utf-8") == "temporary persona"
+    assert backup.read_text(encoding="utf-8") == "original project role"
+
+    assert load_persona_overlay(tmp_path) is EMPTY_OVERLAY
+    assert role.read_text(encoding="utf-8") == "original project role"
+    assert not backup.exists()
+
+
+def test_load_base_role_restores_incomplete_unload_then_reads_file(tmp_path: Path) -> None:
+    role = tmp_path / "role.md"
+    backup = tmp_path / "role.md.soulagent.bak"
+    role.write_text("stale scientist persona", encoding="utf-8")
+    backup.write_text("original home role", encoding="utf-8")
+
+    assert load_base_role(role_file=role) == "original home role"
+    assert role.read_text(encoding="utf-8") == "original home role"
+    assert not backup.exists()
+    assert load_base_role(role="inline sticky role") == "inline sticky role"
+    role.write_text("file role", encoding="utf-8")
+    assert load_base_role(role=str(role)) == "file role"
 
 
 def test_ready_persona_is_read_rendered_and_placed_after_base_role(tmp_path: Path) -> None:
@@ -107,6 +161,62 @@ def test_writing_lock_suppresses_overlay_then_recovers(
     # Once the writer commits (writing cleared, ready set) the overlay appears.
     (tmp_path / ".soulagent" / "lock" / "writing").unlink()
     (tmp_path / ".soulagent" / "lock" / "ready").touch()
+    assert load_persona_overlay(tmp_path).active is True
+
+
+def test_state_change_during_stoma_read_yields_no_overlay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_stoma(tmp_path, text="old persona", scientist_id="old")
+    state_path = tmp_path / ".soulagent" / "state.json"
+
+    def replace_commit(_root: Path) -> str:
+        state_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "host": "omniscientist",
+                    "scientist_id": "new",
+                    "scientist_name": "New Scientist",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (tmp_path / "role.md").write_text("new persona", encoding="utf-8")
+        return "new persona"
+
+    monkeypatch.setattr(persona_stoma, "_read_stoma", replace_commit)
+
+    assert load_persona_overlay(tmp_path) is EMPTY_OVERLAY
+
+
+def test_persona_hash_must_match_committed_stoma(tmp_path: Path) -> None:
+    text = "committed persona\n"
+    state = {
+        "version": 1,
+        "host": "omniscientist",
+        "scientist_id": "kaiming-he",
+        "scientist_name": "Kaiming He",
+        "persona_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+    }
+    _write_stoma(tmp_path, text=text, state=state)
+    assert load_persona_overlay(tmp_path).active is True
+
+    (tmp_path / "role.md").write_text("different persona\n", encoding="utf-8")
+    assert load_persona_overlay(tmp_path) is EMPTY_OVERLAY
+
+
+def test_legacy_persona_hash_before_writer_newline_remains_readable(tmp_path: Path) -> None:
+    text = "legacy persona\n"
+    state = {
+        "version": 1,
+        "host": "omniscientist",
+        "scientist_id": "kaiming-he",
+        "scientist_name": "Kaiming He",
+        "persona_sha256": hashlib.sha256(text.removesuffix("\n").encode()).hexdigest(),
+    }
+    _write_stoma(tmp_path, text=text, state=state)
+
     assert load_persona_overlay(tmp_path).active is True
 
 

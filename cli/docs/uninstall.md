@@ -56,7 +56,7 @@ entry points are inspected at uninstall time.
 - Untracked external Skill copies are removed only by `--everything`, only when their complete tree
   byte-matches a current built-in, and only after a second identity check at execution time.
 - Editable source checkouts are reported and preserved.
-- External WeChat gateways, containers, model runtimes, Python itself, `uv`, `pipx`, Claude Code,
+- External containers, model runtimes, Python itself, `uv`, `pipx`, Claude Code,
   Codex, and OpenClaw are not owned or removed.
 
 ## Cross-platform wrappers

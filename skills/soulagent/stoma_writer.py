@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -44,8 +45,31 @@ def _atomic_write(path: Path, data: bytes) -> None:
                 pass
 
 
+def _file_snapshot(path: Path) -> bytes | None:
+    return path.read_bytes() if path.is_file() else None
+
+
+def _restore_snapshot(snapshot: dict[Path, bytes | None]) -> None:
+    failures: list[str] = []
+    for path, content in snapshot.items():
+        try:
+            if content is None:
+                if path.exists():
+                    path.unlink()
+            else:
+                _atomic_write(path, content)
+        except OSError as exc:
+            failures.append(f"{path}: {exc}")
+    if failures:
+        raise StomaError("回滚文件快照失败：" + "; ".join(failures))
+
+
 def _metadata_path(project_root: Path) -> Path:
     return project_root / ".soulagent" / "originals.json"
+
+
+def _state_path(project_root: Path) -> Path:
+    return project_root / ".soulagent" / "state.json"
 
 
 def _load_metadata(project_root: Path) -> dict[str, Any] | None:
@@ -202,76 +226,122 @@ def write_persona(
     *,
     switching_scientist: bool = False,
     lock_timeout: float = 30.0,
+    state_payload: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     root = Path(project_root).resolve()
     stoma_names = _stoma_names(host)
     root.mkdir(parents=True, exist_ok=True)
     lock = _WritingLock(root, timeout=lock_timeout)
     lock.acquire()
-    rollback: dict[str, bytes | None] = {
-        name: (root / name).read_bytes() if (root / name).is_file() else None
-        for name in stoma_names
-    }
+    committed = False
+    rollback_safe = True
     try:
-        metadata = _ensure_backups(root, stoma_names)
-        if switching_scientist:
-            _restore_originals(
-                root, metadata, stoma_names, delete_backups=False
-            )
-        rollback = {
-            name: (root / name).read_bytes() if (root / name).is_file() else None
-            for name in stoma_names
-        }
-        payload = (persona_text.rstrip() + "\n").encode("utf-8")
-        for name in stoma_names:
-            _atomic_write(root / name, payload)
+        state_path = _state_path(root)
+        metadata_path = _metadata_path(root)
+        snapshot_paths = [
+            *(root / name for name in stoma_names),
+            state_path,
+            metadata_path,
+            *(root / f"{name}{BACKUP_SUFFIX}" for name in stoma_names),
+        ]
+        rollback = {path: _file_snapshot(path) for path in snapshot_paths}
+        try:
+            metadata = _ensure_backups(root, stoma_names)
+            if switching_scientist:
+                _restore_originals(
+                    root, metadata, stoma_names, delete_backups=False
+                )
+            payload = (persona_text.rstrip() + "\n").encode("utf-8")
+            for name in stoma_names:
+                _atomic_write(root / name, payload)
+            stoma_paths = {name: str(root / name) for name in stoma_names}
+            if state_payload is not None:
+                committed_state = {
+                    **state_payload,
+                    "stoma_paths": stoma_paths,
+                    "persona_sha256": hashlib.sha256(payload).hexdigest(),
+                }
+                _atomic_write(
+                    state_path,
+                    json.dumps(committed_state, ensure_ascii=False, indent=2).encode(
+                        "utf-8"
+                    ),
+                )
+        except Exception as exc:
+            rollback_safe = False
+            try:
+                _restore_snapshot(rollback)
+            except StomaError as rollback_exc:
+                raise StomaError(
+                    f"造口写入失败，且无法完整回滚：{rollback_exc}"
+                ) from exc
+            rollback_safe = True
+            if isinstance(exc, StomaError):
+                raise
+            raise StomaError(f"造口写入失败，已恢复上一个版本：{exc}") from exc
+        committed = True
+        return stoma_paths
+    except StomaError:
+        raise
     except Exception as exc:
-        for name, content in rollback.items():
-            target = root / name
-            if content is None:
-                if target.exists():
-                    target.unlink()
-            else:
-                _atomic_write(target, content)
-        lock.release(ready=lock.had_ready)
-        if isinstance(exc, StomaError):
-            raise
-        raise StomaError(f"造口写入失败，已恢复上一个版本：{exc}") from exc
-    lock.release(ready=True)
-    return {name: str(root / name) for name in stoma_names}
+        raise StomaError(f"造口写入准备失败：{exc}") from exc
+    finally:
+        lock.release(ready=committed or (rollback_safe and lock.had_ready))
 
 
 def unload_persona(
-    project_root: str | Path, host: str, *, lock_timeout: float = 30.0
+    project_root: str | Path,
+    host: str,
+    *,
+    lock_timeout: float = 30.0,
+    remove_state: bool = False,
 ) -> None:
     root = Path(project_root).resolve()
     stoma_names = _stoma_names(host)
-    metadata = _load_metadata(root)
-    if metadata is None:
-        raise StomaError("没有可卸载的 SoulAgent 人格：未找到原始造口备份元数据")
     lock = _WritingLock(root, timeout=lock_timeout)
     lock.acquire()
-    previous = {
-        name: (root / name).read_bytes() if (root / name).is_file() else None
-        for name in stoma_names
-    }
+    completed = False
+    rollback_safe = True
     try:
-        _restore_originals(
-            root, metadata, stoma_names, delete_backups=True
-        )
+        state_path = _state_path(root)
+        metadata_path = _metadata_path(root)
+        snapshot_paths = [
+            *(root / name for name in stoma_names),
+            state_path,
+            metadata_path,
+            *(root / f"{name}{BACKUP_SUFFIX}" for name in stoma_names),
+        ]
+        rollback = {path: _file_snapshot(path) for path in snapshot_paths}
+        metadata = _load_metadata(root)
+        if metadata is None:
+            raise StomaError(
+                "没有可卸载的 SoulAgent 人格：未找到原始造口备份元数据"
+            )
+        try:
+            if remove_state and state_path.exists():
+                state_path.unlink()
+            _restore_originals(
+                root, metadata, stoma_names, delete_backups=True
+            )
+        except Exception as exc:
+            rollback_safe = False
+            try:
+                _restore_snapshot(rollback)
+            except StomaError as rollback_exc:
+                raise StomaError(
+                    f"卸载失败，且无法完整回滚：{rollback_exc}"
+                ) from exc
+            rollback_safe = True
+            if isinstance(exc, StomaError):
+                raise
+            raise StomaError(f"卸载失败，已恢复卸载前造口：{exc}") from exc
+        completed = True
+    except StomaError:
+        raise
     except Exception as exc:
-        for name, content in previous.items():
-            target = root / name
-            if content is None:
-                if target.exists():
-                    target.unlink()
-            else:
-                _atomic_write(target, content)
-        lock.release(ready=lock.had_ready)
-        if isinstance(exc, StomaError):
-            raise
-        raise StomaError(f"卸载失败，已恢复卸载前造口：{exc}") from exc
-    lock.release(ready=False)
+        raise StomaError(f"卸载准备失败：{exc}") from exc
+    finally:
+        lock.release(ready=not completed and rollback_safe and lock.had_ready)
     try:
         lock.lock_dir.rmdir()
     except OSError:

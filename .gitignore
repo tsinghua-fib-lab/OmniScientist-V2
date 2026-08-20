@@ -10,6 +10,7 @@ dist/
 .mypy_cache/
 .coverage
 node_modules/
+.pnpm-store/
 
 # venvs
 .venv/

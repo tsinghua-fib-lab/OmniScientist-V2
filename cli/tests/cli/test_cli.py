@@ -972,19 +972,17 @@ def test_channel_help_includes_safe_placeholders_not_real_credentials():
 
 
 def test_channel_help_advertises_exactly_one_way_to_connect_wechat():
-    # WeChat has a single advertised path: scan the official ClawBot QR. The
-    # gateway/wecom modes still work for existing deployments but must not show
-    # up here — listing three options is what sent users to the two that need a
-    # self-hosted gateway on :8088.
+    # WeChat has a single advertised path: scan the official ClawBot QR.
+    # Help must not offer flags that recreate the removed :8088 / WeCom paths.
     res = runner.invoke(app, ["channel", "help"])
     normalized = " ".join(res.stdout.split())
 
     assert res.exit_code == 0
     assert "/channel login wechat --start" in normalized
-    for alternative in ("--method", "--gateway-url", "8088", "wecom", "ilink"):
+    for alternative in ("--method", "--gateway-url", "wecom"):
         assert alternative not in normalized.lower()
-    # WeChat binds on scan; only Feishu and DingTalk need a pairing code.
-    assert "no local gateway, port, or" in normalized
+    assert "clawbot" in normalized.lower()
+    assert "no :8088 bridge" in normalized
     assert "/pair <code>" in normalized
     assert "--start" in normalized
     assert "list" in res.stdout
@@ -4458,7 +4456,7 @@ def test_channel_login_wechat_ilink_no_wait_writes_template():
     from omni.config.paths import get_paths
 
     res = runner.invoke(
-        app, ["channel", "login", "wechat", "--method", "ilink", "--yes", "--no-wait"]
+        app, ["channel", "login", "wechat", "--method", "ilink", "--no-wait"]
     )
 
     assert res.exit_code == 0
@@ -4487,20 +4485,13 @@ def test_channel_login_wechat_defaults_to_official_ilink_without_a_gateway():
     assert "gateway_url" not in cfg
 
 
-def test_channel_login_wechat_gateway_no_wait_creates_pairing_code():
-    from omni.config.paths import get_paths
-
-    res = runner.invoke(
-        app, ["channel", "login", "wechat", "--method", "gateway", "--yes", "--no-wait"]
-    )
-
-    assert res.exit_code == 0
-    assert "/pair " in res.stdout
-    paths = get_paths()
-    cfg = tomllib.loads((paths.channels_dir / "wechat.toml").read_text(encoding="utf-8"))
-    assert cfg["mode"] == "gateway"
-    assert cfg["allowlist_enabled"] is True
-    assert cfg["pairing_code_hash"]
+def test_channel_login_wechat_rejects_removed_gateway_and_wecom_methods():
+    for method in ("gateway", "wecom"):
+        res = runner.invoke(app, ["channel", "login", "wechat", "--method", method, "--no-wait"])
+        assert res.exit_code == 2
+        text = res.output
+        assert "official ClawBot iLink QR" in text
+        assert ":8088" in text
 
 
 def test_channel_login_feishu_prints_the_pairing_code_and_applink():
@@ -4569,6 +4560,31 @@ def test_channel_pair_rejects_wechat_which_binds_the_scanning_account():
 
     assert res.exit_code == 2
     assert "feishu" in res.stdout + res.stderr
+
+
+def test_channel_remove_rejects_unknown_names_and_path_escape():
+    from omni.config.paths import get_paths
+
+    paths = get_paths()
+    paths.home.mkdir(parents=True, exist_ok=True)
+    marker = "must-not-delete = true\n"
+    paths.config_file.write_text(marker, encoding="utf-8")
+    paths.channels_dir.mkdir(parents=True, exist_ok=True)
+    paths.channels_dir.joinpath("wechat.toml").write_text('mode = "ilink"\n', encoding="utf-8")
+
+    unknown = runner.invoke(app, ["channel", "remove", "../config", "--purge"])
+    absolute = runner.invoke(app, ["channel", "remove", str(paths.home / "config"), "--purge"])
+    cli_channel = runner.invoke(app, ["channel", "remove", "cli", "--purge"])
+
+    assert unknown.exit_code != 0
+    assert absolute.exit_code != 0
+    assert cli_channel.exit_code != 0
+    assert paths.config_file.read_text(encoding="utf-8") == marker
+
+    removed = runner.invoke(app, ["channel", "remove", "wechat", "--purge"])
+    assert removed.exit_code == 0
+    assert not paths.channels_dir.joinpath("wechat.toml").is_file()
+    assert paths.config_file.is_file()
 
 
 # ── cite ─────────────────────────────────────────────────────────────────

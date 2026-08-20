@@ -120,6 +120,50 @@ def test_decoder_injects_p01_to_p04_verbatim_after_llm_completion() -> None:
     assert "这段内容应被替换" not in persona
 
 
+def test_decoder_retries_compact_after_a_truncated_first_draft() -> None:
+    decoder = _decoder()
+    calls: list[str] = []
+
+    def completion(_system_prompt: str, user_prompt: str) -> str:
+        calls.append(user_prompt)
+        if decoder.COMPACT_RETRY_HINT in user_prompt:
+            return """## 当前人格：Test Scientist
+### 表达语气
+placeholder
+### 核心原则
+placeholder
+### 当前任务中的思考方式
+- 先做最简单的基线。
+### 当前取舍
+当前没有触发需要消解的取舍。
+### 证据来源
+- A Paper：简单基线已经有效。
+"""
+        return "## 当前人格：Test Scientist\n### 表达语气\n被截断"
+
+    persona = decoder.decode_subgraph(_subgraph(), _task_frame(), completion)
+
+    assert len(calls) == 2
+    assert decoder.COMPACT_RETRY_HINT in calls[1]
+    assert "先做最简单的基线。" in persona
+    assert "原则一：先验证再扩展。" in persona
+
+
+def test_decoder_reports_both_failures_after_compact_retry() -> None:
+    decoder = _decoder()
+
+    def completion(_system_prompt: str, _user_prompt: str) -> str:
+        return "## 当前人格：Test Scientist\n### 表达语气\n仍不完整"
+
+    try:
+        decoder.decode_subgraph(_subgraph(), _task_frame(), completion)
+    except decoder.DecoderError as exc:
+        assert "两次均未得到完整结果" in str(exc)
+        assert "缺少章节" in str(exc)
+    else:
+        raise AssertionError("DecoderError was not raised")
+
+
 def test_validator_rejects_non_verbatim_tone_content() -> None:
     decoder = _decoder()
     persona = """## 当前人格：Test Scientist

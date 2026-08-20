@@ -12,9 +12,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import tomli_w
-
 from omni.channels.config import load_channel_config
+from omni.config.secure_files import write_private_toml
 from omni.config.settings import OmniSettings, read_toml_file
 from omni.runtime.presentation import TurnPresentation
 
@@ -275,6 +274,4 @@ def _read_config(path: Path) -> dict[str, Any]:
 
 
 def _write_config(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("wb") as fh:
-        tomli_w.dump(data, fh)
+    write_private_toml(path, data)

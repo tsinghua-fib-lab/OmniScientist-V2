@@ -122,6 +122,15 @@ jobs:
           --candidate-ref "$OMNI_DIFF_COVERAGE_CANDIDATE"
           --minimum-percent 80
           --test-outcome "$OMNI_DIFF_COVERAGE_TEST_OUTCOME"
+      - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
+        with:
+          version: 10
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: bash cli/scripts/build_web_ui.sh
       - run: uv build --no-sources cli --out-dir dist
       - run: python cli/scripts/check_dist.py dist
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -164,13 +173,27 @@ jobs:
           python -c "import glob, subprocess;
           subprocess.run(['uv', 'venv', '.smoke'], check=True);
           subprocess.run(['uv', 'pip', 'install', '--python', r'${{ matrix.python }}',
-          glob.glob('dist/*.whl')[0]], check=True)"
+          glob.glob('dist/*.whl')[0]+'[web]'], check=True)"
       - name: Smoke test installed CLI
         run: >-
           python -c "import subprocess;
           exe=r'${{ matrix.omni }}';
           subprocess.run([exe, '--version'], check=True);
           subprocess.run([exe, 'update', '--help'], check=True)"
+      - name: Verify installed package, SPA, and health versions agree
+        env:
+          OMNI_WEB_VERSION_SMOKE: >-
+            from importlib.metadata import version;
+            from starlette.testclient import TestClient;
+            from omni.web.app import create_app;
+            payload=TestClient(create_app()).get('/health').json();
+            expected=version('OmniScientist-V2');
+            assert payload['surface'] == 'web', payload;
+            assert payload['version'] == payload['ui_version'] == expected, payload
+        run: >-
+          python -c "import os, subprocess;
+          subprocess.run([r'${{ matrix.python }}', '-c',
+          os.environ['OMNI_WEB_VERSION_SMOKE']], check=True)"
 
   publish:
     needs: smoke

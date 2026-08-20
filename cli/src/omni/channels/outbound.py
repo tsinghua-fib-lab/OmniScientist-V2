@@ -341,48 +341,6 @@ async def _client_send_text(client: MarkdownOutbound, target: str, text: str) ->
     await client.send_markdown(target, text)
 
 
-class WeChatGatewayClient(MarkdownOutbound):
-    def __init__(self, cfg: dict[str, Any]) -> None:
-        self.base_url = str(cfg.get("base_url") or cfg.get("gateway_url") or "http://127.0.0.1:8088").rstrip("/")
-        self.inbox_path = str(cfg.get("inbox_path") or "/messages")
-        self.send_path = str(cfg.get("send_path") or "/send")
-        self.timeout = float(cfg.get("timeout_s") or 10.0)
-
-    async def poll_messages(self) -> list[dict[str, Any]]:
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            res = await client.get(self.base_url + self.inbox_path)
-            res.raise_for_status()
-            data = res.json()
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict):
-            return list(data.get("messages") or data.get("items") or [])
-        return []
-
-    async def send_markdown(self, target: str, markdown: str) -> None:
-        if _prefer_plain_text(markdown):
-            await self.send_text(target, markdown)
-            return
-        await self.send_rich_text(target, markdown)
-
-    async def send_rich_text(self, target: str, markdown: str) -> None:
-        await self._post_send({"to": target, "text": markdown, "markdown": markdown, "type": "markdown"})
-
-    async def send_text(self, target: str, text: str) -> None:
-        await self._post_send({"to": target, "text": _plain_text_markdown(text) or "-", "type": "text"})
-
-    async def send_file(self, target: str, path: str, *, file_name: str | None = None) -> None:
-        await self._post_send(_file_payload(target, path, kind="file", file_name=file_name))
-
-    async def send_image(self, target: str, path: str, *, file_name: str | None = None) -> None:
-        await self._post_send(_file_payload(target, path, kind="image", file_name=file_name))
-
-    async def _post_send(self, payload: dict[str, Any]) -> None:
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            res = await client.post(self.base_url + self.send_path, json=payload)
-            res.raise_for_status()
-
-
 class WeixinIlinkOutbound(MarkdownOutbound):
     """Adapt :class:`~omni.channels.weixin_ilink.WeixinIlinkClient` to the outbound
     protocol so ``send_presentation`` works for the WeChat iLink channel.

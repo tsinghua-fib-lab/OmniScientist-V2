@@ -1422,37 +1422,22 @@ class TaskRecorder:
         """
         if not task_id:
             return
-        parent_task_id = ""
-        kind = "turn"
-        async with self._db.session() as s:
-            task = await s.get(TaskORM, task_id)
-            if task is None:
-                return
-            if task.status in _TERMINAL_TASK_STATUSES and task.status != status:
-                logger.warning(
-                    "refusing to re-settle task %s: %s is already terminal, "
-                    "proposed %s (reopen for recovery to move off a terminal status)",
-                    task_id[:8],
-                    task.status,
-                    status,
+        from omni.runtime.cancel_persist import exclusive_persist
+
+        # Cancel-path skill/workflow writes hold the aiosqlite worker lock
+        # (especially on Windows) after the asyncio task is gone. Those
+        # persists already queue on ``exclusive_persist`` and give up early;
+        # this is the parent turn settler, so it waits for that queue and
+        # then retries with the full busy budget instead of failing the turn.
+        async with exclusive_persist():
+            written = await retry_while_busy(
+                lambda: self._write_terminal_task(
+                    task_id, status=status, summary=summary, error=error
                 )
-                return
-            parent_task_id = task.parent_task_id or ""
-            kind = task.kind or "turn"
-            task.status = status
-            task.steering_status = "sealed"
-            if (
-                self._classify_conversational
-                and status == "succeeded"
-                and _is_conversational_turn(task)
-                and await _left_no_trace(s, task_id)
-            ):
-                task.kind = "chat"
-            task.summary = summary or task.summary
-            task.error = (error or task.error) if status in {"failed", "degraded"} else error
-            task.current_stage = f"task.{status}"
-            task.finished_at = _utcnow()
-            await s.commit()
+            )
+        if written is None:
+            return
+        parent_task_id, kind = written
         await self.append_event(
             task_id,
             event_type=f"task.{status}",
@@ -1479,6 +1464,46 @@ class TaskRecorder:
             )
         await self._reindex(task_id)
         logger.info("task.finished task=%s status=%s summary=%s", task_id[:8], status, _clip(summary or error, 180))
+
+    async def _write_terminal_task(
+        self,
+        task_id: str,
+        *,
+        status: str,
+        summary: str,
+        error: str,
+    ) -> tuple[str, str] | None:
+        """Write the sealed terminal row. Return ``(parent_task_id, kind)`` or skip."""
+        async with self._db.session() as s:
+            task = await s.get(TaskORM, task_id)
+            if task is None:
+                return None
+            if task.status in _TERMINAL_TASK_STATUSES and task.status != status:
+                logger.warning(
+                    "refusing to re-settle task %s: %s is already terminal, "
+                    "proposed %s (reopen for recovery to move off a terminal status)",
+                    task_id[:8],
+                    task.status,
+                    status,
+                )
+                return None
+            parent_task_id = task.parent_task_id or ""
+            kind = task.kind or "turn"
+            task.status = status
+            task.steering_status = "sealed"
+            if (
+                self._classify_conversational
+                and status == "succeeded"
+                and _is_conversational_turn(task)
+                and await _left_no_trace(s, task_id)
+            ):
+                task.kind = "chat"
+            task.summary = summary or task.summary
+            task.error = (error or task.error) if status in {"failed", "degraded"} else error
+            task.current_stage = f"task.{status}"
+            task.finished_at = _utcnow()
+            await s.commit()
+        return parent_task_id, kind
 
     async def settle_task(
         self,
@@ -2542,6 +2567,19 @@ class TaskRecorder:
                     .limit(1)
                 )
             ).scalars().first()
+
+    async def list_tasks_for_session(self, session_id: str) -> list[TaskORM]:
+        """Every task that names this conversation, including archived rows."""
+        if not session_id:
+            return []
+        async with self._db.session() as s:
+            return list(
+                (
+                    await s.execute(
+                        select(TaskORM).where(TaskORM.session_id == session_id)
+                    )
+                ).scalars().all()
+            )
 
     async def latest_task_for_session(self, session_id: str) -> TaskORM | None:
         """Newest turn for one conversation, regardless of status.

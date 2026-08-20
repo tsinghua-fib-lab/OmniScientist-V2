@@ -13,10 +13,10 @@ from contextlib import asynccontextmanager
 import pytest
 from sqlalchemy.exc import OperationalError
 
-from omni.agent.conversation_store import ConversationStore
+from omni.agent.conversation_store import PERSONA_CONTROL_EXTERNAL_KEY, ConversationStore
 from omni.config import load_settings
 from omni.storage.db import get_database
-from omni.storage.models import ConversationMessageORM
+from omni.storage.models import ConversationMessageORM, _utcnow
 
 
 async def _store() -> ConversationStore:
@@ -42,6 +42,25 @@ async def test_ensure_session_caches_principal_and_history_roundtrips():
 
     await store.persist_message(session_id, "user", "hi")
     await store.persist_message(session_id, "assistant", "hello")
+
+    history = await store.history(session_id)
+    assert [m["role"] for m in history] == ["user", "assistant"]
+    assert [m["content"] for m in history] == ["hi", "hello"]
+
+
+@pytest.mark.asyncio
+async def test_history_keeps_insert_order_when_timestamps_tie():
+    store = await _store()
+    session_id = await store.ensure_session(channel="cli")
+    now = _utcnow()
+    async with store._db.session() as s:  # noqa: SLF001
+        s.add(ConversationMessageORM(
+            session_id=session_id, role="user", content="hi", created_at=now,
+        ))
+        s.add(ConversationMessageORM(
+            session_id=session_id, role="assistant", content="hello", created_at=now,
+        ))
+        await s.commit()
 
     history = await store.history(session_id)
     assert [m["role"] for m in history] == ["user", "assistant"]
@@ -132,6 +151,66 @@ async def test_persist_message_swallows_sqlite_busy():
 
 
 @pytest.mark.asyncio
+async def test_list_sessions_hides_the_web_persona_control_session():
+    store = await _store()
+    research = await store.ensure_session(channel="cli", title="research")
+    control = await store.ensure_session(
+        channel="web",
+        external_key=PERSONA_CONTROL_EXTERNAL_KEY,
+        title="Scientist persona",
+    )
+    await store.persist_message(control, "user", "$soulagent {\"action\":\"activate\"}")
+
+    rows = await store.list_sessions(limit=30)
+    ids = [row.id for row, _count in rows]
+    assert research in ids
+    assert control not in ids
+    assert await store.get_session(control) is not None
+
+
+@pytest.mark.asyncio
+async def test_turn_memory_skips_web_persona_control_protocol_turns():
+    from omni.agent.turn_memory import TurnMemory
+    from omni.core.react_agent import AgentLoopResult
+
+    store = await _store()
+    control = await store.ensure_session(
+        channel="web",
+        external_key=PERSONA_CONTROL_EXTERNAL_KEY,
+        title="Scientist persona",
+    )
+    research = await store.ensure_session(channel="cli", title="research")
+    recorded: list[str] = []
+
+    class _Memory:
+        async def record(self, **kwargs):  # noqa: ANN003
+            recorded.append(str(kwargs.get("scope_id") or ""))
+
+    memory = TurnMemory(
+        store=store,
+        memory=_Memory(),
+        llm=None,
+        settings=None,
+        tasks=None,
+        paths=None,
+    )
+    result = AgentLoopResult(kind="text", content="ok")
+    await memory.record(
+        control,
+        '$soulagent {"action":"activate","scientist_id":"fengli-xu"}',
+        result,
+        task_id="persona-task",
+    )
+    await memory.record(
+        research,
+        '$soulagent {"action":"activate","scientist_id":"fengli-xu"}',
+        result,
+        task_id="cli-task",
+    )
+    assert recorded == [research]
+
+
+@pytest.mark.asyncio
 async def test_get_session_resolves_by_unique_prefix():
     store = await _store()
     session_id = await store.ensure_session(channel="cli")
@@ -139,3 +218,15 @@ async def test_get_session_resolves_by_unique_prefix():
     resolved = await store.get_session(session_id[:8])
     assert resolved is not None
     assert resolved.id == session_id
+
+
+@pytest.mark.asyncio
+async def test_delete_session_removes_transcript_and_row():
+    store = await _store()
+    session_id = await store.ensure_session(channel="web", title="toss")
+    await store.persist_message(session_id, "user", "bye")
+    assert await store.delete_session(session_id[:8]) is True
+    assert await store.get_session(session_id) is None
+    assert await store.session_messages(session_id) == []
+    assert session_id not in store._session_principal  # noqa: SLF001
+    assert await store.delete_session(session_id) is False

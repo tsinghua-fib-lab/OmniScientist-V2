@@ -10,6 +10,19 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) and semanti
   machine: a minutes-long hot suite, an ubuntu/3.11 Docker cell, and
   ``--dispatch`` of Actions ``Release preflight`` for the Windows matrix.
 
+## [2.0.0rc5] - 2026-08-20
+
+### Fixed
+
+- Vite's ``esbuild`` postinstall is explicitly allowed in ``web/pnpm-workspace.yaml``,
+  so ``pnpm install --frozen-lockfile`` no longer fails on pnpm 11
+  (``ERR_PNPM_IGNORED_BUILDS``) during ``omni web`` packaging.
+
+### Changed
+
+- Bumped the release candidate to `2.0.0rc5` (Git tag `v2.0.0rc5`).
+  PyPI will not replace `2.0.0rc4`.
+
 ## [2.0.0rc4] - 2026-08-17
 
 ### Added

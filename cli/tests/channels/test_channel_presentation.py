@@ -871,33 +871,10 @@ async def test_task_notification_records_failed_delivery_and_retry(settings):
 
 
 @pytest.mark.asyncio
-async def test_wechat_gateway_client_sends_file_and_image_payloads():
-    from omni.channels.outbound import WeChatGatewayClient
-
-    client = WeChatGatewayClient({"base_url": "http://gateway.local"})
-    sent: list[dict] = []
-
-    async def fake_post(payload):  # noqa: ANN001
-        sent.append(payload)
-
-    client._post_send = fake_post  # type: ignore[method-assign]
-
-    await client.send_file("user-1", "/tmp/model.svg")
-    await client.send_image("user-1", "/tmp/model.png")
-
-    assert sent[0]["type"] == "file"
-    assert sent[0]["file_name"] == "model.svg"
-    assert sent[0]["mime"] == "image/svg+xml"
-    assert sent[1]["type"] == "image"
-    assert sent[1]["file_name"] == "model.png"
-    assert sent[1]["mime"] == "image/png"
-
-
-@pytest.mark.asyncio
 async def test_file_uploads_use_title_derived_name_for_legacy_hash_files(tmp_path):
     """Legacy content-addressed files must not reach IM users as ``<uuid>.md``;
     the upload name comes from the artifact title (OpenClaw's leak fix)."""
-    from omni.channels.outbound import WeChatGatewayClient, send_presentation
+    from omni.channels.outbound import DingTalkClient, send_presentation
     from omni.runtime.presentation import task_presentation_from_result
 
     legacy = tmp_path / "63fb795dc5504e2596fbf0e847a2d0d8.md"
@@ -913,13 +890,13 @@ async def test_file_uploads_use_title_derived_name_for_legacy_hash_files(tmp_pat
             ],
         },
     )
-    client = WeChatGatewayClient({"base_url": "http://gateway.local"})
+    client = DingTalkClient({"gateway_url": "http://gateway.local"})
     sent: list[dict] = []
 
     async def fake_post(payload):  # noqa: ANN001
         sent.append(payload)
 
-    client._post_send = fake_post  # type: ignore[method-assign]
+    client._post_gateway = fake_post  # type: ignore[method-assign]
 
     await send_presentation(client, "user-1", presentation)
 
@@ -945,26 +922,6 @@ def test_display_filename_keeps_semantic_on_disk_names():
 
     untitled = DeliveryPart(kind="file", title="", path="/x/artifacts/figure/10ddda6548f84f61b85256c99eb9dd8e.svg")
     assert _display_filename(untitled) == "artifact.svg"
-
-
-@pytest.mark.asyncio
-async def test_wechat_gateway_client_sends_text_and_rich_payloads():
-    from omni.channels.outbound import WeChatGatewayClient
-
-    client = WeChatGatewayClient({"base_url": "http://gateway.local"})
-    sent: list[dict] = []
-
-    async def fake_post(payload):  # noqa: ANN001
-        sent.append(payload)
-
-    client._post_send = fake_post  # type: ignore[method-assign]
-
-    await client.send_markdown("user-1", "## 任务完成\n\n继续查看详情")
-    await client.send_markdown("user-1", "```mermaid\nflowchart LR\nA-->B\n```")
-
-    assert sent[0]["type"] == "markdown"
-    assert sent[1]["type"] == "text"
-    assert "```" not in sent[1]["text"]
 
 
 @pytest.mark.asyncio
@@ -1668,10 +1625,21 @@ def _product_im_channels():
     return (WeChatChannel, FeishuChannel, DingTalkChannel)
 
 
+def _wechat_text_event(key: str, text: str, *, message_id: str = "") -> dict:
+    event = {
+        "from_user_id": key,
+        "message_type": 1,
+        "item_list": [{"type": 1, "text_item": {"text": text}}],
+    }
+    if message_id:
+        event["message_id"] = message_id
+    return event
+
+
 async def _deliver_im_text(channel, text: str, key: str):
     name = channel.name
     if name == "wechat":
-        return await channel.handle_gateway_message({"text": text, "external_key": key})
+        return await channel.handle_ilink_message(_wechat_text_event(key, text))
     if name == "feishu":
         return await channel.handle_feishu_message({"chat_id": key, "text": text})
     if name == "dingtalk":
@@ -1791,10 +1759,10 @@ async def test_wechat_answers_the_same_question_asked_twice(settings):
     agent = _DummyAgent()
     fake = _FakeOutbound()
     channel = WeChatChannel(settings, agent, client=fake)  # type: ignore[arg-type]
-    event = {"external_key": "wx-user-1", "text": "重复触发检查"}
+    event = _wechat_text_event("wx-user-1", "重复触发检查")
 
-    first = await channel.handle_gateway_message(event)
-    again = await channel.handle_gateway_message(dict(event))
+    first = await channel.handle_ilink_message(event)
+    again = await channel.handle_ilink_message(dict(event))
 
     assert first is not None
     assert again is not None
@@ -1813,10 +1781,10 @@ async def test_wechat_still_ignores_the_same_event_delivered_twice(settings):
     agent = _DummyAgent()
     fake = _FakeOutbound()
     channel = WeChatChannel(settings, agent, client=fake)  # type: ignore[arg-type]
-    event = {"external_key": "wx-user-1", "text": "重复触发检查", "message_id": "wx-msg-1"}
+    event = _wechat_text_event("wx-user-1", "重复触发检查", message_id="wx-msg-1")
 
-    first = await channel.handle_gateway_message(event)
-    redelivered = await channel.handle_gateway_message(dict(event))
+    first = await channel.handle_ilink_message(event)
+    redelivered = await channel.handle_ilink_message(dict(event))
 
     assert first is not None
     assert redelivered is None
@@ -2018,13 +1986,14 @@ def _write_enabled_channels(settings, names: list[str]) -> None:  # noqa: ANN001
     settings.paths.config_file.write_text(f"[channels]\nenabled = [{quoted}]\n", encoding="utf-8")
 
 
-def _write_wechat_gateway_config(settings) -> None:  # noqa: ANN001
+def _write_wechat_ilink_config(settings) -> None:  # noqa: ANN001
     settings.paths.channels_dir.mkdir(parents=True, exist_ok=True)
     (settings.paths.channels_dir / "wechat.toml").write_text(
-        'mode = "gateway"\n'
-        'gateway_url = "http://127.0.0.1:8088"\n'
-        'inbox_path = "/messages"\n'
-        'send_path = "/send"\n',
+        'mode = "ilink"\naccount_id = "bot@im.bot"\nbase_url = "https://ilinkai.weixin.qq.com"\n',
+        encoding="utf-8",
+    )
+    settings.paths.secrets_file.write_text(
+        '[channels.wechat]\nbot_token = "tok-test"\n',
         encoding="utf-8",
     )
 
@@ -2041,7 +2010,7 @@ async def test_channel_manager_dynamically_reconciles_enabled_channels(monkeypat
 
     monkeypatch.setattr(manager_mod, "build_channels", fake_build_channels)
     _write_enabled_channels(settings, ["cli"])
-    _write_wechat_gateway_config(settings)
+    _write_wechat_ilink_config(settings)
     manager = manager_mod.ChannelManager(settings, _DummyAgent())  # type: ignore[arg-type]
 
     await manager.reconcile_once()
@@ -2073,19 +2042,16 @@ async def test_channel_manager_hot_reloads_only_changed_channel(monkeypatch, set
 
     monkeypatch.setattr(manager_mod, "build_channels", fake_build_channels)
     _write_enabled_channels(settings, ["cli", "wechat"])
-    _write_wechat_gateway_config(settings)
+    _write_wechat_ilink_config(settings)
     manager = manager_mod.ChannelManager(settings, _DummyAgent())  # type: ignore[arg-type]
 
     await manager.reconcile_once()
     assert len(built["cli"]) == 1
     assert len(built["wechat"]) == 1
 
-    # Simulate `omni channel login wechat` rewriting wechat.toml (new send_path).
+    # Simulate `omni channel login wechat` rewriting wechat.toml (new account).
     (settings.paths.channels_dir / "wechat.toml").write_text(
-        'mode = "gateway"\n'
-        'gateway_url = "http://127.0.0.1:8088"\n'
-        'inbox_path = "/messages"\n'
-        'send_path = "/send-v2"\n',
+        'mode = "ilink"\naccount_id = "bot-v2@im.bot"\nbase_url = "https://ilinkai.weixin.qq.com"\n',
         encoding="utf-8",
     )
     await manager.reconcile_once()
@@ -2131,7 +2097,7 @@ async def test_channel_manager_degrades_when_home_lock_held(monkeypatch, setting
         return [_ManagedFakeChannel(names[0])]
 
     monkeypatch.setattr(manager_mod, "build_channels", fake_build_channels)
-    _write_wechat_gateway_config(settings)
+    _write_wechat_ilink_config(settings)
     manager = manager_mod.ChannelManager(
         settings, _DummyAgent(), explicit_channels=["wechat"],  # type: ignore[arg-type]
     )
@@ -2142,6 +2108,56 @@ async def test_channel_manager_degrades_when_home_lock_held(monkeypatch, setting
     assert health["status"] == "degraded"
     assert "task-only" in health["reason"]
     assert built == []  # channel was never built/bound — stays task-only
+    await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_channel_manager_reports_auth_expiry_as_degraded_not_running(
+    monkeypatch, settings
+) -> None:
+    import omni.channels.manager as manager_mod
+
+    class AuthExpired(RuntimeError):
+        health_reason = "WeChat login expired; scan the QR code again."
+
+    built: list[str] = []
+
+    def fake_build_channels(names, _settings, _agent):  # noqa: ANN001
+        built.extend(names)
+        return [_ManagedFakeChannel(names[0], fail=AuthExpired("expired"))]
+
+    monkeypatch.setattr(manager_mod, "build_channels", fake_build_channels)
+    _write_enabled_channels(settings, ["wechat"])
+    _write_wechat_ilink_config(settings)
+    manager = manager_mod.ChannelManager(
+        settings, _DummyAgent(), retry_interval=30.0  # type: ignore[arg-type]
+    )
+
+    await manager.reconcile_once()
+    for _ in range(20):
+        if manager.snapshot()["wechat"]["status"] == "degraded":
+            break
+        await asyncio.sleep(0.01)
+
+    health = manager.snapshot()["wechat"]
+    assert health["status"] == "degraded"
+    assert health["reason"] == "WeChat login expired; scan the QR code again."
+    assert built == ["wechat"]
+
+    await manager.reconcile_once()
+    assert built == ["wechat"]
+    assert manager.snapshot()["wechat"]["status"] == "degraded"
+
+    (settings.paths.channels_dir / "wechat.toml").write_text(
+        'mode = "ilink"\naccount_id = "bot-v2@im.bot"\nbase_url = "https://ilinkai.weixin.qq.com"\n',
+        encoding="utf-8",
+    )
+    await manager.reconcile_once()
+    for _ in range(20):
+        if len(built) >= 2:
+            break
+        await asyncio.sleep(0.01)
+    assert built == ["wechat", "wechat"]
     await manager.stop()
 
 
@@ -2210,7 +2226,7 @@ async def test_channel_manager_degrades_failing_adapter_without_raising(monkeypa
         return [_ManagedFakeChannel(names[0], fail=RuntimeError("gateway unreachable"))]
 
     monkeypatch.setattr(manager_mod, "build_channels", fake_build_channels)
-    _write_wechat_gateway_config(settings)
+    _write_wechat_ilink_config(settings)
     manager = manager_mod.ChannelManager(
         settings,
         _DummyAgent(),  # type: ignore[arg-type]

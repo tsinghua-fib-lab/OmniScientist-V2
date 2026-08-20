@@ -202,6 +202,9 @@ if [ "$PREFLIGHT" -eq 1 ] || [ "${OMNI_RELEASE_LOCAL_TESTS:-0}" = "1" ]; then
       tests/eval/test_objective_provider_quality_offline_corpus.py
 fi
 
+echo "→ Build loopback SPA (shipped as omni/data/web)"
+bash "$SCRIPT_DIR/build_web_ui.sh"
+
 echo "→ Build wheel/sdist"
 rm -rf dist
 uv build --python "$RELEASE_PYTHON" --no-sources

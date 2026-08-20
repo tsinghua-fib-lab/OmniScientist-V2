@@ -3,19 +3,25 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import shutil
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
+
+BUILD_METADATA_VERSION = "sentinel-package-version"
 
 
 def _load_build_module(monkeypatch):
     interface = ModuleType("hatchling.builders.hooks.plugin.interface")
 
     class BuildHookInterface:
-        pass
+        def __init__(self) -> None:
+            # Hatch passes the build variant (``standard``/``editable``) to
+            # ``initialize``.  The product version belongs to project metadata.
+            self.metadata = SimpleNamespace(version=BUILD_METADATA_VERSION)
 
     interface.BuildHookInterface = BuildHookInterface
     for package in (
@@ -154,6 +160,122 @@ def test_build_hook_excludes_paper_review_data_from_pip_artifacts(
     for data_file in (review_text, paper_map, vectors, bundle_manifest):
         assert str(data_file.resolve()) not in included
     assert str(paper_review.resolve()) not in included
+
+
+@pytest.mark.parametrize(
+    ("target_name", "destination"),
+    [
+        ("wheel", "omni/data/web"),
+        ("sdist", "web/dist"),
+    ],
+)
+def test_build_hook_packages_built_web_ui_when_present(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_name: str,
+    destination: str,
+) -> None:
+    cli_root = tmp_path / "cli"
+    cli_root.mkdir()
+    dist = tmp_path / "web" / "dist"
+    index = dist / "index.html"
+    asset = dist / "assets" / "app.js"
+    asset.parent.mkdir(parents=True)
+    index.write_text("<!doctype html>", encoding="utf-8")
+    asset.write_text("window.omni=1", encoding="utf-8")
+
+    hook_type = _load_build_hook(monkeypatch)
+    hook = hook_type()
+    hook.root = str(cli_root)
+    hook.target_name = target_name
+    build_data: dict = {}
+
+    hook.initialize("standard", build_data)
+
+    included = build_data["force_include"]
+    assert included[str(index.resolve())] == f"{destination}/index.html"
+    assert included[str(asset.resolve())] == f"{destination}/assets/app.js"
+    stamp_sources = [
+        path for path, dest in included.items() if dest == f"{destination}/version.json"
+    ]
+    assert len(stamp_sources) == 1
+    stamp = json.loads(Path(stamp_sources[0]).read_text(encoding="utf-8"))
+    assert stamp == {"version": str(hook.metadata.version)}
+    assert stamp["version"] != "standard"
+
+
+def test_build_hook_removes_web_stamp_after_finalize(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cli_root = tmp_path / "cli"
+    cli_root.mkdir()
+    dist = tmp_path / "web" / "dist"
+    (dist / "index.html").parent.mkdir(parents=True)
+    (dist / "index.html").write_text("<!doctype html>", encoding="utf-8")
+
+    hook_type = _load_build_hook(monkeypatch)
+    hook = hook_type()
+    hook.root = str(cli_root)
+    hook.target_name = "wheel"
+    build_data: dict = {}
+
+    hook.initialize("standard", build_data)
+
+    stamp_source = next(
+        Path(path)
+        for path, destination in build_data["force_include"].items()
+        if destination == "omni/data/web/version.json"
+    )
+    temporary_dir = stamp_source.parent
+    assert stamp_source.is_file()
+
+    hook.finalize("standard", build_data, str(tmp_path / "artifact.whl"))
+
+    assert not temporary_dir.exists()
+
+
+def test_build_hook_removes_web_stamp_when_hooks_are_cleaned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cli_root = tmp_path / "cli"
+    cli_root.mkdir()
+    dist = tmp_path / "web" / "dist"
+    (dist / "index.html").parent.mkdir(parents=True)
+    (dist / "index.html").write_text("<!doctype html>", encoding="utf-8")
+
+    hook_type = _load_build_hook(monkeypatch)
+    hook = hook_type()
+    hook.root = str(cli_root)
+    hook.target_name = "wheel"
+    build_data: dict = {}
+
+    hook.initialize("standard", build_data)
+    stamp_source = next(
+        Path(path)
+        for path, destination in build_data["force_include"].items()
+        if destination == "omni/data/web/version.json"
+    )
+    temporary_dir = stamp_source.parent
+
+    hook.clean(["standard"])
+
+    assert not temporary_dir.exists()
+
+
+def test_build_hook_skips_web_ui_when_dist_is_missing(tmp_path, monkeypatch) -> None:
+    cli_root = tmp_path / "cli"
+    cli_root.mkdir()
+    (tmp_path / "web").mkdir()
+
+    hook_type = _load_build_hook(monkeypatch)
+    hook = hook_type()
+    hook.root = str(cli_root)
+    hook.target_name = "wheel"
+    build_data: dict = {}
+
+    hook.initialize("test", build_data)
+
+    assert not any("omni/data/web" in dest for dest in build_data["force_include"].values())
 
 
 def test_build_hook_rejects_damaged_bundled_scientist_persona(
