@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import replace
 
+from omni.agent.capabilities import CAPABILITY_LITERATURE_SEARCH
 from omni.agent.intent_plan import (
     ContextPolicy,
     IntentPlan,
@@ -35,6 +36,18 @@ _IDENTIFIER_LOOKUP_MIN_ITERATIONS = 8
 # research-capture, skill/workflow invocation, escalation) stays available so
 # the model can behave like a real agent instead of a 1-tool fallback.
 ASSISTANT_BLOCKED_TOOLS: tuple[str, ...] = ("write_file", "edit_file", "bash", "run_compute")
+
+# Retrieve-only literature: the native search tool stays reachable; skill
+# dispatch and filesystem/shell mutations do not. This is a host policy for
+# that intent, not a natural-language deny parser.
+RETRIEVE_ONLY_BLOCKED_TOOLS: tuple[str, ...] = (
+    *ASSISTANT_BLOCKED_TOOLS,
+    "run_skill",
+    "run_workflow",
+    "submit_task",
+    "spawn_subagents",
+    "find_skill",
+)
 
 # The scheduling tools a SCHEDULE turn is allowed to use (see ``schedule_tools``).
 SCHEDULE_TOOLS: tuple[str, ...] = (
@@ -236,6 +249,79 @@ def build_assistant_plan(
         ),
         rationale=rationale,
     )
+
+
+def build_native_retrieve_plan(
+    text: str,
+    *,
+    task_id: str,
+    capability: str,
+    rationale: str,
+    confidence: float,
+    outputs: list[str],
+    capability_inputs: dict[str, dict] | None = None,
+) -> IntentPlan:
+    """Literature retrieval stays on ReAct so search_literature is callable."""
+    plan = build_assistant_plan(
+        text,
+        task_id=task_id,
+        rationale=rationale or "retrieve with the native literature tool",
+        confidence=confidence,
+    )
+    named = list(dict.fromkeys([*outputs, "sources"]))
+    plan.outputs = named
+    plan.acceptance = ["literature_sources_recorded", "bounded_react_or_salvage"]
+    plan.verification_plan = VerificationPlan(
+        required_outputs=["sources"],
+        required_events=["react.finished"],
+    )
+    plan.tool_policy = ToolPolicy(
+        allowed_tools=None,
+        blocked_tools=list(RETRIEVE_ONLY_BLOCKED_TOOLS),
+        final_reserve_enabled=True,
+    )
+    if capability_inputs:
+        plan.capability_inputs = capability_inputs
+    elif capability == CAPABILITY_LITERATURE_SEARCH:
+        plan.capability_inputs = {capability: {"query": text}}
+    return plan
+
+
+def build_named_native_tool_plan(text: str, *, tool: str, task_id: str) -> IntentPlan:
+    """Keep a named catalog tool on this turn; do not remap it to a skill."""
+    if tool == "search_literature":
+        return build_native_retrieve_plan(
+            text,
+            task_id=task_id,
+            capability=CAPABILITY_LITERATURE_SEARCH,
+            rationale="user named search_literature; keep the native tool in this turn",
+            confidence=0.95,
+            outputs=["sources"],
+        )
+    plan = build_assistant_plan(
+        text,
+        task_id=task_id,
+        rationale=f"user named native tool {tool}",
+        confidence=0.9,
+    )
+    blocked = sorted({*plan.tool_policy.blocked_tools, *RETRIEVE_ONLY_BLOCKED_TOOLS})
+    plan.tool_policy = ToolPolicy(
+        allowed_tools=plan.tool_policy.allowed_tools,
+        blocked_tools=blocked,
+        per_tool_limits=dict(plan.tool_policy.per_tool_limits),
+        max_tool_calls=plan.tool_policy.max_tool_calls,
+        max_iterations=plan.tool_policy.max_iterations,
+        final_reserve_enabled=plan.tool_policy.final_reserve_enabled,
+    )
+    return plan
+
+
+def carry_capability_inputs(plan: IntentPlan, proposal: object, capability: str) -> IntentPlan:
+    """Forward only the proposal inputs belonging to the capability being planned."""
+    raw = getattr(proposal, "capability_inputs", None)
+    payload = raw.get(capability) if isinstance(raw, dict) else None
+    plan.capability_inputs = {capability: dict(payload or {})}
+    return plan
 
 
 def build_task_inspect_plan(

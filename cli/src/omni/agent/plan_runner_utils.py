@@ -5,8 +5,22 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
+from omni.agent.capabilities import WRITING_DELIVERABLES
 from omni.agent.intent_plan import IntentPlan
 from omni.core.termination import execution_outcome_status
+
+_RETRIEVE_ONLY_IGNORE = frozenset({"sources", "answer", "literature.search"})
+_ARTIFACT_OUTPUTS = frozenset(
+    {
+        "artifact.figure",
+        "artifact.pptx",
+        "artifact.slides",
+        "artifact.poster",
+        "figure",
+        "review",
+        "response_letter",
+    }
+)
 
 
 async def emit_tool_event(callback: Any, phase: str, data: dict[str, Any]) -> None:
@@ -282,18 +296,73 @@ def settlement_status(drained: list[dict[str, Any]]) -> str:
     return "failed"
 
 
+def _source_ids_from_result(result: dict[str, Any]) -> list[str]:
+    """Stable source identifiers from a literature skill/tool payload."""
+    sources = result.get("sources")
+    if isinstance(sources, list):
+        ids = [
+            str(item.get("source_id") or "").strip()
+            for item in sources
+            if isinstance(item, dict)
+        ]
+        ids = [item for item in ids if item]
+        if ids:
+            return ids
+    raw = result.get("source_ids")
+    if isinstance(raw, list):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    return []
+
+
+def is_retrieve_only_plan(plan: IntentPlan) -> bool:
+    """True when the contracted deliverable is sources, not a manuscript or figure."""
+    required = [str(item).strip() for item in plan.verification_plan.required_outputs if str(item).strip()]
+    if "sources" not in required:
+        return False
+    named = {
+        str(item).strip()
+        for item in (*plan.outputs, *required)
+        if str(item).strip()
+    }
+    leftover = named - _RETRIEVE_ONLY_IGNORE
+    return not (leftover & (WRITING_DELIVERABLES | _ARTIFACT_OUTPUTS))
+
+
+def project_retrieve_answer(source_ids: list[str]) -> str:
+    """Host-owned source-id list. The model prose is not the deliverable."""
+    ids = [str(item).strip() for item in source_ids if str(item).strip()]
+    return "\n".join(list(dict.fromkeys(ids)))
+
+
+def apply_retrieve_only_projection(
+    plan: IntentPlan,
+    *,
+    source_ids: list[str],
+    model_text: str,
+) -> str:
+    """Replace retrieve-only model copy with the ledger source_id list."""
+    if not is_retrieve_only_plan(plan):
+        return model_text
+    projected = project_retrieve_answer(source_ids)
+    return projected or model_text
+
+
 def delivered_skill_answer(drained: list[dict[str, Any]]) -> str:
     """Return the completed skill body, never a submission receipt.
 
     Codex keeps a tool result in the turn until the model can speak from it.
     Omni's ``single_skill_task`` runner already waits when ``drain_tasks`` is
-    on, but used to replace that body with ``Created execution``. The answer
-    the user asked for is the skill's own ``text`` / ``summary``.
+    on, but used to replace that body with ``Created execution``. Structured
+    literature hits project ``source_id`` before a title ``summary`` so a
+    retrieve-only turn cannot settle on venue lines (P1-02).
     """
     for item in drained:
         result = item.get("result")
         if not isinstance(result, dict):
             continue
+        source_ids = _source_ids_from_result(result)
+        if source_ids:
+            return "\n".join(source_ids)
         for key in ("text", "summary", "message", "title"):
             value = str(result.get(key) or "").strip()
             if value:

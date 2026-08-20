@@ -17,6 +17,18 @@ from omni.cli.file_search import FileSearcher
 from omni.cli.repl_input import FileMentionCompleter, build_repl_completer
 
 
+def _workspace(tmp_path: Path) -> Path:
+    """Picker root: the project tree, not the pytest home that hosts ``$OMNI_HOME``.
+
+    Codex's ``@`` surface is rooted at the workspace. ``isolated_home`` places
+    the control store at ``tmp_path/.omni`` so sqlite init cannot race; that
+    store is not the mention index.
+    """
+    root = tmp_path / "workspace"
+    root.mkdir()
+    return root
+
+
 def _completer(root: Path) -> FileMentionCompleter:
     return FileMentionCompleter(searcher=FileSearcher(root))
 
@@ -27,68 +39,78 @@ def _complete(completer: FileMentionCompleter, text: str) -> list:
 
 
 def test_mention_completes_mid_sentence(tmp_path: Path) -> None:
-    (tmp_path / "README.md").write_text("x", encoding="utf-8")
-    results = _complete(_completer(tmp_path), "review @READ")
+    root = _workspace(tmp_path)
+    (root / "README.md").write_text("x", encoding="utf-8")
+    results = _complete(_completer(root), "review @READ")
     assert [c.text for c in results] == ["README.md"]
     # Only the typed token is replaced, so the leading ``@`` stays in the buffer.
     assert results[0].start_position == -len("READ")
 
 
 def test_no_at_token_yields_nothing(tmp_path: Path) -> None:
-    (tmp_path / "README.md").write_text("x", encoding="utf-8")
-    assert _complete(_completer(tmp_path), "review the readme") == []
+    root = _workspace(tmp_path)
+    (root / "README.md").write_text("x", encoding="utf-8")
+    assert _complete(_completer(root), "review the readme") == []
 
 
 def test_email_never_triggers_completion(tmp_path: Path) -> None:
-    (tmp_path / "README.md").write_text("x", encoding="utf-8")
-    assert _complete(_completer(tmp_path), "mail me at user@example.com") == []
+    root = _workspace(tmp_path)
+    (root / "README.md").write_text("x", encoding="utf-8")
+    assert _complete(_completer(root), "mail me at user@example.com") == []
 
 
 def test_bare_at_offers_an_overview(tmp_path: Path) -> None:
-    (tmp_path / "a.md").write_text("x", encoding="utf-8")
-    (tmp_path / "b.md").write_text("x", encoding="utf-8")
-    assert {c.text for c in _complete(_completer(tmp_path), "look at @")} == {"a.md", "b.md"}
+    root = _workspace(tmp_path)
+    (root / "a.md").write_text("x", encoding="utf-8")
+    (root / "b.md").write_text("x", encoding="utf-8")
+    assert {c.text for c in _complete(_completer(root), "look at @")} == {"a.md", "b.md"}
 
 
 def test_finished_mention_stops_completing(tmp_path: Path) -> None:
-    (tmp_path / "a.md").write_text("x", encoding="utf-8")
+    root = _workspace(tmp_path)
+    (root / "a.md").write_text("x", encoding="utf-8")
     # Whitespace ends an unquoted mention: the cursor is past it now.
-    assert _complete(_completer(tmp_path), "@a.md and then") == []
+    assert _complete(_completer(root), "@a.md and then") == []
 
 
 def test_directory_completes_with_slash_for_navigation(tmp_path: Path) -> None:
-    nested = tmp_path / "corpus"
+    root = _workspace(tmp_path)
+    nested = root / "corpus"
     nested.mkdir()
     (nested / "paper.md").write_text("x", encoding="utf-8")
-    inserted = {c.text for c in _complete(_completer(tmp_path), "@corpus")}
+    inserted = {c.text for c in _complete(_completer(root), "@corpus")}
     assert "corpus/" in inserted
 
 
 def test_whitespace_paths_are_quoted(tmp_path: Path) -> None:
-    folder = tmp_path / "my docs"
+    root = _workspace(tmp_path)
+    folder = root / "my docs"
     folder.mkdir()
     (folder / "note.md").write_text("x", encoding="utf-8")
-    inserted = {c.text for c in _complete(_completer(tmp_path), "@my")}
+    inserted = {c.text for c in _complete(_completer(root), "@my")}
     assert any(text.startswith('"') for text in inserted)
 
 
 def test_quoted_mention_is_closed_not_doubled(tmp_path: Path) -> None:
-    folder = tmp_path / "my docs"
+    root = _workspace(tmp_path)
+    folder = root / "my docs"
     folder.mkdir()
     (folder / "note.md").write_text("x", encoding="utf-8")
-    results = _complete(_completer(tmp_path), '@"my docs/no')
+    results = _complete(_completer(root), '@"my docs/no')
     assert [c.text for c in results] == ['my docs/note.md"']
 
 
 def test_sensitive_files_are_not_completable(tmp_path: Path) -> None:
-    (tmp_path / ".env").write_text("SECRET=1", encoding="utf-8")
-    assert _complete(_completer(tmp_path), "@.en") == []
-    assert _complete(_completer(tmp_path), "@") == []
+    root = _workspace(tmp_path)
+    (root / ".env").write_text("SECRET=1", encoding="utf-8")
+    assert _complete(_completer(root), "@.en") == []
+    assert _complete(_completer(root), "@") == []
 
 
 def test_merged_completer_keeps_both_surfaces(tmp_path: Path) -> None:
-    (tmp_path / "README.md").write_text("x", encoding="utf-8")
-    completer = build_repl_completer(["help", "task"], root=tmp_path)
+    root = _workspace(tmp_path)
+    (root / "README.md").write_text("x", encoding="utf-8")
+    completer = build_repl_completer(["help", "task"], root=root)
     # Threaded completers expose the async API; the sync one delegates too.
     slash = Document("/hel", cursor_position=4)
     assert [c.text for c in completer.get_completions(slash, CompleteEvent())] == ["help"]

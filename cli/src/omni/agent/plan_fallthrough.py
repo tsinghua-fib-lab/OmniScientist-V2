@@ -14,6 +14,8 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
+from omni.skills_runtime.admission import admission_fallthrough_lines, first_admission_result
+
 # A provider result can contain a full report or stack trace. The fallback needs
 # the outcome and reusable paths, not a second transcript.
 _MAX_RESULT_DETAIL = 600
@@ -79,6 +81,9 @@ def history_with_failed_attempt(
                 artifact_lines.append(path or uri)
         for location in artifact_lines[:_MAX_ARTIFACT_REFS]:
             lines.append(f"  usable output: `{location}`")
+        admission = first_admission_result(result) or first_admission_result(item)
+        if admission is not None:
+            lines.extend(admission_fallthrough_lines(skill, admission))
     if not lines:
         return history
     return [
@@ -96,3 +101,14 @@ def history_with_failed_attempt(
             ),
         },
     ]
+
+
+def loop_result_with_failed_attempt(result: Any, attempt: Any) -> Any:
+    """Keep the lost route on the ReAct trace so later judges still see it."""
+    if not _is_failed_attempt(attempt):
+        return result
+    traces = list(getattr(attempt, "tool_trace", None) or [])
+    if not traces:
+        return result
+    result.tool_trace = [*traces, *result.tool_trace]
+    return result

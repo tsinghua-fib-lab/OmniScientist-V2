@@ -44,6 +44,44 @@ def cli_text(*parts: str) -> str:
     return " ".join(_ANSI.sub("", "".join(parts)).split())
 
 
+def prepare_isolated_omni_home(
+    home: Path,
+    *,
+    provider: str = "mock",
+    write_model_config: bool = True,
+) -> Path:
+    """Make a throwaway ``OMNI_HOME`` safe for a real subprocess ``omni``.
+
+    Isolation is the environment variable only — never ``init --home``, which
+    writes the user-level XDG home pointer. Mark the home converged and, when
+    writing config, disable KeepAlive so a bare launch does not install a
+    durable supervisor.
+    """
+    from omni.config.paths import OmniPaths
+    from omni.runtime import update_state
+
+    home = Path(home)
+    home.mkdir(parents=True, exist_ok=True)
+    if write_model_config:
+        config = home / "config.toml"
+        text = config.read_text(encoding="utf-8") if config.is_file() else ""
+        pieces = [text.rstrip()] if text.strip() else []
+        if "[model]" not in text:
+            pieces.append(
+                f"[model]\nprovider = \"{provider}\"\nmodel = \"omni-mock\"\n"
+            )
+        if "ensure_on_launch" not in text:
+            pieces.append("[service]\nensure_on_launch = false\n")
+        config.write_text("\n".join(pieces).rstrip() + "\n", encoding="utf-8")
+    paths = OmniPaths(
+        home=home,
+        project_name="default",
+        project_dir=home / "projects" / "default",
+    )
+    update_state.record_converged(paths)
+    return home
+
+
 def store_shaped_home(root: Path, label: str = "") -> Path:
     """Create a store directory under *root* shaped like the one that ships.
 
@@ -64,6 +102,12 @@ def store_shaped_home(root: Path, label: str = "") -> Path:
     store = (root / label / _PROJECT_MARKER) if label else (root / _PROJECT_MARKER)
     store.mkdir(parents=True, exist_ok=True)
     return store
+
+
+@pytest.fixture
+def prepared_home(omni_home: Path) -> Path:
+    """Isolated home with mock config, converged state, and no KeepAlive."""
+    return prepare_isolated_omni_home(omni_home, write_model_config=True)
 
 
 @pytest.fixture
@@ -139,9 +183,13 @@ def isolated_home(tmp_path, monkeypatch):
     # to ``unable to open database file`` under the full release suite.
     home.mkdir(parents=True, exist_ok=True)
     omni_home.mkdir(parents=True, exist_ok=True)
+    xdg = home / ".config"
+    xdg.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("OMNI_HOME", str(omni_home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
+    prepare_isolated_omni_home(omni_home, write_model_config=False)
     if os.name == "nt":
         # pathlib.Path.home() follows USERPROFILE/HOMEDRIVE on Windows rather
         # than HOME. Keep skill exports and any "~" expansion inside tmp_path.

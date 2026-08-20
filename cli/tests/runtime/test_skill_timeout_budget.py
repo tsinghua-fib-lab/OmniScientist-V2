@@ -187,6 +187,15 @@ def test_a_stall_window_inside_the_deadline_is_accepted():
     assert execution_budget_warnings({"max_seconds": 1800, "stall_seconds": 600}) == []
 
 
+def test_research_pptx_declares_its_own_fifteen_minute_budget() -> None:
+    frontmatter = yaml.safe_load(
+        (_SKILLS_ROOT / "research-pptx" / "SKILL.md").read_text(encoding="utf-8").split("---")[1]
+    )
+    helix = ((frontmatter or {}).get("metadata") or {}).get("helixforge") or {}
+    assert helix.get("kind") == "python_engine"
+    assert float((helix.get("execution") or {}).get("max_seconds") or 0) == 900
+
+
 @pytest.mark.parametrize(
     "skill_dir",
     sorted(p for p in _SKILLS_ROOT.glob("*/SKILL.md")),

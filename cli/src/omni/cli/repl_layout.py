@@ -15,8 +15,23 @@ from prompt_toolkit.utils import get_cwidth
 _HINT_SEP = " · "
 
 COMPOSER_PLACEHOLDER = "Send a message  ·  / commands  ·  ! shell  ·  Ctrl+J newline"
+COMPOSER_PLACEHOLDER_SHIFT = "Send a message  ·  / commands  ·  ! shell  ·  Shift+Enter newline"
 COMPOSER_PLACEHOLDER_MEDIUM = "Send a message  ·  /  ·  !"
 COMPOSER_PLACEHOLDER_NARROW = "Send a message"
+
+
+def newline_hint(shift_enter_ready: bool) -> str:
+    """Footer token for inserting a newline.
+
+    Advertise Shift+Enter only when the host can distinguish it from Enter.
+    Ctrl+J remains the portable fallback and still works in every mode.
+    """
+    return "Shift+Enter newline" if shift_enter_ready else "Ctrl+J newline"
+
+
+def composer_placeholder(*, shift_enter_ready: bool = False) -> str:
+    """Wide composer hint, capability-aware for the newline key."""
+    return COMPOSER_PLACEHOLDER_SHIFT if shift_enter_ready else COMPOSER_PLACEHOLDER
 
 
 def display_width(text: str) -> int:
@@ -108,10 +123,11 @@ def center_truncate_path(path: str, max_width: int) -> str:
     return _take_prefix(path, max_width - need) + ellipsis + tail
 
 
-def placeholder_for_width(width: int) -> str:
+def placeholder_for_width(width: int, *, shift_enter_ready: bool = False) -> str:
     """Composer hint that stays on one line at ``width`` columns."""
-    if width >= display_width(COMPOSER_PLACEHOLDER):
-        return COMPOSER_PLACEHOLDER
+    full = composer_placeholder(shift_enter_ready=shift_enter_ready)
+    if width >= display_width(full):
+        return full
     if width >= display_width(COMPOSER_PLACEHOLDER_MEDIUM):
         return COMPOSER_PLACEHOLDER_MEDIUM
     return COMPOSER_PLACEHOLDER_NARROW

@@ -68,6 +68,21 @@ def test_trust_refuses_skill_without_declared_license(tmp_path, settings):
     assert forced.status == "trusted"
 
 
+def test_import_uses_frontmatter_name_not_folder_stem(tmp_path, settings):
+    source = tmp_path / "odd-folder"
+    source.mkdir()
+    (source / "SKILL.md").write_text(
+        "---\nname: canonical-probe\ndescription: demo\nlicense: MIT\n---\nbody\n",
+        encoding="utf-8",
+    )
+
+    result = import_skill(str(source), settings.paths)
+
+    assert result.status == "installed"
+    assert result.name == "canonical-probe"
+    assert result.dest.name == "canonical-probe"
+
+
 def test_import_rejects_symlinks(tmp_path, settings):
     source = tmp_path / "linked"
     source.mkdir()

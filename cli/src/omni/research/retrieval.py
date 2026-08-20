@@ -34,6 +34,7 @@ from omni.research.registry import ConnectorRegistry
 # identity/metadata for de-dup and citation.
 _LIT_FIELDS = (
     "title", "authors", "year", "doi", "arxiv_id", "url", "venue", "summary", "origin",
+    "source_id",
     "category", "nct_id", "status", "phases", "conditions", "interventions",
     "primary_outcomes", "has_results",
 )
@@ -247,7 +248,10 @@ async def search_literature(
         if index:
             try:
                 summary = await _index(ctx, found, origin=name, query=query, keep=rows)
-                kept = list(summary.get("results") or [])
+                kept = _stamp_source_ids(
+                    list(summary.get("results") or []),
+                    summary.get("sources") or [],
+                )
                 indexed += int(summary.get("indexed", 0))
                 deduped += int(summary.get("deduped", 0))
                 per_source[name] = {
@@ -285,10 +289,15 @@ async def search_literature(
             "No results from live sources or the local corpus. "
             "Retry later (quotas reset), broaden the query, or index sources first."
         ]
+    compact = _stamp_source_ids(compact, _sources_from_per_source(per_source))
+    source_ids = _unique_ids(
+        [*_source_ids_from_per_source(per_source), *(_id_of(item) for item in compact)]
+    )
     return _result(
         status=status, query=query, connectors=usable, results=compact,
         indexed=indexed, deduped=deduped, per_source=per_source, errors=errors,
         providers=providers, remediation=_dedup_str(remediation), note=note,
+        source_ids=source_ids,
     )
 
 
@@ -325,12 +334,67 @@ def _dedup_str(items: list[str]) -> list[str]:
     return out
 
 
+def _stamp_source_ids(results: list[dict[str, Any]], sources: list[Any]) -> list[dict[str, Any]]:
+    by_title: dict[str, str] = {}
+    for src in sources:
+        if not isinstance(src, dict):
+            continue
+        sid = str(src.get("source_id") or "").strip()
+        title = str(src.get("title") or "").strip()
+        if sid and title:
+            by_title[title] = sid
+    for item in results:
+        if not isinstance(item, dict) or item.get("source_id"):
+            continue
+        title = str(item.get("title") or "").strip()
+        if title in by_title:
+            item["source_id"] = by_title[title]
+    return results
+
+
+def _sources_from_per_source(per_source: dict[str, Any]) -> list[Any]:
+    found: list[Any] = []
+    for row in per_source.values():
+        if isinstance(row, dict):
+            found.extend(row.get("sources") or [])
+    return found
+
+
+def _source_ids_from_per_source(per_source: dict[str, Any]) -> list[str]:
+    return _unique_ids(_id_of(item) for item in _sources_from_per_source(per_source))
+
+
+def _id_of(item: Any) -> str:
+    if isinstance(item, dict):
+        return str(item.get("source_id") or "").strip()
+    return str(item or "").strip()
+
+
+def _unique_ids(items: Any) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        value = str(item or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
+
+
 def _result(
     *, status: str, query: str, connectors: list[str], results: list[dict[str, Any]],
     indexed: int, deduped: int, per_source: dict[str, Any], errors: list[str],
     providers: list[dict[str, Any]], remediation: list[str], note: str,
+    source_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    return {
+    from omni.runtime.engine_observation import attach_engine_observation
+
+    ids = list(source_ids or [])
+    if not ids:
+        ids = _unique_ids(
+            [*_source_ids_from_per_source(per_source), *(_id_of(item) for item in results)]
+        )
+    payload: dict[str, Any] = {
         "status": status,
         "query": query,
         "connectors": connectors,
@@ -344,6 +408,9 @@ def _result(
         "remediation": remediation,
         "note": note,
     }
+    if ids:
+        payload["source_ids"] = ids
+    return attach_engine_observation(payload, payload)
 
 
 __all__ = ["search_literature"]

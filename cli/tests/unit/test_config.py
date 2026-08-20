@@ -21,6 +21,21 @@ def test_defaults_use_mock_provider():
     s = load_settings()
     assert s.model.provider == "mock"
     assert s.paths is not None
+    assert s.web.max_inflight_turns == 10
+
+
+def test_user_config_sets_web_max_inflight_turns():
+    paths = get_paths()
+    _write_toml(paths.config_file, {"web": {"max_inflight_turns": 0}})
+    s = load_settings()
+    assert s.web.max_inflight_turns == 0
+
+
+def test_project_cannot_override_web_max_inflight_turns():
+    paths = get_paths()
+    _write_toml(paths.project_config, {"web": {"max_inflight_turns": 1}})
+    s = load_settings()
+    assert s.web.max_inflight_turns == 10
 
 
 def test_env_overrides_provider(monkeypatch):

@@ -174,6 +174,15 @@ def _skill_execution_event(
     }
 
 
+def persist_detached_skill_notice(*, notify_channel: str, workflow_run_id: str = "") -> bool:
+    """Write the background completion line only when the user is not in this turn.
+
+    Foreground drain passes an empty notify channel. Workflow children must not
+    insert a second assistant message into the parent session.
+    """
+    return bool(notify_channel) and not bool(workflow_run_id)
+
+
 def _task_result_message(
     execution_id: str,
     skill_name: str,

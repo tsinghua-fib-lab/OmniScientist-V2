@@ -169,6 +169,18 @@ class ArtifactFigureRunner:
             }
         trace.append(trace_record)
 
+        if drain_tasks and drained and settlement_status(drained) == "failed":
+            # Same Codex shape as SkillTaskRunner: a lost figure route is an
+            # observation, not the turn's verdict (admission or engine failure).
+            return PlanExecutionResult(
+                handled=False,
+                submitted_subtask_ids=[subtask_id],
+                drained_results=drained,
+                tool_trace=trace,
+                terminated_reason="single_skill_failed",
+                plan_summary=plan_summary(plan),
+                degraded_warnings=list(plan.degraded_warnings),
+            )
         title = str(params.get("title") or "Scientific Figure")
         if drain_tasks and drained:
             body = completed_skill_answer(drained, skill=skill)

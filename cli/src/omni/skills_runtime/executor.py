@@ -19,7 +19,6 @@ import importlib.util
 import inspect
 import json
 import logging
-import shutil
 import sys
 import threading
 import time
@@ -35,9 +34,15 @@ from omni.core.termination import (
     termination_reason_label,
 )
 from omni.core.tool_result import command_result_status, owned_result_outcome
+from omni.personas.roots import bind_soulagent_project_root
 from omni.runtime.execution_policy import skill_requires_approval
 from omni.runtime.hooks import execution_policy_active, execution_policy_covers
 from omni.runtime.tool_gateway import ToolGateway
+from omni.skills_runtime.admission import (
+    binary_admission,
+    module_admission,
+    service_admission_from_ctx,
+)
 from omni.skills_runtime.context import ExecContext
 from omni.skills_runtime.manifest import SkillEntry, SkillKind
 
@@ -1007,148 +1012,25 @@ async def _emit_progress(progress_callback: Any, stage: str, pct: float = 0.0, *
         await result
 
 
-# Host-service availability probes: map a declared service name to the object
-# on the exec context that reports its own readiness. Each probe returns
-# something exposing ``available`` / ``error_code`` / ``missing`` /
-# ``setup_command`` (the VlmGateway contract) or ``None`` when the host did not
-# inject the service (then the engine's own invariant check reports it).
-_SERVICE_PROBES: dict[str, Any] = {
-    "vlm": lambda ctx: getattr(ctx, "vlm", None),
-}
-
-
 def _service_configuration_action(entry: SkillEntry, ctx: ExecContext) -> dict[str, Any] | None:
-    """Preflight a skill's declared service requirements before running it.
+    """Preflight declared host services before the engine starts.
 
-    A skill declares the host services it needs (SKILL.md
-    ``runtime_requirements.services``). When a required service is injected but
-    not configured, return a terminal ``action_required: configure`` result so
-    the turn asks the owner to set it up — instead of dispatching the engine
-    only to fail mid-run. Mirrors Codex's capability preflight: never start work
-    that is structurally guaranteed to fail for a missing prerequisite. The
-    ``action_required`` marker makes the runtime treat this as an admission
-    rejection (not an execution attempt).
+    Codex never starts work that is structurally guaranteed to fail. The
+    returned ``action_required`` payload is an admission observation for the
+    caller (ReAct keeps looping; a conversational confirm is a different
+    shape). The engine is not dispatched.
     """
-    for service in entry.requires_services:
-        probe = _SERVICE_PROBES.get(service)
-        if probe is None:
-            continue
-        gateway = probe(ctx)
-        if gateway is None or getattr(gateway, "available", False):
-            continue
-        command = str(getattr(gateway, "setup_command", "") or "")
-        code = str(getattr(gateway, "error_code", "") or f"{service}_not_configured")
-        missing = [str(field) for field in getattr(gateway, "missing", ()) or ()]
-        return {
-            "status": "error",
-            "summary": f"{entry.name} needs the {service} service configured first.",
-            "error": f"The {service} service is not configured.",
-            "recoverable": False,
-            "blocking": True,
-            "action_required": {
-                "kind": "configure",
-                "service": service,
-                "command": command,
-                "missing": missing,
-            },
-            "setup_command": command,
-            "error_info": {
-                "code": code,
-                "category": "configuration",
-                "retryable": False,
-                "workflow_recoverable": False,
-            },
-        }
-    return None
-
-
-# ``python``/``python3`` are satisfied by the interpreter already running omni,
-# so a declared interpreter requirement never blocks on PATH-name quirks.
-_INTERPRETER_ALIASES = frozenset({"python", "python3"})
+    return service_admission_from_ctx(entry, ctx)
 
 
 def _missing_binary_action(entry: SkillEntry) -> dict[str, Any] | None:
-    """Preflight a skill's declared executable requirements (SKILL.md
-    ``requires.bins``).
-
-    A missing binary is structurally fatal, so — like the service gate — reject
-    admission with a terminal ``action_required: install`` result instead of
-    dispatching an engine that cannot run. This is fully generic: a skill declares
-    its bins and the *same* gate enforces them, so no per-skill host code is
-    needed. Env vars are intentionally not gated (mirrors Codex, which dropped
-    env-var prompting; secrets are the gateway's/engine's concern).
-    """
-    missing: list[str] = []
-    for binary in entry.requires_bins:
-        name = str(binary).strip()
-        if not name or (name in _INTERPRETER_ALIASES and sys.executable):
-            continue
-        if shutil.which(name) is None:
-            missing.append(name)
-    if not missing:
-        return None
-    joined = ", ".join(missing)
-    return {
-        "status": "error",
-        "summary": f"{entry.name} needs {joined} on PATH first.",
-        "error": f"Required executable(s) not found: {joined}.",
-        "recoverable": False,
-        "blocking": True,
-        "action_required": {"kind": "install", "bins": missing},
-        "setup_command": "",
-        "error_info": {
-            "code": "missing_binary",
-            "category": "configuration",
-            "retryable": False,
-            "workflow_recoverable": False,
-        },
-    }
+    """Preflight declared executables (SKILL.md ``requires.bins``)."""
+    return binary_admission(entry)
 
 
 def _missing_python_module_action(entry: SkillEntry) -> dict[str, Any] | None:
-    """Preflight a skill's declared Python module requirements (SKILL.md
-    ``runtime_requirements.python_modules``).
-
-    Uses ``importlib.util.find_spec`` against omni's *own* interpreter — the same
-    environment the engine imports from — so a module omni already has never
-    blocks, and a genuinely missing one is reported once as a terminal
-    ``action_required: install`` carrying the skill's declared
-    ``dependency_setup_command``. This is the generic answer to "process an
-    artifact whose parser isn't installed": a capability declares its modules and
-    this single host gate enforces them, instead of the model hand-rolling
-    ``pip install`` across the wrong venv/interpreter (PEP 668, missing
-    ``.venv/bin/pip``, ``--break-system-packages``…). Adding a new format never
-    adds host code — only a skill declaration.
-    """
-    from omni.skills_runtime.manifest import missing_python_modules
-
-    missing = missing_python_modules(entry)
-    if not missing:
-        return None
-    joined = ", ".join(missing)
-    command = str(entry.dependency_setup_command or "").strip()
-    error = f"Required Python module(s) not importable in omni's interpreter: {joined}."
-    if command:
-        error += f" Install with: {command}"
-    return {
-        "status": "error",
-        "summary": f"{entry.name} needs Python module(s) installed first: {joined}.",
-        "error": error,
-        "recoverable": False,
-        "blocking": True,
-        "action_required": {
-            "kind": "install",
-            "python_modules": missing,
-            "command": command,
-        },
-        "setup_command": command,
-        "error_info": {
-            "code": entry.dependency_error_code or "runtime_dependency_missing",
-            "category": "configuration",
-            "retryable": False,
-            "workflow_recoverable": False,
-        },
-    }
+    """Preflight declared Python modules against omni's own interpreter."""
+    return module_admission(entry)
 
 
 async def execute_skill(
@@ -1257,6 +1139,10 @@ async def _execute_skill_unchecked(
             f"`omni skills trust {entry.name} --yes` before execution"
         )
     merged = {**ctx.base_input(), **(input_data or {})}
+    if entry.name == "soulagent":
+        merged = bind_soulagent_project_root(
+            merged, ctx.paths, channel=getattr(ctx, "channel", "") or "cli"
+        )
     await _emit_progress(progress_callback, "skill.start", 0.0, skill=entry.name, kind=entry.kind.value)
     try:
         if entry.kind == SkillKind.PYTHON_ENGINE:
@@ -1435,6 +1321,7 @@ async def _run_prompt_skill(entry, merged, ctx, progress_callback=None) -> dict[
         return {"status": "ok", "instructions": entry.load_body(), "note": "no LLM configured; returned skill body"}
 
     from omni.config.settings import session_compact_token_budget
+    from omni.core.observation import observation_spill_path
     from omni.core.react_agent import ReActLoopAgent, ToolSpec
     from omni.skills_runtime.builtin_tools import build_builtin_tools
     from omni.skills_runtime.context import Tool
@@ -1536,6 +1423,7 @@ async def _run_prompt_skill(entry, merged, ctx, progress_callback=None) -> dict[
         observation_max_chars=int(
             getattr(getattr(ctx.settings, "memory", None), "tool_observation_max_chars", 8000) or 0
         ),
+        observation_spill_dir=str(observation_spill_path(ctx.paths)),
         # A prompt sub-agent keeps the *structured* clarification contract the
         # workflow layer depends on: a ``needs_input`` terminal stays the tool's
         # typed payload rather than being recomposed as prose.

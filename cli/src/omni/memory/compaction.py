@@ -20,6 +20,7 @@ from typing import Any
 
 from omni.config.settings import OmniSettings
 from omni.core.llm.client import chat_result
+from omni.core.truncation import formatted_truncate_text
 from omni.memory.sanitize import redact_secrets
 
 logger = logging.getLogger(__name__)
@@ -145,11 +146,12 @@ def microcompact_tool_results(
     """Shrink the content of *older* tool observations in place (Claude-style).
 
     Keeps the most recent ``keep_last`` ``role="tool"`` messages verbatim and
-    truncates older ones to ``max_chars`` + a placeholder. This clears the
-    cheapest, bulkiest context first (long tool dumps) during a long single
-    ReAct turn without dropping the messages — so the provider-side
-    ``tool_call``↔``tool_result`` linkage stays valid. Idempotent (already
-    trimmed messages are skipped). Returns the number of messages trimmed.
+    head/tail-truncates older ones to ``max_chars``, then a placeholder. This
+    clears the cheapest, bulkiest context first (long tool dumps) during a
+    long single ReAct turn without dropping the messages — so the
+    provider-side ``tool_call``↔``tool_result`` linkage stays valid.
+    Idempotent (already trimmed messages are skipped). Returns the number of
+    messages trimmed.
     """
     if keep_last < 0:
         return 0
@@ -158,11 +160,14 @@ def microcompact_tool_results(
         return 0
     older = tool_idxs[:-keep_last] if keep_last else tool_idxs
     trimmed = 0
+    footer = "\n" + _MICROCOMPACT_PLACEHOLDER
     for i in older:
         content = str(messages[i].get("content") or "")
         if len(content) <= max_chars or content.rstrip().endswith(_MICROCOMPACT_PLACEHOLDER):
             continue
-        messages[i]["content"] = content[:max_chars].rstrip() + "\n" + _MICROCOMPACT_PLACEHOLDER
+        messages[i]["content"] = formatted_truncate_text(
+            content, max_chars + len(footer), footer=footer
+        )
         trimmed += 1
     return trimmed
 

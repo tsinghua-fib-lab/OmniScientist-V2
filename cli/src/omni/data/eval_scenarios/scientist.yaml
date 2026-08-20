@@ -179,10 +179,10 @@
       expect:
         skill_selected: research-pptx
 
-# L4 journey (skill_routing): a literature survey reaches literature.search,
-# not the ideation pipeline that happens to search papers as its first stage.
+# L4 journey (skill_routing): listing papers is native retrieve, not ideation
+# and not an automatic OpenAlex skill compile.
 - id: sci_skill_routing_literature_survey
-  title: "Scientist: literature survey resolves openalex-search, not research-ideation"
+  title: "Scientist: paper listing stays on native retrieve, not research-ideation"
   persona: scientist
   channel: cli
   tags: [skill_routing]
@@ -197,9 +197,10 @@
         outputs: [sources]
         execution_mode: background
         confidence: 0.96
-        rationale: "The request is a literature survey, not idea generation."
+        rationale: "The request is a literature listing, not idea generation."
       expect:
-        skill_selected: openalex-search
+        skill_selected: "!research-ideation"
+        skills_exclude: [research-ideation, openalex-search]
 
 # L4 journey (skill_routing): a novelty request reaches research-ideation.
 - id: sci_skill_routing_research_ideation

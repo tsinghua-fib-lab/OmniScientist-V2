@@ -187,23 +187,25 @@ def test_repl_startup_and_help_publish_semantic_default_collapsed_tables():
         event
         for event in sink.events
         if isinstance(event.payload, DataTableData)
-        and event.payload.title
-        in {"Common commands and subcommands", "Interactive mode commands"}
+        and event.payload.title in {"Conversation and workspace", "Research"}
     ]
+    # Startup is a one-line model hint; the command manual is /help only.
     assert [event.payload.title for event in command_tables] == [
-        "Common commands and subcommands",
-        "Interactive mode commands",
+        "Conversation and workspace",
+        "Research",
     ]
-    for event in command_tables:
-        assert event.kind == TranscriptKind.DATA_TABLE
-        assert event.foldable is True
-        assert event.initially_collapsed is True
-        assert event.payload.layout == "commands"
-        assert event.payload.row_styles[:3] == (
-            "bold cyan",
-            "bold cyan",
-            "bold cyan",
-        )
+    conversation, research = command_tables
+    assert conversation.kind == TranscriptKind.DATA_TABLE
+    assert conversation.foldable is True
+    assert conversation.initially_collapsed is False
+    assert conversation.payload.layout == "commands"
+    assert conversation.payload.row_styles[:3] == (
+        "bold cyan",
+        "bold cyan",
+        "bold cyan",
+    )
+    assert research.initially_collapsed is True
+    assert research.payload.layout == "commands"
 
 
 def test_foldable_table_collapses_without_losing_its_semantic_source():

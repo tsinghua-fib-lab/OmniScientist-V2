@@ -51,6 +51,7 @@ from omni.core.tool_result import (
 )
 from omni.core.tool_transcript import normalize_tool_transcript
 from omni.core.turn_clock import TurnClock, register_clock
+from omni.skills_runtime.admission import is_admission_action
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,12 @@ _CONTRACT_HUNT_TOOLS = frozenset(
 )
 _CONTRACT_CONSUME_TOOLS = frozenset({"run_skill", "run_workflow"})
 _MIN_CONTRACT_HUNT_STREAK = 2
+CONTRACT_HUNT_STEER = (
+    "A skill input_schema was already returned for that skill. "
+    "Call run_skill with those fields now. Do not find_skill, docs_search, "
+    "or glob the same contract again. Looking up a different skill for another "
+    "owed deliverable is fine."
+)
 
 # Bounded stops caused by spend rather than by the work being finished. They get
 # a cheaper wrap-up call than other stops, but they still get one.
@@ -304,11 +311,13 @@ class ReActLoopAgent:
         context_checkpoint_max_tokens: int = 4096,
         microcompact_keep_tool_results: int = 0,
         observation_max_chars: int = 8000,
+        observation_spill_dir: str | None = None,
         compose_needs_input: bool = True,
         no_progress_threshold: int = 2,
         parallel_tools: bool = True,
         require_opening_tool: bool = False,
         owes_scientific_outputs: bool = False,
+        fact_feed: Any | None = None,
     ) -> None:
         self._llm = llm_client
         self._invoke = tool_invoker
@@ -361,6 +370,7 @@ class ReActLoopAgent:
         )
         self._microcompact_keep = max(0, microcompact_keep_tool_results)
         self._observation_max_chars = max(0, int(observation_max_chars))
+        self._observation_spill_dir = observation_spill_dir
         # Stopping once calls stop advancing, and always writing a real final
         # answer at whatever bound was hit, are not options — a caller that turns
         # either off burns its whole budget and hands back a stub. They were
@@ -385,6 +395,9 @@ class ReActLoopAgent:
         # memory and task probes are lookup, not progress. Answer-only and
         # inspect/review turns leave this false so those tools remain the work.
         self._owes_scientific_outputs = owes_scientific_outputs
+        # Host-owned task facts (snapshot / delta / deterministic debt). The
+        # loop only injects observations; it never stages or picks tools.
+        self._fact_feed = fact_feed
         self._circuit: dict[str, int] = {}
         # Calls that never executed are counted separately from provider
         # failures. They never reach a provider, so the circuit breaker cannot
@@ -502,6 +515,7 @@ class ReActLoopAgent:
 
         iteration = 0
         lookup_steered = False
+        hunt_steered_for: frozenset[str] = frozenset()
         while self._max_iterations is None or iteration < self._max_iterations:
             iteration += 1
             if control.cancel_requested:
@@ -521,6 +535,9 @@ class ReActLoopAgent:
                         "content": "[User steering during execution]\n" + "\n".join(f"- {item}" for item in steer),
                     }
                 )
+                desk = await self._fact_text("after_steer")
+                if desk:
+                    messages.append({"role": "user", "content": desk})
             # Layer 3 — soft foreground threshold: emit one "still working"
             # notice so the surface reaffirms the task id and long-running status.
             # The turn keeps going; the reference agents never fail a turn here.
@@ -677,6 +694,11 @@ class ReActLoopAgent:
                     watchdog=watchdog,
                 )
             except asyncio.CancelledError:
+                if not control.cancel_requested:
+                    raise
+                # Outer ExecutionControl cancelled this task. Consume that so
+                # the orchestrator can still write execution.finished / react.finished.
+                _clear_task_cancellation()
                 return self._cancelled_result(
                     trace,
                     total_usage,
@@ -824,6 +846,11 @@ class ReActLoopAgent:
                         content=mark_truncated_output(last.content or ""),
                         budget=budget, transcript_repairs=transcript_repairs,
                     )
+                finding = await self._fact_text("before_text_finish")
+                if finding:
+                    messages.append({"role": "assistant", "content": last.content or ""})
+                    messages.append({"role": "user", "content": finding})
+                    continue
                 return self._finalize(
                     "text", trace, total_usage, iteration, budget.completed,
                     terminated_reason="done", content=last.content or "",
@@ -900,19 +927,24 @@ class ReActLoopAgent:
                 records = await self._dispatch_batch(in_budget, tools_by_name)
             except asyncio.CancelledError:
                 dispatch_cancelled = True
-                records = [
-                    ToolInvocationRecord(
-                        name=tc.name,
-                        arguments=tc.arguments,
-                        call_id=tc.id,
-                        error="Tool execution was cancelled by the user.",
-                        status="cancelled",
-                        error_code="user_cancelled",
-                        lifecycle_status="aborted",
-                        result_success=None,
+                from omni.core.tool_result import interrupted_tool_payload
+
+                records = []
+                for tc in in_budget:
+                    payload = interrupted_tool_payload(tc.name, started=True)
+                    records.append(
+                        ToolInvocationRecord(
+                            name=tc.name,
+                            arguments=tc.arguments,
+                            call_id=tc.id,
+                            result=payload,
+                            error=str(payload.get("error") or ""),
+                            status="cancelled",
+                            error_code=str(payload.get("error_code") or "TOOL_OUTCOME_UNKNOWN"),
+                            lifecycle_status="aborted",
+                            result_success=None,
+                        )
                     )
-                    for tc in in_budget
-                ]
 
             for (index, _), record in zip(admitted, records, strict=True):
                 outcomes[index] = record
@@ -1008,6 +1040,10 @@ class ReActLoopAgent:
                         }
                     no_progress = max(stalled_patterns.values(), default=0)
 
+            delta = await self._fact_text("after_tool_batch")
+            if delta:
+                messages.append({"role": "user", "content": delta})
+
             if promoted:
                 tool_specs = [
                     t.to_openai_spec() for t in effective_tools if t.name in advertised
@@ -1088,17 +1124,22 @@ class ReActLoopAgent:
 
             hunt = _contract_hunt_pressure(trace)
             if hunt >= max(_MIN_CONTRACT_HUNT_STREAK, self._no_progress_threshold):
-                return await self._terminate_or_synthesize(
-                    messages, trace, total_usage, iteration, budget.completed,
-                    user_message=user_message,
-                    reason="no_progress",
-                    salvage=(
-                        "A skill input contract was already returned; "
-                        "call run_skill instead of searching again."
-                    ),
-                    budget=budget,
-                    transcript_repairs=transcript_repairs,
-                )
+                active = _active_hunt_names(trace)
+                if active and not (active & hunt_steered_for):
+                    messages.append({"role": "user", "content": CONTRACT_HUNT_STEER})
+                    hunt_steered_for = active
+                else:
+                    return await self._terminate_or_synthesize(
+                        messages, trace, total_usage, iteration, budget.completed,
+                        user_message=user_message,
+                        reason="no_progress",
+                        salvage=(
+                            "A skill input contract was already returned; "
+                            "call run_skill instead of searching again."
+                        ),
+                        budget=budget,
+                        transcript_repairs=transcript_repairs,
+                    )
 
             lookup = lookup_pressure(trace, owed=self._owes_scientific_outputs)
             if lookup > 0:
@@ -1473,6 +1514,11 @@ class ReActLoopAgent:
                 max_chars=min(16_000, checkpoint_capacity * 4),
             )
 
+        desk = await self._fact_text("after_rollover")
+        if desk:
+            from omni.runtime.research_state import refresh_system_research_brief
+
+            system_prompt = refresh_system_research_brief(system_prompt, desk)
         continued = window.continue_with(
             system_prompt=system_prompt,
             user_message=user_message,
@@ -1500,7 +1546,26 @@ class ReActLoopAgent:
     def _compact_observation(self, value: Any) -> str:
         from omni.core.observation import compact_observation
 
-        return compact_observation(value, max_chars=self._observation_max_chars)
+        return compact_observation(
+            value,
+            max_chars=self._observation_max_chars,
+            spill_dir=self._observation_spill_dir,
+        )
+
+    async def _fact_text(self, method: str) -> str:
+        feed = self._fact_feed
+        if feed is None:
+            return ""
+        fn = getattr(feed, method, None)
+        if not callable(fn):
+            return ""
+        try:
+            result = fn()
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception:  # noqa: BLE001 — facts must not abort the turn
+            return ""
+        return str(result or "").strip()
 
     async def _emit_usage_progress(
         self,
@@ -1681,10 +1746,12 @@ class ReActLoopAgent:
         started_at = time.monotonic()
         last_error: str | None = None
         transport_result: Any = None
+        started = False
         retry_limit = _TOOL_RETRY_MAX if tool_spec.replay_safe else 0
         for attempt in range(1 + retry_limit):
             record.attempts = attempt + 1
             try:
+                started = True
                 raw_result = await self._invoke(tc.name, tc.arguments)
                 transport_result = raw_result
                 outcome = tool_call_outcome(raw_result)
@@ -1702,6 +1769,18 @@ class ReActLoopAgent:
                     record.observation = self._compact_observation(raw_obs)
                 last_error = None
                 break
+            except asyncio.CancelledError:
+                from omni.core.tool_result import interrupted_tool_payload
+
+                payload = interrupted_tool_payload(tc.name, started=started)
+                record.result = payload
+                record.error = str(payload.get("error") or "")
+                record.status = "cancelled"
+                record.error_code = str(payload.get("error_code") or "TOOL_OUTCOME_UNKNOWN")
+                record.lifecycle_status = "aborted"
+                record.result_success = None
+                record.duration_ms = (time.monotonic() - started_at) * 1000
+                raise
             except Exception as exc:  # noqa: BLE001
                 last_error = f"{type(exc).__name__}: {exc}"
                 if not _is_retryable(exc) or attempt >= retry_limit:
@@ -1879,6 +1958,39 @@ def _stall_outcome(record: ToolInvocationRecord, observation: str) -> str:
     return observation
 
 
+def _hunt_window(trace: list[ToolInvocationRecord]) -> list[ToolInvocationRecord]:
+    window: list[ToolInvocationRecord] = []
+    for record in reversed(trace):
+        if record.name in _CONTRACT_CONSUME_TOOLS:
+            break
+        if record.name not in _CONTRACT_HUNT_TOOLS:
+            break
+        window.append(record)
+    return window
+
+
+def _active_hunt_contract(
+    window: list[ToolInvocationRecord],
+) -> tuple[frozenset[str], int] | None:
+    for index, record in enumerate(window):
+        if record.name != "find_skill":
+            continue
+        names = _find_skill_contract_names(record.result)
+        if names:
+            return names, index
+    return None
+
+
+def _active_hunt_names(trace: list[ToolInvocationRecord]) -> frozenset[str]:
+    if any(
+        record.name in _CONTRACT_CONSUME_TOOLS and record.status == "succeeded"
+        for record in trace
+    ):
+        return frozenset()
+    found = _active_hunt_contract(_hunt_window(trace))
+    return found[0] if found else frozenset()
+
+
 def _contract_hunt_pressure(trace: list[ToolInvocationRecord]) -> int:
     """Trailing probes of one unanswered skill contract.
 
@@ -1886,33 +1998,33 @@ def _contract_hunt_pressure(trace: list[ToolInvocationRecord]) -> int:
     Once ``find_skill`` has handed back an ``input_schema``, further
     ``docs_search`` / ``glob`` / a repeat lookup that returns the same skill
     are the same loop: the next action is ``run_skill``. A disjoint second
-    card is preparing another consume, so it resets the streak. Codex keeps
-    tools available in that case; Omni only stops the BUG-11 re-probe.
+    card is preparing another consume, so it resets the streak. An empty
+    ``find_skill`` after a card is a miss, not another probe of that card.
+    Docs-only retrieval (no contract in the trailing window) is how a product
+    question reads ``architecture.md``; that is not a hunt.
     """
     if any(
         record.name in _CONTRACT_CONSUME_TOOLS and record.status == "succeeded"
         for record in trace
     ):
         return 0
+    window = _hunt_window(trace)
+    found = _active_hunt_contract(window)
+    if found is None:
+        return 0
+    active, contract_idx = found
     trailing = 0
-    active: frozenset[str] | None = None
-    for record in reversed(trace):
-        if record.name in _CONTRACT_CONSUME_TOOLS:
-            break
-        if record.name not in _CONTRACT_HUNT_TOOLS:
-            break
+    for index, record in enumerate(window):
         if record.name == "find_skill":
             names = _find_skill_contract_names(record.result)
-            if names:
-                if active is None:
-                    active = names
-                    trailing += 1
-                elif names & active:
-                    trailing += 1
-                else:
-                    break
+            if names and names & active:
+                trailing += 1
                 continue
-        trailing += 1
+            if names:
+                break
+            continue
+        if index < contract_idx:
+            trailing += 1
     return trailing
 
 
@@ -2030,8 +2142,11 @@ def _tool_result_needs_input(result: Any) -> bool:
 def _is_terminal_tool_result(result: Any) -> bool:
     if not isinstance(result, dict):
         return False
-    if isinstance(result.get("action_required"), dict):
-        return True
+    action = result.get("action_required")
+    if isinstance(action, dict):
+        # Owner-lifecycle admission (VLM / bins / modules) is a route
+        # observation. Conversational confirms still suspend the turn.
+        return not is_admission_action(action)
     if _tool_result_needs_input(result):
         return True
     control = result.get("_omni_control")
@@ -2051,8 +2166,7 @@ def _terminal_tool_kind(result: Any) -> Literal["text", "error", "needs_input"]:
     if _tool_result_needs_input(result):
         return "needs_input"
     if isinstance(result, dict) and isinstance(result.get("action_required"), dict):
-        action_kind = str(result["action_required"].get("kind") or "").lower()
-        return "needs_input" if action_kind == "configure" else "error"
+        return "error" if is_admission_action(result["action_required"]) else "needs_input"
     return "text"
 
 
@@ -2086,6 +2200,15 @@ def _salvage_content(reason: str, trace: list[ToolInvocationRecord], user_messag
         "Next: add concrete constraints and retry, or use /task to inspect submitted background work.",
     ]
     return "\n".join(lines)
+
+
+def _clear_task_cancellation() -> None:
+    """Drop pending Task.cancel() so a cancelled LLM call can still persist."""
+    task = asyncio.current_task()
+    if task is None:
+        return
+    while task.cancelling() > 0:
+        task.uncancel()
 
 
 def _brief(value: Any, limit: int = 180) -> str:

@@ -49,6 +49,7 @@ def test_hint_fragments_colour_keys_and_not_labels() -> None:
     [
         ("Enter send", "Enter"),
         ("Ctrl+J newline", "Ctrl+J"),
+        ("Shift+Enter newline", "Shift+Enter"),
         ("Esc stop", "Esc"),
         ("Tab queue", "Tab"),
         ("auto mode", ""),

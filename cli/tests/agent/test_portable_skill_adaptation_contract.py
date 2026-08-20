@@ -425,8 +425,9 @@ def test_research_pptx_reports_missing_extracted_markdown_path(tmp_path: Path) -
 
     error = engine_module.ResearchPptxEngine.validate_params(arguments=arguments)
 
-    assert error is not None
-    assert error["error_info"]["code"] == "markdown_not_found"
+    # A mention is not a required handle. topic itself is a valid source.
+    assert error is None
+    assert "markdown_uri" not in arguments
 
 
 @pytest.mark.asyncio

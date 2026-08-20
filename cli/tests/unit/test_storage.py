@@ -893,6 +893,74 @@ async def test_artifact_store_put_file_uses_source_stem_when_untitled(tmp_path):
     assert (await store.resolve_path(art.uri)) == art.path
 
 
+@pytest.mark.asyncio
+async def test_concurrent_init_on_one_file_does_not_deadlock(tmp_path):
+    """Two Database objects must share an asyncio lock, not a blocking flock."""
+    import asyncio
+
+    from omni.storage.db import Database
+
+    path = tmp_path / "concurrent.sqlite3"
+    first = Database(path)
+    second = Database(path)
+    try:
+        await asyncio.wait_for(asyncio.gather(first.init(), second.init()), timeout=5)
+        assert first._initialized
+        assert second._initialized
+    finally:
+        await first.dispose()
+        await second.dispose()
+
+
+@pytest.mark.asyncio
+async def test_init_lock_wait_does_not_block_the_event_loop(tmp_path):
+    """A held init.lock must wait in a worker thread so other tasks keep running."""
+    import asyncio
+    import os
+    import sys
+
+    if sys.platform == "win32":
+        pytest.skip("fcntl flock is not used on Windows")
+
+    import fcntl
+
+    from omni.storage.db import Database
+
+    path = tmp_path / "blocked.sqlite3"
+    lock_path = path.with_name(f"{path.name}.init.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    progress = 0
+
+    async def ticker() -> None:
+        nonlocal progress
+        for _ in range(8):
+            await asyncio.sleep(0.04)
+            progress += 1
+
+    db = Database(path)
+    try:
+        init_task = asyncio.create_task(db.init())
+        tick_task = asyncio.create_task(ticker())
+        await asyncio.sleep(0.2)
+        assert progress >= 3
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+        fd = -1
+        await asyncio.wait_for(init_task, timeout=5)
+        await tick_task
+        assert db._initialized
+    finally:
+        if fd >= 0:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(fd)
+        await db.dispose()
+
+
 def test_slugify_filename_preserves_cjk_and_limits_length():
     from omni.storage.artifacts import artifact_filename, slugify_filename
 

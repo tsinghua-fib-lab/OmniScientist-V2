@@ -35,6 +35,24 @@ _REVIEW_BLOCKED_TOOLS = {
     "submit_task",
 }
 
+# Plan-only: same ReAct turn, host denies mutating / retrieval side effects.
+# Codex ModeKind::Plan and Kimi PlanModeGuardDeny are this shape — not a
+# second semantic planner LLM.
+_PLAN_BLOCKED_TOOLS = {
+    *_REVIEW_BLOCKED_TOOLS,
+    "spawn_subagents",
+    "search_literature",
+    "search_corpus",
+    "cite_source",
+    "record_claim",
+    "add_evidence",
+    "record_hypothesis",
+    "remember",
+    "log_run",
+    "record_run",
+    "build_research_artifact",
+}
+
 
 class ApprovalConflict(ValueError):
     """The reviewed execution authority changed or was claimed elsewhere."""
@@ -226,17 +244,63 @@ def react_tool_policy(
     return replace(policy, blocked_tools=remaining)
 
 
+def unblock_produce_tools(policy: ToolPolicy, plan: IntentPlan) -> ToolPolicy:
+    """Offer write_file/edit_file when this plan still owes a file deliverable.
+
+    The planner deny-list is conservative. A manuscript/figure/slides contract
+    is not answer-only: the model must be able to produce the file. bash and
+    run_compute stay gated.
+    """
+    from omni.runtime.remaining import plan_owes_scientific_outputs
+
+    if not plan_owes_scientific_outputs(plan):
+        return policy
+    remaining = [
+        name
+        for name in (policy.blocked_tools or [])
+        if name not in {"write_file", "edit_file"}
+    ]
+    if remaining == list(policy.blocked_tools or []):
+        return policy
+    return replace(policy, blocked_tools=remaining)
+
+
 def apply_interaction_mode(plan: IntentPlan, mode: str) -> IntentPlan:
-    """Apply read-only review constraints to a model-produced plan."""
-    if mode != "review":
-        return plan
+    """Apply host tool policy for review (read-only) or plan (no execution)."""
+    if mode == "review":
+        return _apply_mode_blocks(
+            plan,
+            blocked=_REVIEW_BLOCKED_TOOLS,
+            execution_mode="review",
+            outputs=["review"],
+            note="review mode: read-only execution with mandatory self-review",
+        )
+    if mode == "plan":
+        return _apply_mode_blocks(
+            plan,
+            blocked=_PLAN_BLOCKED_TOOLS,
+            execution_mode="plan",
+            outputs=list(plan.outputs) or ["answer"],
+            note="plan mode: same turn, host denies mutating and retrieval tools",
+        )
+    return plan
+
+
+def _apply_mode_blocks(
+    plan: IntentPlan,
+    *,
+    blocked: set[str],
+    execution_mode: str,
+    outputs: list[str],
+    note: str,
+) -> IntentPlan:
     policy = ToolPolicy(
         allowed_tools=(
-            [name for name in plan.tool_policy.allowed_tools if name not in _REVIEW_BLOCKED_TOOLS]
+            [name for name in plan.tool_policy.allowed_tools if name not in blocked]
             if plan.tool_policy.allowed_tools is not None
             else None
         ),
-        blocked_tools=sorted({*plan.tool_policy.blocked_tools, *_REVIEW_BLOCKED_TOOLS}),
+        blocked_tools=sorted({*plan.tool_policy.blocked_tools, *blocked}),
         per_tool_limits=dict(plan.tool_policy.per_tool_limits),
         max_tool_calls=plan.tool_policy.max_tool_calls,
         max_iterations=plan.tool_policy.max_iterations,
@@ -245,12 +309,10 @@ def apply_interaction_mode(plan: IntentPlan, mode: str) -> IntentPlan:
     return replace(
         plan,
         intent_type=IntentType.REACT_FALLBACK,
-        execution_mode="review",
-        outputs=["review"],
+        execution_mode=execution_mode,
+        outputs=outputs,
         tool_policy=policy,
-        rationale=(
-            plan.rationale + "; review mode: read-only execution with mandatory self-review"
-        ).strip("; "),
+        rationale=(plan.rationale + f"; {note}").strip("; "),
     )
 
 
@@ -569,6 +631,8 @@ __all__ = [
     "build_approval_gate",
     "normalize_interaction_mode",
     "plan_mode_text",
+    "react_tool_policy",
     "enqueue_notify_channel",
     "resolve_execution_mode",
+    "unblock_produce_tools",
 ]

@@ -626,6 +626,11 @@ def test_dock_styles_resolve_to_visible_attributes():
     assert attrs("dock.footer", "dock.mode").dim is False
     # The labels beside those keys stay quiet.
     assert attrs("dock.footer").dim is True
+    # Slash descriptions ride display_meta; the menu must keep them visible.
+    meta = attrs("completion-menu", "completion-menu.meta.completion")
+    assert meta.dim is True
+    current = attrs("completion-menu.completion.current")
+    assert current.color == "ansicyan"
 
 
 @pytest.mark.asyncio
@@ -643,6 +648,16 @@ async def test_idle_footer_colours_the_keys_not_the_whole_strip():
     # Labels and the mode indicator stay out of the accent colour.
     assert "auto mode" in [text for style, text in fragments if style == "class:dock.mode"]
     assert all(" send" != text or style != "class:dock.key" for style, text in fragments)
+
+
+@pytest.mark.asyncio
+async def test_idle_footer_advertises_shift_enter_when_modified_keys_are_ready():
+    tui = ReplTui(commands=("/stop",), shift_enter_ready=True)
+    fragments = tui.footer_fragments()
+    keyed = {text for style, text in fragments if style == "class:dock.key"}
+
+    assert "Shift+Enter" in keyed
+    assert "Ctrl+J" not in keyed
 
 
 def _modal_text(tui: ReplTui) -> str:

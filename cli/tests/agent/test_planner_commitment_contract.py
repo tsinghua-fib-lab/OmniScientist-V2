@@ -516,8 +516,9 @@ def test_confidence_does_not_change_where_a_request_is_routed(confidence: float)
         "RAG 综述", proposal, task_id="run-confidence"
     )
 
-    assert plan.intent_type == IntentType.SINGLE_SKILL_TASK
-    assert plan.execution_mode == "background"
+    assert plan.intent_type == IntentType.REACT_FALLBACK
+    assert plan.tool_policy.allows("search_literature")
+    assert not plan.tool_policy.allows("run_skill")
 
 
 # ── The gate stops at locators ──

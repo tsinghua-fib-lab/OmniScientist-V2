@@ -239,7 +239,14 @@ def test_write_file_guidance_is_omitted_when_write_file_is_unavailable():
     prompt = build_system_prompt(role="R", tools=tools, project_name="proj")
     local = render_local_environment(tools, "/tmp/work")
     assert "write_file" not in local
-    assert "the host writes the manuscript" in prompt.lower()
+    assert "the host will not write the file" in prompt.lower()
+
+
+def test_local_environment_says_ledger_tokens_are_not_paths():
+    tools = [*_local_tools(), ToolSpec("write_file", "write", {"type": "object"})]
+    local = render_local_environment(tools, "/tmp/work")
+    assert "draft.section" in local
+    assert "ledger" in local
 
 
 def test_render_local_environment_empty_without_local_tools():
@@ -263,6 +270,8 @@ def test_planner_prompt_routes_local_ops_to_react_fallback():
     # The guidance names local filesystem/shell work as a real job for that turn.
     assert "working directory" in prompt.lower()
     assert "deleting files" in prompt or "shell command" in prompt
+    assert "ledger deliverable" in prompt
+    assert "write_file" in prompt
 
 
 def test_react_tool_policy_unblocks_sensitive_tools_when_approver_present():

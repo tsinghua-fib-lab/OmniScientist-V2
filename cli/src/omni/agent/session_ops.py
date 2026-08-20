@@ -13,7 +13,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from omni.storage.models import ConversationMessageORM, SessionORM
+from omni.storage.models import MESSAGE_ORDER_ASC, ConversationMessageORM, SessionORM
 
 __all__ = ["copy_session_branch"]
 
@@ -35,7 +35,7 @@ async def copy_session_branch(
         rows = list((await s.execute(
             select(ConversationMessageORM)
             .where(ConversationMessageORM.session_id == src.id)
-            .order_by(ConversationMessageORM.created_at.asc())
+            .order_by(*MESSAGE_ORDER_ASC)
         )).scalars().all())
         if up_to_message:
             cut: list[ConversationMessageORM] = []

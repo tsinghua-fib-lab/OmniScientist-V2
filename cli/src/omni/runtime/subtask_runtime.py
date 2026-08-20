@@ -58,6 +58,7 @@ from omni.runtime.task_results import (
     _result_summary,
     _skill_execution_event,
     _task_result_message,  # noqa: F401 - compatibility re-export
+    persist_detached_skill_notice,
 )
 from omni.runtime.tool_gateway import ToolGateway
 from omni.runtime.workflow_plan import WorkflowNeedsInput, _prepare_workflow_plan
@@ -809,7 +810,10 @@ class SubtaskRuntime:
             entry,
             session_id,
             status=terminal_status,
-            persist_message=not bool(workflow_run_id),
+            persist_message=persist_detached_skill_notice(
+                notify_channel=notify_channel,
+                workflow_run_id=workflow_run_id,
+            ),
         )
         await _emit_event(
             on_event,

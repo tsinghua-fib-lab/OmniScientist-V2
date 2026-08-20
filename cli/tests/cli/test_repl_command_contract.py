@@ -80,6 +80,11 @@ def test_repl_session_aware_external_translation_uses_cli_syntax():
     assert shlex.split(translate("/session", sid)) == ["session", "help"]
     assert shlex.split(translate("/artifacts", sid)) == ["artifacts", "help"]
     assert shlex.split(translate("/schedule", sid)) == ["schedule", "list"]
+    assert shlex.split(translate("/web", sid)) == ["web", "start"]
+    assert shlex.split(translate("/web --port 1290", sid)) == ["web", "start", "--port", "1290"]
+    assert shlex.split(translate("/web stop", sid)) == ["web", "stop"]
+    assert shlex.split(translate("/web status", sid)) == ["web", "status"]
+    assert shlex.split(translate("/web port 1290", sid)) == ["web", "port", "1290"]
     assert shlex.split(translate("/task session", sid)) == ["task", "session", sid]
     assert shlex.split(translate("/task attach abc", sid)) == [
         "task", "attach", "abc", "--session", sid,
@@ -135,6 +140,34 @@ async def test_repl_external_commands_share_the_cli_dispatcher(monkeypatch, line
     assert result.agent is agent
     assert result.session_id == "session-123"
     assert result.restart is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("line", ["/task all", "/task list", "/task session", "/task help"])
+async def test_repl_task_inspect_runs_in_process(monkeypatch, line):
+    import omni.cli.main as main
+    from omni.cli.commands import tasks_cmd
+
+    inspected: list[list[str]] = []
+    dispatched: list[str] = []
+
+    async def fake_inspect(_state, tokens):  # noqa: ANN001
+        inspected.append(list(tokens))
+
+    async def fake_external(_state, command):  # noqa: ANN001
+        dispatched.append(command)
+        return 0
+
+    monkeypatch.setattr(tasks_cmd, "run_repl_task_inspect", fake_inspect)
+    monkeypatch.setattr(main, "_run_repl_external_command", fake_external)
+
+    result = await main._repl_command(SimpleNamespace(), AppState(), line, "session-123")
+    expected = main._split_repl_command_line(
+        main._session_aware_external_line(line, "session-123")
+    )
+    assert inspected == [expected]
+    assert dispatched == []
+    assert result.session_id == "session-123"
 
 
 @pytest.mark.asyncio

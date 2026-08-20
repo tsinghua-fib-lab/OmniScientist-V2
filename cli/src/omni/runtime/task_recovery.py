@@ -3,8 +3,8 @@
 Semantics:
 
 * **retry** — create a new attempt from an immutable input snapshot.
-* **resume** — continue from a durable checkpoint only (Action clarification or
-  workflow step that preserves upstream outputs).
+* **resume** — reopen a research task into the same ReAct loop, or continue
+  from a durable schedule/workflow checkpoint.
 * **requeue** — put the same standalone skill execution back on the recovery
   queue (former in-place ``resume_subtask``).
 """
@@ -431,6 +431,7 @@ class TaskRecoveryCoordinator:
             interaction_mode=str(snapshot.get("interaction_mode") or ""),
             origin=str(snapshot.get("origin") or "interactive"),
         )
+        await agent.tasks.inherit_research_ledger(new_task.id, original)
         prior_grants = [
             str(name).strip()
             for name in (getattr(original, "approved_tools", None) or [])
@@ -520,9 +521,10 @@ class TaskRecoveryCoordinator:
                 suggested=f"omni task approve {task.id[:8]}",
             )
         if task.status in _RETRYABLE_TASK_STATUSES:
-            filled = await self._fill_remaining_deliverables(task)
-            if filled is not None:
-                return filled
+            from omni.runtime.task_continue import task_has_research_work
+
+            if task_has_research_work(task):
+                return await self._resume_into_live_loop(task)
             return _outcome(
                 "checkpoint_required",
                 kind="task",
@@ -983,137 +985,33 @@ class TaskRecoveryCoordinator:
             step=step_key,
         )
 
-    async def _fill_remaining_deliverables(self, task: TaskORM) -> RecoveryOutcome | None:
-        """Fill figure and/or writing debts on the same task without a full retry.
-
-        Only host-fillable debts (``artifact.figure`` and writing) are handled.
-        A leftover PPTX or other contract name still requires retry.
-        """
-        from omni.agent.figure_runner import host_fill_figure, unrendered_authored_dot
-        from omni.runtime.final_synthesis import run_native_synthesis
-        from omni.runtime.remaining import (
-            remaining_deliverables,
-            remaining_figure,
-            remaining_writing,
-        )
-        from omni.runtime.task_title import short_task_title
-
+    async def _resume_into_live_loop(self, task: TaskORM) -> RecoveryOutcome:
+        """Reopen the same task into ReAct so the model sees its ledger."""
         agent = self._agent
-        plan = task.plan_json if isinstance(task.plan_json, dict) else {}
-        verification = plan.get("verification_plan") if isinstance(plan.get("verification_plan"), dict) else {}
-        required = list(verification.get("required_outputs") or plan.get("outputs") or [])
+        snapshot = task.input_snapshot_json if isinstance(task.input_snapshot_json, dict) else {}
         try:
-            artifacts = await agent.artifacts.list_by_task(task.id)
-        except Exception:  # noqa: BLE001
-            artifacts = []
-        remaining = remaining_deliverables(required, artifacts)
-        figure = remaining_figure(remaining)
-        writing = remaining_writing(remaining)
-        fillable = set(figure + writing)
-        if not remaining or set(remaining) != fillable:
-            return None
-        goal = str(task.user_input or plan.get("user_message") or "")
-        topic = short_task_title(str(task.title or goal))
-        await agent.tasks.reopen_task_for_recovery(
-            task.id, reason="resume remaining host-fillable deliverables",
-        )
-        notes: list[str] = []
-        if figure:
-            try:
-                filled = await host_fill_figure(
-                    runtime=agent.runtime,
-                    registry=getattr(agent, "registry", None),
-                    task_id=task.id,
-                    session_id=str(task.session_id or ""),
-                    user_message=goal,
-                    title=topic,
-                    source_artifact_path=unrendered_authored_dot(artifacts),
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("host figure fill failed for %s", task.id)
-                await agent.tasks.finish_task(
-                    task.id, status="degraded", summary=f"resume remaining figure failed: {exc}",
-                    error=str(exc),
-                )
-                return _outcome(
-                    "error",
-                    kind="task",
-                    object_id=task.id,
-                    task_id=task.id,
-                    message=f"Could not fill remaining artifact.figure: {exc}",
-                )
-            status = str(filled.get("status") or "")
-            if status and status not in {"succeeded", "ok"}:
-                error = str(filled.get("error") or status)
-                await agent.tasks.finish_task(
-                    task.id, status="degraded", summary=f"resume remaining figure failed: {error}",
-                    error=error,
-                )
-                return _outcome(
-                    "error",
-                    kind="task",
-                    object_id=task.id,
-                    task_id=task.id,
-                    message=f"Could not fill remaining artifact.figure: {error}",
-                )
-            notes.append("artifact.figure")
-            try:
-                artifacts = await agent.artifacts.list_by_task(task.id)
-            except Exception:  # noqa: BLE001
-                artifacts = []
-            remaining = remaining_deliverables(required, artifacts)
-            writing = remaining_writing(remaining)
-        if writing:
-            try:
-                synth = await run_native_synthesis(
-                    goal,
-                    {"deliverable": writing[0], "input": {"topic": topic}},
-                    {
-                        "artifacts": {
-                            "summary": "Existing artifacts: "
-                            + ", ".join(
-                                str(getattr(row, "title", "") or getattr(row, "kind", "") or "artifact")
-                                for row in artifacts[:8]
-                            )
-                        }
-                    },
-                    llm=agent.llm,
-                    artifacts=agent.artifacts,
-                    session_id=str(task.session_id or ""),
-                    task_id=task.id,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("native remaining fill failed for %s", task.id)
-                await agent.tasks.finish_task(
-                    task.id, status="degraded", summary=f"resume remaining writing failed: {exc}",
-                    error=str(exc),
-                )
-                return _outcome(
-                    "error",
-                    kind="task",
-                    object_id=task.id,
-                    task_id=task.id,
-                    message=f"Could not fill remaining {writing[0]}: {exc}",
-                )
-            notes.append(writing[0])
-            draft = str(synth.get("text") or synth.get("draft_markdown") or "").strip()
-        else:
-            draft = ""
-        filled_label = " and ".join(notes) if notes else "remaining deliverables"
-        await agent.tasks.finish_task(
-            task.id,
-            status="succeeded",
-            summary=(draft[:240] if draft else f"Filled remaining {filled_label}."),
-        )
+            await agent.handle_turn(
+                "Continue this task.",
+                session_id=str(task.session_id or "") or None,
+                channel=str(task.channel or "cli"),
+                existing_task_id=task.id,
+                origin=str(snapshot.get("origin") or "interactive"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("live-loop resume failed for %s", task.id)
+            return _outcome(
+                "error",
+                kind="task",
+                object_id=task.id,
+                task_id=task.id,
+                message=f"Could not resume task {task.id[:8]} into the live loop: {exc}",
+            )
         return _outcome(
             "ok",
             kind="task",
             object_id=task.id,
             task_id=task.id,
-            message=(
-                f"Filled remaining {filled_label} on task {task.id[:8]} "
-                "without rerunning completed skills."
-            ),
+            message=f"Resumed task {task.id[:8]} into the live research loop.",
         )
 
 

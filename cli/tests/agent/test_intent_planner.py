@@ -821,66 +821,66 @@ def test_automatic_capability_skips_none_contract_third_party_candidate():
         source="user_claude",
         kind=SkillKind.CLI_EXEC,
         delivery_mode=DeliveryMode.ASYNC_TASK,
-        capabilities=["literature.search"],
+        capabilities=["review.paper"],
         priority=999,
         input_schema={},
         output_schema={},
     ))
-    registry.register(_capability_skill("safe-literature-search", "literature.search", source="builtin", priority=10))
+    registry.register(_capability_skill("safe-paper-review", "review.paper", source="builtin", priority=10))
     planner = IntentPlanner(registry)
 
     proposal = ModelPlanProposal(
         intent_type="single_skill_task",
-        required_capabilities=["literature.search"],
-        outputs=["sources"],
+        required_capabilities=["review.paper"],
+        outputs=["review"],
         confidence=0.84,
-        rationale="model proposed literature search capability",
+        rationale="model proposed paper review capability",
     )
-    plan = planner.plan_from_proposal("围绕 RAG 检索文献并输出综述报告。", proposal, task_id="run-contract")
+    plan = planner.plan_from_proposal("Review this paper for NeurIPS.", proposal, task_id="run-contract")
 
-    selected = next(selection for selection in plan.selected_skills if selection.skill == "safe-literature-search")
+    selected = next(selection for selection in plan.selected_skills if selection.skill == "safe-paper-review")
     assert any(item.skill == "unsafe-third-party-lit" and "contract is none" in item.reason for item in selected.rejected_candidates)
 
 
 def test_automatic_capability_prefers_core_full_over_high_priority_partial_third_party():
     registry = SkillRegistry(load_settings())
-    registry.register(_capability_skill("core-literature-engine", "literature.search", source="builtin", priority=1))
-    registry.register(_capability_skill("codex-lit-supersearch", "literature.search", source="user_codex", priority=999))
+    registry.register(_capability_skill("core-paper-review", "review.paper", source="builtin", priority=1))
+    registry.register(_capability_skill("codex-review-supersearch", "review.paper", source="user_codex", priority=999))
     planner = IntentPlanner(registry)
 
     proposal = ModelPlanProposal(
         intent_type="single_skill_task",
-        required_capabilities=["literature.search"],
-        outputs=["sources"],
+        required_capabilities=["review.paper"],
+        outputs=["review"],
         confidence=0.84,
-        rationale="model proposed literature search capability",
+        rationale="model proposed paper review capability",
     )
-    plan = planner.plan_from_proposal("围绕 RAG 检索文献并输出综述报告。", proposal, task_id="run-core-first")
+    plan = planner.plan_from_proposal("Review this paper for NeurIPS.", proposal, task_id="run-core-first")
 
-    assert [selection.skill for selection in plan.selected_skills] == ["core-literature-engine"]
+    assert [selection.skill for selection in plan.selected_skills] == ["core-paper-review"]
     selected = plan.selected_skills[0]
     assert any(
-        item.skill == "codex-lit-supersearch" and "core full-contract" in item.reason
+        item.skill == "codex-review-supersearch" and "core full-contract" in item.reason
         for item in selected.rejected_candidates
     )
 
 
 def test_automatic_capability_can_fallback_to_partial_third_party_when_no_core_skill_exists():
     registry = SkillRegistry(load_settings())
-    registry.register(_capability_skill("codex-lit-supersearch", "literature.search", source="user_codex", priority=999))
+    registry.register(_capability_skill("codex-review-supersearch", "review.paper", source="user_codex", priority=999))
     planner = IntentPlanner(registry)
 
     proposal = ModelPlanProposal(
         intent_type="single_skill_task",
-        required_capabilities=["literature.search"],
-        outputs=["sources"],
+        required_capabilities=["review.paper"],
+        outputs=["review"],
         confidence=0.84,
-        rationale="model proposed literature search capability",
+        rationale="model proposed paper review capability",
     )
-    plan = planner.plan_from_proposal("围绕 RAG 检索文献并输出综述报告。", proposal, task_id="run-third-party-fallback")
+    plan = planner.plan_from_proposal("Review this paper for NeurIPS.", proposal, task_id="run-third-party-fallback")
     validation = PlanValidator(registry).validate(plan)
 
-    assert [selection.skill for selection in plan.selected_skills] == ["codex-lit-supersearch"]
+    assert [selection.skill for selection in plan.selected_skills] == ["codex-review-supersearch"]
     assert validation.ok
     assert validation.status == "degraded"
     assert any("contract is partial" in warning for warning in validation.degraded_warnings)
@@ -893,21 +893,21 @@ def test_builtin_capability_skill_hard_overrides_same_named_user_and_project():
     registry = SkillRegistry(load_settings())
     # Built-in deliberately has the *lowest* priority to prove source rank
     # dominates the automatic capability tie-break.
-    registry.register(_capability_skill("literature-search", "literature.search", source="builtin", priority=1))
-    registry.register(_capability_skill("project-literature-engine", "literature.search", source="project_omni", priority=500))
-    registry.register(_capability_skill("user-literature-engine", "literature.search", source="user_omni", priority=999))
+    registry.register(_capability_skill("paper-review", "review.paper", source="builtin", priority=1))
+    registry.register(_capability_skill("project-paper-review", "review.paper", source="project_omni", priority=500))
+    registry.register(_capability_skill("user-paper-review", "review.paper", source="user_omni", priority=999))
     planner = IntentPlanner(registry)
 
     proposal = ModelPlanProposal(
         intent_type="single_skill_task",
-        required_capabilities=["literature.search"],
-        outputs=["sources"],
+        required_capabilities=["review.paper"],
+        outputs=["review"],
         confidence=0.84,
-        rationale="model proposed literature search capability",
+        rationale="model proposed paper review capability",
     )
-    plan = planner.plan_from_proposal("围绕 RAG 检索文献并输出综述报告。", proposal, task_id="run-builtin-first")
+    plan = planner.plan_from_proposal("Review this paper for NeurIPS.", proposal, task_id="run-builtin-first")
 
-    assert [selection.skill for selection in plan.selected_skills] == ["literature-search"]
+    assert [selection.skill for selection in plan.selected_skills] == ["paper-review"]
 
 
 def test_automatic_workflow_rejects_required_no_contract_third_party_skill():

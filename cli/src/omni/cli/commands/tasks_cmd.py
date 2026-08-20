@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import os
@@ -42,7 +43,7 @@ from omni.config.paths import OmniPaths
 from omni.config.workspaces import registry_path
 from omni.core.identifiers import short_id, shortest_unique_prefixes
 from omni.core.tool_result import command_failure_hint, command_result_status
-from omni.runtime.aggregate import AggTaskRow, list_tasks_all_workspaces
+from omni.runtime.aggregate import AggTaskRow, list_tasks_all_workspaces_with_total
 from omni.runtime.notifications import collect_inbox_notes, latest_delivery_status
 from omni.runtime.presentation import task_presentation_from_result
 from omni.runtime.task_object_resolver import TaskObjectResolution
@@ -868,7 +869,7 @@ def render_tasks_usage_help() -> None:
         [
             ["list", "List tasks (user requests) in the current workspace; `/task` is an alias", "/task"],
             ["session", "List tasks for one session; pass an id or prefix in the shell", "/task session"],
-            ["all", "List tasks across catalog workspaces (incl. IM channel anchor)", "/task all"],
+            ["all", "List every kind across catalog workspaces (incl. IM channel anchor)", "/task all"],
             ["show <id>", "Show a task, workflow run, workflow step, or skill execution; use --json for full data", "/task show c5b6859f"],
             ["subtask <task>", "Show the skill-execution attempts owned by a task", "/task subtask c5b6859f"],
             ["step <workflow> <step>", "Show stable workflow-step input, output, attempts, and recovery data", "/task step flow1234 diagram"],
@@ -897,7 +898,7 @@ def render_tasks_usage_help() -> None:
             ["--all", "list / watch", "/task list --all"],
             ["--status <status>", "list / watch / clear", "/task list --status failed"],
             ["--kind turn|subagent|maintenance|chat|all", "list / watch / all", "/task list --kind chat"],
-            ["--limit N", "list / watch", "/task list --limit 50"],
+            ["--limit N", "list / watch / all", "/task all --limit 0"],
             ["--archived", "list / watch / all", "/task list --archived"],
             ["--json", "show / step", "/task show c5b6859f --json"],
             ["--interval N / --once", "watch", "/task watch --interval 1 --once"],
@@ -906,7 +907,7 @@ def render_tasks_usage_help() -> None:
         ],
     )
     info("Typical flow: each request creates a task; use `/task watch` for progress, `/task show <task>` for the execution chain, and `/task subtask <task>` for its skill executions.")
-    info("Lists show user requests (kind=turn) by default; conversational/inspection answers are filed under `--kind chat`; other system records need `--kind maintenance`, `--kind subagent`, or `--kind all`.")
+    info("`/task` and `/task list` show user requests (kind=turn) by default; `/task all` shows every kind. Conversational answers are under `--kind chat`. Pass `--limit 0` for the full matching list.")
     info("Workflow recovery: inspect `/task step <workflow-run> <step-id>`, then use `/task retry|resume <workflow-run> --step <step-id>`.")
     info("Recovery verbs take any object id: `retry` starts a new attempt, `resume` continues from a checkpoint, `requeue` re-queues one skill execution unchanged.")
     info("History cleanup: prefer `/task archive <id>` to retain provenance; use `/task prune --yes` for failed and stale tasks; deleting succeeded tasks requires --force.")
@@ -1143,18 +1144,20 @@ def render_all_task_list(
     rows: Sequence[AggTaskRow],
     *,
     limit: int = 30,
+    total: int | None = None,
+    kind: str = "",
     session: str = "",
     status: str = "",
     home=None,  # noqa: ANN001
 ) -> None:
-    """Render global task rows from the workspace catalog."""
+    """Render global task rows already sliced by the caller."""
     filters = " ".join(x for x in (f"status={status}" if status else "", f"session={session}" if session else "") if x)
     info(
-        "Global tasks are read from the workspace catalog "
+        "Global tasks are read from the workspace catalog index "
         f"(registry + on-disk path workspaces + channel anchor + named projects): "
         f"{registry_path(home)}"
     )
-    shown = list(rows)[:limit]
+    shown = list(rows)
     if not shown:
         suffix = f" ({filters})" if filters else ""
         info(
@@ -1164,12 +1167,31 @@ def render_all_task_list(
         )
         return
     task_prefixes = shortest_unique_prefixes([row.id for row in shown])
-    data_table(
-        "Tasks (all workspaces)",
-        ["workspace", "task_id", "status", "created", "title"],
-        [[r.workspace[:16], task_prefixes[r.id], _status_text(r), _ts(r.created_at), (r.title or "")[:48]]
-         for r in shown],
+    mixed = not kind or kind == "all"
+    headers = (
+        ["workspace", "task_id", "kind", "status", "created", "title"]
+        if mixed
+        else ["workspace", "task_id", "status", "created", "title"]
     )
+    table_rows = []
+    for row in shown:
+        prefix = task_prefixes[row.id]
+        title = (row.title or "")[:48]
+        if mixed:
+            table_rows.append(
+                [row.workspace[:16], prefix, row.kind or "turn", _status_text(row), _ts(row.created_at), title]
+            )
+        else:
+            table_rows.append(
+                [row.workspace[:16], prefix, _status_text(row), _ts(row.created_at), title]
+            )
+    data_table("Tasks (all workspaces)", headers, table_rows)
+    matched = total if total is not None else len(shown)
+    if matched > len(shown):
+        info(
+            f"Showing {len(shown)} of {matched}. "
+            "Pass --limit 0 to print every matching task."
+        )
 
 
 def render_subtask_json(task: SubtaskORM) -> None:
@@ -1998,47 +2020,127 @@ def _normalize_kind(kind: str) -> str | None:
     return value
 
 
+async def render_task_list_view(
+    state: AppState,
+    *,
+    status: str = "",
+    kind: str = "turn",
+    limit: int = 30,
+    show_all: bool = False,
+    session: str = "",
+    archived: bool = False,
+) -> None:
+    """Render ``task list`` / ``task all`` without ``asyncio.run`` (REPL-safe)."""
+    kind_filter = _normalize_kind(kind)
+    if show_all:
+        rows, total = await list_tasks_all_workspaces_with_total(
+            limit=limit,
+            status=status or None,
+            include_archived=archived,
+            kind=kind_filter,
+            session=session or None,
+            home=state.settings().paths.home,
+        )
+        render_all_task_list(
+            rows,
+            limit=limit,
+            total=total,
+            kind=kind,
+            session=session,
+            status=status,
+            home=state.settings().paths.home,
+        )
+        return
+    agent = await make_agent(state)
+    try:
+        rows = await agent.tasks.list_tasks(
+            limit=limit if limit > 0 else 10_000,
+            status=status or None,
+            include_archived=archived,
+            kind=kind_filter,
+        )
+        paths = agent.paths
+    finally:
+        await agent.aclose()
+    rows = [r for r in rows if _session_matches(r.session_id, session)]
+    render_task_list(paths, rows, session=session, status=status)
+
+
+_REPL_TASK_INSPECT = frozenset({"list", "all", "session", "help"})
+
+
+def is_repl_task_inspect(tokens: Sequence[str]) -> bool:
+    """True for read-only task list/help verbs that must not fork a child CLI."""
+    if len(tokens) < 2 or tokens[0] != "task":
+        return False
+    action = tokens[1]
+    return action in _REPL_TASK_INSPECT
+
+
+async def run_repl_task_inspect(state: AppState, tokens: Sequence[str]) -> None:
+    """Dispatch ``/task list|all|session|help`` inside the running REPL loop."""
+    parser = argparse.ArgumentParser(prog="task", add_help=False)
+    parser.add_argument("group")
+    parser.add_argument("action")
+    parser.add_argument("rest", nargs="*")
+    parser.add_argument("--status", default="")
+    parser.add_argument("--kind", "-k", default=None)
+    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--all", "-a", action="store_true")
+    parser.add_argument("--session", "-s", default="")
+    parser.add_argument("--archived", action="store_true")
+    try:
+        ns, _unknown = parser.parse_known_args(list(tokens))
+    except SystemExit:
+        render_tasks_usage_help()
+        return
+    action = ns.action
+    if action == "help":
+        render_tasks_usage_help()
+        return
+    session = ns.session
+    if action == "session":
+        if ns.rest and not str(ns.rest[0]).startswith("-"):
+            session = str(ns.rest[0])
+        if not session:
+            error("Specify a session id: `/task session` uses the current REPL session.")
+            return
+    show_all = bool(ns.all) or action == "all"
+    kind = ns.kind if ns.kind is not None else ("all" if action == "all" else "turn")
+    limit = 30 if ns.limit is None else ns.limit
+    await render_task_list_view(
+        state,
+        status=ns.status,
+        kind=kind,
+        limit=limit,
+        show_all=show_all,
+        session=session,
+        archived=ns.archived,
+    )
+
+
 @app.command("list")
 def list_cmd(
     ctx: typer.Context,
     status: str = typer.Option("", help="Filter by status"),
     kind: str = typer.Option("turn", "--kind", "-k", help="Task kind: turn (default), subagent, maintenance, chat, or all"),
-    limit: int = typer.Option(30, help="Maximum rows to show"),
+    limit: int = typer.Option(30, help="Maximum rows to show; 0 means all"),
     show_all: bool = typer.Option(False, "--all", "-a", help="Show all workspaces (default: current workspace)"),
     session: str = typer.Option("", "--session", "-s", help="Filter by session id or prefix"),
     archived: bool = typer.Option(False, "--archived", help="Include archived tasks"),
 ) -> None:
     """List tasks (user requests) in the current workspace or across workspaces."""
-    state: AppState = ctx.obj
-    kind_filter = _normalize_kind(kind)
-
-    if show_all:
-        rows = run_async(list_tasks_all_workspaces(
-            limit_per=limit,
-            status=status or None,
-            include_archived=archived,
-            kind=kind_filter,
-        ))
-        rows = [r for r in rows if _session_matches(r.session_id, session)]
-        render_all_task_list(rows, limit=limit, session=session, status=status, home=state.settings().paths.home)
-        return
-
-    async def _run():
-        agent = await make_agent(state)
-        try:
-            rows = await agent.tasks.list_tasks(
-                limit=limit,
-                status=status or None,
-                include_archived=archived,
-                kind=kind_filter,
-            )
-            return agent.paths, rows
-        finally:
-            await agent.aclose()
-
-    paths, rows = run_async(_run())
-    rows = [r for r in rows if _session_matches(r.session_id, session)]
-    render_task_list(paths, rows, session=session, status=status)
+    run_async(
+        render_task_list_view(
+            ctx.obj,
+            status=status,
+            kind=kind,
+            limit=limit,
+            show_all=show_all,
+            session=session,
+            archived=archived,
+        )
+    )
 
 
 @app.command("session")
@@ -2061,8 +2163,8 @@ def session_cmd(
 def all_cmd(
     ctx: typer.Context,
     status: str = typer.Option("", help="Filter by status"),
-    kind: str = typer.Option("turn", "--kind", "-k", help="Task kind: turn (default), subagent, maintenance, chat, or all"),
-    limit: int = typer.Option(30, help="Maximum rows per workspace"),
+    kind: str = typer.Option("all", "--kind", "-k", help="Task kind: all (default), turn, subagent, maintenance, or chat"),
+    limit: int = typer.Option(30, help="Maximum rows to show; 0 means all"),
     session: str = typer.Option("", "--session", "-s", help="Filter by session id or prefix"),
     archived: bool = typer.Option(False, "--archived", help="Include archived tasks"),
 ) -> None:
@@ -2378,16 +2480,19 @@ def watch_cmd(
                 if not once:
                     console.clear()
                 if show_all:
-                    rows = run_async(list_tasks_all_workspaces(
-                        limit_per=limit,
+                    rows, total = run_async(list_tasks_all_workspaces_with_total(
+                        limit=limit,
                         status=status or None,
                         include_archived=archived,
                         kind=kind_filter,
+                        session=session or None,
+                        home=state.settings().paths.home,
                     ))
-                    rows = [r for r in rows if _session_matches(r.session_id, session)]
                     render_all_task_list(
                         rows,
                         limit=limit,
+                        total=total,
+                        kind=kind,
                         session=session,
                         status=status,
                         home=state.settings().paths.home,

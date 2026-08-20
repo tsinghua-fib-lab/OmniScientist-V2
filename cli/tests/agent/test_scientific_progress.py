@@ -251,8 +251,10 @@ def test_survey_with_search_and_write_still_owes_a_draft() -> None:
         ),
         task_id="hist-survey",
     )
-    assert plan.intent_type is IntentType.SINGLE_SKILL_TASK
-    assert [selection.skill for selection in plan.selected_skills] == ["openalex-search"]
+    assert plan.intent_type is IntentType.REACT_FALLBACK
+    assert plan.selected_skills == []
+    assert plan.tool_policy.allows("search_literature")
+    assert plan.tool_policy.allows("write_file")
     assert plan_owes_scientific_outputs(plan)
     assert "draft.section" in plan.verification_plan.required_outputs
 
@@ -272,7 +274,7 @@ def test_advice_requests_do_not_owe_a_manuscript() -> None:
         assert plan_owes_scientific_outputs(plan) is False
 
 
-def test_literature_only_stays_on_the_host_search_runner() -> None:
+def test_literature_only_stays_on_the_native_search_tool() -> None:
     plan = _planner().plan_from_proposal(
         LIT_ONLY,
         ModelPlanProposal(
@@ -284,8 +286,10 @@ def test_literature_only_stays_on_the_host_search_runner() -> None:
         ),
         task_id="hist-lit",
     )
-    assert plan.intent_type is IntentType.SINGLE_SKILL_TASK
-    assert [selection.skill for selection in plan.selected_skills] == ["openalex-search"]
+    assert plan.intent_type is IntentType.REACT_FALLBACK
+    assert plan.selected_skills == []
+    assert plan.tool_policy.allows("search_literature")
+    assert not plan.tool_policy.allows("run_skill")
     assert plan_owes_scientific_outputs(plan) is False
 
 

@@ -471,11 +471,119 @@ def _topic_file_references(topic: str) -> list[str]:
     return references
 
 
-def _extract_file_paths_from_topic(args: dict[str, Any]) -> None:
-    """Populate source/template fields from paths written inside ``topic``.
+def _bare_filename(reference: str) -> str:
+    """Return the basename when ``reference`` has no directory, else empty."""
 
-    Explicit structured fields always win. A PPTX mentioned only as the source
-    of a conversion/export request is deliberately not treated as a template.
+    raw = (reference or "").strip()
+    if not raw or raw.startswith("artifact://"):
+        return ""
+    path = Path(raw.removeprefix("file://")).expanduser()
+    if path.is_absolute() or path.parent != Path("."):
+        return ""
+    return path.name
+
+
+def _bare_name_candidates(name: str, ctx: Any | None) -> list[Path]:
+    """Omni deliverable roots for a bare filename (same idea as write_file).
+
+    Order matches ``resolve_write_target``'s *read* side: this task's reports
+    bundle, then workspace ``artifacts/``, then a real file already in cwd.
+    Cwd is last so a stray source-root copy cannot hide the managed deliverable.
+    """
+
+    if not name or ctx is None:
+        return []
+    found: list[Path] = []
+    paths = getattr(ctx, "paths", None)
+    working = getattr(ctx, "working_dir", None)
+    root = None
+    if paths is not None:
+        root = getattr(paths, "workspace_root", None) or getattr(paths, "invocation_cwd", None)
+    if root is None and working:
+        root = working
+    if root:
+        reports = Path(root) / "reports"
+        if reports.is_dir():
+            found.extend(sorted(p for p in reports.glob(f"*/{name}") if p.is_file()))
+    if paths is not None:
+        artifacts = getattr(paths, "artifacts_dir", None)
+        if artifacts:
+            found.append(Path(artifacts) / name)
+    if working:
+        found.append(Path(working) / name)
+    return found
+
+
+def _resolve_source_reference(reference: str, ctx: Any | None = None) -> str | None:
+    """Promote a mention only when it is already a durable, existing handle.
+
+    A bare filename is a deliverable name (``write_file``), not a cwd path.
+    Unresolvable mentions stay in ``topic``; they are not required fields.
+    """
+
+    value = (reference or "").strip()
+    if not value:
+        return None
+    if value.startswith("artifact://"):
+        return value
+    path = Path(value.removeprefix("file://")).expanduser()
+    name = _bare_filename(value)
+    if name:
+        for candidate in _bare_name_candidates(name, ctx):
+            if candidate.is_file():
+                return str(candidate)
+        return None
+    if path.is_file():
+        return str(path)
+    return None
+
+
+def _bind_declared_source_fields(args: dict[str, Any], ctx: Any | None = None) -> dict[str, Any] | None:
+    """Resolve explicit source/template fields; fail only those the caller set."""
+
+    for field, example, detail in (
+        (
+            "pdf_uri",
+            "S:/paper.pdf",
+            "Do NOT read the PDF manually; this skill parses it internally.",
+        ),
+        ("markdown_uri", "S:/outline.md", ""),
+        ("template_uri", "S:/template.pptx", ""),
+    ):
+        uri = str(args.get(field, "") or "").strip()
+        if not uri:
+            continue
+        resolved = _resolve_source_reference(uri, ctx)
+        if resolved:
+            args[field] = resolved
+            continue
+        suffix = f" {detail}" if detail else ""
+        return {
+            "error": (
+                f"{field} '{uri}' was not found. Pass the correct absolute "
+                f"path (e.g. {example}) or an artifact:// uri.{suffix}"
+            ),
+            "recoverable": True,
+            "blocking": False,
+            "error_info": {
+                "code": f"{field.removesuffix('_uri')}_not_found",
+                "message": f"{field} not found: {uri}",
+                "retryable": True,
+                "workflow_recoverable": True,
+            },
+        }
+    return None
+
+
+def _extract_file_paths_from_topic(args: dict[str, Any], ctx: Any | None = None) -> None:
+    """Populate source/template fields from *resolvable* paths inside ``topic``.
+
+    Explicit structured fields always win. A filename mentioned in prose is a
+    deliverable name until it resolves to ``artifact://``, an existing absolute
+    path, or a file already in this task's reports/artifacts. Unresolved
+    mentions stay in ``topic`` and must not become required fields.
+    A PPTX mentioned only as the source of a conversion/export request is
+    deliberately not treated as a template.
     """
 
     topic = str(args.get("topic") or "").strip()
@@ -489,15 +597,18 @@ def _extract_file_paths_from_topic(args: dict[str, Any]) -> None:
         "pptx": [],
     }
     for reference in _topic_file_references(topic):
-        suffix = Path(reference).suffix.lower()
+        resolved = _resolve_source_reference(reference, ctx)
+        if not resolved:
+            continue
+        suffix = Path(resolved).suffix.lower() if not resolved.startswith("artifact://") else Path(reference).suffix.lower()
         if suffix == ".pdf":
-            candidates["pdf"].append(reference)
+            candidates["pdf"].append(resolved)
         elif suffix in {".md", ".markdown"}:
-            candidates["markdown"].append(reference)
+            candidates["markdown"].append(resolved)
         elif suffix == ".txt":
-            candidates["text"].append(reference)
+            candidates["text"].append(resolved)
         elif suffix == ".pptx":
-            candidates["pptx"].append(reference)
+            candidates["pptx"].append(resolved)
 
     if candidates["pdf"] and not args.get("pdf_uri"):
         args["pdf_uri"] = candidates["pdf"][0]
@@ -562,15 +673,18 @@ class ResearchPptxEngine:
 
 
     # ── synchronous validation (returns dict -> shown to the model) ──
-    @staticmethod
     def validate_params(
-            *, arguments: dict[str, Any] | None = None, input_data: dict[str, Any] | None = None
+            self=None,
+            *,
+            arguments: dict[str, Any] | None = None,
+            input_data: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         args = arguments or input_data or {}
+        ctx = getattr(self, "ctx", None)
         normalized = _models.remap_common_alias_fields(args)
         args.clear()
         args.update(normalized)
-        _extract_file_paths_from_topic(args)
+        _extract_file_paths_from_topic(args, ctx)
         # Single-skill routing / a workflow step may hand us the raw user text as
         # ``input``/``query`` (or the overall ``workflow_goal``) instead of
         # ``topic``. Absorb it so a topic-only deck still has a source instead of
@@ -581,7 +695,7 @@ class ResearchPptxEngine:
                       or args.get("workflow_goal") or "").strip()
             if _fb:
                 args["topic"] = _fb
-                _extract_file_paths_from_topic(args)
+                _extract_file_paths_from_topic(args, ctx)
         action = str(args.get("action", "generate")).lower()
         if action != "generate":
             return {
@@ -619,33 +733,11 @@ class ResearchPptxEngine:
                                "retryable": False, "workflow_recoverable": False},
             }
 
-        # Early, actionable feedback for structured paths, including paths
-        # extracted from a natural-language request.
-        for field, example, detail in (
-            (
-                "pdf_uri",
-                "S:/paper.pdf",
-                "Do NOT read the PDF manually; this skill parses it internally.",
-            ),
-            ("markdown_uri", "S:/outline.md", ""),
-            ("template_uri", "S:/template.pptx", ""),
-        ):
-            uri = str(args.get(field, "")).strip()
-            if not uri or uri.startswith("artifact://"):
-                continue
-            path = Path(uri.removeprefix("file://")).expanduser()
-            if not path.is_file():
-                suffix = f" {detail}" if detail else ""
-                return {
-                    "error": (
-                        f"{field} '{uri}' was not found. Pass the correct absolute "
-                        f"path (e.g. {example}) or an artifact:// uri.{suffix}"
-                    ),
-                    "recoverable": True, "blocking": False,
-                    "error_info": {"code": f"{field.removesuffix('_uri')}_not_found",
-                                   "message": f"{field} not found: {uri}",
-                                   "retryable": True, "workflow_recoverable": True},
-                }
+        # Explicit (or successfully promoted) handles must exist. Mentions that
+        # did not resolve were left in topic and are not checked here.
+        bound = _bind_declared_source_fields(args, ctx)
+        if bound is not None:
+            return bound
         # Normalize common LLM-planner aliases BEFORE validating enums, so a planner
         # that passes 'Chinese'/'conference talk' is accepted instead of failing
         # the whole workflow. Mirrors PresentationRequest.
@@ -699,7 +791,7 @@ class ResearchPptxEngine:
     # ── entry point ──
     async def execute(self, progress_callback: Any | None = None, **kwargs: Any) -> dict[str, Any]:
         kwargs = _models.remap_common_alias_fields(kwargs)
-        _extract_file_paths_from_topic(kwargs)
+        _extract_file_paths_from_topic(kwargs, self.ctx)
         # Belt-and-suspenders topic fallback (see validate_params): if the
         # framework passed the user text as input/query/workflow_goal, use it as
         # the deck topic so single-skill routing doesn't dead-end.
@@ -708,7 +800,10 @@ class ResearchPptxEngine:
                       or kwargs.get("workflow_goal") or "").strip()
             if _fb:
                 kwargs["topic"] = _fb
-                _extract_file_paths_from_topic(kwargs)
+                _extract_file_paths_from_topic(kwargs, self.ctx)
+        bound = _bind_declared_source_fields(kwargs, self.ctx)
+        if bound is not None:
+            return {"status": "error", **bound}
         # topic can be empty on the resume path; require topic XOR resume_token
         # here so PresentationRequest(topic="") no longer crashes.
         _has_source = _has_presentation_source(kwargs)

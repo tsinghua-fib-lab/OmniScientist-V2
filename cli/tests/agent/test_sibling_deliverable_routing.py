@@ -92,7 +92,7 @@ def test_qa_plus_figure_pair_is_unchanged() -> None:
     assert plan.intent_type is IntentType.QA_PLUS_ARTIFACT
 
 
-def test_literature_search_alone_still_binds() -> None:
+def test_literature_search_alone_stays_on_native_react() -> None:
     plan = _planner().plan_from_proposal(
         "检索 RAG factuality 的文献。",
         ModelPlanProposal(
@@ -105,10 +105,13 @@ def test_literature_search_alone_still_binds() -> None:
         task_id="lit-only",
     )
 
-    assert plan.intent_type is IntentType.SINGLE_SKILL_TASK
+    assert plan.intent_type is IntentType.REACT_FALLBACK
+    assert plan.selected_skills == []
+    assert plan.tool_policy.allows("search_literature")
+    assert not plan.tool_policy.allows("run_skill")
 
 
-def test_literature_search_plus_synthesis_stays_on_the_host_closer() -> None:
+def test_literature_search_plus_synthesis_stays_on_capable_react() -> None:
     plan = _planner().plan_from_proposal(
         "帮我调研如何利用隐空间干预的方式提升LLM的Agentic能力",
         ModelPlanProposal(
@@ -118,11 +121,14 @@ def test_literature_search_plus_synthesis_stays_on_the_host_closer() -> None:
             confidence=0.88,
             rationale="written survey",
         ),
-        task_id="survey-closer",
+        task_id="survey-live",
     )
 
-    assert plan.intent_type is IntentType.SINGLE_SKILL_TASK
-    assert [sel.skill for sel in plan.selected_skills] == ["openalex-search"]
+    assert plan.intent_type is IntentType.REACT_FALLBACK
+    assert plan.selected_skills == []
+    assert plan.tool_policy.allows("search_literature")
+    assert plan.tool_policy.allows("write_file")
+    assert not plan.tool_policy.allows("bash")
     assert "draft.section" in plan.verification_plan.required_outputs
 
 

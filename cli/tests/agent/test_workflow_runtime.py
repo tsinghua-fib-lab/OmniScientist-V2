@@ -38,19 +38,21 @@ def _sandbox_io(tmp_path: Path, name: str) -> Path:
 
 
 def _traces_ran_concurrently(traces: list[dict]) -> bool:
-    """True when recorded work exceeds the span — serial steps cannot.
+    """True when at least two recorded intervals overlap.
 
-    ``max(started) < min(finished)`` requires all three cli_exec children to
-    share one instant. On Windows CI, spawning the third Python often lands
-    ~40ms after the first 0.2s sleep ends, so that triple-point fails even
-    when two steps overlapped. Sum of sleeps vs span is the concurrency
-    property and does not depend on a wall-clock budget.
+    A shared instant (``max(started) < min(finished)``) is too strict on
+    Windows CI: spawning the third ``python -c`` often starts after the first
+    0.2s sleep ends. Sum-of-work versus span is also too strict: a spawn gap
+    after the first process inflates the span and hides a later overlapping
+    pair (the 2026-08-21 Windows release failure). Serial steps never overlap;
+    a gathered wave has at least one overlapping pair.
     """
-    work = sum(int(trace["finished"]) - int(trace["started"]) for trace in traces)
-    span = max(int(trace["finished"]) for trace in traces) - min(
-        int(trace["started"]) for trace in traces
-    )
-    return work > span
+    intervals = [(int(trace["started"]), int(trace["finished"])) for trace in traces]
+    for index, (start_a, finish_a) in enumerate(intervals):
+        for start_b, finish_b in intervals[index + 1 :]:
+            if max(start_a, start_b) < min(finish_a, finish_b):
+                return True
+    return False
 
 
 def test_windows_spawn_stagger_still_counts_as_concurrent() -> None:
@@ -65,6 +67,21 @@ def test_windows_spawn_stagger_still_counts_as_concurrent() -> None:
         max(trace["started"] for trace in traces)
         < min(trace["finished"] for trace in traces)
     )
+
+
+def test_windows_spawn_gap_after_first_step_still_counts_as_concurrent() -> None:
+    """Release 2026-08-21: first cli_exec finished, then b and c overlapped."""
+    traces = [
+        {"started": 1_787_299_285_213_385_300, "finished": 1_787_299_285_413_798_900},
+        {"started": 1_787_299_285_579_006_300, "finished": 1_787_299_285_779_861_500},
+        {"started": 1_787_299_285_631_787_800, "finished": 1_787_299_285_832_744_000},
+    ]
+    work = sum(int(trace["finished"]) - int(trace["started"]) for trace in traces)
+    span = max(int(trace["finished"]) for trace in traces) - min(
+        int(trace["started"]) for trace in traces
+    )
+    assert work < span
+    assert _traces_ran_concurrently(traces)
 
 
 def test_strictly_serial_traces_are_not_concurrent() -> None:

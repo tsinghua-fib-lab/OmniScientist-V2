@@ -2,11 +2,25 @@
 # only natural-language user turns and observable expectations: no plan, model
 # answer, tool-call script, fixture, or reviewer verdict is accepted by loader.
 
+- id: offline_mock_smoke
+  title: "Offline mock provider returns an honest placeholder without inventing tools"
+  channel: cli
+  persona: general
+  tags: [smoke, deterministic, offline]
+  turns:
+    - user: "只回答 OK"
+      expect:
+        task_status: succeeded
+        output_contains: ["Offline mock model"]
+        tools_exclude: [run_skill, write_file, spawn_subagents]
+        no_absolute_paths: true
+
 - id: memory_preference_cli
   title: "CLI user asks Omni to remember a research-writing preference"
   channel: cli
   persona: scientist
   tags: [memory, deterministic]
+  requires_model: true
   turns:
     - user: "请记住：这个项目的参考文献默认使用 Vancouver 格式。"
       expect:
@@ -36,6 +50,7 @@
   channel: dingtalk
   persona: general
   tags: [memory, deterministic, channel]
+  requires_model: true
   turns:
     - user: "帮我记住：后续实验汇报先给结论，再给证据和局限。"
       expect:

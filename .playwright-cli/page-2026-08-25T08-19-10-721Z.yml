@@ -1,0 +1,132 @@
+- generic [ref=f1e3]:
+  - complementary "工作区与会话导航" [ref=f1e4]:
+    - generic [ref=f1e5]:
+      - generic [ref=f1e6]:
+        - generic [ref=f1e7]: Omni
+        - generic [ref=f1e8]: Scientist
+      - button "收起侧栏" [ref=f1e10] [cursor=pointer]
+    - button "新会话" [disabled] [ref=f1e14]
+    - generic [ref=f1e16]:
+      - button "搜索" [ref=f1e17] [cursor=pointer]
+      - button "打开目录" [ref=f1e21] [cursor=pointer]
+      - button "刷新工作区" [ref=f1e24] [cursor=pointer]
+    - generic [ref=f1e30]:
+      - generic [ref=f1e31]:
+        - generic [ref=f1e32]:
+          - generic [ref=f1e33]: 工作区
+          - generic [ref=f1e34]: "1"
+        - list [ref=f1e35]:
+          - button "workspace /private/tmp/omni-acceptance-20260825.WpUEbV/workspace" [active] [ref=f1e36] [cursor=pointer]:
+            - generic [ref=f1e39]:
+              - generic [ref=f1e40]: workspace
+              - generic [ref=f1e41]: /private/tmp/omni-acceptance-20260825.WpUEbV/workspace
+      - separator "调整工作区与会话区域高度" [ref=f1e43]
+      - generic [ref=f1e45]:
+        - generic [ref=f1e46]:
+          - generic [ref=f1e47]: 会话
+          - generic [ref=f1e48] [cursor=pointer]: 按渠道筛选会话
+          - combobox "按渠道筛选会话" [ref=f1e49] [cursor=pointer]:
+            - option "全部渠道" [selected]
+            - option "cli"
+            - option "web"
+            - option "wechat"
+            - option "feishu"
+            - option "dingtalk"
+        - generic [ref=f1e50]:
+          - generic [ref=f1e91]:
+            - button "打开会话：acceptance-fork" [ref=f1e92] [cursor=pointer]:
+              - generic [ref=f1e93]:
+                - generic "acceptance-fork" [ref=f1e94]
+                - generic [ref=f1e95]:
+                  - generic [ref=f1e96]: cli
+                  - generic [ref=f1e97]: 14 分钟前
+                - generic [ref=f1e98]:
+                  - generic [ref=f1e99]: 创建 14 分钟前
+                  - generic [ref=f1e100]: Task 1556e987
+            - button "会话菜单：acceptance-fork" [ref=f1e101] [cursor=pointer]: ···
+          - generic [ref=f1e102]:
+            - button "打开会话：只读总结当前空工作区，不修改文件。" [ref=f1e103] [cursor=pointer]:
+              - generic [ref=f1e104]:
+                - generic "只读总结当前空工作区，不修改文件。" [ref=f1e105]
+                - generic [ref=f1e106]:
+                  - generic [ref=f1e107]: cli
+                  - generic [ref=f1e108]: 14 分钟前
+                - generic [ref=f1e109]:
+                  - generic [ref=f1e110]: 创建 14 分钟前
+                  - generic [ref=f1e111]: Task 0f866646
+            - button "会话菜单：只读总结当前空工作区，不修改文件。" [ref=f1e112] [cursor=pointer]: ···
+          - generic [ref=f1e113]:
+            - button "打开会话：只回复 READY，并说明你召回到的长期语言偏好。" [ref=f1e114] [cursor=pointer]:
+              - generic [ref=f1e115]:
+                - generic "只回复 READY，并说明你召回到的长期语言偏好。" [ref=f1e116]
+                - generic [ref=f1e117]:
+                  - generic [ref=f1e118]: cli
+                  - generic [ref=f1e119]: 14 分钟前
+                - generic [ref=f1e120]:
+                  - generic [ref=f1e121]: 创建 14 分钟前
+                  - generic [ref=f1e122]: Task 4420d48d
+            - button "会话菜单：只回复 READY，并说明你召回到的长期语言偏好。" [ref=f1e123] [cursor=pointer]: ···
+    - generic [ref=f1e52]:
+      - group "渠道与设置" [ref=f1e53]:
+        - button "配置消息渠道" [ref=f1e85] [cursor=pointer]
+        - button "设置" [ref=f1e54] [cursor=pointer]
+      - generic [ref=f1e58]:
+        - strong [ref=f1e124]: workspace
+        - generic [ref=f1e125]: 未信任 · 只读
+  - separator "调整左侧导航宽度" [ref=f1e60]
+  - main [ref=f1e62]:
+    - generic [ref=f1e63]:
+      - heading "workspace" [level=2] [ref=f1e127]
+      - button "选择学术人格" [ref=f1e128] [cursor=pointer]:
+        - generic [ref=f1e137]: 学术人格
+      - button "专注主内容" [ref=f1e138] [cursor=pointer]
+      - navigation "工作区详情" [ref=f1e144]:
+        - button "打开任务" [ref=f1e145] [cursor=pointer]:
+          - generic [ref=f1e149]: 任务
+        - button "打开产物" [ref=f1e150] [cursor=pointer]:
+          - generic [ref=f1e156]: 产物
+        - button "打开ROM" [ref=f1e157] [cursor=pointer]:
+          - generic [ref=f1e170]: ROM
+        - button "打开笔记" [ref=f1e171] [cursor=pointer]:
+          - generic [ref=f1e175]: 笔记
+        - button "打开费用" [ref=f1e176] [cursor=pointer]:
+          - generic [ref=f1e180]: 费用
+    - generic [ref=f1e184]:
+      - generic [ref=f1e185]:
+        - strong [ref=f1e188]: 开始一条新会话
+        - generic [ref=f1e189]: 支持 Markdown、表格、代码块与本地文件附件。
+      - region [ref=f1e190]:
+        - generic [ref=f1e191]:
+          - generic [ref=f1e201]:
+            - strong [ref=f1e202]: 学术人格
+            - generic [ref=f1e203]: 未启用学术人格
+          - button "管理全部" [ref=f1e205] [cursor=pointer]
+        - group "可用人格" [ref=f1e206]:
+          - button "Alan Turing" [pressed] [ref=f1e207] [cursor=pointer]:
+            - generic [ref=f1e208]: AT
+          - button "Claude E. Shannon" [ref=f1e210] [cursor=pointer]:
+            - generic [ref=f1e211]: CS
+          - button "Fengli Xu" [ref=f1e213] [cursor=pointer]:
+            - generic [ref=f1e214]: FX
+          - button "Herbert A. Simon" [ref=f1e216] [cursor=pointer]:
+            - generic [ref=f1e217]: HS
+        - paragraph [ref=f1e219]:
+          - generic [ref=f1e220]: 已打开的文件夹
+          - code [ref=f1e221]: /private/tmp/omni-acceptance-20260825.WpUEbV/workspace
+        - button "启用人格" [disabled] [ref=f1e223]
+        - paragraph [ref=f1e227]: 当前文件夹不可写；请先在侧栏信任该文件夹。
+        - paragraph [ref=f1e228]: 人格是当前文件夹的默认设置。研究任务请启用后在下方输入框发送。
+    - generic [ref=f1e229]:
+      - generic [ref=f1e230]:
+        - textbox "给 Omni 发送消息" [disabled] [ref=f1e231]:
+          - /placeholder: 此目录只读。先在 CLI 运行 omni trust。
+        - generic [ref=f1e232]:
+          - generic "添加附件" [ref=f1e233]
+          - group "交互模式" [ref=f1e236]:
+            - button "自动" [pressed] [ref=f1e237] [cursor=pointer]
+            - button "计划" [ref=f1e238] [cursor=pointer]
+            - button "审阅" [ref=f1e239] [cursor=pointer]
+          - button "发送" [disabled] [ref=f1e240]
+      - generic [ref=f1e244]:
+        - generic "/private/tmp/omni-acceptance-20260825.WpUEbV/workspace" [ref=f1e245]: workspace
+        - generic [ref=f1e248]: 此工作区只读，请先在 CLI 中信任该目录。

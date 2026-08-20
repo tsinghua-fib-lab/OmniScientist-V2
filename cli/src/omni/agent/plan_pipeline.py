@@ -84,6 +84,7 @@ class PlanPipeline:
         on_tool_event: Any,
         forward: Any,
         planner_factory: Any = IntentPlanner,
+        carry_contract: bool = False,
     ) -> PlanPipelineResult:
         """Produce, repair, recover, and persist the final authoritative plan."""
         planner = planner_factory(self.registry)
@@ -94,6 +95,7 @@ class PlanPipeline:
             task_id=task_id,
             mode=mode,
             approved_plan=approved_plan,
+            carry_contract=carry_contract,
             turn_context=turn_context,
             context_summary=context_summary,
             recent_activity=recent_activity,
@@ -256,11 +258,13 @@ class PlanPipeline:
         task_id: str,
         mode: str,
         approved_plan: IntentPlan | None,
+        carry_contract: bool = False,
         turn_context: Any,
         context_summary: str,
         recent_activity: str,
     ) -> tuple[IntentPlan, list[dict[str, Any]], str]:
         approval_bound_hash = ""
+        carried = None
         if approved_plan is not None:
             plan = deep_clone_plan(approved_plan)
             if plan.task_id != task_id or plan.user_message != user_message:
@@ -281,38 +285,79 @@ class PlanPipeline:
                 }
             ]
         else:
-            boundary = (
-                planner.boundary_plan(user_message, task_id=task_id)
-                if hasattr(planner, "boundary_plan")
-                else None
-            )
-            if boundary is not None:
-                plan = boundary
+            if carry_contract and self.tasks is not None:
+                from omni.runtime.task_continue import continue_from_persisted_plan
+
+                persisted = await self.tasks.get_task(task_id)
+                carried = continue_from_persisted_plan(user_message, task_id, persisted)
+            if carried is not None:
+                plan = carried
                 events = [
                     {
-                        "event_type": "plan.boundary.selected",
+                        "event_type": "plan.contract.carried",
                         "status": "succeeded",
-                        "name": boundary.intent_type.value,
+                        "name": plan.intent_type.value,
                         "output_json": {
-                            "intent_type": boundary.intent_type.value,
-                            "rationale": boundary.rationale,
+                            "intent_type": plan.intent_type.value,
+                            "outputs": list(plan.outputs),
+                            "provenance_mode": plan.provenance_mode,
                         },
-                        "summary": boundary.rationale[:220],
+                        "summary": "continued from the accepted task contract",
                     }
                 ]
             else:
-                planner_context = "\n\n".join(
-                    part for part in (context_summary, recent_activity) if part
+                boundary = (
+                    planner.boundary_plan(user_message, task_id=task_id)
+                    if hasattr(planner, "boundary_plan")
+                    else None
                 )
-                plan, events = await self._plan_with_model(
-                    planner,
-                    llm=llm,
-                    user_message=user_message,
-                    task_id=task_id,
-                    turn_context=turn_context,
-                    context_summary=planner_context,
-                )
-        if approved_plan is None:
+                if boundary is not None:
+                    plan = boundary
+                    events = [
+                        {
+                            "event_type": "plan.boundary.selected",
+                            "status": "succeeded",
+                            "name": boundary.intent_type.value,
+                            "output_json": {
+                                "intent_type": boundary.intent_type.value,
+                                "rationale": boundary.rationale,
+                            },
+                            "summary": boundary.rationale[:220],
+                        }
+                    ]
+                elif mode == "plan":
+                    plan = build_assistant_plan(
+                        user_message,
+                        task_id=task_id,
+                        rationale=(
+                            "plan mode skipped the semantic planner; "
+                            "host presents a read-only plan for approval"
+                        ),
+                        confidence=0.7,
+                    )
+                    events = [
+                        {
+                            "event_type": "plan.mode.bounded",
+                            "status": "succeeded",
+                            "name": "plan",
+                            "summary": (
+                                "plan mode did not run ModelIntentPlanner.propose"
+                            ),
+                        }
+                    ]
+                else:
+                    planner_context = "\n\n".join(
+                        part for part in (context_summary, recent_activity) if part
+                    )
+                    plan, events = await self._plan_with_model(
+                        planner,
+                        llm=llm,
+                        user_message=user_message,
+                        task_id=task_id,
+                        turn_context=turn_context,
+                        context_summary=planner_context,
+                    )
+        if approved_plan is None and carried is None:
             plan, repeat_event = await self._rerun_rather_than_ask(
                 plan, user_message=user_message, task_id=task_id
             )

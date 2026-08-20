@@ -590,7 +590,7 @@ async def test_explicit_file_question_can_use_read_only_workspace_tools():
 @pytest.mark.parametrize(
     ("prompt", "skill"),
     [
-        ("检索最近关于 RAG 评估基准的文献并给我可引用结论", "literature-search"),
+        ("获取 arXiv 1706.03762 的全文", "arxiv-fetch"),
         ("检查这篇 RAG 草稿是否像审稿人会指出严重问题", "paper-review"),
         ("这个结论有没有反例或冲突证据？", "contradiction-scan"),
     ],
@@ -891,35 +891,40 @@ async def test_a_dead_skill_ends_a_route_not_the_turn():
     """One failed provider is a detour, not the answer to a research question."""
     settings = load_settings()
     agent = await OmniAgent.create(settings)
-    agent.registry.register(_dead_skill("literature-search"))
+    agent.registry.register(_dead_skill("paper-review"))
     llm = _TranscriptLLM(
         {
             "intent_type": "single_skill_task",
             "confidence": 0.9,
-            "required_capabilities": ["literature.search"],
+            "required_capabilities": ["review.paper"],
             "outputs": ["answer"],
             "execution_mode": "foreground",
-            "rationale": "semantic planner selected literature.search",
+            "rationale": "semantic planner selected review.paper",
         },
-        script=[ChatWithToolsResult(content="Found the benchmarks via another source.")],
+        script=[
+            ChatWithToolsResult(content="Found the benchmarks via another source."),
+            ChatWithToolsResult(content="Found the benchmarks via another source."),
+            ChatWithToolsResult(content="Found the benchmarks via another source."),
+        ],
     )
     agent.llm = llm
     try:
         turn = await agent.handle_turn(
-            "检索最近关于 RAG 评估基准的文献", channel="cli", drain_tasks=True
+            "Review this paper for NeurIPS.", channel="cli", drain_tasks=True
         )
 
         # The turn continued past the failure and the model, not the runner,
         # wrote the answer.
         assert llm.calls >= 1, "the turn ended at the failed skill instead of routing around it"
-        assert turn.text == "Found the benchmarks via another source."
+        assert "Found the benchmarks via another source." in turn.text
+        assert "still owes review" in turn.text
 
         # The model was told which route was already spent, so its retry is a
         # detour rather than the same call again.
         seeded = "\n".join(
             str(m.get("content") or "") for m in llm.transcripts[0]
         )
-        assert "literature-search" in seeded
+        assert "paper-review" in seeded
         assert "Semantic Scholar API key is not configured" in seeded
 
         # And it was handed a catalog it can actually route with, not the

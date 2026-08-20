@@ -7,18 +7,38 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from omni.agent.capabilities import contract_outputs
+from omni.agent.capabilities import contract_outputs, contract_write_target
 from omni.agent.intent_plan import IntentType
 from omni.agent.model_planner import ModelPlanProposal
 from omni.agent.planner import IntentPlanner
 from omni.config import load_settings
 from omni.runtime.remaining import (
+    remaining_contract_files,
     remaining_deliverables,
     remaining_figure,
     remaining_slides,
+    remaining_typed_refs,
     remaining_writing,
 )
 from omni.skills_runtime.registry import SkillRegistry
+
+
+def test_ledger_tokens_are_not_write_basenames() -> None:
+    assert contract_write_target("draft.section") == ("report", ".md")
+    assert contract_write_target("draft.manuscript") == ("report", ".md")
+    assert contract_write_target("synthesis.final") == ("report", ".md")
+    assert contract_write_target("artifact.figure") == ("figure", ".png")
+    assert contract_write_target("artifact.slides") == ("slides", ".pptx")
+    assert contract_write_target("notes.md") is None
+    assert contract_write_target("survey.md") is None
+
+
+def test_sources_debt_clears_only_when_source_ids_exist() -> None:
+    assert remaining_typed_refs(["answer", "sources"], source_ids=None) == ["sources"]
+    assert remaining_typed_refs(["sources"], source_ids=[]) == ["sources"]
+    assert remaining_typed_refs(["sources"], source_ids=["", "  "]) == ["sources"]
+    assert remaining_typed_refs(["sources"], source_ids=["openalex:W1"]) == []
+    assert remaining_typed_refs(["answer"], source_ids=None) == []
 
 
 def test_figure_does_not_satisfy_a_manuscript_debt() -> None:
@@ -62,9 +82,64 @@ def test_markdown_report_satisfies_manuscript() -> None:
     assert remaining_deliverables(["draft.manuscript", "draft.section"], [report]) == []
 
 
+def test_this_task_utf8_file_pays_writing_debt(tmp_path) -> None:  # noqa: ANN001
+    path = tmp_path / "draft.section"
+    path.write_text("# latent-space intervention survey\n", encoding="utf-8")
+    artifact = SimpleNamespace(
+        kind="file",
+        title="draft",
+        rel_path=str(path),
+        path=str(path),
+        mime="application/octet-stream",
+        uri="artifact://draft",
+    )
+    assert remaining_deliverables(["draft.section", "draft.manuscript"], [artifact]) == []
+
+
+def test_this_task_png_bytes_do_not_pay_writing_debt(tmp_path) -> None:  # noqa: ANN001
+    path = tmp_path / "draft.section"
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 24)
+    artifact = SimpleNamespace(
+        kind="file",
+        title="draft",
+        rel_path=str(path),
+        path=str(path),
+        mime="application/octet-stream",
+        uri="artifact://bin",
+    )
+    assert remaining_deliverables(["draft.section"], [artifact]) == ["draft.section"]
+
+
+def test_document_txt_pays_writing_debt() -> None:
+    notes = SimpleNamespace(
+        kind="document",
+        title="notes",
+        rel_path="notes.txt",
+        mime="text/plain",
+        uri="artifact://txt",
+    )
+    assert remaining_deliverables(["draft.section"], [notes]) == []
+
+
+def test_text_mime_file_pays_writing_debt() -> None:
+    artifact = SimpleNamespace(
+        kind="file",
+        title="draft",
+        rel_path="draft.section",
+        mime="text/plain",
+        uri="artifact://text",
+    )
+    assert remaining_deliverables(["draft.manuscript"], [artifact]) == []
+
+
 def test_answer_alone_is_not_an_artifact_debt() -> None:
     assert contract_outputs(["answer"]) == []
     assert remaining_deliverables(["answer"], []) == []
+
+
+def test_remaining_contract_files_omit_sources_and_answer() -> None:
+    remaining = ["sources", "answer", "draft.section", "artifact.figure"]
+    assert remaining_contract_files(remaining) == ["draft.section", "artifact.figure"]
 
 
 def test_figure_debt_is_host_fillable() -> None:
@@ -150,6 +225,8 @@ def test_answer_only_proposal_still_binds_named_capabilities() -> None:
     required = plan.verification_plan.required_outputs
     assert "artifact.figure" in required
     assert "draft.manuscript" in required
+    assert plan.tool_policy.allows("write_file")
+    assert not plan.tool_policy.allows("bash")
 
 
 def test_figure_and_paper_wording_binds_the_contract_without_capabilities() -> None:

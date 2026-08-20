@@ -64,6 +64,8 @@ async def test_cite_source_also_writes_library():
         {"arxiv_id": "1706.03762", "title": "Attention Is All You Need",
          "authors": ["Vaswani"], "year": "2017"})
     assert res["status"] == "ok"
+    assert res.get("observation", {}).get("created_refs")
+    assert any(ref.startswith("source:") for ref in res["observation"]["created_refs"])
     lib = load_library(ctx.paths.library)
     assert any(e.get("arxiv_id") == "1706.03762" for e in lib)
 

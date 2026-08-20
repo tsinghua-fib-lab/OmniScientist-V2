@@ -125,6 +125,14 @@ def classify_repl_command(tokens: Sequence[str]) -> ReplCommandPolicy:
             return _FOREGROUND
         return _CAPTURED
 
+    if command == "web":
+        # Bare `omni web` owns the terminal. REPL rewrites `/web` to `web start`
+        # before this classifier sees it, so the captured start/stop/status path
+        # is what the dock waits on.
+        if subcommand == "":
+            return _FOREGROUND
+        return _CAPTURED
+
     if command == "mcp" and subcommand == "serve":
         return _FOREGROUND
 

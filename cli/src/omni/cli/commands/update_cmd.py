@@ -521,6 +521,44 @@ def _plan(
     return kind, argv, label
 
 
+def _prepare_local_web_ui(cli_src: Path) -> None:
+    """Rebuild ``web/dist`` before deploying an explicit source checkout.
+
+    A snapshot copies ``web/dist`` into ``omni/data/web``; an editable install
+    serves that same directory directly. Both modes therefore need the current
+    Vite output before Python installation is synchronized.
+    """
+    web = cli_src.parent / "web" / "package.json"
+    if not web.is_file():
+        return
+    if shutil.which("node") is None and shutil.which("node.exe") is None:
+        error(
+            "Node.js is required to build the current web UI for a local checkout; "
+            "an existing web/dist will not be reused because it may be stale."
+        )
+        raise typer.Exit(1)
+    if os.name == "nt":
+        script = cli_src / "scripts" / "build_web_ui.ps1"
+        shell = shutil.which("pwsh") or shutil.which("powershell") or shutil.which(
+            "powershell.exe"
+        )
+        if shell is None:
+            error("PowerShell is required to build the current web UI on Windows.")
+            raise typer.Exit(1)
+        command = [shell, "-ExecutionPolicy", "Bypass", "-File", str(script)]
+    else:
+        script = cli_src / "scripts" / "build_web_ui.sh"
+        command = ["bash", str(script)]
+    if not script.is_file():
+        error(f"Web UI build script is missing: {script}")
+        raise typer.Exit(1)
+    info("Building the loopback SPA from the current checkout...")
+    proc = subprocess.run(command, check=False)
+    if proc.returncode != 0:
+        error("Failed to build the web UI. Fix web/ or install Node, then retry.")
+        raise typer.Exit(proc.returncode)
+
+
 def _resolve_local_checkout(dist: md.Distribution | None = None) -> Path | None:
     """Resolve the local source checkout dir (the installable ``cli`` package).
 
@@ -589,6 +627,17 @@ def _execute_git_update(*, repo_root: Path, src: Path, editable: bool, ref: str)
             "or target another branch with `omni update --ref <branch>`."
         )
         raise typer.Exit(proc.returncode)
+
+    try:
+        _prepare_local_web_ui(src)
+    except typer.Exit:
+        error(
+            "The source checkout was fast-forwarded, but the installed package was not "
+            "changed. After fixing the Web UI toolchain/build, redeploy the checkout "
+            "with its repository installer (`./cli/scripts/install.sh --local` on "
+            "macOS/Linux or `cli\\scripts\\install.ps1 -Local` on Windows)."
+        )
+        raise
 
     if editable:
         reinstall = _editable_dependency_sync_plan()
@@ -798,6 +847,8 @@ def update_command(
         )
         mode = "editable (live edits)" if editable else "snapshot of current tree (incl. uncommitted)"
         label = f"developer {mode} from {src}; {label}"
+        if not check:
+            _prepare_local_web_ui(src)
     elif to:
         target = DIST if to.strip() == f"{DIST}@latest" else to.strip()
         _kind, cmd, label = _exact_install_plan(target, reinstall=True, refresh=_spec_is_moving_git(target))
@@ -1035,6 +1086,7 @@ def _render_update_summary(
         warn("• Background serve restart was skipped; run `omni serve restart` if needed.")
     # Any already-open REPL/terminal keeps old code in-memory until relaunched.
     info("• Restart open omni sessions or terminals to load the new version.")
+    info("• Restart `omni web` to load the UI that shipped with this version.")
     if orphans:
         pids = ", ".join(str(p) for p in orphans)
         warn(

@@ -684,24 +684,37 @@ def test_repl_banner_values_are_never_dimmer_than_their_labels():
     assert "workspace" in dimmed  # the label is the quiet part
     # The value carries no span at all: full-strength default foreground.
     assert str(settings.paths.project_dir) not in dimmed
-    # Actionable commands are what the eye should land on.
-    assert {"/help", "/exit", "@"} <= accented
+    # Incomplete model: the one next step is setup, not /help + IM login.
+    assert {"/init", "/model"} <= accented
 
 
-def test_repl_banner_points_at_the_one_wechat_command():
-    """The quickstart table folds away on a short terminal, so the banner itself
-    has to carry the messaging entry point."""
+def test_repl_banner_points_at_the_one_next_step():
+    """Startup is one CTA: setup when the model is missing, ask + /web when ready."""
     from rich.text import Text
 
     from omni.cli.main import _repl_banner_text
     from omni.config import load_settings
 
-    settings = load_settings(overrides={"model": {"provider": "openai", "model": "deepseek-v4-pro"}})
-    banner = " ".join(Text.from_markup(_repl_banner_text("default", settings)).plain.split())
+    missing = load_settings(overrides={"model": {"provider": "openai", "model": "deepseek-v4-pro"}})
+    missing_banner = " ".join(Text.from_markup(_repl_banner_text("default", missing)).plain.split())
+    assert "/init" in missing_banner and "/model" in missing_banner
+    assert "/channel login wechat" not in missing_banner
+    assert "WeChat" not in missing_banner
 
-    assert "/channel login wechat --start" in banner
-    for platform in ("WeChat", "Feishu", "DingTalk"):
-        assert platform in banner
+    ready = load_settings(
+        overrides={
+            "model": {
+                "provider": "openai",
+                "model": "deepseek-v4-pro",
+                "base_url": "https://example.invalid/v1",
+                "api_key": "test",
+            }
+        }
+    )
+    ready_banner = " ".join(Text.from_markup(_repl_banner_text("default", ready)).plain.split())
+    assert "/web" in ready_banner
+    assert "/help" in ready_banner
+    assert "/channel login wechat" not in ready_banner
 
 
 def test_repl_detects_incomplete_real_model_config():
@@ -753,6 +766,7 @@ def test_repl_quickstart_rows_are_concise_with_examples():
         ("/doctor", "/doctor"),
         ("/uninstall", "/uninstall --dry-run"),
         ("/init", "/init"),
+        ("/web", "/web"),
     ):
         assert command in quickstart_text
         assert example in quickstart_text
@@ -804,8 +818,10 @@ def test_repl_help_is_concise_overview_with_slashes_and_hierarchy():
     out = cap.get()
     flat = "".join(out.split())  # collapse table wrapping for presence checks
 
-    # Command groups appear WITH a leading slash (index-0 column is no-wrap).
-    for cmd in ("/config", "/skills", "/task", "/serve", "/channel"):
+    # Conversation and research groups both appear WITH a leading slash.
+    assert "Conversation and workspace" in out
+    assert "Research" in out
+    for cmd in ("/config", "/skills", "/task", "/serve", "/channel", "/web"):
         assert cmd in out
     # The type column and verbose per-subcommand/parameter rows are gone.
     assert "类型" not in out
@@ -827,6 +843,11 @@ def test_repl_quickstart_order_highlight_and_accurate_init():
     assert [r[0] for r in rows[:4]] == ["Ask directly", "/init", "/model", "/config"]
     # The rest keep their relative order (spot-check a couple that follow /config).
     assert [r[0] for r in rows[4:7]] == ["/skills", "/soul", "/status"]
+    session = [r[0] for r in _repl_quickstart_rows(group="session")]
+    research = [r[0] for r in _repl_quickstart_rows(group="research")]
+    assert "/web" in session and "/help /exit /quit" in session
+    assert "/lit" in research and "/bench" in research
+    assert "/web" not in research and "/lit" not in session
 
     # The three first-touch rows share one highlight (bold cyan) as key commands;
     # others use the default row colour.
@@ -972,19 +993,17 @@ def test_channel_help_includes_safe_placeholders_not_real_credentials():
 
 
 def test_channel_help_advertises_exactly_one_way_to_connect_wechat():
-    # WeChat has a single advertised path: scan the official ClawBot QR. The
-    # gateway/wecom modes still work for existing deployments but must not show
-    # up here — listing three options is what sent users to the two that need a
-    # self-hosted gateway on :8088.
+    # WeChat has a single advertised path: scan the official ClawBot QR.
+    # Help must not offer flags that recreate the removed :8088 / WeCom paths.
     res = runner.invoke(app, ["channel", "help"])
     normalized = " ".join(res.stdout.split())
 
     assert res.exit_code == 0
     assert "/channel login wechat --start" in normalized
-    for alternative in ("--method", "--gateway-url", "8088", "wecom", "ilink"):
+    for alternative in ("--method", "--gateway-url", "wecom"):
         assert alternative not in normalized.lower()
-    # WeChat binds on scan; only Feishu and DingTalk need a pairing code.
-    assert "no local gateway, port, or" in normalized
+    assert "clawbot" in normalized.lower()
+    assert "no :8088 bridge" in normalized
     assert "/pair <code>" in normalized
     assert "--start" in normalized
     assert "list" in res.stdout
@@ -3121,6 +3140,35 @@ def test_memory_aliases_path_and_pagination_via_cli():
     assert delete_res.exit_code == 0
 
 
+def test_memory_add_then_link_uses_the_global_graph():
+    project = "memory-link-cli"
+    first = runner.invoke(app, ["--project", project, "memory", "add", "prefer Chinese slides"])
+    second = runner.invoke(app, ["--project", project, "memory", "add", "prefer arXiv only"])
+    assert first.exit_code == 0
+    assert second.exit_code == 0
+    first_id = first.stdout.split("Recorded memory ", 1)[1].split()[0].rstrip(".")
+    second_id = second.stdout.split("Recorded memory ", 1)[1].split()[0].rstrip(".")
+
+    linked = runner.invoke(
+        app,
+        ["--project", project, "memory", "link", first_id, second_id, "--relation", "related"],
+    )
+    assert linked.exit_code == 0, linked.stdout + linked.stderr
+    assert "Linked" in linked.stdout
+    assert "was not found" not in linked.stdout
+
+    graph = runner.invoke(app, ["--project", project, "memory", "graph", first_id])
+    assert graph.exit_code == 0, graph.stdout + graph.stderr
+    assert second_id[:8] in graph.stdout
+
+    missing = runner.invoke(
+        app,
+        ["--project", project, "memory", "link", first_id, "does-not-exist"],
+    )
+    assert missing.exit_code == 1
+    assert "was not found" in missing.stdout + missing.stderr
+
+
 def test_repl_memory_dispatches_subcommands_and_recalls_free_text(monkeypatch):
     # `/memory list` must run the real subcommand (not search for "list"), while
     # `/memory <free text>` stays a quick semantic recall shortcut.
@@ -4458,7 +4506,7 @@ def test_channel_login_wechat_ilink_no_wait_writes_template():
     from omni.config.paths import get_paths
 
     res = runner.invoke(
-        app, ["channel", "login", "wechat", "--method", "ilink", "--yes", "--no-wait"]
+        app, ["channel", "login", "wechat", "--method", "ilink", "--no-wait"]
     )
 
     assert res.exit_code == 0
@@ -4487,20 +4535,13 @@ def test_channel_login_wechat_defaults_to_official_ilink_without_a_gateway():
     assert "gateway_url" not in cfg
 
 
-def test_channel_login_wechat_gateway_no_wait_creates_pairing_code():
-    from omni.config.paths import get_paths
-
-    res = runner.invoke(
-        app, ["channel", "login", "wechat", "--method", "gateway", "--yes", "--no-wait"]
-    )
-
-    assert res.exit_code == 0
-    assert "/pair " in res.stdout
-    paths = get_paths()
-    cfg = tomllib.loads((paths.channels_dir / "wechat.toml").read_text(encoding="utf-8"))
-    assert cfg["mode"] == "gateway"
-    assert cfg["allowlist_enabled"] is True
-    assert cfg["pairing_code_hash"]
+def test_channel_login_wechat_rejects_removed_gateway_and_wecom_methods():
+    for method in ("gateway", "wecom"):
+        res = runner.invoke(app, ["channel", "login", "wechat", "--method", method, "--no-wait"])
+        assert res.exit_code == 2
+        text = res.output
+        assert "official ClawBot iLink QR" in text
+        assert ":8088" in text
 
 
 def test_channel_login_feishu_prints_the_pairing_code_and_applink():
@@ -4569,6 +4610,31 @@ def test_channel_pair_rejects_wechat_which_binds_the_scanning_account():
 
     assert res.exit_code == 2
     assert "feishu" in res.stdout + res.stderr
+
+
+def test_channel_remove_rejects_unknown_names_and_path_escape():
+    from omni.config.paths import get_paths
+
+    paths = get_paths()
+    paths.home.mkdir(parents=True, exist_ok=True)
+    marker = "must-not-delete = true\n"
+    paths.config_file.write_text(marker, encoding="utf-8")
+    paths.channels_dir.mkdir(parents=True, exist_ok=True)
+    paths.channels_dir.joinpath("wechat.toml").write_text('mode = "ilink"\n', encoding="utf-8")
+
+    unknown = runner.invoke(app, ["channel", "remove", "../config", "--purge"])
+    absolute = runner.invoke(app, ["channel", "remove", str(paths.home / "config"), "--purge"])
+    cli_channel = runner.invoke(app, ["channel", "remove", "cli", "--purge"])
+
+    assert unknown.exit_code != 0
+    assert absolute.exit_code != 0
+    assert cli_channel.exit_code != 0
+    assert paths.config_file.read_text(encoding="utf-8") == marker
+
+    removed = runner.invoke(app, ["channel", "remove", "wechat", "--purge"])
+    assert removed.exit_code == 0
+    assert not paths.channels_dir.joinpath("wechat.toml").is_file()
+    assert paths.config_file.is_file()
 
 
 # ── cite ─────────────────────────────────────────────────────────────────

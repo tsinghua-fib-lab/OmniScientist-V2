@@ -12,7 +12,7 @@ from prompt_toolkit.document import Document
 from typer.main import get_command
 
 from omni.cli.main import _repl_quickstart_rows, _repl_slash_commands, app
-from omni.cli.repl_commands import CommandCatalog, build_command_catalog
+from omni.cli.repl_commands import RESEARCH_COMMANDS, CommandCatalog, build_command_catalog
 from omni.cli.repl_input import SlashCommandCompleter
 
 # REPL-only verbs that have no backing Typer command but are dispatched in the loop.
@@ -87,6 +87,29 @@ def test_bare_slash_lists_all_commands_with_descriptions():
         "Inspect completions (this workspace + IM channel anchor)"
     )
     assert inbox.start_position == 0
+    web = next(completion for completion in rows if completion.text == "web")
+    assert web.display_meta_text
+    assert "browser" in web.display_meta_text.lower() or "web" in web.display_meta_text.lower()
+
+
+def test_catalog_groups_session_and_research():
+    catalog = build_command_catalog(app)
+    assert {command.group for command in catalog.commands} <= {"session", "research"}
+    assert catalog.get("web").group == "session"
+    assert catalog.get("help").group == "session"
+    assert catalog.get("lit").group == "research"
+    assert RESEARCH_COMMANDS <= set(catalog.names())
+
+
+def test_bare_slash_lists_session_commands_before_research():
+    names = _texts("/")
+    catalog = build_command_catalog(app)
+    session = sorted(command.name for command in catalog.commands if command.group == "session")
+    research = sorted(command.name for command in catalog.commands if command.group == "research")
+
+    assert names[: len(session)] == session
+    assert names[len(session) :] == research
+    assert names.index("web") < names.index("lit")
 
 
 def test_prefix_completes_both_inbox_and_init():
@@ -118,8 +141,14 @@ def test_model_completion_exposes_the_three_typed_roles_and_source_views():
 def test_group_help_is_completed_for_every_multi_subcommand_group():
     """`schedule`/`mcp`/`session`/`artifacts` gained a `help` subcommand, so
     `/x help` now works and is suggested (they previously lacked it)."""
-    for group in ("schedule", "mcp", "session", "artifacts", "task"):
+    for group in ("schedule", "mcp", "session", "artifacts", "task", "web"):
         assert "help" in _texts(f"/{group} ")
+
+
+def test_web_offers_its_manage_subcommand_surface():
+    assert {
+        "start", "stop", "status", "restart", "port", "help",
+    } <= set(_texts("/web "))
 
 
 def test_schedule_offers_its_full_subcommand_surface():

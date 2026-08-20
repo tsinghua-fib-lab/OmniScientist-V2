@@ -202,12 +202,19 @@ def build_delegation_tools(ctx: ExecContext) -> list[Tool]:
             return {"status": "error", "error": "no subtasks with a goal"}
         results = await run_subagents(specs, ctx, depth=depth)
         accepted = sum(1 for r in results if r.status in ("ok", "partial"))
-        return {
+        payload = {
             "status": "ok",
             "count": len(results),
             "accepted": accepted,
             "results": [r.to_dict() for r in results],
+            "source_ids": _unique_refs(results, "source_ids"),
+            "claim_ids": _unique_refs(results, "claim_ids"),
+            "evidence_ids": _unique_refs(results, "evidence_ids"),
+            "artifact_ids": _unique_refs(results, "artifact_ids"),
         }
+        from omni.runtime.engine_observation import attach_engine_observation
+
+        return attach_engine_observation(payload, payload)
 
     tools = [Tool(_SPEC, handler)]
 
@@ -217,6 +224,18 @@ def build_delegation_tools(ctx: ExecContext) -> list[Tool]:
     if getattr(cfg, "async_enabled", False) and getattr(ctx, "subagent_control", None) is not None:
         tools.extend(_build_async_tools(ctx))
     return tools
+
+
+def _unique_refs(results: list[Any], attr: str) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in results:
+        for value in getattr(item, attr, None) or []:
+            ref = str(value or "").strip()
+            if ref and ref not in seen:
+                seen.add(ref)
+                out.append(ref)
+    return out
 
 
 def _spec_from_args(args: dict) -> Any:

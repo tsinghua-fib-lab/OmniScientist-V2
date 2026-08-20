@@ -550,7 +550,8 @@ def import_skill(
         return InstallResult(
             (name or default_name or spec), "omni", paths.user_skills_dir, "error: source not found"
         )
-    return _copy_into_omni(src, paths, name or default_name, force, source=spec)
+    canonical = _skill_name_of(src if src.is_dir() else src.parent, default_name)
+    return _copy_into_omni(src, paths, name or canonical, force, source=spec)
 
 
 def imported_skill_metadata(name: str, paths: OmniPaths) -> dict:

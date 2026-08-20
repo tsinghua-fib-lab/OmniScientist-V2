@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from omni.agent.intent_plan import IntentPlan, IntentType
+from omni.agent.intent_plan import IntentPlan, IntentType, VerificationPlan
 from omni.agent.interaction_lifecycle import InteractionLifecycle
 from omni.agent.plan_result import PlanExecutionResult
 from omni.agent.plan_revision import (
@@ -31,6 +31,9 @@ class _Recorder:
     async def mark_awaiting_approval(self, *_args: Any, **_kwargs: Any) -> bool:
         self.timeline.append("mark_awaiting")
         return True
+
+    async def get_task(self, _task_id: str) -> None:
+        return None
 
 
 class _Hooks:
@@ -455,3 +458,85 @@ async def test_interaction_gate_invalidates_stale_authority_before_reapproval() 
         "pre_present",
         "post_present",
     ]
+
+
+@pytest.mark.asyncio
+async def test_complete_react_does_not_host_fill_owed_files() -> None:
+    recorder = _Recorder()
+    plan = IntentPlan(
+        task_id="task-survey",
+        user_message="write a survey with a figure",
+        intent_type=IntentType.REACT_FALLBACK,
+        verification_plan=VerificationPlan(
+            required_outputs=["draft.manuscript", "artifact.figure"]
+        ),
+    )
+
+    async def no_escalation(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    completion = _completion(recorder)
+    called: list[str] = []
+
+    async def _fail_fill(*_args: Any, **_kwargs: Any) -> list[str]:
+        called.append("fill")
+        return ["should not run"]
+
+    completion._fill_remaining_figure = _fail_fill  # type: ignore[method-assign]
+    completion._fill_remaining_writing = _fail_fill  # type: ignore[method-assign]
+    completion._fill_remaining_slides = _fail_fill  # type: ignore[method-assign]
+    result = await completion.complete_react(
+        plan=plan,
+        result=AgentLoopResult(kind="text", content="Retrieved two papers."),
+        session_id="session-survey",
+        user_message=plan.user_message,
+        channel="cli",
+        drain_tasks=False,
+        emit_tool_event=None,
+        maybe_escalate=no_escalation,
+        **_completion_callbacks(recorder),
+    )
+    assert called == []
+    assert any("still owes" in note for note in result.degraded_warnings)
+    assert "draft.manuscript" in result.text
+    assert "artifact.figure" in result.text
+    assert result.settlement_status == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_drained_review_file_pays_the_named_debt() -> None:
+    """Skill-declared files count even before the store indexes them."""
+    recorder = _Recorder()
+    plan = IntentPlan(
+        task_id="task-review",
+        user_message="Review paper.pdf for NeurIPS.",
+        intent_type=IntentType.REACT_FALLBACK,
+        verification_plan=VerificationPlan(required_outputs=["review"]),
+    )
+    drained = [
+        {
+            "subtask_id": "sub-review",
+            "skill": "paper-review",
+            "status": "succeeded",
+            "result": {
+                "text": "The paper is sound on the main claim.",
+                "artifacts": [
+                    {
+                        "title": "review.md",
+                        "path": "/tmp/review.md",
+                        "format": "md",
+                    }
+                ],
+            },
+        }
+    ]
+    loop = AgentLoopResult(kind="text", content="The paper is sound on the main claim.")
+    honesty = await _completion(recorder)._honest_unpaid_files(
+        plan,
+        loop,
+        drained,
+        submitted=[],
+        task_id=plan.task_id,
+    )
+    assert honesty == []
+    assert "still owes" not in (loop.content or "")

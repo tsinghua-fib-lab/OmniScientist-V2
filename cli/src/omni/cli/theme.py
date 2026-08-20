@@ -57,6 +57,23 @@ PTK_CAUTION = "nodim ansiyellow"
 PTK_STRONG = "nodim bold"
 PTK_TEXT = "nodim"  # the terminal's default foreground, at full strength
 
+
+def completion_menu_styles() -> dict[str, str]:
+    """prompt_toolkit classes for the slash popup's name + description columns.
+
+    Catalog help is already attached as ``display_meta``; these roles keep the
+    description readable without betting on a grey that can vanish into the
+    terminal background.
+    """
+    return {
+        "completion-menu": PTK_TEXT,
+        "completion-menu.completion": PTK_TEXT,
+        "completion-menu.completion.current": f"reverse {PTK_ACCENT}",
+        "completion-menu.meta.completion": PTK_MUTED,
+        "completion-menu.meta.completion.current": "reverse",
+    }
+
+
 # ``Ctrl+J``, ``Enter``, ``Esc`` … the part of a hint the user actually presses.
 _KEY = re.compile(r"^(\s*)(Ctrl\+\S+|Alt\+\S+|Shift\+\S+|Enter|Tab|Esc|Space)(\s.*)?$", re.DOTALL)
 

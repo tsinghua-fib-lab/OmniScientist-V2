@@ -24,7 +24,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from omni.storage.db import Database, get_database
@@ -251,20 +251,61 @@ class TaskIndex:
             store = await self._store()
             async with store.session() as s:
                 q = select(TaskIndexORM).order_by(TaskIndexORM.created_at.desc())
-                if status:
-                    q = q.where(TaskIndexORM.status == status)
-                if kind:
-                    q = q.where(TaskIndexORM.kind == kind)
-                if not include_archived:
-                    q = q.where(TaskIndexORM.archived_at.is_(None))
+                q = _apply_index_filters(
+                    q,
+                    status=status,
+                    kind=kind,
+                    include_archived=include_archived,
+                    session=session,
+                )
                 q = q.limit(max(1, int(limit)))
-                rows = list((await s.execute(q)).scalars().all())
+                return list((await s.execute(q)).scalars().all())
         except Exception:  # noqa: BLE001
             logger.debug("task index: list failed", exc_info=True)
             return []
-        if session:
-            rows = [r for r in rows if (r.session_id or "").startswith(session)]
-        return rows
+
+    async def count(
+        self,
+        *,
+        status: str | None = None,
+        kind: str | None = None,
+        include_archived: bool = False,
+        session: str | None = None,
+    ) -> int:
+        try:
+            store = await self._store()
+            async with store.session() as s:
+                q = select(func.count()).select_from(TaskIndexORM)
+                q = _apply_index_filters(
+                    q,
+                    status=status,
+                    kind=kind,
+                    include_archived=include_archived,
+                    session=session,
+                )
+                return int((await s.scalar(q)) or 0)
+        except Exception:  # noqa: BLE001
+            logger.debug("task index: count failed", exc_info=True)
+            return 0
+
+
+def _apply_index_filters(
+    query: Any,
+    *,
+    status: str | None,
+    kind: str | None,
+    include_archived: bool,
+    session: str | None,
+) -> Any:
+    if status:
+        query = query.where(TaskIndexORM.status == status)
+    if kind:
+        query = query.where(TaskIndexORM.kind == kind)
+    if not include_archived:
+        query = query.where(TaskIndexORM.archived_at.is_(None))
+    if session:
+        query = query.where(TaskIndexORM.session_id.startswith(session, autoescape=True))
+    return query
 
 
 def settings_for_workspace(

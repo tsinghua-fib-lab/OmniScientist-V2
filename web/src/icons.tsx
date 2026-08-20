@@ -1,0 +1,38 @@
+/**
+ * Shared interface icons. Lucide keeps stroke weight, optical sizing, and
+ * accessibility behavior consistent across the shell.
+ */
+export {
+  Activity as IconActivity,
+  ArrowDown as IconArrowDown,
+  BrainCircuit as IconRom,
+  Brain as IconPersona,
+  Check as IconCheck,
+  ChevronDown as IconChevronDown,
+  ChevronUp as IconChevronUp,
+  CircleDollarSign as IconCost,
+  Copy as IconCopy,
+  ExternalLink as IconExternalLink,
+  FileOutput as IconArtifact,
+  Folder as IconFolder,
+  FolderOpen as IconFolderOpen,
+  ListChecks as IconTask,
+  Maximize2 as IconMaximize,
+  Menu as IconMenu,
+  MessagesSquare as IconChannels,
+  Minimize2 as IconMinimize,
+  NotebookPen as IconNote,
+  PanelLeftClose as IconPanelLeftClose,
+  PanelLeftOpen as IconPanelLeftOpen,
+  PanelRightClose as IconPanelRightClose,
+  Paperclip as IconPaperclip,
+  Plus as IconPlus,
+  RefreshCw as IconRefresh,
+  Search as IconSearch,
+  Settings as IconSettings,
+  Send as IconSend,
+  ShieldCheck as IconApprove,
+  Sparkles as IconSteer,
+  Square as IconStop,
+  X as IconClose,
+} from "lucide-react";

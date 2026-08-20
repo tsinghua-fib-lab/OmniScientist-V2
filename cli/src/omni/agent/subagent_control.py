@@ -138,6 +138,10 @@ class SubagentControl:
             "task_id": (result.task_id if result is not None else ""),
             "iterations": (result.iterations if result is not None else 0),
             "tool_calls": (result.tool_calls if result is not None else 0),
+            "source_ids": list(getattr(result, "source_ids", None) or []) if result is not None else [],
+            "claim_ids": list(getattr(result, "claim_ids", None) or []) if result is not None else [],
+            "evidence_ids": list(getattr(result, "evidence_ids", None) or []) if result is not None else [],
+            "artifact_ids": list(getattr(result, "artifact_ids", None) or []) if result is not None else [],
             "timed_out": False,
         }
 

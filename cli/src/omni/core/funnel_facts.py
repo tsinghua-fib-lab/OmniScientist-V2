@@ -97,7 +97,9 @@ def project_skill_observation(
     elif isinstance(result, dict) and result.get("warning"):
         payload.setdefault("warning", result["warning"])
     payload["result"] = result
-    return payload
+    from omni.runtime.engine_observation import attach_engine_observation
+
+    return attach_engine_observation(payload, result, extra=extra)
 
 
 def _funnel_block(payload: Any) -> dict[str, Any] | None:

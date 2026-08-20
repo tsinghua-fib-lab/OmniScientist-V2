@@ -75,6 +75,7 @@ from omni.cli.repl_layout import (
     compact_number,
     display_width,
     fit_hint_parts,
+    newline_hint,
     placeholder_for_width,
 )
 from omni.cli.repl_output import (
@@ -191,6 +192,7 @@ _STYLE = Style.from_dict(
         "dock.notice": f"bold {theme.PTK_CAUTION}",
         "dock.spinner": f"bold {theme.PTK_ACCENT}",
         "dock.shimmer": theme.PTK_STRONG,
+        **theme.completion_menu_styles(),
         # The modal paints its own background, so its foregrounds stay fixed:
         # here the contrast is against our colour, not the terminal's.
         "modal": "bg:#1c1c1c #e4e4e4",
@@ -340,8 +342,10 @@ class ReplTui:
         output: Output | None = None,
         diagnostic_log_path: str | os.PathLike[str] | None = None,
         output_base: Path | None = None,
+        shift_enter_ready: bool = False,
     ) -> None:
         self.enabled = True
+        self._shift_enter_ready = bool(shift_enter_ready)
         self.transcript = TranscriptModel(max_chars=max_transcript_chars)
         self._mode = "auto"
         self._model = ""
@@ -1501,7 +1505,7 @@ class ReplTui:
             parts = [
                 f"{self._mode} mode",
                 "Enter send",
-                "Ctrl+J newline",
+                newline_hint(self._shift_enter_ready),
                 "select to copy",
                 "Ctrl+D exit",
             ]
@@ -1517,7 +1521,13 @@ class ReplTui:
             extras.append(f"Ctrl+T {action}")
         if self._busy:
             return ("Tab queue", "Enter steer", *extras, "Ctrl+D exit")
-        return ("select to copy", "Ctrl+J newline", *extras, "Ctrl+D exit", "Enter send")
+        return (
+            "select to copy",
+            newline_hint(self._shift_enter_ready),
+            *extras,
+            "Ctrl+D exit",
+            "Enter send",
+        )
 
     def footer_fragments(self) -> FormattedText:
         columns = self.terminal_size()[1]
@@ -1578,7 +1588,10 @@ class ReplTui:
 
     def _placeholder_text(self) -> str:
         # Frame chrome plus the ``› `` prompt; keep the hint on one composer line.
-        return placeholder_for_width(max(1, self.terminal_size()[1] - 6))
+        return placeholder_for_width(
+            max(1, self.terminal_size()[1] - 6),
+            shift_enter_ready=self._shift_enter_ready,
+        )
 
     def _prompt_fragments(self) -> FormattedText:
         # A leading ``!`` puts the composer in shell intent: show a distinct

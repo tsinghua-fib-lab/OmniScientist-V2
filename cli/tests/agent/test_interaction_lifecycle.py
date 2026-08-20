@@ -20,6 +20,8 @@ from omni.agent.intent_plan import (
     ToolPolicy,
     VerificationPlan,
 )
+from omni.agent.interaction_lifecycle import apply_interaction_mode
+from omni.agent.plan_factory import build_assistant_plan
 from omni.agent.plan_revision import (
     create_execution_authority,
     create_revision,
@@ -34,6 +36,22 @@ from omni.core.tool_result import ToolResultEnvelope
 from omni.runtime import hooks as hooks_runtime
 from omni.runtime.hooks import HookManager, invoke_tool_with_hooks
 from tests.conftest import CapturingLLM, ScriptedLLM
+
+
+def test_plan_mode_host_denies_retrieval_and_skill_tools() -> None:
+    plan = apply_interaction_mode(
+        build_assistant_plan(
+            "compare retrieval strategies",
+            task_id="plan-policy",
+            rationale="plan only",
+        ),
+        "plan",
+    )
+    assert plan.execution_mode == "plan"
+    assert not plan.tool_policy.allows("search_literature")
+    assert not plan.tool_policy.allows("run_skill")
+    assert not plan.tool_policy.allows("write_file")
+    assert not plan.tool_policy.allows("spawn_subagents")
 
 
 @pytest.mark.asyncio
@@ -60,6 +78,12 @@ async def test_plan_mode_persists_plan_without_execution_and_approve_reuses_run(
         )
         assert run.approved_tools == []
         assert agent.llm.calls == 0
+        stored = IntentPlan.from_dict(run.plan_json)
+        assert stored.execution_mode == "plan"
+        assert not stored.tool_policy.allows("search_literature")
+        assert not stored.tool_policy.allows("run_skill")
+        events = [event.event_type for event in await agent.tasks.list_events(run.id)]
+        assert "plan.mode.bounded" in events
 
         executed = await agent.approve_task(planned.task_id, drain_tasks=False)
         assert executed.task_id == planned.task_id

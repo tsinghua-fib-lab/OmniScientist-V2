@@ -1,22 +1,16 @@
-"""WeChat channel.
+"""WeChat channel — official ClawBot iLink only.
 
-1. **ClawBot bot API** (default, ``mode = "ilink"``). OmniScientist speaks
-   Tencent's official iLink bot HTTP/JSON API directly — the same backend the
-   ``@tencent-weixin/openclaw-weixin`` plugin uses. ``omni channel login wechat``
-   shows the liteapp QR; after the scan the user chats with the WeChat ClawBot
-   and OmniScientist answers. No gateway, public webhook, Node, or OpenClaw runtime.
-2. **Operator-managed gateway** (``mode = "gateway"``). OmniScientist polls a
-   self-hosted gateway inbox and posts replies through its send API. Kept for
-   existing deployments; ``omni channel login`` no longer advertises it.
-3. **WeCom** (``mode = "wecom"``, gateway-fronted for now).
+OmniScientist speaks Tencent's official iLink bot HTTP/JSON API directly — the
+same backend the ``@tencent-weixin/openclaw-weixin`` plugin uses. ``omni channel
+login wechat`` shows the liteapp QR; after the scan the user chats with the
+WeChat ClawBot and OmniScientist answers. No self-hosted :8088 bridge, WeCom
+adapter, public webhook, Node, or OpenClaw runtime.
 
 Config (``~/.omni/channels/wechat.toml`` + secrets in ``secrets.toml``/Keychain):
 
-    mode = "ilink"                       # ilink | gateway | wecom
-    # gateway/wecom only:
-    gateway_url = "http://127.0.0.1:8088"
-    inbox_path = "/messages"
-    send_path = "/send"
+    mode = "ilink"
+    account_id = "..."          # optional, returned by the scan
+    # bot_token lives in secrets.toml / Keychain
 """
 
 import asyncio
@@ -27,11 +21,7 @@ from typing import Any
 
 from omni.channels.base import Channel
 from omni.channels.config import load_channel_config
-from omni.channels.outbound import (
-    WeChatGatewayClient,
-    WeixinIlinkOutbound,
-    send_presentation,
-)
+from omni.channels.outbound import WeixinIlinkOutbound, send_presentation
 from omni.channels.security import claim_inbound_message
 from omni.channels.weixin_ilink import (
     SESSION_TIMEOUT_ERRCODE,
@@ -47,19 +37,13 @@ from omni.runtime.presentation import TaskPresentation, TurnPresentation
 
 logger = logging.getLogger(__name__)
 
+WECHAT_AUTH_EXPIRED_REASON = "WeChat login expired; scan the QR code again."
 
-def resolve_wechat_mode(cfg: dict[str, Any]) -> str:
-    """Pick the WeChat integration mode, defaulting to the official ClawBot API.
 
-    Configs that predate the ``mode`` key are inferred from their gateway fields
-    so existing gateway deployments keep working untouched.
-    """
-    mode = str(cfg.get("mode") or cfg.get("backend") or "").strip()
-    if mode:
-        return mode
-    if cfg.get("gateway_url") or cfg.get("inbox_path") or cfg.get("send_path"):
-        return "gateway"
-    return "ilink"
+class WeChatAuthExpired(RuntimeError):
+    """Stored iLink token was rejected; the user must scan again."""
+
+    health_reason = WECHAT_AUTH_EXPIRED_REASON
 
 
 class WeChatChannel(Channel):
@@ -68,7 +52,6 @@ class WeChatChannel(Channel):
     def __init__(self, settings, agent, *, client=None) -> None:  # noqa: ANN001
         super().__init__(settings, agent)
         self._cfg = load_channel_config(settings, self.name)
-        self._mode = resolve_wechat_mode(self._cfg)
         # Per-peer context_token map (echoed verbatim on every iLink reply).
         self._ctx_tokens: dict[str, str] = {}
         # Per-peer typing_ticket cache (fetched lazily via getconfig). ``None``
@@ -78,18 +61,12 @@ class WeChatChannel(Channel):
         # iLink typing indicators expire after a few seconds, so refresh them while
         # a turn is in flight, keeping the native typing indicator active.
         self._typing_refresh_s = max(1.0, float(self._cfg.get("typing_refresh_s") or 4.0))
-        if client is not None:
-            self._client = client
-        elif self._mode == "ilink":
-            self._client = WeixinIlinkClient.from_config(self._cfg)
-        else:
-            self._client = WeChatGatewayClient(self._cfg)
+        self._client = client if client is not None else WeixinIlinkClient.from_config(self._cfg)
         # The iLink outbound wrapper threads the per-peer context_token onto every
-        # reply. It only applies when the client speaks the iLink ``send_message``
-        # API; a plain MarkdownOutbound (gateway client / test fake) is used directly.
+        # reply. Test fakes that only speak ``send_markdown`` skip the wrapper.
         self._ilink_outbound = (
             WeixinIlinkOutbound(self._client, self._ctx_tokens)
-            if self._mode == "ilink" and hasattr(self._client, "send_message")
+            if hasattr(self._client, "send_message")
             else None
         )
 
@@ -103,24 +80,8 @@ class WeChatChannel(Channel):
                 "WeChat channel not configured. Run `omni channel login wechat`. (%s)", cfg
             )
             return
-        if self._mode == "ilink":
-            await self._start_ilink()
-            return
-        if self._mode not in {"gateway", "wecom"}:
-            logger.warning("unknown WeChat mode '%s'; expected ilink|gateway|wecom", self._mode)
-            return
-        logger.info(
-            "WeChat channel running in %s polling mode via %s",
-            self._mode,
-            self._cfg.get("gateway_url") or self._cfg.get("base_url"),
-        )
-        interval = float(self._cfg.get("poll_interval_s") or self._cfg.get("poll_interval") or 3)
-        while True:
-            for msg in await self._client.poll_messages():
-                await self.handle_gateway_message(msg)
-            await asyncio.sleep(max(0.5, interval))
+        await self._start_ilink()
 
-    # ── iLink runtime ────────────────────────────────────────────────────────
     async def _start_ilink(self) -> None:
         token = str(self._cfg.get("bot_token") or "")
         if not token:
@@ -156,8 +117,7 @@ class WeChatChannel(Channel):
                     logger.error(
                         "WeChat iLink token expired; re-run `omni channel login wechat`."
                     )
-                    await asyncio.sleep(60)
-                    continue
+                    raise WeChatAuthExpired(WECHAT_AUTH_EXPIRED_REASON)
                 failures += 1
                 logger.warning(
                     "WeChat getupdates ret=%s errcode=%s errmsg=%s",
@@ -176,18 +136,18 @@ class WeChatChannel(Channel):
                 self._save_sync_buf(buf)
             for msg in resp.get("msgs") or []:
                 if isinstance(msg, dict):
-                    await self._handle_ilink_message(msg)
+                    await self.handle_ilink_message(msg)
 
-    async def _handle_ilink_message(self, msg: dict[str, Any]) -> None:
+    async def handle_ilink_message(self, msg: dict[str, Any]) -> TurnPresentation | None:
         if is_bot_message(msg):
-            return
+            return None
         external_key = str(msg.get("from_user_id") or "")
         if not external_key:
-            return
+            return None
         text = message_text(msg)
         media = media_items(msg)
         if not text and not media:
-            return
+            return None
         context_token = str(msg.get("context_token") or "")
         if context_token:
             self._ctx_tokens[external_key] = context_token
@@ -196,11 +156,11 @@ class WeChatChannel(Channel):
         if not claim_inbound_message(
             self.settings, self.name, external_key, message_id=message_id
         ):
-            return
+            return None
         combined = await self._compose_inbound_text(text, media)
         if not combined:
-            return
-        await self._run_with_typing(
+            return None
+        return await self._run_with_typing(
             external_key, context_token, self.handle_inbound_and_send(combined, external_key)
         )
 
@@ -304,53 +264,17 @@ class WeChatChannel(Channel):
         except OSError as exc:
             logger.debug("failed to persist wechat sync buf: %s", exc)
 
-    # ── gateway runtime ───────────────────────────────────────────────────────
-    async def handle_gateway_message(self, msg: dict[str, Any]) -> TurnPresentation | None:
-        text = str(msg.get("text") or msg.get("content") or "").strip()
-        external_key = str(
-            msg.get("external_key")
-            or msg.get("openid")
-            or msg.get("from")
-            or msg.get("sender")
-            or ""
-        )
-        if not text or not external_key:
-            return None
-        if not claim_inbound_message(
-            self.settings,
-            self.name,
-            external_key,
-            message_id=str(
-                msg.get("message_id")
-                or msg.get("msg_id")
-                or msg.get("msgId")
-                or msg.get("MsgId")
-                or ""
-            ),
-            event_id=str(msg.get("event_id") or msg.get("eventId") or ""),
-        ):
-            return None
-        return await self.handle_inbound_and_send(text, external_key)
-
     async def send_turn(
         self, external_key: str, presentation: TurnPresentation | TaskPresentation
     ) -> None:
         roots = self.uploadable_roots()
-        if self._mode == "ilink" and self._ilink_outbound is not None:
-            return await send_presentation(
-                self._ilink_outbound,
-                external_key,
-                presentation,
-                allowed_roots=roots,
-            )
-        return await send_presentation(self._client, external_key, presentation, allowed_roots=roots)
+        client = self._ilink_outbound if self._ilink_outbound is not None else self._client
+        return await send_presentation(client, external_key, presentation, allowed_roots=roots)
 
     async def notify(self, note: TaskNotification) -> None:
         await self.send_task_notification(note)
 
     async def stop(self) -> None:
-        if self._mode != "ilink":
-            return
         notify_stop = getattr(self._client, "notify_stop", None)
         if callable(notify_stop):
             try:

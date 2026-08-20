@@ -131,6 +131,7 @@ async def test_contract_hunting_after_find_skill_is_no_progress() -> None:
         [
             ChatWithToolsResult(tool_calls=[ToolCall("1", "find_skill", {"query": "research-pptx"})]),
             ChatWithToolsResult(tool_calls=[ToolCall("2", "docs_search", {"query": "pptx params"})]),
+            ChatWithToolsResult(tool_calls=[ToolCall("3", "docs_search", {"query": "pptx schema"})]),
             ChatWithToolsResult(content="文字大纲"),
         ]
     )
@@ -219,6 +220,31 @@ def _docs_record(query: str = "params") -> ToolInvocationRecord:
     )
 
 
+def _read_record(doc: str = "architecture.md") -> ToolInvocationRecord:
+    return ToolInvocationRecord(
+        name="docs_read",
+        arguments={"name": doc},
+        result={"status": "ok", "text": f"bundled {doc}"},
+    )
+
+
+def test_docs_only_retrieval_is_not_a_hunt() -> None:
+    assert (
+        _contract_hunt_pressure(
+            [
+                _read_record(),
+                _docs_record("storage architecture"),
+                _docs_record("sqlite workspace"),
+            ]
+        )
+        == 0
+    )
+
+
+def test_docs_before_a_contract_do_not_count_as_a_hunt() -> None:
+    assert _contract_hunt_pressure([_read_record(), _find_record("research-pptx")]) == 1
+
+
 def test_two_disjoint_find_skill_cards_are_not_a_hunt() -> None:
     assert (
         _contract_hunt_pressure(
@@ -259,6 +285,40 @@ def test_docs_after_a_second_disjoint_card_hunts_the_newer_contract() -> None:
     )
 
 
+def _empty_find(query: str) -> ToolInvocationRecord:
+    return ToolInvocationRecord(
+        name="find_skill",
+        arguments={"query": query},
+        result={"matches": [], "total_skills": 12},
+    )
+
+
+def test_empty_finds_after_a_card_are_not_a_hunt() -> None:
+    assert (
+        _contract_hunt_pressure(
+            [
+                _find_record("research-pptx"),
+                _empty_find("scientific figure generation architecture diagram"),
+                _empty_find("research pptx slides presentation generation"),
+            ]
+        )
+        == 1
+    )
+
+
+def test_empty_find_after_two_cards_is_not_a_hunt() -> None:
+    assert (
+        _contract_hunt_pressure(
+            [
+                _find_record("livefigure"),
+                _find_record("research-pptx"),
+                _empty_find("record_claim"),
+            ]
+        )
+        == 1
+    )
+
+
 def test_a_successful_consume_clears_hunt_pressure() -> None:
     assert (
         _contract_hunt_pressure(
@@ -274,6 +334,59 @@ def test_a_successful_consume_clears_hunt_pressure() -> None:
         )
         == 0
     )
+
+
+@pytest.mark.asyncio
+async def test_docs_only_retrieval_can_read_architecture_and_finish() -> None:
+    async def invoker(name: str, args: dict) -> dict:
+        if name == "docs_read":
+            doc = str(args.get("name") or "catalog")
+            return {"status": "ok", "text": f"bundled {doc}: SQLite plus the filesystem."}
+        return {"status": "ok", "matches": [{"doc": "architecture.md"}]}
+
+    llm = ScriptedLLM(
+        [
+            ChatWithToolsResult(
+                tool_calls=[
+                    ToolCall("1", "docs_read", {}),
+                    ToolCall("2", "docs_search", {"query": "storage architecture"}),
+                    ToolCall("3", "docs_search", {"query": "sqlite workspace"}),
+                ]
+            ),
+            ChatWithToolsResult(
+                tool_calls=[ToolCall("4", "docs_read", {"name": "architecture.md"})]
+            ),
+            ChatWithToolsResult(content="Storage is SQLite plus the filesystem."),
+        ]
+    )
+    tools = [
+        ToolSpec(
+            "docs_read",
+            "read",
+            {"type": "object", "properties": {"name": {"type": "string"}}},
+        ),
+        ToolSpec(
+            "docs_search",
+            "docs",
+            {"type": "object", "properties": {"query": {"type": "string"}}},
+        ),
+    ]
+    result = await ReActLoopAgent(
+        llm, invoker, max_iterations=8, no_progress_threshold=2
+    ).run(
+        system_prompt="s",
+        user_message="详细分析你的存储架构吧",
+        tools=tools,
+    )
+    assert [record.name for record in result.tool_trace] == [
+        "docs_read",
+        "docs_search",
+        "docs_search",
+        "docs_read",
+    ]
+    assert result.terminated_reason == "done"
+    assert result.content == "Storage is SQLite plus the filesystem."
+    assert "run_skill" not in (result.content or "")
 
 
 @pytest.mark.asyncio
@@ -357,6 +470,9 @@ async def test_repeat_find_skill_of_the_same_contract_is_no_progress() -> None:
             ChatWithToolsResult(
                 tool_calls=[ToolCall("2", "find_skill", {"query": "pptx parameters"})]
             ),
+            ChatWithToolsResult(
+                tool_calls=[ToolCall("3", "find_skill", {"query": "pptx input schema"})]
+            ),
             ChatWithToolsResult(content="文字大纲"),
         ]
     )
@@ -381,3 +497,115 @@ async def test_repeat_find_skill_of_the_same_contract_is_no_progress() -> None:
     )
     assert "run_skill" not in [record.name for record in result.tool_trace]
     assert "no_progress" in result.terminated_reason
+
+
+@pytest.mark.asyncio
+async def test_same_contract_is_steered_then_can_run_skill() -> None:
+    async def invoker(name: str, args: dict) -> dict:
+        if name == "find_skill":
+            return _skill_card("research-pptx")
+        return {"status": "succeeded", "skill_name": args.get("skill_name")}
+
+    llm = ScriptedLLM(
+        [
+            ChatWithToolsResult(
+                tool_calls=[ToolCall("1", "find_skill", {"query": "research-pptx"})]
+            ),
+            ChatWithToolsResult(
+                tool_calls=[ToolCall("2", "find_skill", {"query": "pptx parameters"})]
+            ),
+            ChatWithToolsResult(
+                tool_calls=[
+                    ToolCall(
+                        "3",
+                        "run_skill",
+                        {"skill_name": "research-pptx", "input": {"topic": "Transformer"}},
+                    )
+                ]
+            ),
+            ChatWithToolsResult(content="Deck submitted."),
+        ]
+    )
+    tools = [
+        ToolSpec(
+            "find_skill",
+            "lookup",
+            {"type": "object", "properties": {"query": {"type": "string"}}},
+        ),
+        ToolSpec(
+            "run_skill",
+            "run",
+            {"type": "object", "properties": {"skill_name": {"type": "string"}}},
+        ),
+    ]
+    result = await ReActLoopAgent(
+        llm, invoker, max_iterations=8, no_progress_threshold=2
+    ).run(
+        system_prompt="s",
+        user_message="请做一组会PPT",
+        tools=tools,
+    )
+    assert [record.name for record in result.tool_trace] == [
+        "find_skill",
+        "find_skill",
+        "run_skill",
+    ]
+    assert result.terminated_reason == "done"
+
+
+@pytest.mark.asyncio
+async def test_empty_finds_after_a_card_do_not_stop_the_loop() -> None:
+    async def invoker(name: str, args: dict) -> dict:
+        if name == "find_skill":
+            query = str(args.get("query") or "")
+            if "pptx" in query or "slides" in query:
+                return _skill_card("research-pptx")
+            if "livefigure" in query:
+                return _skill_card("livefigure")
+            return {"matches": [], "total_skills": 12}
+        return {"status": "succeeded", "skill_name": args.get("skill_name")}
+
+    llm = ScriptedLLM(
+        [
+            ChatWithToolsResult(
+                tool_calls=[ToolCall("1", "find_skill", {"query": "livefigure"})]
+            ),
+            ChatWithToolsResult(
+                tool_calls=[ToolCall("2", "find_skill", {"query": "research-pptx"})]
+            ),
+            ChatWithToolsResult(
+                tool_calls=[ToolCall("3", "find_skill", {"query": "record_claim"})]
+            ),
+            ChatWithToolsResult(
+                tool_calls=[
+                    ToolCall(
+                        "4",
+                        "run_skill",
+                        {"skill_name": "research-pptx", "input": {"topic": "LLM"}},
+                    )
+                ]
+            ),
+            ChatWithToolsResult(content="Deck submitted."),
+        ]
+    )
+    tools = [
+        ToolSpec(
+            "find_skill",
+            "lookup",
+            {"type": "object", "properties": {"query": {"type": "string"}}},
+        ),
+        ToolSpec(
+            "run_skill",
+            "run",
+            {"type": "object", "properties": {"skill_name": {"type": "string"}}},
+        ),
+    ]
+    result = await ReActLoopAgent(
+        llm, invoker, max_iterations=8, no_progress_threshold=2
+    ).run(
+        system_prompt="s",
+        user_message="检索 LLM 并做组会 PPT",
+        tools=tools,
+    )
+    assert result.terminated_reason == "done"
+    assert "run_skill" in [record.name for record in result.tool_trace]

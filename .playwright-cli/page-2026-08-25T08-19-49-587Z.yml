@@ -1,0 +1,50 @@
+- generic [ref=f2e3]:
+  - complementary "工作区与会话导航" [ref=f2e4]:
+    - generic [ref=f2e5]:
+      - generic [ref=f2e6]:
+        - generic [ref=f2e7]: Omni
+        - generic [ref=f2e8]: Scientist
+      - button "收起侧栏" [ref=f2e10] [cursor=pointer]
+    - button "新会话" [disabled] [ref=f2e14]
+    - generic [ref=f2e16]:
+      - button "搜索" [ref=f2e17] [cursor=pointer]
+      - button "打开目录" [ref=f2e21] [cursor=pointer]
+      - button "刷新工作区" [ref=f2e24] [cursor=pointer]
+    - generic [ref=f2e30]:
+      - generic [ref=f2e31]:
+        - generic [ref=f2e32]:
+          - generic [ref=f2e33]: 工作区
+          - generic [ref=f2e34]: "1"
+        - list [ref=f2e35]:
+          - button "workspace /private/tmp/omni-acceptance-20260825.WpUEbV/workspace" [ref=f2e36] [cursor=pointer]:
+            - generic [ref=f2e39]:
+              - generic [ref=f2e40]: workspace
+              - generic [ref=f2e41]: /private/tmp/omni-acceptance-20260825.WpUEbV/workspace
+      - separator "调整工作区与会话区域高度" [ref=f2e43]
+      - generic [ref=f2e45]:
+        - generic [ref=f2e46]:
+          - generic [ref=f2e47]: 会话
+          - generic [ref=f2e48] [cursor=pointer]: 按渠道筛选会话
+          - combobox "按渠道筛选会话" [ref=f2e49] [cursor=pointer]:
+            - option "全部渠道" [selected]
+            - option "cli"
+            - option "web"
+            - option "wechat"
+            - option "feishu"
+            - option "dingtalk"
+        - generic [ref=f2e50]: 选择一个工作区开始
+    - generic [ref=f2e52]:
+      - group "渠道与设置" [ref=f2e53]:
+        - button "配置消息渠道" [ref=f2e54] [cursor=pointer]
+        - button "设置" [ref=f2e60] [cursor=pointer]
+      - generic [ref=f2e64]: 本地目录、本地会话、同一智能体
+  - separator "调整左侧导航宽度" [ref=f2e66]
+  - main [ref=f2e68]:
+    - heading "Omni" [level=2] [ref=f2e71]
+    - generic [ref=f2e73]:
+      - paragraph [ref=f2e74]: OmniScientist Web
+      - heading "从本地工作区继续研究" [level=1] [ref=f2e75]
+      - paragraph [ref=f2e76]: 选择一个本机目录，即可继续 CLI 中的会话、任务、笔记和研究产物。
+      - button "打开目录" [ref=f2e77] [cursor=pointer]
+      - generic [ref=f2e80]: 打开文件夹后，可选择学术人格，让下一轮进入 ReAct 的判断与表达贴合不同科学家的方法品味。
+      - paragraph [ref=f2e90]: 所有数据保存在本机，网页只是同一套 Omni 智能体的界面。

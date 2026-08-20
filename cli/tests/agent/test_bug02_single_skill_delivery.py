@@ -80,6 +80,24 @@ def test_delivered_skill_answer_prefers_result_text() -> None:
     ) == "`paper-review` completed."
 
 
+def test_delivered_skill_answer_projects_source_ids_over_title_summary() -> None:
+    drained = [
+        {
+            "status": "succeeded",
+            "skill": "openalex-search",
+            "result": {
+                "status": "ok",
+                "summary": "Attention Is All You Need — Vaswani et al.",
+                "sources": [
+                    {"source_id": "openalex:W2963662125", "title": "Attention Is All You Need"},
+                    {"source_id": "arxiv:1706.03762", "title": "Attention Is All You Need"},
+                ],
+            },
+        }
+    ]
+    assert delivered_skill_answer(drained) == "openalex:W2963662125\narxiv:1706.03762"
+
+
 @pytest.mark.asyncio
 async def test_drained_single_skill_turn_delivers_result_not_receipt() -> None:
     settings = load_settings()

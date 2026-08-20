@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import importlib.util
 import sys
-import time
 import tomllib
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -32,7 +32,7 @@ from omni.channels.security import (
     with_security_defaults,
 )
 from omni.cli.qr import render_terminal_qr
-from omni.cli.render import confirm, console, data_table, error, info, prompt_secret, success, warn
+from omni.cli.render import console, data_table, error, info, prompt_secret, success, warn
 from omni.runtime.daemon import daemon_info
 
 app = typer.Typer(help="Configure messaging channels.", no_args_is_help=True)
@@ -61,34 +61,15 @@ _BASE_TEMPLATES: dict[str, dict[str, Any]] = {
     },
 }
 
-# Personal-WeChat local gateway template (used by `--method gateway`).
-_WECHAT_GATEWAY_TEMPLATE: dict[str, Any] = {
-    "mode": "gateway",
-    "gateway_url": "http://127.0.0.1:8088",
-    "inbox_path": "/messages",
-    "send_path": "/send",
-    "login_qr_path": "/login/qrcode",
-    "login_status_path": "/login/status",
-    "poll_interval": 2,
-}
-
 _REQUIRED: dict[str, tuple[str, ...]] = {
+    "wechat": ("bot_token",),
     "feishu": ("app_id", "app_secret"),
     "dingtalk": ("client_id", "client_secret"),
 }
 
 
-def _required_fields(name: str, data: dict[str, Any]) -> tuple[str, ...]:
-    """Required config fields for a channel, mode-aware for WeChat."""
-    if name == "wechat":
-        from omni.channels.wechat import resolve_wechat_mode
-
-        mode = resolve_wechat_mode(data)
-        if mode == "ilink":
-            return ("bot_token",)
-        if mode == "wecom":
-            return ("gateway_url", "inbox_path", "send_path")
-        return ("gateway_url", "inbox_path", "send_path")
+def _required_fields(name: str, _data: dict[str, Any]) -> tuple[str, ...]:
+    """Required config fields for a channel."""
     return _REQUIRED.get(name, ())
 
 _DINGTALK_SETUP_URL = "https://open.dingtalk.com/document/direction/stream-mode-protocol-access-description"
@@ -107,6 +88,17 @@ def _write_enabled(paths, names: list[str]) -> None:  # noqa: ANN001
     paths.home.mkdir(parents=True, exist_ok=True)
     with paths.config_file.open("wb") as fh:
         tomli_w.dump(data, fh)
+
+
+def _channel_config_file(channels_dir: Path, name: str) -> Path:
+    """Return ``<channels_dir>/<name>.toml`` only for a known IM channel."""
+    if name not in _KNOWN or name == "cli":
+        raise ValueError(f"unsupported channel: {name}")
+    root = Path(channels_dir).resolve()
+    path = (root / f"{name}.toml").resolve()
+    if path.parent != root:
+        raise ValueError(f"channel config path escaped {root}")
+    return path
 
 
 def _template(name: str) -> dict[str, Any]:
@@ -198,8 +190,8 @@ def render_channel_usage_help() -> None:
     )
     warn("Do not put real app secrets in documentation or screenshots; replace every placeholder.")
     info(
-        "WeChat goes through Tencent's official ClawBot bot API: scan the QR shown in the terminal "
-        "and the scanning account is bound automatically — no local gateway, port, or `/pair`."
+        "WeChat uses the official ClawBot iLink QR: scan the code shown in the terminal "
+        "and the scanning account is bound automatically — no :8088 bridge or `/pair`."
     )
     info(
         "Feishu and DingTalk take their app credentials from the developer console, and their long "
@@ -215,7 +207,8 @@ def render_channel_usage_help() -> None:
     )
     info(
         "Credentials are stored for you: the macOS Keychain where it exists, otherwise "
-        "secrets.toml with mode 0600. No extra flag is needed on any platform."
+        "local secrets.toml (mode 0600 on POSIX; the user-directory ACL on Windows). "
+        "No extra flag is needed on any platform."
     )
     data_table(
         "Everyday commands",
@@ -298,12 +291,8 @@ def login_cmd(
     method: str = typer.Option(
         "auto",
         "--method",
-        help=(
-            "Connection method. wechat: ilink (default, official ClawBot) | gateway | wecom, "
-            "where gateway and wecom need a self-hosted gateway; feishu/dingtalk: auto | manual."
-        ),
+        help="Feishu/DingTalk: auto | manual. WeChat always uses the official ClawBot iLink QR.",
     ),
-    gateway_url: str = typer.Option("http://127.0.0.1:8088", "--gateway-url", help="WeChat gateway URL."),
     bot_url: str = typer.Option("", "--bot-url", help="AppLink or deep link that opens the bot conversation."),
     setup_url: str = typer.Option("", "--setup-url", help="Platform setup or installation URL."),
     app_id: str = typer.Option("", "--app-id", help="Feishu app ID."),
@@ -317,7 +306,6 @@ def login_cmd(
     start: bool = typer.Option(False, "--start", help="Start or reuse omni serve after login."),
     timeout_s: int = typer.Option(120, "--timeout", help="Seconds to wait for scan or authorization."),
     non_interactive: bool = typer.Option(False, "--non-interactive", help="Fail on missing fields instead of prompting."),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip risk confirmation."),
 ) -> None:
     """Authorize or pair a platform and write secure defaults."""
     if name not in _KNOWN or name == "cli":
@@ -328,16 +316,12 @@ def login_cmd(
         _login_wechat(
             paths,
             method=method,
-            gateway_url=gateway_url,
-            bot_url=bot_url,
-            setup_url=setup_url,
             credential_store=credential_store,
             allow=allow,
             no_wait=no_wait,
             no_qr=no_qr,
             timeout_s=timeout_s,
             non_interactive=non_interactive,
-            yes=yes,
         )
     elif name == "feishu":
         _login_feishu(
@@ -403,11 +387,21 @@ def remove_cmd(
     purge: bool = typer.Option(False, "--purge", help="Also delete the configuration file."),
 ) -> None:
     """Disable a channel and optionally delete its configuration."""
+    if name not in _KNOWN:
+        error(f"Unknown channel '{name}'. Choose one of: {', '.join(_KNOWN)}")
+        raise typer.Exit(1)
+    if name == "cli":
+        error("The CLI channel cannot be removed.")
+        raise typer.Exit(1)
     paths = ctx.obj.settings().paths
     enabled = [n for n in _enabled(paths) if n != name]
     _write_enabled(paths, enabled)
     if purge:
-        cfg = paths.channels_dir / f"{name}.toml"
+        try:
+            cfg = _channel_config_file(paths.channels_dir, name)
+        except ValueError as exc:
+            error(str(exc))
+            raise typer.Exit(1) from exc
         if cfg.is_file():
             cfg.unlink()
             info(f"Deleted {cfg}")
@@ -451,66 +445,31 @@ def _login_wechat(
     paths,  # noqa: ANN001
     *,
     method: str,
-    gateway_url: str,
-    bot_url: str,
-    setup_url: str,
     credential_store: str,
     allow: list[str] | None,
     no_wait: bool,
     no_qr: bool,
     timeout_s: int,
     non_interactive: bool,
-    yes: bool,
 ) -> None:
-    # The official WeChat ClawBot bot API (iLink) is the default: it needs no
-    # self-hosted gateway and works the same on Linux, macOS, and Windows. The
-    # gateway/wecom paths stay reachable for existing deployments but are no
-    # longer advertised, so `--method` must name them explicitly.
-    method = "ilink" if method in {"auto", ""} else method
-    if method == "ilink":
-        _login_wechat_ilink(
-            paths,
-            credential_store=credential_store,
-            allow=allow,
-            no_wait=no_wait,
-            no_qr=no_qr,
-            timeout_s=timeout_s,
-            non_interactive=non_interactive,
+    # WeChat has one path: Tencent's official ClawBot iLink QR. Legacy
+    # self-hosted :8088 bridges and WeCom are not accepted.
+    method = "ilink" if method in {"auto", "", "ilink"} else method
+    if method != "ilink":
+        error(
+            "WeChat only supports the official ClawBot iLink QR. "
+            "Self-hosted :8088 gateways and WeCom are no longer supported. "
+            "Run `omni channel login wechat`."
         )
-        return
-    if method not in {"gateway", "wecom"}:
-        error("WeChat login --method supports ilink, gateway, or wecom.")
         raise typer.Exit(2)
-    if method == "gateway" and not yes:
-        msg = "A personal WeChat gateway may violate platform terms and risk account restrictions. Continue?"
-        if non_interactive or not confirm(msg, default=False):
-            error("Personal WeChat gateway login cancelled.")
-            raise typer.Exit(1)
-    cfg = with_security_defaults(dict(_WECHAT_GATEWAY_TEMPLATE))
-    cfg["mode"] = method
-    cfg["gateway_url"] = gateway_url.rstrip("/")
-    if bot_url:
-        cfg["bot_url"] = bot_url
-    if setup_url:
-        cfg["setup_url"] = setup_url
-    _write_channel_config(paths, "wechat", cfg)
-    _enable(paths, "wechat")
-    _bind_allowed(paths, "wechat", allow)
-    success(f"Wrote WeChat channel configuration to {paths.channels_dir / 'wechat.toml'}")
-
-    bound_key = None if no_wait or method != "gateway" else _try_wechat_gateway_login(cfg, timeout_s)
-    if bound_key:
-        add_allowed_external_key(paths.channels_dir / "wechat.toml", bound_key)
-        success(f"Bound WeChat conversation: {bound_key}")
-        return
-    code = create_pairing_code(paths.channels_dir / "wechat.toml")
-    warn("The gateway did not return a WeChat conversation key for automatic binding.")
-    _show_pairing_qr(
-        "wechat",
-        code,
-        bot_url=bot_url or setup_url,
+    _login_wechat_ilink(
+        paths,
+        credential_store=credential_store,
+        allow=allow,
+        no_wait=no_wait,
         no_qr=no_qr,
-        fallback_hint="Send this to the agent in WeChat",
+        timeout_s=timeout_s,
+        non_interactive=non_interactive,
     )
 
 
@@ -867,62 +826,6 @@ def _start_channel_daemon(ctx: typer.Context, channel: str) -> None:
             "Run `omni serve start` to bring the home service online so this channel stays "
             "connected in the background."
         )
-
-
-def _try_wechat_gateway_login(cfg: dict[str, Any], timeout_s: int) -> str | None:
-    base_url = str(cfg.get("gateway_url") or cfg.get("base_url") or "").rstrip("/")
-    if not base_url:
-        return None
-    try:
-        qr_data = _get_json(base_url + str(cfg.get("login_qr_path") or "/login/qrcode"))
-    except httpx.HTTPError as exc:
-        warn(f"Could not reach the WeChat gateway QR endpoint: {exc}")
-        return None
-    payload = _extract_first(qr_data, ("qr_url", "qrcode_url", "url", "qr", "qrcode", "data"))
-    if payload:
-        info("Scan the QR code in WeChat to complete login:")
-        render_terminal_qr(payload)
-    else:
-        warn("The WeChat gateway did not return a renderable QR payload.")
-    status_path = str(cfg.get("login_status_path") or "/login/status")
-    deadline = time.time() + max(1, timeout_s)
-    while time.time() < deadline:
-        try:
-            status_data = _get_json(base_url + status_path)
-        except httpx.HTTPError:
-            time.sleep(2)
-            continue
-        external_key = _extract_first(
-            status_data,
-            ("external_key", "openid", "wxid", "user_id", "account_id", "chat_id"),
-        )
-        status = _extract_first(status_data, ("status", "state", "login_status")).lower()
-        if external_key and status in {"", "ok", "success", "confirmed", "logged_in", "online"}:
-            return external_key
-        if status in {"failed", "expired", "cancelled", "canceled"}:
-            warn(f"WeChat QR login status: {status}")
-            return None
-        time.sleep(2)
-    warn("Timed out while waiting for WeChat QR login.")
-    return None
-
-
-def _get_json(url: str) -> dict[str, Any]:
-    res = httpx.get(url, timeout=8.0)
-    res.raise_for_status()
-    data = res.json()
-    return data if isinstance(data, dict) else {"data": data}
-
-
-def _extract_first(data: dict[str, Any], keys: tuple[str, ...]) -> str:
-    for key in keys:
-        value = data.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    nested = data.get("data")
-    if isinstance(nested, dict):
-        return _extract_first(nested, keys)
-    return ""
 
 
 def _warn_missing_runtime_dependency(name: str, data: dict[str, Any]) -> None:

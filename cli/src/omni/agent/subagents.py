@@ -91,6 +91,10 @@ class SubagentResult:
     isolation: str = "none"
     working_dir: str = ""
     task_id: str = ""
+    source_ids: list[str] = field(default_factory=list)
+    claim_ids: list[str] = field(default_factory=list)
+    evidence_ids: list[str] = field(default_factory=list)
+    artifact_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -107,6 +111,10 @@ class SubagentResult:
             "isolation": self.isolation,
             "working_dir": self.working_dir,
             "task_id": self.task_id,
+            "source_ids": list(self.source_ids),
+            "claim_ids": list(self.claim_ids),
+            "evidence_ids": list(self.evidence_ids),
+            "artifact_ids": list(self.artifact_ids),
         }
         if self.review is not None:
             out["review"] = self.review
@@ -223,6 +231,21 @@ def _specialist_system(role: str, spec: SubagentSpec) -> str:
         + "Complete only the assigned subtask and return a self-contained final answer. "
         + "The coordinator sees only the final answer, so it must be complete, directly usable, and evidence-grounded."
     )
+
+
+async def _child_research_refs(recorder: Any, task_id: str) -> dict[str, list[str]]:
+    empty = {"source_ids": [], "claim_ids": [], "evidence_ids": [], "artifact_ids": []}
+    if recorder is None or not task_id:
+        return empty
+    row = await recorder.get_task(task_id)
+    if row is None:
+        return empty
+    return {
+        "source_ids": [str(item) for item in (row.source_ids or []) if item],
+        "claim_ids": [str(item) for item in (row.claim_ids or []) if item],
+        "evidence_ids": [str(item) for item in (row.evidence_ids or []) if item],
+        "artifact_ids": [str(item) for item in (row.artifact_ids or []) if item],
+    }
 
 
 def _summary_of(content: str) -> str:
@@ -467,6 +490,7 @@ async def run_subagent(
                               "no LLM configured for subagent", depth=depth + 1,
                               task_id=child_task_id)
 
+    from omni.core.observation import observation_spill_path
     from omni.core.react_agent import ReActLoopAgent
 
     tools = _specialist_tools(child, spec.tools, isolation=isolation)
@@ -521,6 +545,7 @@ async def run_subagent(
         observation_max_chars=int(
             getattr(child_settings.memory, "tool_observation_max_chars", 8000) or 0
         ),
+        observation_spill_dir=str(observation_spill_path(child.paths)),
         stall_timeout_s=float(
             getattr(getattr(child_settings, "react", None), "stall_timeout_s", 0.0) or 0.0
         ),
@@ -633,6 +658,12 @@ async def run_subagent(
         summary=summary[:500],
         error=summary[:500] if terminal_status == "failed" else "",
     )
+    refs = await _child_research_refs(child_recorder, child_task_id)
+    parent_id = str(getattr(ctx, "task_id", "") or "")
+    if parent_id and child_recorder is not None and child_task_id:
+        child_row = await child_recorder.get_task(child_task_id)
+        if child_row is not None:
+            await child_recorder.merge_research_ledger(parent_id, child_row)
     return SubagentResult(
         role=spec.role,
         goal=spec.goal,
@@ -648,6 +679,7 @@ async def run_subagent(
         isolation=isolation,
         working_dir=str(child.working_dir or ""),
         task_id=child_task_id,
+        **refs,
     )
 
 

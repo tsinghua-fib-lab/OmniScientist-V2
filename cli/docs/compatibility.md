@@ -24,9 +24,7 @@ and Codex/OpenClaw also get the shared `~/.agents/skills` root so discovery work
 | Remove Omni-exported copies | `omni skills unexport` | `/skills unexport` |
 
 Exports are idempotent and tracked in `<OMNI_HOME>/skills_install.json`, so re-running updates our own
-copies and `unexport` never deletes a same-named skill you authored yourself. (The former command
-names `omni skills install` / `omni skills uninstall` and `/skills install` / `/skills uninstall`
-still work as hidden aliases.)
+copies and `unexport` never deletes a same-named skill you authored yourself.
 
 ## 0.5. No-Omni adoption path
 

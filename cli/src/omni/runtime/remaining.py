@@ -17,12 +17,16 @@ from typing import Any
 from omni.agent.capabilities import (
     CAPABILITY_FIGURE,
     CONTRACT_DELIVERABLES,
+    TYPED_REF_OUTPUTS,
     WRITING_DELIVERABLES,
     contract_outputs,
     contract_outputs_from_capabilities,
     writing_outputs,
 )
 from omni.runtime.task_results import is_dot_artifact
+
+_CONTRACT_WRITE_TOOLS = ("write_file", "edit_file")
+_WRITING_FILE_DEBTS = WRITING_DELIVERABLES | {"review", "response_letter"}
 
 # A request that names both a figure and a paper is a multi-deliverable contract
 # even when the semantic planner only emitted ``outputs=["answer"]``. Either
@@ -113,7 +117,7 @@ _FIGURE_MIMES = frozenset(
         "image/gif",
     }
 )
-_MANUSCRIPT_KINDS = frozenset({"paper", "report", "review", "manuscript"})
+_MANUSCRIPT_KINDS = frozenset({"paper", "report", "review", "manuscript", "document"})
 _MANUSCRIPT_SUFFIXES = frozenset({"md", "markdown", "docx", "doc", "tex", "html"})
 _SLIDE_SUFFIXES = frozenset({"pptx", "ppt"})
 _POSTER_SUFFIXES = frozenset({"pdf", "pptx", "png", "svg"})
@@ -142,20 +146,31 @@ def remaining_deliverables(
     return [name for name in owed if name not in delivered]
 
 
+def remaining_typed_refs(required: list[str], *, source_ids: list[str] | None) -> list[str]:
+    """ROM-backed debts (``sources``) that no ``source_id`` list satisfies."""
+    owed = [name for name in required if str(name) in TYPED_REF_OUTPUTS]
+    if "sources" not in owed:
+        return []
+    if any(str(item).strip() for item in (source_ids or [])):
+        return []
+    return ["sources"]
+
+
 def remaining_writing(remaining: list[str]) -> list[str]:
     """Writing debts native ``synthesis.final`` can fill without re-running skills."""
     return writing_outputs(remaining)
 
 
-def survey_closer_eligible(plan: Any) -> bool:
-    """Whether the host may retrieve-then-write when this turn still lacks evidence.
+def remaining_contract_files(remaining: list[str]) -> list[str]:
+    """Named file debts settlement can prove — not ``sources`` or ``answer``."""
+    return [name for name in remaining if name in CONTRACT_DELIVERABLES]
 
-    The canonical survey pair always qualifies. After a workflow demote drops
-    ``literature.search``, a writing debt plus survey wording still qualifies —
-    that is how a ReAct turn that only looked up memory still gets papers.
-    Figures, slides, and a bare ``draft.section`` without survey wording stay
-    on the live sequence: inventing a literature search there would do the
-    wrong scientific work.
+
+def survey_closer_eligible(plan: Any) -> bool:
+    """Whether this plan is a written-survey shape (not figure+paper or slides).
+
+    Used by the unused host-writing salvage helper. The default produce path
+    is capable ReAct with ``write_file``; this predicate does not route.
     """
     from omni.agent.capabilities import (
         CAPABILITY_LITERATURE_SEARCH,
@@ -271,6 +286,38 @@ def bind_contract_outputs(plan: Any, proposal: Any | None = None) -> Any:
         required_outputs=required,
         required_events=list(plan.verification_plan.required_events),
     )
+    return grant_contract_write_tools(plan)
+
+
+def grant_contract_write_tools(plan: Any) -> Any:
+    """Unblock ``write_file`` / ``edit_file`` when this turn owes a manuscript.
+
+    The default capable floor blocks those as irreversible mutations. A named
+    writing debt is the produce path — the model writes the file. ``bash`` and
+    ``run_compute`` stay blocked. A sealed empty catalog or a retrieve-only
+    contract (sources, no manuscript) is left alone.
+    """
+    names = [str(item) for item in (getattr(plan, "outputs", None) or []) if item]
+    verification = getattr(plan, "verification_plan", None)
+    names.extend(
+        str(item) for item in (getattr(verification, "required_outputs", None) or []) if item
+    )
+    if not (set(contract_outputs(names)) & _WRITING_FILE_DEBTS):
+        return plan
+    policy = getattr(plan, "tool_policy", None)
+    if policy is None:
+        return plan
+    if policy.allowed_tools is not None and not policy.allowed_tools:
+        return plan
+    blocked = [
+        name for name in (policy.blocked_tools or []) if name not in _CONTRACT_WRITE_TOOLS
+    ]
+    if list(policy.blocked_tools or []) != blocked:
+        policy.blocked_tools = blocked
+    if policy.allowed_tools is not None:
+        policy.allowed_tools = list(
+            dict.fromkeys([*policy.allowed_tools, *_CONTRACT_WRITE_TOOLS])
+        )
     return plan
 
 
@@ -354,14 +401,16 @@ def _outputs_satisfied_by(artifact: Any) -> set[str]:
     suffix = _suffix(artifact)
     mime = str(getattr(artifact, "mime", "") or "").lower()
     title = str(getattr(artifact, "title", "") or "").lower()
-    if kind in _FIGURE_KINDS or suffix in _FIGURE_SUFFIXES or mime in _FIGURE_MIMES:
+    is_figure = kind in _FIGURE_KINDS or suffix in _FIGURE_SUFFIXES or mime in _FIGURE_MIMES
+    is_slides = suffix in _SLIDE_SUFFIXES or kind in {"slides", "pptx"}
+    if is_figure:
         names.add("artifact.figure")
         names.add("artifact")
-    if kind in _MANUSCRIPT_KINDS or suffix in _MANUSCRIPT_SUFFIXES:
+    if _is_writing_artifact(artifact, kind=kind, suffix=suffix, mime=mime):
         names.update(WRITING_DELIVERABLES)
         names.add("review")
         names.add("artifact")
-    if suffix in _SLIDE_SUFFIXES or kind in {"slides", "pptx"}:
+    if is_slides:
         names.add("artifact.pptx")
         names.add("artifact.slides")
         names.add("artifact")
@@ -370,12 +419,61 @@ def _outputs_satisfied_by(artifact: Any) -> set[str]:
     ):
         names.add("artifact.poster")
         names.add("artifact")
-    if suffix in _PDF_SUFFIXES and kind in _MANUSCRIPT_KINDS:
+    if suffix in _PDF_SUFFIXES and kind in _MANUSCRIPT_KINDS and not is_figure:
         names.update(WRITING_DELIVERABLES)
         names.add("artifact")
     if "response" in kind or "response" in title:
         names.add("response_letter")
     return names & (CONTRACT_DELIVERABLES | {"artifact"})
+
+
+def _is_writing_artifact(
+    artifact: Any,
+    *,
+    kind: str,
+    suffix: str,
+    mime: str,
+) -> bool:
+    """Whether this artifact is a manuscript this task already registered.
+
+    Codex treats the turn's written files as the deliverable. Named writing
+    debts are paid by a text document on this task, not only by
+    ``kind=report`` / ``.md``. Figures, decks, and data files stay out.
+    """
+    if kind in _FIGURE_KINDS or suffix in _FIGURE_SUFFIXES or mime in _FIGURE_MIMES:
+        return False
+    if suffix in _SLIDE_SUFFIXES or kind in {"slides", "pptx", "data"}:
+        return False
+    if "poster" in kind:
+        return False
+    if kind in _MANUSCRIPT_KINDS or suffix in _MANUSCRIPT_SUFFIXES:
+        return True
+    if mime.startswith("text/") and mime not in {
+        "text/vnd.graphviz",
+        "text/csv",
+    }:
+        return True
+    return kind == "file" and _path_is_utf8_text(artifact)
+
+
+def _path_is_utf8_text(artifact: Any) -> bool:
+    raw = _path_of(artifact)
+    if not raw:
+        return False
+    path = Path(raw)
+    if not path.is_file():
+        return False
+    try:
+        probe = path.read_bytes()[:4096]
+    except OSError:
+        return False
+    if b"\x00" in probe:
+        return False
+    try:
+        probe.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
 
 
 def _is_sidecar(artifact: Any) -> bool:
@@ -414,6 +512,8 @@ __all__ = [
     "infer_figure_and_paper_outputs",
     "infer_slide_outputs",
     "plan_owes_scientific_outputs",
+    "grant_contract_write_tools",
+    "remaining_contract_files",
     "remaining_deliverables",
     "remaining_figure",
     "remaining_retry_context",

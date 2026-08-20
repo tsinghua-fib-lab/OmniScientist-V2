@@ -10,6 +10,7 @@ argument validation (which exits before any network probe) and the recorded
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -390,6 +391,40 @@ def test_source_pull_reports_missing_native_owner_without_traceback(
     assert "Restore uv on PATH" in output
 
 
+def test_source_pull_builds_web_after_pull_and_before_reinstall(monkeypatch, tmp_path):
+    events: list[str] = []
+    monkeypatch.setattr(uc, "_git_tree_is_dirty", lambda _root: False)
+
+    def _pull(_argv, **_kwargs):  # noqa: ANN001
+        events.append("pull")
+        return subprocess.CompletedProcess([], 0)
+
+    monkeypatch.setattr(uc.subprocess, "run", _pull)
+    monkeypatch.setattr(
+        uc, "_prepare_local_web_ui", lambda _src: events.append("web")
+    )
+    monkeypatch.setattr(
+        uc,
+        "_exact_install_plan",
+        lambda *_args, **_kwargs: ("pip", ["fake-installer"], "fake local"),
+    )
+
+    def _install(_argv, _kind):  # noqa: ANN001
+        events.append("install")
+        return subprocess.CompletedProcess([], 0)
+
+    monkeypatch.setattr(uc, "_run_package_command", _install)
+
+    uc._execute_git_update(
+        repo_root=tmp_path,
+        src=tmp_path / "cli",
+        editable=False,
+        ref="master",
+    )
+
+    assert events == ["pull", "web", "install"]
+
+
 # ── _plan: branch channel reinstalls the tip; commit pin stays reproducible ──
 
 
@@ -485,6 +520,29 @@ def test_update_editable_check_shows_editable_plan(monkeypatch, tmp_path):
     res = runner.invoke(app, ["update", "--editable", "--check", "--no-restart-serve"])
     assert res.exit_code == 0, res.output
     assert "developer editable (live edits)" in res.output
+
+
+def test_update_editable_builds_web_before_install(monkeypatch, tmp_path):
+    cli = tmp_path / "cli"
+    monkeypatch.setattr(uc, "_resolve_local_checkout", lambda dist=None: cli)
+    monkeypatch.setattr(uc, "_source_checkout", lambda dist=None: (tmp_path, cli, True))
+    monkeypatch.setattr(
+        uc,
+        "_exact_install_plan",
+        lambda *_args, **_kwargs: ("pip", ["fake-installer"], "fake editable"),
+    )
+    prepared: list[Path] = []
+
+    def _prepare(path: Path) -> None:
+        prepared.append(path)
+        raise typer.Exit(17)
+
+    monkeypatch.setattr(uc, "_prepare_local_web_ui", _prepare)
+
+    res = runner.invoke(app, ["update", "--editable", "--no-restart-serve"])
+
+    assert res.exit_code == 17
+    assert prepared == [cli]
 
 
 def test_update_dev_is_alias_of_local(monkeypatch, tmp_path):
@@ -631,7 +689,103 @@ def test_update_local_serializes_a_concurrent_bare_launch(
     assert service_state.observe_service(settings.paths).phase == "ready"
     assert service_state.start_requested(settings.paths) is False
     assert "Update completed" in result.output
+    assert "omni web" in result.output
     assert "stray omni serve" not in result.output
+
+
+def test_prepare_local_web_ui_skips_when_the_web_tree_is_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        uc.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not build")),
+    )
+    uc._prepare_local_web_ui(tmp_path / "cli")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix build_web_ui.sh path; Windows uses the PowerShell test")
+def test_prepare_local_web_ui_runs_the_release_script(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    cli = tmp_path / "cli"
+    (cli / "scripts").mkdir(parents=True)
+    (cli / "scripts" / "build_web_ui.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+    (tmp_path / "web").mkdir()
+    (tmp_path / "web" / "package.json").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        uc.shutil, "which", lambda name: "/usr/bin/node" if name == "node" else None
+    )
+    seen: dict[str, list[str]] = {}
+
+    def _run(cmd, **_kwargs):  # noqa: ANN001
+        seen["cmd"] = list(cmd)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(uc.subprocess, "run", _run)
+    uc._prepare_local_web_ui(cli)
+    assert seen["cmd"][:2] == ["bash", str(cli / "scripts" / "build_web_ui.sh")]
+
+
+def test_prepare_local_web_ui_uses_powershell_on_windows(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    cli = tmp_path / "cli"
+    (cli / "scripts").mkdir(parents=True)
+    script = cli / "scripts" / "build_web_ui.ps1"
+    script.write_text("# build\n", encoding="utf-8")
+    (tmp_path / "web").mkdir()
+    (tmp_path / "web" / "package.json").write_text("{}\n", encoding="utf-8")
+    seen: dict[str, list[str]] = {}
+
+    def _run(cmd, **_kwargs):  # noqa: ANN001
+        seen["cmd"] = list(cmd)
+        return SimpleNamespace(returncode=0)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(uc.os, "name", "nt")
+        patch.setattr(
+            uc.shutil,
+            "which",
+            lambda name: (
+                "C:/node.exe"
+                if name in {"node", "node.exe"}
+                else "C:/powershell.exe"
+                if name == "powershell.exe"
+                else None
+            ),
+        )
+        patch.setattr(uc.subprocess, "run", _run)
+        uc._prepare_local_web_ui(cli)
+
+    assert seen["cmd"] == [
+        "C:/powershell.exe",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script),
+    ]
+
+
+def test_prepare_local_web_ui_refuses_to_reuse_dist_without_node(
+    tmp_path, monkeypatch
+):
+    cli = tmp_path / "cli"
+    (cli / "scripts").mkdir(parents=True)
+    (cli / "scripts" / "build_web_ui.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+    web = tmp_path / "web"
+    (web / "dist").mkdir(parents=True)
+    (web / "package.json").write_text("{}\n", encoding="utf-8")
+    (web / "dist" / "index.html").write_text("stale\n", encoding="utf-8")
+    monkeypatch.setattr(uc.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(
+        uc.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not build")),
+    )
+
+    with pytest.raises(typer.Exit) as exc_info:
+        uc._prepare_local_web_ui(cli)
+
+    assert exc_info.value.exit_code == 1
 
 
 # ── installer channel argument validation (bash, offline, no install) ────────

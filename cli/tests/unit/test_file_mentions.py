@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from omni.core.file_mentions import (
+    format_mention,
     iter_mention_tokens,
     mention_file_uris,
     parse_mentions,
@@ -141,6 +142,11 @@ def test_attachments_report_typos_instead_of_attaching_nothing(tmp_path: Path) -
     resolved = resolve_turn_attachments("@real.md and @typo.md", cwd=tmp_path)
     assert resolved.file_uris == [str((tmp_path / "real.md").resolve())]
     assert resolved.missing == ["typo.md"]
+
+
+def test_format_mention_quotes_whitespace() -> None:
+    assert format_mention("/tmp/notes.md") == "@/tmp/notes.md"
+    assert format_mention("/tmp/OmniScientist Cli.pdf") == '@"/tmp/OmniScientist Cli.pdf"'
 
 
 def test_strip_mention_marker_tolerates_model_copy_paste() -> None:

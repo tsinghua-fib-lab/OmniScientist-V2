@@ -1,12 +1,13 @@
 """Cross-workspace aggregation for ``--all`` / ``all`` views.
 
-Reads the workspace **catalog** (registry ∪ channel-anchor ∪ named project DBs),
-opens each workspace's store (skipping missing files so we never materialise
-empty databases), and returns recent rows tagged with their workspace label.
+Task lists read the machine-global ``task_index`` in ``control.sqlite3`` — the
+same control-plane Codex keeps for thread listings — so ``/task all`` does not
+open every workspace store or take schema-init locks. An empty index is
+reconciled once from the catalog. Schedule and clarification views still scan
+each catalog workspace directly.
+
 This powers ``omni task list --all`` / the REPL ``/task all`` and ``omni schedule
-all`` / ``/schedule all`` — omni's edge over Claude/Codex, which have no
-cross-window view at all. Rows stay consistent with the per-workspace
-``task list`` / ``schedule list``.
+all`` / ``/schedule all``.
 """
 
 from __future__ import annotations
@@ -22,10 +23,9 @@ from sqlalchemy import select
 from omni.config.paths import user_home
 from omni.config.workspaces import iter_catalog_workspaces
 from omni.runtime.action_checkpoints import ActionCheckpointStore, CheckpointRecord
-from omni.runtime.task_index import TaskIndex, settings_for_workspace
-from omni.runtime.task_recorder import repair_misfiled_chat
+from omni.runtime.task_index import TaskIndex, reconcile_index, settings_for_workspace
 from omni.storage.db import get_database
-from omni.storage.models import ScheduleORM, TaskORM
+from omni.storage.models import ScheduleORM, TaskIndexORM
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from omni.config import OmniSettings
@@ -49,69 +49,102 @@ class AggTaskRow:
     title: str
     created_at: datetime | None
     archived_at: datetime | None = None
+    kind: str = ""
+
+
+def _agg_from_index(row: TaskIndexORM) -> AggTaskRow:
+    label = row.workspace_label or row.project or Path(row.project_dir or "").name
+    return AggTaskRow(
+        workspace=label,
+        id=row.task_id,
+        status=row.status,
+        session_id=row.session_id,
+        channel=row.channel,
+        title=row.title or "",
+        created_at=row.created_at,
+        archived_at=row.archived_at,
+        kind=row.kind or "",
+    )
+
+
+async def _indexed_task_page(
+    *,
+    cap: int,
+    status: str | None = None,
+    home: Path | None = None,
+    include_archived: bool = False,
+    kind: str | None = None,
+    session: str | None = None,
+) -> tuple[list[AggTaskRow], int]:
+    """Read the global task index; reconcile once when the index is empty."""
+    root = home or user_home()
+    control_path = root / "control.sqlite3"
+    index = TaskIndex(control_path)
+    if not await index.list(include_archived=True, limit=1):
+        await reconcile_index(root, control_db=control_path)
+    total = await index.count(
+        status=status,
+        kind=kind,
+        include_archived=include_archived,
+        session=session,
+    )
+    fetch = total if cap <= 0 else min(total, cap)
+    if fetch <= 0:
+        return [], total
+    rows = await index.list(
+        status=status,
+        kind=kind,
+        include_archived=include_archived,
+        session=session,
+        limit=fetch,
+    )
+    return [_agg_from_index(row) for row in rows], total
 
 
 async def list_tasks_all_workspaces(
     *,
     limit_per: int = 50,
+    limit: int | None = None,
     status: str | None = None,
     home: Path | None = None,
     include_archived: bool = False,
     kind: str | None = None,
+    session: str | None = None,
 ) -> list[AggTaskRow]:
-    control_path = (home or user_home()) / "control.sqlite3"
-    out: list[AggTaskRow] = []
-    for rec in iter_catalog_workspaces(home):
-        db_path = Path(rec.get("db", ""))
-        if not db_path.exists():
-            continue  # don't recreate workspaces that were deleted
-        try:
-            db = get_database(db_path)
-            await db.init()
-            # Same one-shot repair the per-workspace list runs, and for the same
-            # reason: the ``kind`` filter below is applied in SQL, so a turn
-            # still misfiled as ``chat`` would be dropped before anyone sees it.
-            await repair_misfiled_chat(db)
-            async with db.session() as s:
-                q = (
-                    select(TaskORM)
-                    .order_by(TaskORM.created_at.desc())
-                    .limit(limit_per)
-                )
-                if status:
-                    q = q.where(TaskORM.status == status)
-                if kind:
-                    q = q.where(TaskORM.kind == kind)
-                if not include_archived:
-                    q = q.where(TaskORM.archived_at.is_(None))
-                rows = (await s.execute(q)).scalars().all()
-        except Exception:  # noqa: BLE001 — a single bad DB shouldn't break the view
-            continue
-        label = rec.get("name") or db_path.parent.name
-        # Mirror the rows we just read into the global index so a subsequent
-        # ``omni task show <id>`` can route to this workspace (the "list here,
-        # look up there" fix). Best-effort — never let it break the --all view.
-        try:
-            await TaskIndex(
-                control_path,
-                project_dir=str(rec.get("project_dir") or db_path.parent),
-                workspace_root=str(rec.get("root") or ""),
-                workspace_kind=str(rec.get("kind") or ""),
-                workspace_label=label,
-            ).record_many(list(rows))
-        except Exception:  # noqa: BLE001
-            logger.debug("task index: --all sync skipped %s", label, exc_info=True)
-        out.extend(
-            AggTaskRow(
-                workspace=label, id=r.id, status=r.status,
-                session_id=r.session_id, channel=r.channel,
-                title=(r.title or r.user_input or ""),
-                created_at=r.created_at, archived_at=r.archived_at,
-            )
-            for r in rows
-        )
-    out.sort(key=lambda t: t.created_at.isoformat() if t.created_at else "", reverse=True)
-    return out
+    """Recent tasks across every workspace, newest first.
+
+    ``limit`` (or legacy ``limit_per``) is a **global** cap, not per workspace.
+    ``limit <= 0`` returns every matching index row.
+    """
+    rows, _total = await _indexed_task_page(
+        cap=limit if limit is not None else limit_per,
+        status=status,
+        home=home,
+        include_archived=include_archived,
+        kind=kind,
+        session=session,
+    )
+    return rows
+
+
+async def list_tasks_all_workspaces_with_total(
+    *,
+    limit: int = 30,
+    status: str | None = None,
+    home: Path | None = None,
+    include_archived: bool = False,
+    kind: str | None = None,
+    session: str | None = None,
+) -> tuple[list[AggTaskRow], int]:
+    """Like :func:`list_tasks_all_workspaces` plus the untruncated match count."""
+    return await _indexed_task_page(
+        cap=limit,
+        status=status,
+        home=home,
+        include_archived=include_archived,
+        kind=kind,
+        session=session,
+    )
 
 
 @dataclass

@@ -7,7 +7,6 @@ platforms must explicitly opt into file-based ``secrets.toml`` storage.
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import sys
@@ -15,7 +14,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-import tomli_w
+from omni.config.secure_files import write_private_toml
 
 _SERVICE = "omniscientist"
 _REF_PREFIX = "macos-keychain"
@@ -63,6 +62,31 @@ def resolve_secret_ref(ref: str) -> str:
     if len(parts) != 3 or parts[0] != _REF_PREFIX:
         return ""
     return _read_macos_keychain(parts[1], parts[2])
+
+
+def secret_ref_exists(ref: str) -> bool:
+    """Check a Keychain reference without requesting or materializing its value."""
+    parts = ref.split(":", 2)
+    if len(parts) != 3 or parts[0] != _REF_PREFIX or not _has_macos_keychain():
+        return False
+    try:
+        proc = subprocess.run(
+            [
+                "security",
+                "find-generic-password",
+                "-s",
+                _SERVICE,
+                "-a",
+                _account(parts[1], parts[2]),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=2.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
 
 
 def delete_channel_secret(channel: str, key: str) -> bool:
@@ -180,10 +204,4 @@ def _store_secrets_file(path: Path, channel: str, key: str, value: str) -> None:
     if path.is_file():
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     data.setdefault("channels", {}).setdefault(channel, {})[key] = value
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("wb") as fh:
-        tomli_w.dump(data, fh)
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+    write_private_toml(path, data)

@@ -16,6 +16,8 @@ from omni.core.tool_result import (
     ToolCallOutcome,
     ToolResultEnvelope,
     _mint_host_tool_rejection,
+    attach_tool_outcome,
+    fs_result_outcome,
 )
 from tests.conftest import ScriptedLLM
 
@@ -86,6 +88,40 @@ async def test_structured_tool_result_separates_model_observation_from_event_out
     assert done["status"] == "succeeded"
     assert done["result"]["exit_code"] == 1
     assert "ToolResultEnvelope" not in repr(done)
+
+
+@pytest.mark.asyncio
+async def test_fs_jail_denial_is_recorded_as_rejected_not_succeeded():
+    """ef3b6546: ERROR text used to land as status=succeeded / result_success=true."""
+    events: list[tuple[str, dict]] = []
+    denied = (
+        "ERROR: read denied because the path is outside the accessible roots: "
+        "/Users/x/.omni/cache/spillover/source_ids-deadbeef.txt"
+    )
+
+    async def jail_invoker(_name, _args):  # noqa: ANN001
+        return attach_tool_outcome(denied, fs_result_outcome(denied))
+
+    llm = ScriptedLLM([
+        ChatWithToolsResult(tool_calls=[ToolCall("c1", "echo", {"x": "spill"})]),
+        ChatWithToolsResult(content="listed ids from the first tool result"),
+    ])
+    agent = ReActLoopAgent(llm, jail_invoker, max_iterations=4)
+    result = await agent.run(
+        system_prompt="sys",
+        user_message="read the spill file",
+        tools=[ECHO],
+        on_tool_event=lambda phase, data: events.append((phase, data)),
+    )
+
+    record = result.tool_trace[0]
+    done = next(data for phase, data in events if phase == "done")
+    assert record.status == "rejected"
+    assert record.lifecycle_status == "blocked"
+    assert record.result_success is not True
+    assert done["status"] == "rejected"
+    assert done["result_success"] is not True
+    assert "outside the accessible roots" in str(record.error or record.result)
 
 
 @pytest.mark.asyncio

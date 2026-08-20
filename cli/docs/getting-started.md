@@ -34,12 +34,31 @@ pipx install OmniScientist-V2
 omni
 ```
 
+For the loopback browser UI, include the optional Web runtime and then launch it:
+
+```bash
+uv tool install "OmniScientist-V2[web]"
+# or: pip install "OmniScientist-V2[web]"
+omni web
+```
+
+The browser remembers the selected workspace and conversation for the current tab, so a refresh
+returns to the same page. While the tab is visible it automatically discovers CLI and message-
+channel updates, follows durable Task activity, and refreshes open Task/artifact inspectors. Turns
+started in Web stream assistant text token by token. Work started in another CLI/WeChat process
+streams its durable progress into Web and loads the final reply when committed; provisional tokens
+are not copied between processes.
+
 The first bare `omni` runs setup and converges the managed runtime and Home Service. Update later
 with the same product-level command regardless of the original package manager:
 
 ```bash
 omni update
 ```
+
+Local snapshot and editable commands build the current loopback Web UI before replacing the Python
+package. They require Node.js plus pnpm or npm and stop before installation if that build fails, so
+an old `web/dist` is never relabeled as the current release.
 
 ### macOS / Linux
 
@@ -64,8 +83,8 @@ omni update
 Or install the isolated tool yourself:
 
 ```bash
-uv tool install "./cli[mcp,vec,channels]"   # then: uv tool update-shell
-pipx install "./cli[mcp,vec,channels]"
+uv tool install "./cli[mcp,vec,channels,web]"   # then: uv tool update-shell
+pipx install "./cli[mcp,vec,channels,web]"
 ```
 
 ### Windows (PowerShell)
@@ -86,8 +105,8 @@ cli\scripts\install.ps1 -Method env -ForceCondaBase
 Or install the isolated tool yourself:
 
 ```powershell
-uv tool install ".\cli[mcp,vec,channels]"   # then: uv tool update-shell
-pipx install ".\cli[mcp,vec,channels]"
+uv tool install ".\cli[mcp,vec,channels,web]"   # then: uv tool update-shell
+pipx install ".\cli[mcp,vec,channels,web]"
 ```
 
 Before changing anything, the installer detects verified `omni` launchers. Interactive installs
@@ -115,6 +134,11 @@ branch is only allowed through the explicit, non-reproducible `--channel master`
 ```bash
 uv tool install "OmniScientist-V2[mcp,vec,channels] @ git+<GITHUB_REPOSITORY_URL>@<RELEASE_TAG>#subdirectory=cli"
 ```
+
+That direct Git URL is a CLI/agent development install. It cannot include the generated Web SPA,
+because `web/` is outside the selected `cli/` subdirectory and `web/dist` is not committed. For
+`omni web`, use the published package with `[web]`, or clone the full repository and run its
+installer so the frontend is built before the Python package is installed.
 
 For normal users, prefer `uv tool install OmniScientist-V2` or `pipx install OmniScientist-V2`; a shared
 environment-level `pip install` is supported but does not provide the same isolation.
@@ -405,8 +429,10 @@ Remote VLM endpoints must use HTTPS; plain HTTP is allowed only for
 `<OMNI_HOME>/secrets.toml` with mode `0600` on POSIX and is never written to a
 project configuration. VLM admission happens only when LiveFigure actually
 executes. The gateway returns `vlm_not_configured` plus the action
-`omni config vlm` without loading the skill engine; inline Agent calls present
-that as `needs_input`, while background tasks and workflows retain their run
+`omni config vlm` without loading the skill engine. That is a route
+observation: the turn continues so the model can use another catalog skill
+or tell the owner to run the setup command. Conversational confirms still
+suspend as `needs_input`. Background tasks and workflows retain their run
 record and expose the same action in the task result. Claude Code, Codex, and OpenClaw should normally call LiveFigure through
 `omni mcp serve`, keeping the VLM key in Omni rather than the external host
 process.
@@ -933,8 +959,6 @@ omni channel login wechat --start   # the one command; identical on Linux, macOS
   the agent works. These need the optional `cryptography` backend (`pip install "OmniScientist-V2[channels]"`);
   without it, media gracefully falls back to a text link. Disable typing with `typing_indicator = false`
   in `<OMNI_HOME>/channels/wechat.toml`.
-- Self-hosted `--method gateway` and gateway-fronted `--method wecom` still work for existing
-  deployments, but they need a WeChat gateway you run yourself (Omni does not launch it) and are no
-  longer part of the advertised setup.
+- Use the official ClawBot iLink QR. Self-hosted `:8088` bridges and WeCom are not supported.
 - The scanning account is bound automatically. Additional WeChat users can self-bind by sending
   `/pair <code>` (from `omni channel login` or `/channel login`) in the bot conversation.

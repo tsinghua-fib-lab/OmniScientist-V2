@@ -14,6 +14,33 @@ from omni.core.field_contract import instruction_field
 
 _CARD_PROPERTY_LIMIT = 16
 _CARD_DESCRIPTION_LIMIT = 160
+_FIGURE_HINTS = frozenset(
+    {
+        "figure",
+        "diagram",
+        "architecture",
+        "chart",
+        "svg",
+        "png",
+        "graphviz",
+        "\u67b6\u6784\u56fe",
+        "\u793a\u610f\u56fe",
+        "\u7ed8\u56fe",
+    }
+)
+_SLIDE_HINTS = frozenset(
+    {
+        "pptx",
+        "slides",
+        "slide",
+        "presentation",
+        "ppt",
+        "deck",
+        "\u5e7b\u706f",
+        "\u6f14\u793a",
+        "\u7ec4\u4f1a",
+    }
+)
 
 FIND_SKILL_NEXT_ACTION = (
     "Call run_skill now with this input_schema. Do not keep searching docs, "
@@ -70,6 +97,10 @@ def skill_contract_card(entry: Any) -> dict[str, Any]:
     }
 
 
+def _significant_words(text: str) -> list[str]:
+    return [word for word in text.replace("-", " ").split() if len(word) > 2]
+
+
 def _match_score(entry: Any, query: str) -> float:
     name = str(getattr(entry, "name", "") or "").lower()
     if not name:
@@ -80,14 +111,44 @@ def _match_score(entry: Any, query: str) -> float:
         return 1000.0
     if query in name or name in query:
         return 500.0
-    words = [word for word in query.split() if word]
+    words = _significant_words(query)
+    wordset = set(words)
+    for phrase in getattr(entry, "default_for", None) or []:
+        phrase_words = _significant_words(str(phrase).lower())
+        if phrase_words and all(word in folded for word in phrase_words):
+            return 400.0
+    tags = {
+        str(item).lower()
+        for item in (
+            *(getattr(entry, "capabilities", None) or []),
+            *(getattr(entry, "deliverables", None) or []),
+        )
+        if item
+    }
+    if wordset & _FIGURE_HINTS and (
+        "figure" in name
+        or name == "livefigure"
+        or any(tag == "artifact.figure" or tag.startswith("figure.") for tag in tags)
+    ):
+        return 200.0
+    if wordset & _SLIDE_HINTS and (
+        "pptx" in name
+        or "slides" in name
+        or any(tag == "artifact.slides" or tag.startswith("slides.") for tag in tags)
+    ):
+        return 200.0
     phrases = " ".join(entry.trigger.get("phrases", [])) if isinstance(getattr(entry, "trigger", None), dict) else ""
-    haystack = f"{name} {getattr(entry, 'description', '')} {getattr(entry, 'when_to_use', '')} {phrases}".lower()
-    if not words or not all(word in haystack for word in words):
-        return 0.0
-    if any(word in name for word in words if len(word) > 2):
+    defaults = " ".join(str(item) for item in (getattr(entry, "default_for", None) or []))
+    haystack = (
+        f"{name} {getattr(entry, 'description', '')} {getattr(entry, 'when_to_use', '')} "
+        f"{phrases} {defaults}"
+    ).lower()
+    hits = sum(1 for word in words if word in haystack)
+    if hits >= 2:
+        return 40.0 + hits
+    if any(word in name for word in words):
         return 80.0
-    return 15.0
+    return 0.0
 
 
 def _compact_properties(schema: dict[str, Any], *, instruction_slot: str) -> dict[str, Any]:

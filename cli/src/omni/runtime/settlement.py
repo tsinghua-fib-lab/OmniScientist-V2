@@ -45,7 +45,7 @@ from omni.core.funnel_facts import (
     is_empty_literature_funnel,
 )
 from omni.core.termination import OutcomeStatus, aggregate_outcome_status, base_termination_reason
-from omni.runtime.remaining import remaining_deliverables
+from omni.runtime.remaining import remaining_deliverables, remaining_typed_refs
 from omni.storage.models import SubtaskORM, TaskEventORM, TaskORM, WorkflowRunORM
 
 _ACTIVE_STATUSES = frozenset({"scheduled", "pending", "running", "recovering"})
@@ -169,9 +169,16 @@ async def settlement_for(
     lost.extend(w.id for w in workflows if w.status in _LOST_STATUSES)
     undelivered: list[str] = []
     if turn_reached_its_end(events):
+        required = _required_outputs(run)
         undelivered = remaining_deliverables(
-            _required_outputs(run),
+            required,
             await _artifacts_for(store, task_id),
+        )
+        undelivered.extend(
+            remaining_typed_refs(
+                required,
+                source_ids=list(getattr(run, "source_ids", None) or []),
+            )
         )
 
     required_contract = contract_outputs(_required_outputs(run))

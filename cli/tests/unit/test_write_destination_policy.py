@@ -151,6 +151,13 @@ async def test_the_tool_refuses_a_protected_directory_even_when_approved(ctx) ->
     assert not (ctx.working_dir / ".git" / "hooks" / "pre-commit").exists()
 
 
+def test_write_file_path_says_not_to_use_ledger_tokens(ctx) -> None:  # noqa: ANN001
+    spec = next(tool.spec for tool in build_fs_tools(ctx) if tool.spec.name == "write_file")
+    path = spec.parameters["properties"]["path"]["description"]
+    assert "draft.section" in path
+    assert "ledger" in path
+
+
 # ── where a bare filename lands ──
 
 
@@ -261,6 +268,47 @@ async def test_an_empty_path_is_reported_rather_than_written_somewhere(ctx) -> N
     result = await write({"path": "  ", "contents": "x"})
 
     assert result.startswith("ERROR")
+
+
+@pytest.mark.asyncio
+async def test_a_ledger_token_is_not_a_write_path(ctx) -> None:  # noqa: ANN001
+    """Plan output names are ledger debts, not filenames.
+
+    Task 1fd39000 wrote path=draft.section into the launch cwd as kind=file,
+    then settlement refused to treat that token as a manuscript.
+    """
+    stray = ctx.working_dir / "draft.section"
+    stray.write_text("pre-fix stray\n", encoding="utf-8")
+    write = _tool(build_fs_tools(ctx), "write_file")
+
+    result = await write({"path": "draft.section", "contents": "# survey\n"})
+
+    landed = ctx.paths.artifacts_dir / "draft.md"
+    assert landed.read_text(encoding="utf-8") == "# survey\n"
+    assert str(landed) in result
+    assert stray.read_text(encoding="utf-8") == "pre-fix stray\n"
+    assert not (ctx.working_dir / "draft.section").read_text(encoding="utf-8").startswith("# survey")
+
+
+@pytest.mark.asyncio
+async def test_a_human_bare_name_is_not_rewritten(ctx) -> None:  # noqa: ANN001
+    write = _tool(build_fs_tools(ctx), "write_file")
+
+    await write({"path": "notes.md", "contents": "keep\n"})
+
+    assert (ctx.paths.artifacts_dir / "notes.md").read_text(encoding="utf-8") == "keep\n"
+    assert not (ctx.paths.artifacts_dir / "draft.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_ledger_path_is_left_alone(ctx) -> None:  # noqa: ANN001
+    write = _tool(build_fs_tools(ctx), "write_file")
+    target = ctx.working_dir / "reports" / "draft.section"
+
+    await write({"path": str(target), "contents": "# explicit\n"})
+
+    assert target.read_text(encoding="utf-8") == "# explicit\n"
+    assert not (ctx.paths.artifacts_dir / "draft.md").exists()
 
 
 # ── the gate the product actually builds knows its own workspace ──

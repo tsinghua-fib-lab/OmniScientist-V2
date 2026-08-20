@@ -3,54 +3,46 @@
 from __future__ import annotations
 
 import json
-import os
-import re
-import tomllib
-from pathlib import Path
 from typing import Any
 
-import tomli_w
 import typer
 
 from omni.cli.command_surface import spell_commands
 from omni.cli.render import data_table, error, info, kv_table, success, warn
 from omni.cli.state import AppState
-from omni.config.model_stack import safe_endpoint_display
 from omni.config.paths import (
-    configure_user_home,
     default_user_home,
     get_paths,
     home_selection_file,
-    reset_user_home,
     user_home_resolution,
 )
-from omni.config.secure_files import write_private_toml
-from omni.config.settings import read_toml_file
-from omni.core.vlm import (
-    check_vlm_connectivity,
-    validate_vlm_endpoint,
-    validate_vlm_protocol,
+from omni.config.user_edits import (
+    apply_config_value,
+    apply_embeddings_config,
+    apply_home_change,
+    apply_model_config,
+    apply_semantic_scholar_config,
+    apply_vlm_config,
+    coerce_value,
+    get_dotted,
+    is_mock_provider,
+    is_sensitive,
+    mark_model_unverified,
+    mask_secret,
+    read_editable_toml,
+    redact_sensitive_values,
+    resolve_key,
+    set_dotted,
+    test_model_connectivity,
+    test_semantic_scholar_connectivity,
+    unset_config_value,
 )
+from omni.core.vlm import check_vlm_connectivity
 
 app = typer.Typer(help="Inspect and modify layered TOML configuration.", no_args_is_help=True)
 _CONFIG_SUBCOMMANDS = (
     "list", "get", "set", "model", "vlm", "semantic-scholar", "embeddings", "home", "test", "path", "unset", "help",
 )
-
-_SENSITIVE = ("api_key", "secret", "token", "password")
-
-_REMOVED_KEY_SHORTCUTS = {
-    "provider": "model.provider",
-    "api_key": "model.api_key",
-    "apikey": "model.api_key",
-    "key": "model.api_key",
-    "model": "model.model",
-    "model_name": "model.model",
-    "base_url": "model.base_url",
-    "baseurl": "model.base_url",
-    "url": "model.base_url",
-}
-
 
 def render_config_usage_help() -> None:
     """Render detailed config help for shell and REPL users."""
@@ -195,11 +187,7 @@ def help_cmd() -> None:
 
 def _resolve_key(key: str) -> str:
     """Validate and return a canonical config key."""
-    k = key.strip()
-    canonical = _REMOVED_KEY_SHORTCUTS.get(k.lower())
-    if canonical:
-        raise ValueError(f"Configuration alias `{k}` was removed; use `{canonical}`.")
-    return k
+    return resolve_key(key)
 
 
 def _resolve_key_or_exit(key: str) -> str:
@@ -211,39 +199,18 @@ def _resolve_key_or_exit(key: str) -> str:
 
 
 def _coerce(value: str) -> Any:
-    low = value.lower()
-    if low in ("true", "false"):
-        return low == "true"
-    if value.startswith(("[", "{")):
-        try:
-            return json.loads(value)
-        except json.JSONDecodeError:
-            return value
-    for cast in (int, float):
-        try:
-            return cast(value)
-        except ValueError:
-            continue
-    return value
+    return coerce_value(value)
 
 
 def _set_dotted(data: dict, dotted: str, value: Any) -> None:
-    parts = dotted.split(".")
-    cur = data
-    for p in parts[:-1]:
-        cur = cur.setdefault(p, {})
-        if not isinstance(cur, dict):
-            raise typer.BadParameter(f"'{p}' is not a configuration table")
-    cur[parts[-1]] = value
+    try:
+        set_dotted(data, dotted, value)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 def _get_dotted(data: dict, dotted: str) -> Any:
-    cur: Any = data
-    for p in dotted.split("."):
-        if not isinstance(cur, dict) or p not in cur:
-            return None
-        cur = cur[p]
-    return cur
+    return get_dotted(data, dotted)
 
 
 @app.command("list")
@@ -333,7 +300,11 @@ def get_cmd(ctx: typer.Context, key: str) -> None:
         info(f"{key} = {json.dumps(str(state.settings().paths.home))}")
         return
     paths = get_paths(project=state.project)
-    raw = _read_editable_toml(paths.config_file)
+    try:
+        raw = _read_editable_toml(paths.config_file)
+    except ValueError as exc:
+        error(str(exc))
+        raise typer.Exit(2) from exc
     val = _get_dotted(raw, key)
     if val is None:
         # fall back to effective settings dump (also surfaces secrets-derived values)
@@ -350,80 +321,20 @@ def get_cmd(ctx: typer.Context, key: str) -> None:
 
 
 def _is_sensitive(key: str) -> bool:
-    return any(tok in key for tok in _SENSITIVE)
+    return is_sensitive(key)
 
 
 def _mask(value: Any) -> str:
-    s = str(value)
-    if len(s) <= 4:
-        return "****"
-    return f"{s[:2]}…{s[-2:]} (redacted)"
+    return mask_secret(value)
 
 
 def _redact_sensitive_values(value: Any) -> Any:
     """Recursively mask secrets when a parent config object is requested."""
-    def _sensitive_field(name: object) -> bool:
-        normalized = str(name).lower()
-        return (
-            "api_key" in normalized
-            or "secret" in normalized
-            or "password" in normalized
-            or normalized == "token"
-            or normalized.endswith("_token")
-        )
-
-    if isinstance(value, dict):
-        return {
-            key: (
-                _mask(item)
-                if _sensitive_field(key) and item not in (None, "")
-                else _redact_sensitive_values(item)
-            )
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact_sensitive_values(item) for item in value]
-    return value
-
-
-def _write_config_value(paths, key: str, value: Any) -> Any:
-    """Persist ``key`` to user config (or secrets for sensitive keys)."""
-    paths.home.mkdir(parents=True, exist_ok=True)
-    target = paths.secrets_file if _is_sensitive(key) else paths.config_file
-    data = _read_editable_toml(target)
-    _set_dotted(data, key, value)
-    if target == paths.secrets_file:
-        write_private_toml(target, data)
-    else:
-        with target.open("wb") as fh:
-            tomli_w.dump(data, fh)
-    return target
+    return redact_sensitive_values(value)
 
 
 def _read_editable_toml(path) -> dict[str, Any]:
-    if not path.is_file():
-        return {}
-    try:
-        return read_toml_file(path)
-    except tomllib.TOMLDecodeError as exc:
-        error(f"{path} is invalid TOML and could not be repaired: {exc}")
-        raise typer.Exit(2) from exc
-
-
-def apply_config_value(paths, key: str, value: str) -> tuple[str, Any, Any, str]:
-    """Resolve a key shortcut, coerce the value, persist it.
-
-    Shared by ``omni config set`` and the in-REPL ``config set`` so both behave
-    identically. Returns ``(resolved_key, coerced_value, target_path, display)``
-    where ``display`` is already masked for sensitive keys.
-    """
-    resolved = _resolve_key(key)
-    if resolved == "data_dir":
-        raise ValueError("data_dir is read-only; use `omni config home [PATH]`")
-    coerced = _coerce(value)
-    target = _write_config_value(paths, resolved, coerced)
-    display = _mask(coerced) if _is_sensitive(resolved) else str(value)
-    return resolved, coerced, target, display
+    return read_editable_toml(path)
 
 
 def _semantic_scholar_reload_notice() -> None:
@@ -485,33 +396,16 @@ def home_cmd(
         _render_home_configuration()
         return
 
-    previous, source = user_home_resolution()
-    if reset:
-        reset_user_home()
-        active, active_source = user_home_resolution()
-        success(f"Restored the default Omni data directory selection: {default_user_home()}")
-        if active_source == "environment (OMNI_HOME)":
-            warn(f"OMNI_HOME still overrides the saved selection; the active directory remains {active}.")
-        else:
-            info(f"New commands will use {active}. Existing data at {previous} was not deleted.")
-        info("Restart an active Omni REPL or daemon so every component uses the same directory.")
-        return
-
-    target = Path(path).expanduser().resolve()
-    if source == "environment (OMNI_HOME)" and target != previous:
-        error(f"OMNI_HOME currently selects {previous}. Unset OMNI_HOME before choosing {target}.")
-        raise typer.Exit(2)
     try:
-        configure_user_home(target)
-    except (OSError, ValueError) as exc:
-        error(f"Could not configure the Omni data directory: {exc}")
+        result = apply_home_change(path=path, reset=reset)
+    except ValueError as exc:
+        error(str(exc))
         raise typer.Exit(2) from exc
-    active, active_source = user_home_resolution()
-    success(f"Omni data directory set to {active} ({active_source}).")
-    if active != previous:
-        info(f"Existing data at {previous} was not moved or deleted.")
-    if os.environ.get("OMNI_HOME", "").strip():
-        info("The persisted selection will also apply after OMNI_HOME is unset.")
+    success(result["message"])
+    if result.get("warning"):
+        warn(str(result["warning"]))
+    for note in result.get("notes") or []:
+        info(str(note))
     info("Restart an active Omni REPL or daemon so every component uses the same directory.")
 
 
@@ -537,31 +431,19 @@ def model_cmd(
     or -k without -p automatically changes mock to openai_compatible.
     """
     state_settings = ctx.obj.settings()
-    paths = state_settings.paths
-    changed: list[str] = []
-    if provider:
-        _write_config_value(paths, "model.provider", provider)
-        changed.append(f"provider={provider}")
-    if base_url:
-        _write_config_value(paths, "model.base_url", base_url)
-        changed.append(f"base_url={safe_endpoint_display(base_url)}")
-    if model:
-        _write_config_value(paths, "model.model", model)
-        changed.append(f"model={model}")
-    if api_key:
-        _write_config_value(paths, "model.api_key", api_key)
-        changed.append(f"api_key={_mask(api_key)}")
-    if not changed:
-        error("No fields were provided. Use -p, -u, -m, or -k.")
-        raise typer.Exit(2)
-    # If the user pointed at a real endpoint but never chose a provider, don't
-    # leave them stranded on the offline mock — default to the OpenAI-compatible
-    # protocol so the endpoint is actually used.
-    if not provider and (base_url or api_key) and _is_mock_provider(state_settings.model.provider):
-        _write_config_value(paths, "model.provider", "openai_compatible")
-        changed.insert(0, "provider=openai_compatible (automatic)")
+    try:
+        changed = apply_model_config(
+            state_settings.paths,
+            provider=provider,
+            base_url=base_url,
+            model=model,
+            api_key=api_key,
+            current_provider=state_settings.model.provider,
+        )
+    except ValueError as exc:
+        error(str(exc))
+        raise typer.Exit(2) from exc
     success("Updated model configuration: " + ", ".join(changed))
-    _mark_model_unverified(ctx.obj.settings())
     if test:
         _run_connectivity_test(ctx)
     else:
@@ -613,45 +495,19 @@ def vlm_cmd(
         info("Configure with `config vlm -u <ENDPOINT> -m <MODEL> -k <API_KEY>`.")
         return
 
-    if timeout is not None and timeout <= 0:
-        error("VLM timeout must be greater than zero seconds.")
-        raise typer.Exit(2)
-
-    # Validate every supplied value before writing either the public config or
-    # secrets file. A rejected endpoint/protocol must not leave a mixed profile.
     try:
-        if endpoint:
-            validate_vlm_endpoint(endpoint.strip())
-        if protocol:
-            validate_vlm_protocol(protocol.strip())
+        changed = apply_vlm_config(
+            paths,
+            endpoint=endpoint,
+            model=model,
+            api_key=api_key,
+            protocol=protocol,
+            timeout_s=timeout,
+            enabled=enabled,
+        )
     except ValueError as exc:
         error(str(exc))
         raise typer.Exit(2) from exc
-
-    changed: list[str] = []
-    if endpoint:
-        value = endpoint.strip()
-        _write_config_value(paths, "vlm.endpoint", value)
-        changed.append(f"endpoint={safe_endpoint_display(value)}")
-    if model:
-        value = model.strip()
-        _write_config_value(paths, "vlm.model", value)
-        changed.append(f"model={value}")
-    if api_key:
-        _write_config_value(paths, "vlm.api_key", api_key)
-        changed.append(f"api_key={_mask(api_key)}")
-    if protocol:
-        value = protocol.strip()
-        _write_config_value(paths, "vlm.protocol", value)
-        changed.append(f"protocol={value}")
-    if timeout is not None:
-        _write_config_value(paths, "vlm.timeout_s", timeout)
-        changed.append(f"timeout_s={timeout:g}")
-
-    if enabled is not None or supplied:
-        resolved_enabled = enabled if enabled is not None else True
-        _write_config_value(paths, "vlm.enabled", resolved_enabled)
-        changed.append(f"enabled={str(resolved_enabled).lower()}")
     if changed:
         success("Updated VLM configuration: " + ", ".join(changed))
     if test:
@@ -696,15 +552,9 @@ def semantic_scholar_cmd(
         return
 
     if api_key:
-        _write_config_value(
-            settings.paths,
-            "research.semantic_scholar_api_key",
-            api_key.strip(),
-        )
-        success(
-            "Updated Semantic Scholar configuration: "
-            f"api_key={_mask(api_key.strip())}"
-        )
+        changed = apply_semantic_scholar_config(settings.paths, api_key=api_key)
+        if changed:
+            success("Updated Semantic Scholar configuration: " + ", ".join(changed))
     if test:
         _run_semantic_scholar_connectivity_test(ctx)
 
@@ -712,32 +562,11 @@ def semantic_scholar_cmd(
 def _run_semantic_scholar_connectivity_test(ctx: typer.Context) -> bool:
     """Test Semantic Scholar without exposing its token or response body."""
     from omni.cli.state import run_async
-    from omni.research import connectors
 
-    api_key = ctx.obj.settings().research.semantic_scholar_api_key
-    if not api_key:
-        error(
-            "Semantic Scholar API key is not configured. "
-            "Run `config semantic-scholar -k <API_KEY>` first."
-        )
-        return False
     info("Testing Semantic Scholar credentials...")
-    try:
-        results = run_async(
-            connectors.semanticscholar_search(
-                "automated peer review large language model",
-                rows=1,
-                api_key=api_key,
-            )
-        )
-    except Exception as exc:  # noqa: BLE001 - CLI converts connector errors to safe text
-        error(f"Semantic Scholar test failed: {exc}")
-        return False
-    if not results:
-        error("Semantic Scholar responded but returned no result for the test query.")
-        return False
-    success("Semantic Scholar credentials are working.")
-    return True
+    ok, detail = run_async(test_semantic_scholar_connectivity(ctx.obj.settings()))
+    (success if ok else error)(detail)
+    return ok
 
 
 @app.command("embeddings")
@@ -849,131 +678,25 @@ def embeddings_cmd(
         )
         return
 
-    if not enabled:
-        if any_values_supplied:
-            error("Do not combine --disable with provider configuration options.")
-            raise typer.Exit(2)
-        _write_config_value(paths, "memory.embeddings_enabled", False)
-        success("Embeddings disabled. Keyword recall will be used; endpoint settings are retained.")
-        return
-
-    requested_provider = provider.strip().casefold()
-    if not requested_provider:
-        if base_url or api_key:
-            requested_provider = "openai_compatible"
-        else:
-            requested_provider = (
-                str(memory.embedding_provider or "openai_compatible")
-                .strip()
-                .casefold()
-            )
-    if requested_provider == "openai":
-        requested_provider = "openai_compatible"
-    if requested_provider not in {"openai_compatible", "specter2"}:
-        error("Embedding provider must be openai_compatible or specter2.")
-        raise typer.Exit(2)
-
-    if requested_provider == "specter2":
-        if base_url or api_key:
-            error("Local SPECTER2 does not use --base-url or --api-key.")
-            raise typer.Exit(2)
-        resolved_python = local_python or memory.embedding_specter2_python
-        resolved_base = local_base_model or memory.embedding_specter2_base_model
-        resolved_adapter = local_adapter or memory.embedding_specter2_adapter
-        resolved_device = device or memory.embedding_specter2_device or "cpu"
-        local_paths = (
-            (resolved_python, "file"),
-            (resolved_base, "directory"),
-            (resolved_adapter, "directory"),
-        )
-        if not all(value for value, _kind in local_paths):
-            error(
-                "SPECTER2 requires --python, --base-model, and --adapter "
-                "the first time it is configured."
-            )
-            raise typer.Exit(2)
-        try:
-            # Preserve a virtual-environment launcher symlink. Resolving it can
-            # bypass that environment's ``pyvenv.cfg`` and start the base
-            # interpreter without the packages installed in the selected env.
-            python_path = Path(
-                os.path.abspath(os.path.expanduser(resolved_python))
-            )
-            base_path = Path(resolved_base).expanduser().resolve(strict=True)
-            adapter_path = Path(resolved_adapter).expanduser().resolve(strict=True)
-        except (OSError, RuntimeError):
-            error("A configured SPECTER2 local path does not exist.")
-            raise typer.Exit(2) from None
-        if not python_path.is_file() or not os.access(python_path, os.X_OK):
-            error("The SPECTER2 Python executable is not an executable file.")
-            raise typer.Exit(2)
-        if not base_path.is_dir() or not adapter_path.is_dir():
-            error("The SPECTER2 base model and adapter must be directories.")
-            raise typer.Exit(2)
-        if not re.fullmatch(r"(?:cpu|mps|cuda(?::\d+)?)", resolved_device):
-            error("SPECTER2 device must be cpu, mps, cuda, or cuda:N.")
-            raise typer.Exit(2)
-        resolved_model = (
-            model.strip()
-            or (
-                memory.embedding_model
-                if memory.embedding_provider == "specter2"
-                else ""
-            )
-            or "allenai/specter2-proximity"
-        )
-        _write_config_value(paths, "memory.embedding_provider", "specter2")
-        _write_config_value(paths, "memory.embedding_model", resolved_model)
-        _write_config_value(paths, "memory.embedding_dim", 768)
-        _write_config_value(
+    try:
+        message = apply_embeddings_config(
             paths,
-            "memory.embedding_specter2_python",
-            str(python_path),
+            memory,
+            enabled=enabled,
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            provider=provider,
+            local_python=local_python,
+            local_base_model=local_base_model,
+            local_adapter=local_adapter,
+            device=device,
         )
-        _write_config_value(
-            paths,
-            "memory.embedding_specter2_base_model",
-            str(base_path),
-        )
-        _write_config_value(
-            paths,
-            "memory.embedding_specter2_adapter",
-            str(adapter_path),
-        )
-        _write_config_value(
-            paths,
-            "memory.embedding_specter2_device",
-            resolved_device,
-        )
-        _write_config_value(paths, "memory.embeddings_enabled", True)
-        success(
-            f"Enabled local SPECTER2 embeddings: {resolved_model} "
-            f"on {resolved_device} (768 dimensions)"
-        )
-        return
-
-    if local_values_supplied:
-        error("Local Python/model/adapter/device options require -p specter2.")
-        raise typer.Exit(2)
-    resolved_base = (base_url or memory.embedding_base_url).rstrip("/")
-    resolved_model = model or memory.embedding_model or "text-embedding-3-small"
-    if not resolved_base:
-        error(
-            "Enabling embeddings requires -u/--base-url and an endpoint that provides /embeddings."
-        )
-        raise typer.Exit(2)
-
-    _write_config_value(paths, "memory.embedding_provider", requested_provider)
-    _write_config_value(paths, "memory.embedding_base_url", resolved_base)
-    _write_config_value(paths, "memory.embedding_model", resolved_model)
-    if api_key:
-        _write_config_value(paths, "memory.embedding_api_key", api_key)
-    _write_config_value(paths, "memory.embeddings_enabled", True)
-    success(
-        f"Enabled semantic recall: {resolved_model} @ "
-        f"{safe_endpoint_display(resolved_base)}"
-    )
-    if not api_key and not memory.embedding_api_key:
+    except ValueError as exc:
+        error(str(exc))
+        raise typer.Exit(2) from exc
+    success(message)
+    if message.startswith("Enabled semantic recall") and not api_key and not memory.embedding_api_key:
         warn(
             "No dedicated embedding API key is configured. The model token is reused "
             "only when the model and embedding endpoints have the same origin; "
@@ -982,7 +705,7 @@ def embeddings_cmd(
 
 
 def _is_mock_provider(provider: str) -> bool:
-    return (provider or "").strip().lower() in ("", "mock", "offline")
+    return is_mock_provider(provider)
 
 
 @app.command("test")
@@ -993,20 +716,12 @@ def test_cmd(ctx: typer.Context) -> None:
 
 def _run_connectivity_test(ctx: typer.Context) -> bool:
     from omni.cli.state import run_async
-    from omni.core.llm.client import check_connectivity
-    from omni.core.llm.health import record_model_health
 
     # ``settings()`` reads config files fresh each call, so the values written
     # above are already in effect — no daemon/restart needed.
     s = ctx.obj.settings()
     info(f"Testing {s.model.provider} / {s.model.model}...")
-    ok, detail = run_async(check_connectivity(s))
-    record_model_health(
-        s.paths,
-        s.model,
-        status="verified" if ok else "failed",
-        message=detail,
-    )
+    ok, detail = run_async(test_model_connectivity(s))
     (success if ok else error)(detail)
     if not ok:
         info(
@@ -1018,14 +733,7 @@ def _run_connectivity_test(ctx: typer.Context) -> bool:
 
 
 def _mark_model_unverified(settings) -> None:  # noqa: ANN001
-    from omni.core.llm.health import record_model_health
-
-    record_model_health(
-        settings.paths,
-        settings.model,
-        status="unverified",
-        message="Model configuration changed and has not been tested.",
-    )
+    mark_model_unverified(settings)
 
 
 @app.command("path")
@@ -1050,29 +758,16 @@ def unset_cmd(ctx: typer.Context, key: str) -> None:
     """Remove a user setting by full dotted path."""
     p = get_paths(project=ctx.obj.project)
     key = _resolve_key_or_exit(key)
-    for target in (p.config_file, p.secrets_file):
-        if not target.is_file():
-            continue
-        data = _read_editable_toml(target)
-        parts = key.split(".")
-        cur = data
-        ok = True
-        for part in parts[:-1]:
-            if not isinstance(cur, dict) or part not in cur:
-                ok = False
-                break
-            cur = cur[part]
-        if ok and isinstance(cur, dict) and parts[-1] in cur:
-            del cur[parts[-1]]
-            if target == p.secrets_file:
-                write_private_toml(target, data)
-            else:
-                with target.open("wb") as fh:
-                    tomli_w.dump(data, fh)
-            if key.startswith("model."):
-                _mark_model_unverified(ctx.obj.settings())
-            success(f"Removed {key} ({target})")
-            if key == "research.semantic_scholar_api_key":
-                _semantic_scholar_reload_notice()
-            return
-    error(f"Setting {key} was not found.")
+    try:
+        target = unset_config_value(p, key)
+    except LookupError:
+        error(f"Setting {key} was not found.")
+        return
+    except ValueError as exc:
+        error(str(exc))
+        raise typer.Exit(2) from exc
+    if key.startswith("model."):
+        _mark_model_unverified(ctx.obj.settings())
+    success(f"Removed {key} ({target})")
+    if key == "research.semantic_scholar_api_key":
+        _semantic_scholar_reload_notice()

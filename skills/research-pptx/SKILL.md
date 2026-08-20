@@ -26,6 +26,11 @@ metadata:
     delivery_mode: async_task
     kind: python_engine
     priority: 100
+    execution:
+      # Own wall clock: a full deck (PDF/topic → outline → Node render) routinely
+      # exceeds the undeclared 600s fallback. 15 minutes stays under the
+      # python_engine ceiling; do not inherit skills.default_seconds.
+      max_seconds: 900
     deliverables:
       - artifact.slides
     capabilities:
@@ -215,7 +220,10 @@ metadata:
           description: "A user outline; slides follow it top‑to‑bottom (source_type=outline)."
         markdown_uri:
           type: string
-          description: "artifact:// or path of a .md source to turn into slides."
+          description: >
+            artifact:// or an existing absolute path of a .md source. A bare
+            filename in topic is a deliverable name, not this field — pass a
+            durable handle here only when the file should drive the deck.
       required: []
     output_schema:
       type: object
@@ -304,7 +312,7 @@ generates decks and does not export existing PPTX files.
 |---------------|--------------------------|--------|
 | Show me the outline first / let me review / approve before rendering | `review_mode="plan"` (plus the normal source fields) | do NOT render directly |
 | From this outline / based on this outline | `outline=<the outline text or file content>` | — |
-| From this markdown / convert this .md to slides | `markdown_uri=<path>` | — |
+| From this markdown / convert this .md to slides | `markdown_uri=<absolute path or artifact://>` | Do not put a bare filename only in `topic` and expect it to be a cwd path |
 | From this paper / PDF / research paper | `pdf_uri=<path>`, `topic=<user's ask>` | do NOT read the PDF yourself |
 | Use this template / apply this theme | `template_uri=<pptx path>` | — |
 | Just make me a deck / create a presentation (no review words) | `topic=<the ask>` (+ source), `review_mode="none"` | do NOT set review_mode=plan |
@@ -431,7 +439,10 @@ not keep calling tools.
 
 Besides a PDF (`pdf_uri`) or a bare `topic`, you can drive generation from:
 - `outline` — a user outline; slides follow it top‑to‑bottom.
-- `markdown_uri` — a `.md` file; sections drive the deck. A `.md` mistakenly
+- `markdown_uri` — a `.md` file (`artifact://` or an existing absolute path);
+  sections drive the deck. A bare name in `topic` (e.g. `综述.md`) is a
+  deliverable mention: the skill binds it only when that file already exists
+  in this task's reports/artifacts. A `.md` mistakenly
   passed as `pdf_uri` is auto‑detected and parsed as markdown.
 
 ## Template (theme + master adoption)

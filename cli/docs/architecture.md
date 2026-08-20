@@ -15,7 +15,7 @@ This document describes the code as actually implemented under `src/omni/`.
 src/omni/
 ├── cli/                 # Typer CLI: command tree, REPL, render, init/doctor/serve
 │   └── commands/        #   config/skills/mcp/project/memory/task/session/profile/channel/cite +
-│                        #   status/resume/exec/replay/serve/init/doctor/update +
+│                        #   status/resume/exec/replay/serve/web/init/doctor/update +
 │                        #   research: lit/verify/bench/hypo/claim/evidence/run/source
 ├── agent/               # OmniAgent orchestrator — turn execution, figure fill, revision router
 ├── core/                # Agent core
@@ -29,6 +29,7 @@ src/omni/
 ├── memory/              # 5-layer (M1–M5) file/SQLite memory + recall + notebook
 ├── runtime/             # durable runs/tasks + hooks + isolation + DAG/checkpoints + presentation
 ├── eval/                # deterministic behavior, coverage, and research-quality evaluation
+├── web/                 # loopback HTTP surface (Starlette): directory RPC, per-store agent cache, SSE
 ├── compat/              # MCP server bridge, MCP client, Codex/Claude integration writers
 ├── channels/            # Channel abstraction + CLI + optional WeChat/Feishu/DingTalk adapters
 ├── storage/             # SQLAlchemy async models + SQLite engine + file artifact store
@@ -45,7 +46,7 @@ src/omni/
 
 ```mermaid
 flowchart TD
-  User["CLI / REPL / Feishu / WeChat / DingTalk / MCP"] --> Run["Create AgentRun + ack"]
+  User["CLI / REPL / Feishu / WeChat / DingTalk / MCP / Web"] --> Run["Create AgentRun + ack"]
   Run --> Context["Session + memory + ROM + domain packs + skill registry"]
   Context --> Plan["IntentPlan + skill selection reasons"]
   Plan --> Validate["PlanValidator + recovery ladder"]
@@ -65,7 +66,7 @@ flowchart TD
   Inline --> Settle
   Artifact --> Settle
   Settle --> Present["shared TurnPresentation"]
-  Present --> Render["CLI table / IM markdown-card-file fallback"]
+  Present --> Render["CLI table / IM markdown-card-file fallback / Web SSE"]
   Run -.-> Events["append-only planner + tool + hook + child + progress + task + delivery events"]
   Plan -.-> Events
   Execute -.-> Events
@@ -104,7 +105,9 @@ flowchart TD
 
 ### CLI live progress (Claude Code / Codex-style transcript)
 
-The same event stream that lands in the run log also narrates the turn live, but only on the CLI.
+The same event stream that lands in the run log is the durable source for every surface. The CLI
+narrates it directly while the turn is running; the Web surface can replay and follow the same
+durable activity stream, including work started by the CLI or an IM channel.
 `handle_turn(on_tool_event=…)` receives phase events — `plan` (boundary/model planning, validation
 summary, recovery decisions, workflow dispatch), `start`/`done` (every gateway tool call with
 arguments, result, duration), `task_start`/`task_progress`/`task_done` (subtasks, hierarchical
@@ -120,9 +123,54 @@ share the terminal cooperatively: the first streamed token stops the status line
 close any open stream line first. Verbosity is `display.verbosity` in config (`quiet`/`normal`/
 `verbose`), `-v`/`-q` on `omni chat`/`omni exec`, or `/verbose` in the REPL.
 
-IM channels (WeChat / Feishu / DingTalk) call `handle_turn` without `on_tool_event`, so they are
-structurally unaffected; the durable task log (`/task show`, `/why`) remains the authoritative
-record either way.
+IM channels (WeChat / Feishu / DingTalk) call `handle_turn` without `on_tool_event`, so their own
+reply behavior is structurally unaffected. They still write the authoritative task log used by
+`/task show`, `/why`, and the Web activity timeline.
+
+The web surface (`omni web`, extra `[web]`) is the same turn, projected over loopback HTTP.
+Settings and the first-run modal write the same user `config.toml` / `secrets.toml` as
+`omni config` (shared `omni.config.user_edits`); theme and language stay in the browser.
+After a save the web process drops cached agents so the next turn reloads settings.
+It does not own a process-wide CWD. Choosing a directory in the UI calls `get_paths(cwd=D)` /
+`load_settings(cwd=D)` and caches `OmniAgent` by `paths.project_dir`, so a repo the CLI already
+used shows the same `sessions.sqlite3`, artifacts, and tool root. New chats in that store use
+`channel=web`; continuing an existing row keeps that row's channel. The selected workspace and
+session live in the URL hash (`#/w/named/<name>/s/<id>` or `#/w/path/<encoded-path>…`), with
+`sessionStorage` / `localStorage` as a backup. Refresh revalidates that locator against the
+server: a named project uses `workspace.select` (never `workspace.open` of
+`~/.omni/projects/<name>`, which `control_store` rejects as Omni-home). Browser state is not
+execution authority. While the tab is visible, `workspace.inbox` polls cheap session
+fingerprints (no full user-message scan). Changed transcripts are fetched once via
+`session.timeline` (user → executions → answer). Only a followable latest task
+(`pending`/`queued`/`running`/`recovering`/`awaiting_approval`) attaches `task.watch`, which
+replays durable `task_events` until the task leaves that set. Web-origin turns also
+stream their in-process partial text. Provisional token deltas from a different CLI or IM process
+are deliberately not persisted: Web shows their durable activity live and their final assistant
+message as soon as it is committed. A task's `worker=external` label means only that no Web-local
+run handle owns it; channel connectivity is reported independently by the Home Service/channel
+health projection.
+
+Task and artifact inspectors use the same durable hierarchy as CLI task detail: Task, Workflow,
+Step, Execution/attempt, child task, activity, and artifacts attributed by task/execution/workflow.
+While their focused task is active, an open inspector refreshes that hierarchy and its artifact
+inventory; terminal settlement triggers one final refresh. Artifact `presentation_role` keeps
+primary deliverables ahead of collapsible support files without changing artifact ownership or the
+agent runtime.
+
+The SPA lives in top-level
+`web/` and ships as `omni/data/web` inside the wheel (same lifetime as the CLI
+package). Release packaging runs `cli/scripts/build_web_ui.sh` before `uv build`;
+`check_dist.py` requires `index.html` plus a `version.json` that matches the
+package version. `omni update` replaces `site-packages/omni/` — including that
+SPA — then tells the user to restart `omni web`. The running `omni web` process
+keeps the old files in memory until it exits; it never runs Vite for an
+installed wheel. `index.html` is served `Cache-Control: no-store` so a restarted
+server is enough; hashed `/assets/*` may be cached forever. A checkout without a
+packaged SPA resolves `web/dist` and may build it once if Node is on PATH.
+Explicit local/editable deployment rebuilds that SPA before package replacement
+and fails closed rather than reusing an unverified older `dist`.
+`omni doctor` and `GET /health` report the stamped UI version. Bind is loopback
+only (`127.0.0.1:1088`); `0.0.0.0` is rejected.
 
 ## Planning, Scheduling, and Workflow State
 
@@ -1282,10 +1330,10 @@ code, and can start the daemon with `--start`.
 
 Current channel behavior:
 
-- **WeChat**: `method=auto` prefers the configured gateway QR login endpoint
-  (`/login/qrcode` + `/login/status`) when `gateway_url` is available, then falls back to a pairing
-  QR containing `/pair <code>`. The current code expects an external gateway or WeCom-compatible
-  gateway client; it does not yet launch a local gateway process/container by itself.
+- **WeChat**: official ClawBot iLink QR only (`omni channel login wechat`). Omni talks to
+  `ilinkai.weixin.qq.com` directly — scan the liteapp QR, store `bot_token`, then `getupdates` /
+  `sendmessage`. The scanning account is auto-allowed; additional users send `/pair <code>`.
+  Self-hosted `:8088` bridges and WeCom are not supported.
 - **Feishu**: requires an app id and app secret (`--app-id`, `--app-secret`, or existing config).
   Inbound events use the official `lark-oapi` WebSocket client. The QR is an AppLink that opens the
   bot chat; the user sends `/pair <code>` there to add that conversation to the allowlist.
@@ -1332,8 +1380,10 @@ and cli-exec skills can participate in workflows.
 compact `input_schema` and a `run_skill` example, with an exact name ranked above a neighbour
 that merely mentions it. After that card is returned, further `docs_search` / `glob` /
 `search_tasks` probes — or another `find_skill` that returns the same skill — count as
-no-progress (BUG-11). A second `find_skill` for a disjoint skill is setup for another
-consume, not a hunt: Codex keeps the tool channel open so the model can run both.
+no-progress (BUG-11). Docs-only retrieval with no `find_skill` card is how a product
+question reads bundled docs; it is not a hunt. A second `find_skill` for a disjoint skill
+is setup for another consume, not a hunt: Codex keeps the tool channel open so the model
+can run both.
 A lone contracted capability
 (for example `slides.generate` labelled as a one-step workflow) stays on the host
 `single_skill_task` runner; settlement owes `artifact.slides` when the request or selected

@@ -27,6 +27,7 @@ import os
 from collections.abc import Sequence
 from pathlib import Path
 
+from omni.agent.capabilities import contract_write_target
 from omni.config.paths import OmniPaths
 from omni.core.file_mentions import strip_mention_marker
 from omni.core.path_lookup import (
@@ -57,6 +58,7 @@ _SKIP_DIRS = {
 
 
 def _read_roots(ctx: ExecContext) -> list[Path]:
+    from omni.core.observation import observation_spill_roots
     from omni.skills_runtime.exec_io import extra_exec_roots
 
     roots = [ctx.paths.project_dir.resolve(), Path.cwd().resolve()]
@@ -66,6 +68,7 @@ def _read_roots(ctx: ExecContext) -> list[Path]:
     if skill_root is not None:
         roots.append(Path(skill_root).resolve())
     roots.extend(extra_exec_roots(ctx))
+    roots.extend(observation_spill_roots(ctx.paths))
     return list(dict.fromkeys(roots))
 
 
@@ -186,6 +189,12 @@ async def resolve_write_target(ctx: ExecContext, raw: str) -> Path:
     them, and a path recorded outside them is stored absolute, so the artifact
     record does not survive the tree being moved.
 
+    A ledger token (``draft.section``, ``artifact.figure``, …) is never a
+    filename. Those names stay on the settlement contract; the write is rewritten
+    to a human stem in the matching task collection. That rewrite wins over a
+    same-named stray in the working directory so one pre-fix ``draft.section``
+    cannot keep capturing later turns.
+
     Anything carrying a directory component is the model being explicit and is
     honoured as given. For a bare name, an existing file wins over a new location
     so an append or a rewrite continues the document it is extending:
@@ -211,6 +220,9 @@ async def resolve_write_target(ctx: ExecContext, raw: str) -> Path:
     candidate = Path(raw).expanduser()
     if candidate.parent != Path("."):
         return candidate
+    rewritten = await _rewrite_contract_write_target(ctx, candidate.name)
+    if rewritten is not None:
+        return rewritten
     kind, _mime = _DOCUMENT_TYPES.get(
         candidate.suffix.lower(), ("file", "application/octet-stream")
     )
@@ -229,6 +241,36 @@ async def resolve_write_target(ctx: ExecContext, raw: str) -> Path:
     if store is not None and getattr(ctx, "task_id", ""):
         return await store.task_output_path(candidate.name, kind=kind)
     return generated
+
+
+async def _rewrite_contract_write_target(ctx: ExecContext, basename: str) -> Path | None:
+    """Map a ledger token onto a human file in the task collection."""
+    spec = contract_write_target(basename)
+    if spec is None:
+        return None
+    kind, suffix = spec
+    filename = f"{await _task_write_stem(ctx)}{suffix}"
+    store = getattr(ctx, "artifacts", None)
+    if store is not None and getattr(ctx, "task_id", ""):
+        existing = await store.existing_task_output_path(filename, kind=kind)
+        if existing is not None and existing.exists():
+            return existing
+        return await store.task_output_path(filename, kind=kind)
+    return ctx.paths.artifacts_dir / filename
+
+
+async def _task_write_stem(ctx: ExecContext) -> str:
+    from omni.storage.artifacts import slugify_filename
+
+    store = getattr(ctx, "artifacts", None)
+    getter = getattr(store, "task_label", None)
+    title = ""
+    if callable(getter):
+        try:
+            title = str(await getter() or "")
+        except Exception:  # noqa: BLE001 - a missing title must not block the write
+            title = ""
+    return slugify_filename(title) or "draft"
 
 
 def _granted_paths(ctx: ExecContext) -> set[Path]:
@@ -564,7 +606,9 @@ def build_fs_tools(ctx: ExecContext) -> list[Tool]:
         ][:500]
         return "\n".join(out) or f"(no matches for '{pattern}' under {base})"
 
-    return [
+    from omni.core.tool_result import fs_result_outcome
+
+    tools = [
         Tool(
             ToolSpec("read_file", f"Read a local file under the project/current-directory roots (default {default_base}) or any file the user attached with @; artifact:// URIs resolve through the artifact store. Use the exact path or URI from a previous tool result — do not rewrite quotation marks. Sensitive files are hidden. PDFs are extracted as markdown. Directories return a listing. Use offset/limit to page through a long file.", {
                 "type": "object",
@@ -597,9 +641,11 @@ def build_fs_tools(ctx: ExecContext) -> list[Tool]:
                     "path": {
                         "type": "string",
                         "description": (
-                            "A bare filename is stored in the workspace's artifacts "
-                            "directory; give a path with a directory to write "
-                            "somewhere specific."
+                            "A human filename (Survey.md). A bare name lands in "
+                            "this task's reports (or the matching collection). "
+                            "Do not use plan output tokens such as draft.section "
+                            "or draft.manuscript as the path — those are ledger "
+                            "names. Give a directory to write somewhere specific."
                         ),
                     },
                     "contents": {"type": "string"},
@@ -644,3 +690,6 @@ def build_fs_tools(ctx: ExecContext) -> list[Tool]:
             glob_tool,
         ),
     ]
+    for tool in tools:
+        tool.outcome_resolver = fs_result_outcome
+    return tools

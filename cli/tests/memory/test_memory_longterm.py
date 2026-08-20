@@ -264,7 +264,7 @@ def test_estimate_tokens_and_window_inference():
 
 
 def test_microcompact_tool_results_keeps_recent():
-    from omni.memory.compaction import microcompact_tool_results
+    from omni.memory.compaction import _MICROCOMPACT_PLACEHOLDER, microcompact_tool_results
 
     big = "X" * 5000
     messages = [
@@ -277,6 +277,10 @@ def test_microcompact_tool_results_keeps_recent():
     trimmed = microcompact_tool_results(messages, keep_last=2, max_chars=100)
     assert trimmed == 1  # only the oldest tool result shrinks
     assert len(messages[2]["content"]) < 200  # oldest trimmed
+    assert "chars truncated" in messages[2]["content"]
+    assert "Warning: truncated output" in messages[2]["content"]
+    assert "X" in messages[2]["content"]
+    assert messages[2]["content"].rstrip().endswith(_MICROCOMPACT_PLACEHOLDER)
     assert len(messages[3]["content"]) == 5000  # recent kept
     assert len(messages[4]["content"]) == 5000
     # idempotent: a second pass trims nothing new

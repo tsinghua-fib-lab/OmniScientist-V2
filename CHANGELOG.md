@@ -4,11 +4,113 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) and semanti
 
 ## Unreleased
 
+### Fixed
+
+- ``research-pptx`` no longer treats a bare filename in ``topic`` as a
+  cwd-required ``markdown_uri``. Mentions bind only when the file already
+  exists as ``artifact://``, an absolute path, or a task reports/artifacts
+  deliverable. An explicit missing ``markdown_uri`` still fails with a
+  retryable not-found error.
+
+## [2.0.0rc6] - 2026-08-25
+
+### Changed
+
+- REPL ``/web`` starts the loopback UI in the background (``/web stop``,
+  ``/web status``, ``/web port``). Shell ``omni web`` is still a foreground
+  server stopped with Ctrl+C or Ctrl+D.
+- Docs no longer claim ``omni project migrate`` or ``skills install`` /
+  ``uninstall`` aliases; those commands are not on the CLI.
+- ``omni eval blackbox`` fails CI when nothing is attempted or any attempt
+  fails. Memory scenarios require a real model; ``offline_mock_smoke`` is the
+  deterministic offline gate.
+- Lone ``literature.search`` (and a named ``search_literature`` token) stay
+  on native ReAct with a retrieve-only host tool policy. A written survey
+  pair stays on capable ReAct with ``search_literature`` and ``write_file``;
+  the model writes the manuscript. ``$skill`` protocol is unchanged.
+- REPL welcome is one next step: ``/init`` or ``/model`` when the model is
+  missing, otherwise ask a question with ``/web`` as the browser surface.
+  The command manual moved to ``/help`` (conversation vs research). The
+  footer advertises Shift+Enter only when xterm modified keys are ready;
+  otherwise it keeps Ctrl+J. Slash completion still shows each command's
+  description and lists session verbs first.
+- Loopback SPA first JS no longer ships Settings or ``react-markdown``.
+  Those load when settings open or a message needs rich markdown, so the
+  entry chunk stays under Vite's 500 kB hint.
+- Bumped the release candidate to `2.0.0rc6` (Git tag `v2.0.0rc6`).
+  PyPI will not replace `2.0.0rc5`.
+
+### Fixed
+
+- A retrieve-only turn projects ``sources[].source_id`` instead of a title
+  ``summary``. Settlement treats missing ``source_ids`` as an unpaid
+  ``sources`` debt.
+- Foreground skill drain no longer persists
+  ``[Background skill execution completed]`` as a second assistant message.
+  That line is only written when a detached notify channel is set.
+- ``--mode plan`` skips ``ModelIntentPlanner.propose``, host-denies mutating
+  and retrieval tools on the same turn, then pauses for approval.
+- Local ``omni skills add`` uses the SKILL.md frontmatter name, not the
+  folder stem.
+- Non-TTY ``cli/scripts/build_web_ui.sh`` sets ``CI=true`` so pnpm can
+  replace ``node_modules``.
+- ``research-pptx`` stubs the unused ``image-size`` transitive (CVE-2025-71329
+  / CVE-2025-71330 have no patched release). The renderer still passes
+  explicit image width and height.
+
+- Writing debts settle from this task's registered text document, not only
+  ``kind=report`` / ``.md``. A ``write_file`` of a ledger token
+  (``draft.section``) is rewritten to a human ``.md`` in the task reports
+  bundle and no longer lands as an unclassified cwd file. Figure and slide
+  debts stay type-strict. The host does not write the manuscript after the
+  model stops. An unpaid named file is presented as degraded (continue the
+  same task), not as succeeded. Host figure/slide fill runs only when this
+  turn already has authored DOT or a registered manuscript.
+- Host-known skill admission (missing VLM, binary, or Python module) is a
+  route observation, not a turn-terminal ``needs_input``. The sealed skill
+  still does not start; ReAct sees the setup command and can choose another
+  catalog skill. Conversational confirms (``action: confirm_*``) still suspend.
+- ReAct now lists skill names and descriptions (Codex-style budget) so
+  ``run_skill`` can be called without hunting; empty ``find_skill`` after a
+  card no longer trips the contract-hunt fuse, and ranking uses capability
+  overlap instead of requiring every query word.
+- In-flight model cancel still writes ``react.finished`` so the ReAct span
+  closes (Python 3.11+ no longer drops the persist tail after ``Task.cancel()``).
+  On Windows the event is queued like ``finish_task`` so a busy store cannot
+  drop the closed span.
+- Parent cancel settle is capped and memoized so a Linux busy store cannot
+  hold a cancelled turn past the 8s workflow-cancel wait.
+- Windows workflow-cancel now finishes after ``wait_for`` cancels the turn
+  mid-settle. Advisory events yield the persist lock (and skip the busy
+  queue once the execute task is already cancelling) so the checkpoint can
+  land inside the 8s budget.
+
 ### Added
 
+- ``cli/docs/user-walkthrough-cases.md`` (User Walkthrough Catalog) indexes
+  116 user-facing cases with a specification table (named
+  ``search_literature``, stacked prompts, long-horizon campaigns, and
+  CLI/REPL) without advertising removed commands.
 - ``cli/scripts/release_selfcheck.sh`` recreates a GitHub Release cell on this
   machine: a minutes-long hot suite, an ubuntu/3.11 Docker cell, and
   ``--dispatch`` of Actions ``Release preflight`` for the Windows matrix.
+- ``release_selfcheck.sh --plan`` prints the ``release.yml`` job map
+  (compatibility / build / smoke / publish) against the local stand-ins.
+  ``--dispatch --wait`` blocks until the GitHub 9-cell preflight finishes.
+  The hot list includes the in-flight model-cancel cell that fails on this OS.
+
+## [2.0.0rc5] - 2026-08-20
+
+### Fixed
+
+- Vite's ``esbuild`` postinstall is explicitly allowed in ``web/pnpm-workspace.yaml``,
+  so ``pnpm install --frozen-lockfile`` no longer fails on pnpm 11
+  (``ERR_PNPM_IGNORED_BUILDS``) during ``omni web`` packaging.
+
+### Changed
+
+- Bumped the release candidate to `2.0.0rc5` (Git tag `v2.0.0rc5`).
+  PyPI will not replace `2.0.0rc4`.
 
 ## [2.0.0rc4] - 2026-08-17
 

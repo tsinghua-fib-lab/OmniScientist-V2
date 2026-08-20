@@ -571,6 +571,19 @@ class SkillRegistry:
         )
         return "\n".join(lines)
 
+    def react_skill_catalog(self, *, context_window_tokens: int = 0) -> str:
+        """ReAct name+description index. Never includes input_schema."""
+        from omni.skills_runtime.catalog_prompt import render_react_skill_catalog
+
+        return render_react_skill_catalog(
+            self.list_selectable(),
+            context_window_tokens=context_window_tokens,
+        )
+
+    def react_discovery_hint(self, *, context_window_tokens: int = 0) -> str:
+        """ReAct skill index — names and descriptions, never the planner contracts."""
+        return self.react_skill_catalog(context_window_tokens=context_window_tokens)
+
     def suggest(self, message: str, *, limit: int = 5) -> list[SkillEntry]:
         """Search skill metadata for an interactive catalog query.
 

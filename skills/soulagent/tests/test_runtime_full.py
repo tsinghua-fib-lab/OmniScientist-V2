@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import http.server
 import json
 import os
@@ -242,6 +243,220 @@ class StomaProtocolTest(unittest.TestCase):
             stoma_writer.unload_persona(project, "omniscientist")
             self.assertEqual(role.read_text(encoding="utf-8"), "原始人格\n")
 
+    def test_persona_and_state_commit_under_one_ready_lock(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="原子状态 (测试)-", dir=Path(__file__).parent
+        ) as temporary:
+            project = Path(temporary)
+            role = project / "role.md"
+            role.write_text("原始人格\n", encoding="utf-8")
+            state = {
+                "version": 1,
+                "host": "omniscientist",
+                "scientist_id": "fengli-xu",
+                "scientist_name": "Fengli Xu",
+            }
+
+            paths = stoma_writer.write_persona(
+                project,
+                "任务人格",
+                "omniscientist",
+                state_payload=state,
+            )
+
+            committed = json.loads(
+                (project / ".soulagent" / "state.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(committed["scientist_id"], "fengli-xu")
+            self.assertEqual(committed["stoma_paths"], paths)
+            self.assertEqual(role.read_text(encoding="utf-8"), "任务人格\n")
+            self.assertEqual(
+                committed["persona_sha256"],
+                hashlib.sha256(role.read_bytes()).hexdigest(),
+            )
+            self.assertTrue((project / ".soulagent" / "lock" / "ready").is_file())
+
+            stoma_writer.unload_persona(
+                project,
+                "omniscientist",
+                remove_state=True,
+            )
+            self.assertFalse((project / ".soulagent" / "state.json").exists())
+            self.assertFalse((project / ".soulagent" / "lock" / "ready").exists())
+            self.assertEqual(role.read_text(encoding="utf-8"), "原始人格\n")
+
+    def test_failed_state_commit_restores_previous_persona_and_state(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="状态回滚 (测试)-", dir=Path(__file__).parent
+        ) as temporary:
+            project = Path(temporary)
+            role = project / "role.md"
+            role.write_text("原始人格\n", encoding="utf-8")
+            first_state = {
+                "host": "omniscientist",
+                "scientist_id": "first",
+            }
+            stoma_writer.write_persona(
+                project,
+                "第一版人格",
+                "omniscientist",
+                state_payload=first_state,
+            )
+            state_path = project / ".soulagent" / "state.json"
+            previous_state = state_path.read_bytes()
+            real_atomic_write = stoma_writer._atomic_write
+
+            def fail_second_state(path: Path, data: bytes) -> None:
+                if path == state_path and b'"second"' in data:
+                    raise OSError("simulated state failure")
+                real_atomic_write(path, data)
+
+            with mock.patch.object(
+                stoma_writer,
+                "_atomic_write",
+                side_effect=fail_second_state,
+            ), self.assertRaisesRegex(stoma_writer.StomaError, "已恢复上一个版本"):
+                stoma_writer.write_persona(
+                    project,
+                    "第二版人格",
+                    "omniscientist",
+                    switching_scientist=True,
+                    state_payload={
+                        "host": "omniscientist",
+                        "scientist_id": "second",
+                    },
+                )
+
+            self.assertEqual(role.read_text(encoding="utf-8"), "第一版人格\n")
+            self.assertEqual(state_path.read_bytes(), previous_state)
+            self.assertTrue((project / ".soulagent" / "lock" / "ready").is_file())
+
+    def test_failed_first_state_commit_leaves_no_activation_residue_and_retries(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="首次状态回滚 (测试)-", dir=Path(__file__).parent
+        ) as temporary:
+            project = Path(temporary)
+            role = project / "role.md"
+            role.write_text("原始人格\n", encoding="utf-8")
+            state_path = project / ".soulagent" / "state.json"
+            real_atomic_write = stoma_writer._atomic_write
+
+            def fail_first_state(path: Path, data: bytes) -> None:
+                if path == state_path:
+                    raise OSError("simulated first state failure")
+                real_atomic_write(path, data)
+
+            with mock.patch.object(
+                stoma_writer,
+                "_atomic_write",
+                side_effect=fail_first_state,
+            ), self.assertRaisesRegex(stoma_writer.StomaError, "已恢复上一个版本"):
+                stoma_writer.write_persona(
+                    project,
+                    "首次人格",
+                    "omniscientist",
+                    state_payload={
+                        "host": "omniscientist",
+                        "scientist_id": "first",
+                    },
+                )
+
+            self.assertEqual(role.read_text(encoding="utf-8"), "原始人格\n")
+            self.assertFalse(state_path.exists())
+            self.assertFalse((project / ".soulagent" / "originals.json").exists())
+            self.assertFalse((project / "role.md.soulagent.bak").exists())
+            self.assertFalse((project / ".soulagent" / "lock" / "writing").exists())
+            self.assertFalse((project / ".soulagent" / "lock" / "ready").exists())
+
+            stoma_writer.write_persona(
+                project,
+                "首次人格",
+                "omniscientist",
+                state_payload={
+                    "host": "omniscientist",
+                    "scientist_id": "first",
+                },
+            )
+            self.assertEqual(role.read_text(encoding="utf-8"), "首次人格\n")
+            self.assertTrue(state_path.is_file())
+            self.assertTrue((project / ".soulagent" / "lock" / "ready").is_file())
+
+    def test_snapshot_failure_releases_writing_lock_and_restores_ready(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="快照异常 (测试)-", dir=Path(__file__).parent
+        ) as temporary:
+            project = Path(temporary)
+            role = project / "role.md"
+            role.write_text("原始人格\n", encoding="utf-8")
+            stoma_writer.write_persona(project, "第一版人格", "omniscientist")
+
+            with mock.patch.object(
+                stoma_writer,
+                "_file_snapshot",
+                side_effect=OSError("simulated snapshot failure"),
+            ), self.assertRaisesRegex(stoma_writer.StomaError, "准备失败"):
+                stoma_writer.write_persona(
+                    project,
+                    "第二版人格",
+                    "omniscientist",
+                )
+
+            self.assertEqual(role.read_text(encoding="utf-8"), "第一版人格\n")
+            self.assertFalse((project / ".soulagent" / "lock" / "writing").exists())
+            self.assertTrue((project / ".soulagent" / "lock" / "ready").is_file())
+
+    def test_failed_rollback_never_republishes_ready(self) -> None:
+        with tempfile.TemporaryDirectory(
+            prefix="回滚失败 (测试)-", dir=Path(__file__).parent
+        ) as temporary:
+            project = Path(temporary)
+            role = project / "role.md"
+            role.write_text("原始人格\n", encoding="utf-8")
+            state_path = project / ".soulagent" / "state.json"
+            stoma_writer.write_persona(
+                project,
+                "第一版人格",
+                "omniscientist",
+                state_payload={
+                    "host": "omniscientist",
+                    "scientist_id": "first",
+                },
+            )
+            real_atomic_write = stoma_writer._atomic_write
+            state_commit_failed = False
+
+            def fail_commit_and_rollback(path: Path, data: bytes) -> None:
+                nonlocal state_commit_failed
+                if path == state_path and b'"second"' in data:
+                    state_commit_failed = True
+                    raise OSError("simulated state failure")
+                if (
+                    state_commit_failed
+                    and path == role
+                    and data == "第一版人格\n".encode()
+                ):
+                    raise OSError("simulated rollback failure")
+                real_atomic_write(path, data)
+
+            with mock.patch.object(
+                stoma_writer,
+                "_atomic_write",
+                side_effect=fail_commit_and_rollback,
+            ), self.assertRaisesRegex(stoma_writer.StomaError, "无法完整回滚"):
+                stoma_writer.write_persona(
+                    project,
+                    "第二版人格",
+                    "omniscientist",
+                    switching_scientist=True,
+                    state_payload={
+                        "host": "omniscientist",
+                        "scientist_id": "second",
+                    },
+                )
+
+            self.assertFalse((project / ".soulagent" / "lock" / "writing").exists())
+            self.assertFalse((project / ".soulagent" / "lock" / "ready").exists())
+
 
 class _LocalLLMHandler(http.server.BaseHTTPRequestHandler):
     requests: ClassVar[list[dict]] = []
@@ -379,7 +594,7 @@ class PortableCliLifecycleTest(unittest.TestCase):
                 self.assertEqual(len(decoder_requests), 1)
                 self.assertEqual(len(sensor_requests), 1)
                 self.assertEqual(sensor_requests[0]["max_tokens"], 512)
-                self.assertEqual(decoder_requests[0]["max_tokens"], 3072)
+                self.assertEqual(decoder_requests[0]["max_tokens"], 8192)
                 decoder_wire_text = json.dumps(decoder_requests[0], ensure_ascii=False)
                 self.assertTrue(all(value not in decoder_wire_text for value in kaiming_tone))
 

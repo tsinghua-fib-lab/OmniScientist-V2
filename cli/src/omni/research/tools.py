@@ -38,6 +38,15 @@ _ENV_LOCK_PKGS = (
 )
 
 
+def _observe(payload: dict[str, Any]) -> dict[str, Any]:
+    """Attach the engine observation envelope so the task ledger can merge refs."""
+    if payload.get("error"):
+        return payload
+    from omni.runtime.engine_observation import attach_engine_observation
+
+    return attach_engine_observation(dict(payload), payload)
+
+
 def _store(ctx: ExecContext) -> ResearchStore | None:
     return ResearchStore(ctx.db) if getattr(ctx, "db", None) is not None else None
 
@@ -107,7 +116,7 @@ def build_research_tools(ctx: ExecContext) -> list[Tool]:
         await _feed_memory(ctx, summary=f"Hypothesis: {statement}", memory_type="hypothesis", importance=0.6)
         _notebook(ctx, f"Hypothesis {hyp.id[:8]}", f"{statement}\n\nStatus: {hyp.status} (confidence {hyp.confidence:.2f})",
                   tags=["hypothesis"])
-        return {"status": "ok", "hypothesis_id": hyp.id, "state": hyp.status}
+        return _observe({"status": "ok", "hypothesis_id": hyp.id, "state": hyp.status})
 
     # ── record_claim ──
     async def record_claim(args: dict) -> Any:
@@ -122,8 +131,11 @@ def build_research_tools(ctx: ExecContext) -> list[Tool]:
             made_by="agent",
         )
         await _feed_memory(ctx, summary=f"Claim: {text}", memory_type="claim", importance=0.55)
-        return {"status": "ok", "claim_id": claim.id,
-                "note": "Use add_evidence to bind this claim to a source; otherwise verify will flag it as unsupported."}
+        return _observe({
+            "status": "ok",
+            "claim_id": claim.id,
+            "note": "Use add_evidence to bind this claim to a source; otherwise verify will flag it as unsupported.",
+        })
 
     # ── cite_source ──
     async def cite_source(args: dict) -> Any:
@@ -134,8 +146,12 @@ def build_research_tools(ctx: ExecContext) -> list[Tool]:
             return {"error": "need at least one of: title, arxiv_id, doi, url"}
         src = await store.add_source(meta, origin=str(args.get("origin", "manual")), date_pin=_as_of(ctx))
         _save_to_library(ctx, meta)
-        return {"status": "ok", "source_id": src.id, "title": src.title,
-                "dedup_key": src.dedup_key}
+        return _observe({
+            "status": "ok",
+            "source_id": src.id,
+            "title": src.title,
+            "dedup_key": src.dedup_key,
+        })
 
     # ── add_evidence ──
     async def add_evidence(args: dict) -> Any:
@@ -157,7 +173,13 @@ def build_research_tools(ctx: ExecContext) -> list[Tool]:
             quote=str(args.get("quote", "")), locator=str(args.get("locator", "")),
             strength=float(args.get("strength", 0.6) or 0.6),
         )
-        return {"status": "ok", "evidence_id": ev.id, "claim_id": claim.id, "stance": ev.stance}
+        return _observe({
+            "status": "ok",
+            "evidence_id": ev.id,
+            "claim_id": claim.id,
+            "source_id": source_id,
+            "stance": ev.stance,
+        })
 
     # ── search_corpus ──
     async def search_corpus_tool(args: dict) -> Any:
@@ -173,11 +195,16 @@ def build_research_tools(ctx: ExecContext) -> list[Tool]:
             vector_backend=str(getattr(ctx.settings.memory, "vector_backend", "auto") or "auto"),
         )
         if not passages:
-            return {"status": "empty", "matches": [],
-                    "note": "The local corpus is empty or has no match. Run openalex-search or search a connector and cite_source."}
-        return {"status": "ok",
-                "matches": [p.to_dict(i) for i, p in enumerate(passages, 1)],
-                "note": "Use [S#] inline citations and call add_evidence(claim_id, source_id) for each recorded claim."}
+            return _observe({
+                "status": "empty",
+                "matches": [],
+                "note": "The local corpus is empty or has no match. Run openalex-search or search a connector and cite_source.",
+            })
+        return _observe({
+            "status": "ok",
+            "matches": [p.to_dict(i) for i, p in enumerate(passages, 1)],
+            "note": "Use [S#] inline citations and call add_evidence(claim_id, source_id) for each recorded claim.",
+        })
 
     # ── search_literature (single resilient funnel) ──
     async def search_literature(args: dict) -> Any:
@@ -205,8 +232,10 @@ def build_research_tools(ctx: ExecContext) -> list[Tool]:
             if any(meta.values()):
                 src = await store.find_source(meta)
         if src is None:
-            return {"status": "empty",
-                    "note": "Source not found. Record it with cite_source or openalex-search, or expand the citation graph through a connector."}
+            return _observe({
+                "status": "empty",
+                "note": "Source not found. Record it with cite_source or openalex-search, or expand the citation graph through a connector.",
+            })
         direction = str(args.get("direction", "references")).strip().lower()
         if direction not in ("references", "cited_by"):
             direction = "references"
@@ -214,10 +243,17 @@ def build_research_tools(ctx: ExecContext) -> list[Tool]:
         limit = max(1, min(int(args.get("limit", 50) or 50), 200))
         hood = await traverse(store, src.id, direction=direction, depth=depth, limit=limit)
         if not hood.nodes:
-            return {"status": "empty", "seed_source_id": src.id, "direction": direction,
-                    "note": "The local citation graph has no edges in this direction."}
-        return {"status": "ok", **hood.to_dict(),
-                "note": "Use search_corpus and add_evidence on neighboring source ids for a grounded review."}
+            return _observe({
+                "status": "empty",
+                "seed_source_id": src.id,
+                "direction": direction,
+                "note": "The local citation graph has no edges in this direction.",
+            })
+        return _observe({
+            "status": "ok",
+            **hood.to_dict(),
+            "note": "Use search_corpus and add_evidence on neighboring source ids for a grounded review.",
+        })
 
     # ── package_artifact ──
     async def package_artifact(args: dict) -> Any:
@@ -421,8 +457,11 @@ def build_research_tools(ctx: ExecContext) -> list[Tool]:
                   tags=["run"])
         await _feed_memory(ctx, summary=f"Experiment run {run.id[:8]}: {run.title} {nums}",
                            memory_type="run", importance=0.6)
-        return {"status": "ok", "run_id": run.id,
-                "note": f"Cite this value as (run {run.id[:8]}) for traceability."}
+        return _observe({
+            "status": "ok",
+            "run_id": run.id,
+            "note": f"Cite this value as (run {run.id[:8]}) for traceability.",
+        })
 
     return [
         Tool(ToolSpec(

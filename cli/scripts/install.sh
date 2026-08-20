@@ -33,7 +33,7 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." 2>/dev/null && pwd || true)"
-EXTRAS="mcp,vec,channels"
+EXTRAS="mcp,vec,channels,web"
 EDITABLE=0
 METHOD="uv"
 FORCE_CONDA_BASE=0
@@ -498,6 +498,19 @@ guard_env_target() {
   fi
 }
 
+prepare_local_web_ui() {
+  [ "$SOURCE_MODE" = "local" ] || return 0
+  local script="$REPO_DIR/scripts/build_web_ui.sh"
+  local package_json="$REPO_DIR/../web/package.json"
+  [ -f "$package_json" ] || return 0
+  if [ ! -f "$script" ]; then
+    echo "Local Web UI source exists, but its build script is missing: $script" >&2
+    return 1
+  fi
+  echo "-> Building the loopback SPA from this checkout"
+  bash "$script"
+}
+
 install_into_env() {
   local py="$1" scripts
   guard_env_target "$py"
@@ -694,6 +707,7 @@ acquire_install_lock
 echo "-> Checking existing Omni installations"
 discover_installations
 resolve_duplicate_installations
+prepare_local_web_ui
 
 case "$METHOD" in
   uv) install_uv_tool ;;

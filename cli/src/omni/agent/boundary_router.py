@@ -28,6 +28,24 @@ class BoundaryDecision:
     # Forced discovery source when the user wrote ``$<scope>:<name>``; empty for
     # a bare ``$name`` (which resolves to the winning skill for that name).
     skill_source: str = ""
+    # Registered native tool identifier the user named as a token, or "".
+    tool: str = ""
+
+# Language-neutral identifiers already registered on the ReAct catalog.
+# Matching these is the same class of host boundary as ``run_skill name``,
+# not a natural-language allow/deny grammar.
+_NATIVE_TOOL_NAMES = (
+    "search_literature",
+    "search_corpus",
+    "cite_source",
+    "record_claim",
+    "add_evidence",
+    "record_hypothesis",
+    "citation_neighbors",
+)
+_NATIVE_TOOL_RE = re.compile(
+    r"(?:^|[^\w])(?P<name>" + "|".join(re.escape(n) for n in _NATIVE_TOOL_NAMES) + r")(?:[^\w]|$)"
+)
 
 
 _EXPLICIT_SKILL_PATTERNS = (
@@ -52,14 +70,31 @@ class BoundaryRouter:
 
     def route(self, text: str) -> BoundaryDecision | None:
         name, source = explicit_skill_ref(text or "", self._registry)
-        if not name:
+        if name:
+            return BoundaryDecision(
+                "explicit_skill",
+                "user explicitly selected a skill/provider",
+                skill=name,
+                skill_source=source,
+            )
+        tool = explicit_native_tool(text or "")
+        if not tool:
             return None
         return BoundaryDecision(
-            "explicit_skill",
-            "user explicitly selected a skill/provider",
-            skill=name,
-            skill_source=source,
+            "explicit_tool",
+            "user named a registered native tool",
+            tool=tool,
         )
+
+
+def explicit_native_tool(text: str) -> str:
+    """Return a registered native tool token from ``text``, or ``""``.
+
+    Skill protocol (``$name`` / ``run_skill name``) is checked first by
+    :meth:`BoundaryRouter.route`. This only matches catalog identifiers.
+    """
+    match = _NATIVE_TOOL_RE.search(text or "")
+    return match.group("name") if match is not None else ""
 
 
 def _explicit_skill_match(text: str) -> re.Match[str] | None:

@@ -48,8 +48,9 @@ def render_memory_usage_help() -> None:
         ],
     )
     info(
-        "Memory entries live in the current workspace's sessions.sqlite3 memory_entries table. "
-        "Personal preferences in the active Omni data directory's MEMORY.md are available across workspaces."
+        "User-scope preferences live in the Omni data directory's memory.sqlite3; "
+        "project findings stay in the workspace sessions database. "
+        "MEMORY.md remains the curated cross-workspace file."
     )
 
 
@@ -196,13 +197,9 @@ def graph_cmd(
     async def _run():
         agent = await make_agent(state)
         try:
-            row, status = await agent.memory.resolve(mem_id)
-            if status == "ambiguous" or row is None:
-                return status, None, []
-            neigh = await agent.memory.graph.neighbors(
-                row.id, depth=max(1, depth), limit=max(1, limit)
+            return await agent.memory.neighbors_for(
+                mem_id, depth=max(1, depth), limit=max(1, limit)
             )
-            return "ok", row, neigh
         finally:
             await agent.aclose()
 
@@ -243,32 +240,32 @@ def link_cmd(
     async def _run():
         agent = await make_agent(state)
         try:
-            srow, ss = await agent.memory.resolve(src)
-            drow, ds = await agent.memory.resolve(dst)
-            if "ambiguous" in (ss, ds):
-                return "ambiguous", None
-            if srow is None or drow is None:
-                return "not_found", None
-            if srow.id == drow.id:
-                return "same", None
-            eid = await agent.memory.graph.add_edge(
-                srow.id, drow.id, relation=relation, weight=weight, origin="manual"
+            status, srow, drow = await agent.memory.link(
+                src, dst, relation=relation, weight=weight
             )
-            return ("ok" if eid else "failed"), (srow, drow)
+            return status, srow, drow
         finally:
             await agent.aclose()
 
-    status, pair = run_async(_run())
+    status, srow, drow = run_async(_run())
     if status == "ambiguous":
         error("An ID prefix matches multiple memories; provide a longer ID.")
         raise typer.Exit(1)
-    if status in ("not_found", "failed") or pair is None:
+    if status == "not_found":
         error("A specified memory was not found. Use memory list to inspect valid IDs.")
         raise typer.Exit(1)
     if status == "same":
         error("Source and destination refer to the same memory; no edge was created.")
         raise typer.Exit(1)
-    srow, drow = pair
+    if status == "cross_store":
+        error(
+            "Cannot link a global memory to a workspace memory. "
+            "Both IDs must live in the same store."
+        )
+        raise typer.Exit(1)
+    if status == "failed" or srow is None or drow is None:
+        error("Could not create the memory graph edge. Use memory graph <id> to inspect neighbors.")
+        raise typer.Exit(1)
     success(f"Linked {srow.id[:8]} -[{relation}]-> {drow.id[:8]}.")
 
 

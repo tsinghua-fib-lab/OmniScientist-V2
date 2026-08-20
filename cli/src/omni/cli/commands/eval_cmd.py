@@ -212,34 +212,44 @@ async def _render_blackbox(
     )
     if as_json:
         console.print_json(_json.dumps(report.to_dict(), ensure_ascii=False))
-        return
-    data_table(
-        "Natural-language black-box evaluation",
-        ["scenario", "repeat", "passed", "status", "duration", "tokens", "rework"],
-        [
-            [
-                attempt.scenario_id,
-                str(attempt.repeat),
-                "✓" if attempt.passed else "✗",
-                "/".join(attempt.statuses) or "error",
-                f"{attempt.duration_ms / 1000:.2f}s",
-                str(attempt.cost.get("total_tokens") or 0),
-                str(attempt.manual_rework),
-            ]
-            for attempt in report.attempts
-        ],
-    )
-    line = (
-        f"Success {report.success_rate:.0%} · Provenance accuracy {report.provenance_accuracy:.0%} · "
-        f"Mean rework {report.mean_manual_rework:.2f} · Mean duration {report.mean_duration_ms / 1000:.2f}s · "
-        f"Total tokens {report.total_tokens} · Estimated cost ${report.total_cost_usd:.4f}"
-    )
-    if report.success_rate >= 0.99:
-        success(line)
     else:
-        warn(line)
+        data_table(
+            "Natural-language black-box evaluation",
+            ["scenario", "repeat", "passed", "status", "duration", "tokens", "rework"],
+            [
+                [
+                    attempt.scenario_id,
+                    str(attempt.repeat),
+                    "✓" if attempt.passed else "✗",
+                    "/".join(attempt.statuses) or "error",
+                    f"{attempt.duration_ms / 1000:.2f}s",
+                    str(attempt.cost.get("total_tokens") or 0),
+                    str(attempt.manual_rework),
+                ]
+                for attempt in report.attempts
+            ],
+        )
+        line = (
+            f"Success {report.success_rate:.0%} · Provenance accuracy {report.provenance_accuracy:.0%} · "
+            f"Mean rework {report.mean_manual_rework:.2f} · Mean duration {report.mean_duration_ms / 1000:.2f}s · "
+            f"Total tokens {report.total_tokens} · Estimated cost ${report.total_cost_usd:.4f}"
+        )
+        if report.attempted and report.success_rate >= 0.99:
+            success(line)
+        else:
+            warn(line)
     if report.skips:
-        info(f"Skipped {report.skipped} attempts because model or network prerequisites were unavailable; --live enables network scenarios.")
+        info(
+            f"Skipped {report.skipped} attempts because model or network prerequisites were unavailable; "
+            "--live enables network scenarios."
+        )
+    passed = sum(1 for attempt in report.attempts if attempt.passed)
+    if report.ci_gate_failed():
+        error(
+            f"black-box produced {passed} successful attempt(s) "
+            f"of {report.attempted} attempted ({report.skipped} skipped)"
+        )
+        raise typer.Exit(1)
 
 
 async def _render_memory_benchmark(*, as_json: bool, gate: bool) -> None:

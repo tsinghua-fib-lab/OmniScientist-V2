@@ -21,6 +21,7 @@ from pathlib import Path
 
 import yaml
 
+from omni.agent.intent_plan import IntentType
 from omni.agent.model_planner import (
     _PLANNER_CONTRACT_SHORTLIST_LIMIT,
     ModelPlanProposal,
@@ -208,7 +209,7 @@ def test_english_survey_shortlists_the_literature_search_provider():
     assert "research-ideation" in picked
 
 
-def test_literature_search_capability_binds_openalex_not_ideation():
+def test_literature_search_capability_stays_on_native_tool():
     registry = SkillRegistry(load_settings())
     registry.build_index()
     plan = IntentPlanner(registry).plan_from_proposal(
@@ -226,7 +227,11 @@ def test_literature_search_capability_binds_openalex_not_ideation():
         ),
     )
 
-    assert [selection.skill for selection in plan.selected_skills] == ["openalex-search"]
+    assert plan.intent_type is IntentType.REACT_FALLBACK
+    assert plan.selected_skills == []
+    assert plan.tool_policy.allows("search_literature")
+    assert not plan.tool_policy.allows("run_skill")
+    assert plan.capability_inputs["literature.search"]["query"] == "federated learning"
 
 
 def test_the_bundled_research_provider_survives_the_contract_cut_in_chinese():

@@ -54,6 +54,9 @@ async def test_search_literature_fans_out_and_indexes(monkeypatch):
     assert out["indexed"] == 2
     titles = {r["title"] for r in out["results"]}
     assert titles == {"Transformer Networks", "Another Paper"}
+    assert out.get("source_ids")
+    assert all(item.get("source_id") for item in out["results"])
+    assert out.get("observation", {}).get("schema") == "omni.engine.observation/v1"
     # results are now searchable in the local corpus
     corpus = await _tool(ctx, "search_corpus").handler({"query": "transformer", "k": 5})
     assert corpus["status"] in ("ok", "empty")  # indexed; recall depends on embeddings

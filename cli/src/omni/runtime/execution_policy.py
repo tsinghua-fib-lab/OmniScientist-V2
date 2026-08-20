@@ -27,12 +27,14 @@ _STORE_MUTATIONS = frozenset({
     "add_evidence",
     "build_research_artifact",
     "cite_source",
+    "log_run",
     "record_claim",
     "record_hypothesis",
     "record_run",
     "remember",
     "run_skill",
     "run_workflow",
+    "search_literature",
     "submit_task",
 })
 

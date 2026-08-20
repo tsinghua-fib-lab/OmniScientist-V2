@@ -17,16 +17,15 @@ distillation run from silently changing the active persona.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import typer
 
-from omni.agent.persona_stoma import load_persona_overlay
 from omni.cli.render import console, data_table, info
 from omni.cli.runner import run_one_shot
 from omni.cli.state import AppState, run_async
+from omni.personas.catalog import persona_snapshot, resolve_persona_paths
 
 app = typer.Typer(
     help="List, inspect, and create scientist personas.",
@@ -35,91 +34,9 @@ app = typer.Typer(
 )
 
 
-@dataclass(frozen=True)
-class SoulPaths:
-    """Resolved SoulAgent project and scanner roots for one CLI invocation."""
-
-    project_root: Path
-    kg_root: Path
-
-
-def _soul_paths(paths: Any) -> SoulPaths:
-    """Mirror SoulAgent's project-local-first KG root resolution."""
-    project_root = Path(paths.local_ops_dir).resolve()
-    project_kg = project_root / "scientist-kg"
-    kg_root = project_kg if project_kg.is_dir() else Path(paths.scientist_kg_dir).resolve()
-    return SoulPaths(project_root=project_root, kg_root=kg_root)
-
-
-def _read_json_object(path: Path) -> dict[str, Any]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return value if isinstance(value, dict) else {}
-
-
-def _inventory(kg_root: Path) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-    """Read a lightweight persona inventory without depending on Skill code."""
-    scientists: list[dict[str, Any]] = []
-    invalid: list[dict[str, str]] = []
-    if not kg_root.is_dir():
-        return scientists, invalid
-    try:
-        candidates = sorted(path for path in kg_root.iterdir() if path.is_dir())
-    except OSError as exc:
-        return scientists, [{"directory": str(kg_root), "error": str(exc)}]
-    for candidate in candidates:
-        identity = _read_json_object(candidate / "identity.json")
-        manifest = _read_json_object(candidate / "manifest.json")
-        scientist_id = str(
-            identity.get("scientist_id")
-            or manifest.get("scientist_id")
-            or candidate.name
-        ).strip()
-        scientist_name = str(identity.get("scientist_name") or "").strip()
-        if not scientist_name or scientist_id != candidate.name:
-            invalid.append(
-                {
-                    "directory": candidate.name,
-                    "error": "missing identity or scientist_id does not match the directory",
-                }
-            )
-            continue
-        aliases = [
-            str(value).strip()
-            for value in identity.get("aliases") or []
-            if str(value).strip()
-        ]
-        scientists.append(
-            {
-                "scientist_id": scientist_id,
-                "scientist_name": scientist_name,
-                "aliases": aliases,
-                "path": str(candidate),
-            }
-        )
-    return scientists, invalid
-
-
-def _status_payload(paths: Any) -> dict[str, Any]:
-    resolved = _soul_paths(paths)
-    overlay = load_persona_overlay(resolved.project_root)
-    scientists, invalid = _inventory(resolved.kg_root)
-    return {
-        "active": overlay.active,
-        "scientist_id": overlay.scientist_id if overlay.active else "",
-        "scientist_name": overlay.scientist_name if overlay.active else "",
-        "project_root": str(resolved.project_root),
-        "kg_root": str(resolved.kg_root),
-        "available": scientists,
-        "invalid": invalid,
-    }
-
-
 def render_status(paths: Any, *, json_output: bool = False, startup: bool = False) -> None:
     """Render the active persona and scanner inventory for shell or REPL use."""
-    payload = _status_payload(paths)
+    payload = persona_snapshot(paths)
     if json_output:
         console.print_json(json.dumps(payload, ensure_ascii=False))
         return
@@ -127,7 +44,7 @@ def render_status(paths: Any, *, json_output: bool = False, startup: bool = Fals
         who = payload["scientist_name"] or payload["scientist_id"]
         info(
             f"Active scientist persona: {who} — answers reflect this persona. "
-            'Say "restore yourself" or run $soulagent to unload it.'
+            'Say "restore yourself" to unload it.'
         )
         return
     available = payload["available"]
@@ -148,7 +65,7 @@ def render_status(paths: Any, *, json_output: bool = False, startup: bool = Fals
 
 def render_list(paths: Any, *, json_output: bool = False) -> None:
     """Render the scanner inventory; shared by shell and in-process ``/soul``."""
-    payload = _status_payload(paths)
+    payload = persona_snapshot(paths)
     if json_output:
         console.print_json(json.dumps(payload, ensure_ascii=False))
         return
@@ -269,7 +186,7 @@ def create_cmd(
     """Create, validate, and install a new scientist persona KG."""
     state: AppState = ctx.obj or AppState()
     paths = state.settings().paths
-    resolved = _soul_paths(paths)
+    resolved = resolve_persona_paths(paths)
     output_workspace = (
         workspace.expanduser().resolve()
         if workspace is not None

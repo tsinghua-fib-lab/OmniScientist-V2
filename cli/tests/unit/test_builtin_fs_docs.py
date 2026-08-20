@@ -6,10 +6,20 @@ Covers Layer B (list_dir, dir-aware read_file, sensitive denylist) and Layer Câ€
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from omni.config import load_settings
-from omni.config.paths import get_paths
+from omni.config.paths import OmniPaths, get_paths
+from omni.core.observation import compact_observation, observation_spill_path
+from omni.core.tool_result import (
+    attach_tool_outcome,
+    fs_result_outcome,
+    tool_call_outcome,
+    tool_result_failure,
+)
 from omni.skills_runtime.builtin_tools.docs import build_docs_tools
 from omni.skills_runtime.builtin_tools.fs import build_fs_tools
 from omni.skills_runtime.context import ExecContext
@@ -250,3 +260,38 @@ async def test_docs_read_blocks_traversal_and_non_docs():
 async def test_docs_read_without_name_lists_available_docs():
     out = await _tool(build_docs_tools(_ctx()), "docs_read")({})
     assert "memory.md" in out
+
+
+@pytest.mark.asyncio
+async def test_observation_spill_is_readable_and_jail_denial_is_blocked(tmp_path: Path) -> None:
+    """Reproduce ef3b6546: spill pointer must be readable; jail denial is not success."""
+    home = tmp_path / "home"
+    project = home / "projects" / "walkthrough"
+    project.mkdir(parents=True)
+    ctx = ExecContext(
+        settings=load_settings(),
+        paths=OmniPaths(home=home, project_name="walkthrough", project_dir=project),
+    )
+    leftover = home / "cache" / "spillover" / "source_ids-deadbeef.txt"
+    leftover.parent.mkdir(parents=True)
+    leftover.write_text("abc\n", encoding="utf-8")
+
+    read = _tool(build_fs_tools(ctx), "read_file")
+    assert await read({"path": str(leftover)}) == "abc\n"
+
+    source_ids = [f"source-{index:04d}-{'x' * 80}" for index in range(80)]
+    observation = compact_observation(
+        {"status": "ok", "source_ids": source_ids, "count": 80},
+        max_chars=1500,
+        spill_dir=observation_spill_path(ctx.paths),
+    )
+    spilled = Path(json.loads(observation)["source_ids_spill"])
+    assert spilled.is_relative_to(project)
+    assert (await read({"path": str(spilled)})).splitlines() == source_ids
+
+    denied = await read({"path": "/etc/hosts"})
+    assert "outside the accessible roots" in denied
+    wrapped = attach_tool_outcome(denied, fs_result_outcome(denied))
+    assert tool_call_outcome(wrapped).lifecycle == "blocked"
+    assert tool_call_outcome(wrapped).result_success is not True
+    assert tool_result_failure(wrapped)[0] == "rejected"

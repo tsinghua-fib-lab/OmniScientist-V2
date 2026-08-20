@@ -77,6 +77,11 @@ uv run --project cli omni eval --black-box --repeats 5 --concurrency 4 --json
 uv run --project cli omni eval --black-box --repeats 5 --concurrency 2 --live --json
 ```
 
+The [User Walkthrough Catalog](user-walkthrough-cases.md) lists named native
+tools, stacked prompts, and CLI groups for a configured checkout.
+Those cases are not a substitute for `omni eval --black-box`; they are the
+operator script for a configured checkout.
+
 A black-box scenario contains user turns and observable expectations only. The loader rejects
 planner answers, model outputs, tool scripts, seeded memories/tasks, and reviewer verdicts. Every
 attempt receives a fresh workspace and enters through `OmniAgent.handle_turn`; IM scenarios also

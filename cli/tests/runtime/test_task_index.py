@@ -286,5 +286,73 @@ async def test_list_all_workspaces_syncs_the_index():
 
     rows = await list_tasks_all_workspaces(home=alpha.paths.home)
     assert any(r.id == task.id for r in rows)
-    # The scan mirrored the row into the index so a later show can route to it.
+    # An empty index is reconciled once so a later show can route to the row.
     assert any(r.task_id == task.id for r in await _index_rows(alpha.paths.control_db))
+
+
+@pytest.mark.asyncio
+async def test_list_all_reads_index_without_reconciling(monkeypatch):
+    alpha, adb = await _workspace("alpha")
+    rec = TaskRecorder(
+        adb, project=alpha.paths.project_name, index=TaskIndex.for_workspace(alpha.paths)
+    )
+    task = await rec.create_task(
+        session_id="s", channel="cli", user_input="indexed already", external_key="k"
+    )
+
+    async def boom(*_args, **_kwargs):  # noqa: ANN002
+        raise AssertionError("populated index must not scan workspace stores")
+
+    monkeypatch.setattr("omni.runtime.aggregate.reconcile_index", boom)
+    rows = await list_tasks_all_workspaces(home=alpha.paths.home, limit=10)
+    assert any(r.id == task.id for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_list_all_applies_a_global_limit_not_per_workspace():
+    alpha, adb = await _workspace("alpha")
+    beta, bdb = await _workspace("beta")
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC)
+    async with adb.session() as session:
+        for index in range(3):
+            session.add(
+                TaskORM(
+                    id=f"alpha-task-{index}",
+                    status="succeeded",
+                    title=f"alpha {index}",
+                    kind="turn",
+                    created_at=now - timedelta(minutes=index),
+                )
+            )
+        await session.commit()
+        rows = list((await session.execute(select(TaskORM))).scalars().all())
+    await TaskIndex.for_workspace(alpha.paths).record_many(rows)
+    async with bdb.session() as session:
+        for index in range(3):
+            session.add(
+                TaskORM(
+                    id=f"beta-task-{index}",
+                    status="succeeded",
+                    title=f"beta {index}",
+                    kind="maintenance",
+                    created_at=now - timedelta(minutes=10 + index),
+                )
+            )
+        await session.commit()
+        rows = list((await session.execute(select(TaskORM))).scalars().all())
+    await TaskIndex.for_workspace(beta.paths).record_many(rows)
+
+    listed = await list_tasks_all_workspaces(home=alpha.paths.home, limit=4)
+    assert len(listed) == 4
+    assert {row.id for row in listed} == {
+        "alpha-task-0",
+        "alpha-task-1",
+        "alpha-task-2",
+        "beta-task-0",
+    }
+    mixed = await list_tasks_all_workspaces(home=alpha.paths.home, limit=0)
+    assert len(mixed) == 6
+    turns = await list_tasks_all_workspaces(home=alpha.paths.home, kind="turn", limit=0)
+    assert {row.id for row in turns} == {"alpha-task-0", "alpha-task-1", "alpha-task-2"}

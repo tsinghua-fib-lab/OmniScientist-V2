@@ -961,6 +961,57 @@ class MemoryService:
         _store, row, status = await self._locate(mem_id)
         return row, status
 
+    async def link(
+        self,
+        src_id: str,
+        dst_id: str,
+        *,
+        relation: str = "related",
+        weight: float = 1.0,
+    ) -> tuple[str, MemoryEntryORM | None, MemoryEntryORM | None]:
+        """Create a manual graph edge on the store that owns both memories.
+
+        Status is ``ok``, ``not_found``, ``ambiguous``, ``same``,
+        ``cross_store``, or ``failed``. Edges never cross a store boundary: a
+        global preference and a workspace finding live in different SQLite
+        files, so a cross-store pair is rejected rather than written to the
+        workspace graph and reported as missing.
+        """
+        src_store, src_row, src_status = await self._locate(src_id)
+        dst_store, dst_row, dst_status = await self._locate(dst_id)
+        if "ambiguous" in (src_status, dst_status):
+            return "ambiguous", src_row, dst_row
+        if src_row is None or dst_row is None or src_store is None or dst_store is None:
+            return "not_found", src_row, dst_row
+        if src_row.id == dst_row.id:
+            return "same", src_row, dst_row
+        if src_store is not dst_store:
+            return "cross_store", src_row, dst_row
+        edge_id = await self._graph_for(src_store).add_edge(
+            src_row.id,
+            dst_row.id,
+            relation=relation,
+            weight=weight,
+            origin="manual",
+        )
+        return ("ok" if edge_id else "failed"), src_row, dst_row
+
+    async def neighbors_for(
+        self,
+        mem_id: str,
+        *,
+        depth: int = 1,
+        limit: int = 50,
+    ) -> tuple[str, MemoryEntryORM | None, list[Any]]:
+        """Walk graph neighbors on the store that owns ``mem_id``."""
+        store, row, status = await self._locate(mem_id)
+        if status != "ok" or store is None or row is None:
+            return status, row, []
+        neighbors = await self._graph_for(store).neighbors(
+            row.id, depth=max(1, depth), limit=max(1, limit)
+        )
+        return "ok", row, neighbors
+
     async def set_pinned(self, mem_id: str, pinned: bool) -> bool:
         store, row, status = await self._locate(mem_id)
         if store is None or row is None or status != "ok":

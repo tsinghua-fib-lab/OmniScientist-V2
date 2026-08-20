@@ -2,7 +2,7 @@
 
 `omni` (no args) → interactive REPL. `omni "<prompt>"` → one-shot. Subcommands
 (`model`, `config`, `skills`, `soul`, `mcp`, `project`, `memory`, `task`, `artifacts`, `profile`, `session`,
-`channel`, `cite`, `exec`, `replay`, `init`, `doctor`, `terminal`, `serve`, `uninstall`) work as usual,
+`channel`, `cite`, `exec`, `replay`, `init`, `doctor`, `terminal`, `serve`, `web`, `uninstall`) work as usual,
 as do the research commands (`lit`, `verify`, `bench`, `hypo`, `claim`,
 `evidence`, `run`, `source`). The REPL exposes the same verbs as slash commands
 (`/lit`, `/verify`, `/bench`, `/hypo`, …); `/lit`, `/verify`, `/bench` run
@@ -73,6 +73,7 @@ from omni.cli.commands import (
     uninstall_cmd,
     update_cmd,
     verify_cmd,
+    web_cmd,
 )
 from omni.cli.live_display import (
     VERBOSITY_LEVELS,
@@ -87,7 +88,7 @@ from omni.cli.repl_command_policy import (
     redact_repl_command,
     remember_restart_notice,
 )
-from omni.cli.repl_commands import CommandCatalog, build_command_catalog
+from omni.cli.repl_commands import CommandCatalog, build_command_catalog, command_group
 from omni.cli.repl_input import ReplInputBox
 from omni.cli.repl_output import (
     clear_active_output,
@@ -116,6 +117,7 @@ from omni.cli.runner import (
 )
 from omni.cli.session_resume import render_session_resume
 from omni.cli.state import AppState, make_agent, run_async
+from omni.cli.terminal_harness import inspect_terminal
 from omni.cli.timefmt import format_local_time
 from omni.config.settings import ModelCfg, OmniSettings
 from omni.core.execution_control import CancellationEscalator
@@ -476,6 +478,7 @@ app.command("eval", help=eval_cmd.app_help)(eval_cmd.eval_command)
 app.command("exec")(exec_cmd.exec_command)
 app.command("replay")(replay_cmd.replay_command)
 app.command("trust", help=trust_cmd.app_help)(trust_cmd.trust_command)
+app.add_typer(web_cmd.app, name="web")
 app.add_typer(update_cmd.app, name="update")
 app.command("upgrade", hidden=True)(update_cmd.update_command)
 app.command("uninstall")(uninstall_cmd.uninstall_command)
@@ -908,6 +911,19 @@ def _repl_banner_text(project_name: str, settings: OmniSettings) -> str:
     else:
         state = f"[{theme.SUCCESS}]ready[/]"
     dim, accent = theme.MUTED, theme.ACCENT
+    # One next step, not a manual. Missing/mock models point at setup;
+    # a ready model points at asking, with /web as the browser surface.
+    if missing or mock:
+        next_step = (
+            f"[{dim}]Next[/] [{accent}]/init[/] [{dim}]or[/] [{accent}]/model[/]"
+            f" [{dim}]to configure a real model.[/]"
+        )
+    else:
+        next_step = (
+            f"[{dim}]Next[/] ask a question, or [{accent}]/help[/]"
+            f" [{dim}]·[/] [{accent}]/web[/] [{dim}]opens the browser UI ·[/]"
+            f" [{accent}]/exit[/] [{dim}]to quit.[/]"
+        )
     # Labels dim, values at full strength: dimming the workspace path and the
     # whole guide line left the box's own border as the most legible thing in it.
     return "\n".join(
@@ -917,11 +933,7 @@ def _repl_banner_text(project_name: str, settings: OmniSettings) -> str:
             f" [{model_style}]{escape(f'{model.provider}/{model.model}')}[/]"
             f" [{dim}]·[/] {state}",
             f"[{dim}]workspace[/] {escape(str(settings.paths.project_dir))}",
-            f"[{dim}]Enter[/] [{accent}]/help[/] [{dim}]for examples,[/] [{accent}]@[/]"
-            f" [{dim}]to attach a file, or[/] [{accent}]/exit[/] [{dim}]to quit.[/]",
-            f"[{dim}]Chat from WeChat, Feishu, or DingTalk:[/]"
-            f" [{accent}]/channel login wechat --start[/] [{dim}]scans a QR;[/]"
-            f" [{accent}]/channel help[/] [{dim}]covers the rest.[/]",
+            next_step,
         )
     )
 
@@ -939,14 +951,23 @@ def _typer_children_summary(command_app: typer.Typer) -> str:
     return " / ".join(names) or "none"
 
 
-def _repl_quickstart_rows() -> list[tuple[str, str, str, str]]:
-    """Rows for the entry quickstart table.
+def _quickstart_group(command: str) -> str:
+    """``session`` or ``research`` for a quickstart row's first token."""
+    token = command.split()[0]
+    return command_group(token) if token.startswith("/") else "session"
+
+
+def _repl_quickstart_rows(*, group: str | None = None) -> list[tuple[str, str, str, str]]:
+    """Rows for the ``/help`` command tables.
 
     Columns are (command, subcommands, purpose/details, example): the detail column is
     self-explanatory and the example column is a concrete, runnable command
     chosen for what a first-time user reaches for first. The first four rows
     are ordered by what a new user does first — ask, run setup, choose a model,
     then use advanced config — and the caller colour-highlights those rows.
+
+    ``group`` filters to ``session`` (conversation / workspace) or ``research``.
+    Startup no longer prints this table; it lives under ``/help``.
     """
     rows = [
         ("Ask directly", "none", "Start a conversation by entering a question", "Summarize the contributions of arXiv 2310.06825"),
@@ -988,6 +1009,12 @@ def _repl_quickstart_rows() -> list[tuple[str, str, str, str]]:
             "auto|plan|review",
             "Switch REPL mode; plan waits for approval and review uses read-only tools",
             "/mode plan",
+        ),
+        (
+            "/web",
+            _typer_children_summary(web_cmd.app),
+            "Start the local browser UI in the background; /web stop / status / port manage it",
+            "/web",
         ),
         (
             "/verbose",
@@ -1038,7 +1065,7 @@ def _repl_quickstart_rows() -> list[tuple[str, str, str, str]]:
         ("/compact", "none", "Compact older turns and report estimated token savings", "/compact"),
         ("/context", "none", "Show the session context budget and injected sections", "/context"),
         ("/resume", _typer_children_summary(resume_cmd.app), "Resume workspace sessions", "/resume --last"),
-        ("/session", _typer_children_summary(session_cmd.app), "Inspect, resume, fork, and export sessions", "/session list"),
+        ("/session", _typer_children_summary(session_cmd.app), "Inspect, resume, fork, export, and delete sessions", "/session list"),
         ("/project", _typer_children_summary(project_cmd.app), "Manage project workspaces", "/project list"),
         ("/mcp", _typer_children_summary(mcp_cmd.app), "Expose Omni capabilities to Codex or Claude Code", "/mcp install"),
         ("/profile", _typer_children_summary(profile_cmd.app), "Manage model and credential profiles", "/profile list"),
@@ -1109,7 +1136,9 @@ def _repl_quickstart_rows() -> list[tuple[str, str, str, str]]:
         if name in shown:
             continue
         rows.append((f"/{name}", "see --help", help_text or "Show command help", f"/{name} --help"))
-    return rows
+    if group is None:
+        return rows
+    return [row for row in rows if _quickstart_group(row[0]) == group]
 
 
 def _command_table(
@@ -1118,6 +1147,7 @@ def _command_table(
     rows: list[tuple[str, ...]],
     *,
     row_styles: list[str | None] | None = None,
+    initially_collapsed: bool = True,
 ) -> None:
     event = TranscriptEvent(
         kind=TranscriptKind.DATA_TABLE,
@@ -1129,7 +1159,7 @@ def _command_table(
             row_styles=tuple(style or "" for style in (row_styles or ())),
         ),
         foldable=True,
-        initially_collapsed=True,
+        initially_collapsed=initially_collapsed,
     )
     if publish_transcript_event(event, stream=console.file):
         return
@@ -1177,6 +1207,7 @@ def _quickstart_row_style(command: str) -> str | None:
 
 
 def _show_repl_quickstart(model: ModelCfg) -> None:
+    """Startup model status only. The command manual lives under ``/help``."""
     missing = _missing_model_fields(model)
     if _is_mock_provider(model.provider):
         warn("The offline mock model is active; configure a real model for full answers.")
@@ -1186,28 +1217,26 @@ def _show_repl_quickstart(model: ModelCfg) -> None:
         _print_model_setup_hint()
     else:
         info("Model configuration is loaded; you can ask a question now.")
-    rows = _repl_quickstart_rows()
-    styles = [_quickstart_row_style(row[0]) for row in rows]
-    _command_table(
-        "Common commands and subcommands",
-        ("command", "subcommands", "purpose and details", "example"),
-        rows,
-        row_styles=styles,
-    )
 
 
 def _show_repl_help() -> None:
-    # A concise, hierarchical overview: one row per command (command · its
-    # subcommands · purpose · one example), no per-subcommand rows. The detailed
-    # subcommand params/examples live under each command's own ``help`` (e.g.
-    # `/config help`, `/skills help`), so the top level stays scannable.
-    rows = _repl_quickstart_rows()
-    styles = [_quickstart_row_style(row[0]) for row in rows]
+    # Two groups so daily verbs are not buried under /lit /bench /channel.
+    # Conversation starts open; research stays a foldable appendix.
+    conversation = _repl_quickstart_rows(group="session")
+    research = _repl_quickstart_rows(group="research")
     _command_table(
-        "Interactive mode commands",
+        "Conversation and workspace",
         ("command", "subcommands", "purpose", "example"),
-        rows,
-        row_styles=styles,
+        conversation,
+        row_styles=[_quickstart_row_style(row[0]) for row in conversation],
+        initially_collapsed=False,
+    )
+    _command_table(
+        "Research",
+        ("command", "subcommands", "purpose", "example"),
+        research,
+        row_styles=[_quickstart_row_style(row[0]) for row in research],
+        initially_collapsed=True,
     )
     info(
         "For subcommands, options, and examples, enter `<command> help`, for example "
@@ -1994,12 +2023,16 @@ async def _repl_async(state: AppState, *, resume_session_id: str | None = None) 
     # stay mentionable even when the repository gitignores them, which projects
     # routinely do precisely because those files are generated.
     output_base = Path(str(getattr(s.artifacts, "output_dir", ".") or ".")).expanduser()
+    # xterm modifyOtherKeys readiness — not a Kitty CSI-u probe. Footer and
+    # placeholder advertise Shift+Enter only when this report says they work.
+    shift_enter_ready = inspect_terminal().shift_enter_ready
     tui: ReplTui | None = None
     if resolve_ui_mode(str(getattr(s.display, "ui_mode", "auto") or "auto")) == "tui":
         candidate = ReplTui(
             commands=commands,
             diagnostic_log_path=agent.paths.logs_dir / "omni-tui.log",
             output_base=output_base,
+            shift_enter_ready=shift_enter_ready,
         )
         try:
             await candidate.start()
@@ -2011,7 +2044,11 @@ async def _repl_async(state: AppState, *, resume_session_id: str | None = None) 
             from omni.cli.approval_prompt import build_tui_approver
 
             agent.approver = build_tui_approver(tui)
-    input_box = tui or ReplInputBox(commands=commands, output_base=output_base)
+    input_box = tui or ReplInputBox(
+        commands=commands,
+        output_base=output_base,
+        shift_enter_ready=shift_enter_ready,
+    )
     guide(_repl_banner_text(agent.paths.project_name, s))
     _show_repl_quickstart(s.model)
     # Contextual SoulAgent discovery hint: silent unless a persona is active or the
@@ -2402,18 +2439,27 @@ def _repl_update_in_terminal(state: AppState, line: str) -> bool:
 
 
 def _background_service_exit_hint(paths) -> str:  # noqa: ANN001
+    parts: list[str] = []
     d = daemon_info(paths)
-    if not d:
-        return ""
-    channels = d.get("channels")
-    if isinstance(channels, list):
-        channel_text = ",".join(str(c) for c in channels if str(c).strip()) or "configured channels"
-    else:
-        channel_text = str(d.get("channels_arg") or "configured channels")
-    return (
-        f"omni serve is still running (pid={d['pid']}, channels={channel_text}). "
-        "Connected channels remain available; stop it with `omni serve stop`."
-    )
+    if d:
+        channels = d.get("channels")
+        if isinstance(channels, list):
+            channel_text = ",".join(str(c) for c in channels if str(c).strip()) or "configured channels"
+        else:
+            channel_text = str(d.get("channels_arg") or "configured channels")
+        parts.append(
+            f"omni serve is still running (pid={d['pid']}, channels={channel_text}). "
+            "Connected channels remain available; stop it with `omni serve stop`."
+        )
+    from omni.runtime.web_service import web_info
+
+    web = web_info(paths)
+    if web:
+        parts.append(
+            f"omni web is still running (pid={web['pid']}, {web['url']}). "
+            "Stop it with `omni web stop` or `/web stop` in a new session."
+        )
+    return " ".join(parts)
 
 
 def _refresh_repl_skill_registry(agent, state: AppState) -> None:  # noqa: ANN001
@@ -2464,8 +2510,9 @@ _REPL_IN_PROCESS_COMMANDS = frozenset({
 # read-only / pure-UI verbs run *immediately* even while a turn is in flight, instead
 # of queuing behind it. They only read state (or touch the dock), so they run
 # concurrently with the turn's own output — each gets a task-local output turn, and a
-# failure is contained (never sinks the running turn). ``/task`` streams a child
-# ``omni task …`` process; the rest dispatch in-process.
+# failure is contained (never sinks the running turn). ``/task list|all|session|help``
+# run in-process against the global task index; other ``/task`` verbs stream a child
+# ``omni task …`` process. The rest of this set dispatch in-process.
 _REPL_LIVE_DURING_TURN = frozenset({
     "task", "context", "inbox", "copy", "help", "soul", "verbose", "debug", "mode",
 })
@@ -2575,6 +2622,12 @@ def _session_aware_external_line(line: str, session_id: str) -> str:
         return ""
 
     command = tokens[0]
+    if command == "web":
+        # REPL `/web` must not block on the foreground server. Bare `/web` and
+        # `/web --port N` become `web start`; explicit manage verbs stay as-is.
+        sub = tokens[1] if len(tokens) > 1 and not str(tokens[1]).startswith("-") else ""
+        if sub not in {"start", "stop", "status", "restart", "port", "help"}:
+            tokens = ["web", "start", *tokens[1:]]
     if len(tokens) == 1 and command in _REPL_BARE_GROUP_ACTIONS:
         tokens.append(_REPL_BARE_GROUP_ACTIONS[command])
 
@@ -2907,21 +2960,27 @@ async def _repl_command(
         except ValueError:
             warn("Could not parse the command; check quotation marks.")
         else:
-            returncode = await _run_repl_external_command(state, external_line)
-            if returncode == 0 and command == "skills":
-                _refresh_repl_skill_registry(agent, state)
-            elif returncode == 0 and command == "config":
-                tokens = _split_repl_command_line(external_line)
-                subcommand = tokens[1] if len(tokens) > 1 else ""
-                home_changed = subcommand == "home" and (
-                    len(tokens) > 2 or "--reset" in tokens
-                )
-                if home_changed:
-                    # Re-exec the whole REPL so its agent, session, inbox watcher,
-                    # and daemon checks all resolve the same newly selected home.
-                    restart = True
-                elif _config_command_changed_settings(tokens):
-                    agent = await _reload_repl_agent(agent, state)
+            from omni.cli.commands.tasks_cmd import is_repl_task_inspect, run_repl_task_inspect
+
+            inspect_tokens = _split_repl_command_line(external_line)
+            if is_repl_task_inspect(inspect_tokens):
+                await run_repl_task_inspect(state, inspect_tokens)
+            else:
+                returncode = await _run_repl_external_command(state, external_line)
+                if returncode == 0 and command == "skills":
+                    _refresh_repl_skill_registry(agent, state)
+                elif returncode == 0 and command == "config":
+                    tokens = _split_repl_command_line(external_line)
+                    subcommand = tokens[1] if len(tokens) > 1 else ""
+                    home_changed = subcommand == "home" and (
+                        len(tokens) > 2 or "--reset" in tokens
+                    )
+                    if home_changed:
+                        # Re-exec the whole REPL so its agent, session, inbox watcher,
+                        # and daemon checks all resolve the same newly selected home.
+                        restart = True
+                    elif _config_command_changed_settings(tokens):
+                        agent = await _reload_repl_agent(agent, state)
     else:
         warn(f"Unknown command: {cmd}. Use /help.")
 

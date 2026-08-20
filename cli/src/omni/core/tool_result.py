@@ -11,6 +11,52 @@ COMMAND_RESULT_SCHEMA = "omni.command-result.v1"
 COMMAND_RESULT_STATUSES = frozenset(
     {"succeeded", "failed", "timed_out", "blocked", "invalid"}
 )
+TOOL_NOT_STARTED = "TOOL_NOT_STARTED"
+TOOL_OUTCOME_UNKNOWN = "TOOL_OUTCOME_UNKNOWN"
+_SIDE_EFFECT_TOOLS = frozenset(
+    {
+        "write_file",
+        "edit_file",
+        "bash",
+        "run_compute",
+        "search_literature",
+        "cite_source",
+        "record_claim",
+        "add_evidence",
+        "record_hypothesis",
+        "run_skill",
+        "run_workflow",
+        "log_run",
+        "build_research_artifact",
+    }
+)
+
+
+def interrupted_tool_payload(name: str, *, started: bool) -> dict[str, Any]:
+    """Honest interrupt observation: unknown after start, retryable before it."""
+    if not started:
+        return {
+            "status": "interrupted",
+            "error_code": TOOL_NOT_STARTED,
+            "error": (
+                "The tool call was interrupted before the host recorded it as started. "
+                "Retry it if it is still needed."
+            ),
+        }
+    side_effect = str(name or "") in _SIDE_EFFECT_TOOLS
+    return {
+        "status": "interrupted",
+        "error_code": TOOL_OUTCOME_UNKNOWN,
+        "error": (
+            "The tool call was interrupted after it started, but no result was "
+            "durably recorded. Its outcome is unknown. "
+            + (
+                "Do not retry blindly; verify external state or ask the user first."
+                if side_effect
+                else "It is read-only or idempotent; retry if still needed."
+            )
+        ),
+    }
 
 
 ToolLifecycle = Literal["completed", "failed", "blocked", "aborted", "timed_out"]
@@ -172,6 +218,35 @@ def owned_result_outcome(value: Any) -> ToolCallOutcome | None:
     if failed or (not raw_status and bool(output.get("error"))):
         return ToolCallOutcome.completed(success=False, error=error or "tool result failed")
     return None
+
+
+_FS_POLICY_MARKERS = (
+    "outside the accessible roots",
+    "denied",
+    "sensitive file hidden",
+    "security policy",
+    "protected directory",
+)
+
+
+def fs_result_outcome(value: Any) -> ToolCallOutcome | None:
+    """Classify first-party filesystem observations.
+
+    Codex records a sandbox denial as a failed/denied invocation, not a
+    successful tool call that happens to contain the word ERROR. ``read_file``
+    still returns a string so the model can course-correct; only the host-owned
+    outcome changes. Dict payloads fall through to :func:`owned_result_outcome`.
+    """
+    output = tool_event_output(value)
+    if not isinstance(output, str):
+        return owned_result_outcome(value)
+    text = output.strip()
+    if not text.startswith("ERROR:"):
+        return ToolCallOutcome.completed()
+    lowered = text.lower()
+    if any(marker in lowered for marker in _FS_POLICY_MARKERS):
+        return ToolCallOutcome.blocked(text)
+    return ToolCallOutcome.completed(success=False, error=text)
 
 
 def recall_result_outcome(value: Any) -> ToolCallOutcome | None:
@@ -431,6 +506,9 @@ def tool_event_name(data: Any) -> str:
 __all__ = [
     "COMMAND_RESULT_SCHEMA",
     "COMMAND_RESULT_STATUSES",
+    "TOOL_NOT_STARTED",
+    "TOOL_OUTCOME_UNKNOWN",
+    "interrupted_tool_payload",
     "TOOL_EVENT_NAME_KEYS",
     "HostToolRejection",
     "ToolCallOutcome",
@@ -451,6 +529,7 @@ __all__ = [
     "tool_observation",
     "tool_outcome_event_fields",
     "owned_result_outcome",
+    "fs_result_outcome",
     "recall_result_outcome",
     "tool_rejection_error",
     "tool_result_failure",

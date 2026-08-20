@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy.exc import OperationalError
+
 from omni.agent.capabilities import CAPABILITY_TASK_INSPECT, CAPABILITY_TASK_REVIEW
 from omni.agent.intent_plan import IntentPlan
 from omni.agent.plan_result import PlanExecutionResult
@@ -17,6 +19,7 @@ from omni.core.execution_control import ExecutionCancelled, ExecutionControl
 from omni.core.react_agent import AgentLoopResult, ToolInvocationRecord
 from omni.runtime.presentation import ArtifactRef, artifact_refs, presentable_artifacts
 from omni.runtime.remaining import (
+    remaining_contract_files,
     remaining_deliverables,
     remaining_figure,
     remaining_slides,
@@ -24,6 +27,7 @@ from omni.runtime.remaining import (
     survey_closer_eligible,
 )
 from omni.runtime.task_title import short_task_title
+from omni.storage.db import sqlite_busy
 
 
 @dataclass
@@ -105,6 +109,23 @@ def _merge_drained_artifacts(
             seen.add(key)
             merged.append(ref)
     return merged
+
+
+def _task_contract_inventory(
+    rows: list[Any],
+    drained: list[dict[str, Any]],
+) -> list[Any]:
+    """Store rows plus skill-declared files settlement has not indexed yet."""
+    return [*rows, *_merge_drained_artifacts([], drained)]
+
+
+def _mark_unpaid_settlement(result: Any, unpaid_notices: list[str]) -> None:
+    """Unpaid named files are degraded, not succeeded — even if settle disagreed."""
+    if not unpaid_notices:
+        return
+    status = str(getattr(result, "settlement_status", "") or "")
+    if status in {"", "succeeded", "passed", "pending"}:
+        result.settlement_status = "degraded"
 
 
 _SLIDE_SKILL_NAMES = frozenset({"research-pptx"})
@@ -538,23 +559,23 @@ class TurnCompletion:
             tool_trace=list(result.tool_trace),
             terminated_reason=result.terminated_reason,
         )
-        fill_warnings = await self._fill_remaining_writing(
+        fill_warnings = await self._fill_authored_renders(
             plan,
             loop_result,
             result.drained_results,
+            submitted=result.submitted_subtask_ids,
             task_id=task_id,
             session_id=session_id,
+            drain_tasks=drain_tasks,
+            channel=channel,
         )
         fill_warnings.extend(
-            await self._fill_remaining_slides(
+            await self._honest_unpaid_files(
                 plan,
                 loop_result,
                 result.drained_results,
                 submitted=result.submitted_subtask_ids,
                 task_id=task_id,
-                session_id=session_id,
-                drain_tasks=drain_tasks,
-                channel=channel,
             )
         )
         result.text = loop_result.content
@@ -566,6 +587,14 @@ class TurnCompletion:
             plan,
             await self._task_outputs(task_id),
             result.drained_results,
+        )
+        unpaid = [note for note in fill_warnings if "still owes" in note]
+        present_status = (
+            result.terminated_reason
+            if result.terminated_reason in {"cancelled", "interrupted"}
+            else "degraded"
+            if unpaid
+            else ""
         )
         await self._hooks.emit(
             "pre_present",
@@ -601,13 +630,10 @@ class TurnCompletion:
             submitted_subtask_ids=result.submitted_subtask_ids,
             drain_tasks=drain_tasks,
             error=result.error,
-            task_status=(
-                result.terminated_reason
-                if result.terminated_reason in {"cancelled", "interrupted"}
-                else ""
-            ),
+            task_status=present_status,
         )
         await apply_settlement(task_id, result)
+        _mark_unpaid_settlement(result, unpaid)
         await self._hooks.emit(
             "post_present",
             task_id=task_id,
@@ -693,25 +719,48 @@ class TurnCompletion:
             drain_tasks=drain_tasks,
             emit_tool_event=emit_tool_event,
         )
-        figure_warnings = await self._fill_remaining_figure(
-            plan, result, drained, task_id=task_id, session_id=session_id,
+        from omni.agent.plan_runner_utils import apply_retrieve_only_projection
+
+        getter = getattr(self._tasks, "get_task", None)
+        task = await getter(task_id) if callable(getter) else None
+        ledger_ids = [
+            str(item).strip()
+            for item in (getattr(task, "source_ids", None) or [])
+            if str(item).strip()
+        ]
+        result.content = apply_retrieve_only_projection(
+            plan,
+            source_ids=ledger_ids,
+            model_text=result.content,
         )
-        fill_warnings = [
-            *figure_warnings,
-            *await self._fill_remaining_writing(
-                plan, result, drained, task_id=task_id, session_id=session_id,
-            ),
-            *await self._fill_remaining_slides(
+        fill_warnings = await self._fill_authored_renders(
+            plan,
+            result,
+            drained,
+            submitted=submitted,
+            task_id=task_id,
+            session_id=session_id,
+            drain_tasks=drain_tasks,
+            channel=channel,
+        )
+        fill_warnings.extend(
+            await self._honest_unpaid_files(
                 plan,
                 result,
                 drained,
                 submitted=submitted,
                 task_id=task_id,
-                session_id=session_id,
-                drain_tasks=drain_tasks,
-                channel=channel,
-            ),
-        ]
+            )
+        )
+        unpaid = [note for note in fill_warnings if "still owes" in note]
+        present_status = final_status
+        if unpaid and present_status not in {
+            "failed",
+            "needs_input",
+            "cancelled",
+            "interrupted",
+        }:
+            present_status = "degraded"
         await self._hooks.emit(
             "pre_present",
             task_id=task_id,
@@ -743,7 +792,7 @@ class TurnCompletion:
             submitted_subtask_ids=submitted,
             drain_tasks=drain_tasks,
             error=result.content if result.kind == "error" else "",
-            task_status=final_status,
+            task_status=present_status,
         )
         turn_result = TurnResult(
             text=result.content,
@@ -762,15 +811,14 @@ class TurnCompletion:
             ),
             user_notices=list(plan.user_notices),
             twin_task_id=plan.twin_task_id,
-            # Use the same canonical classifier already written to
-            # ``react.finished`` and passed to ``finish_turn``. A synthesized
-            # answer can still be bounded/degraded even though its shape is
-            # ordinary text; classifying from text alone produced a succeeded
-            # TurnResult beside a degraded durable task.
-            settlement_status=final_status,
+            # Unpaid named files are degraded even when the loop stop looks
+            # like ordinary text. apply_settlement may still raise a child
+            # failure; honesty then refuses to present succeeded.
+            settlement_status=present_status,
             artifacts=artifacts,
         )
         await apply_settlement(task_id, turn_result)
+        _mark_unpaid_settlement(turn_result, unpaid)
         await self._hooks.emit(
             "post_present",
             task_id=task_id,
@@ -781,6 +829,95 @@ class TurnCompletion:
         )
         return turn_result
 
+    async def _fill_authored_renders(
+        self,
+        plan: IntentPlan,
+        result: AgentLoopResult,
+        drained: list[dict[str, Any]],
+        *,
+        submitted: list[str],
+        task_id: str,
+        session_id: str,
+        drain_tasks: bool,
+        channel: str,
+    ) -> list[str]:
+        """Render already-authored inputs. Never invent a figure or manuscript."""
+        if result.kind in {"error", "needs_input"} or result.terminated_reason in {
+            "cancelled",
+            "interrupted",
+        }:
+            return []
+        if not task_id:
+            return []
+        if self._artifacts is None:
+            return []
+        rows = await self._artifacts.list_by_task(task_id)
+        required = list(plan.verification_plan.required_outputs) or list(plan.outputs)
+        inventory = _task_contract_inventory(rows, drained)
+        remaining = remaining_deliverables(required, inventory)
+        notes: list[str] = []
+        from omni.agent.figure_runner import unrendered_authored_dot
+
+        if remaining_figure(remaining) and unrendered_authored_dot(inventory):
+            notes.extend(
+                await self._fill_remaining_figure(
+                    plan, result, drained, task_id=task_id, session_id=session_id
+                )
+            )
+            rows = await self._artifacts.list_by_task(task_id)
+            inventory = _task_contract_inventory(rows, drained)
+            remaining = remaining_deliverables(required, inventory)
+        if remaining_slides(remaining) and any(_is_task_manuscript(row) for row in inventory):
+            notes.extend(
+                await self._fill_remaining_slides(
+                    plan,
+                    result,
+                    drained,
+                    submitted=submitted,
+                    task_id=task_id,
+                    session_id=session_id,
+                    drain_tasks=drain_tasks,
+                    channel=channel,
+                )
+            )
+        return notes
+
+    async def _honest_unpaid_files(
+        self,
+        plan: IntentPlan,
+        result: AgentLoopResult,
+        drained: list[dict[str, Any]],
+        *,
+        submitted: list[str],
+        task_id: str,
+    ) -> list[str]:
+        """Say what is still owed before persist. Host does not write it."""
+        if result.kind in {"error", "needs_input"} or result.terminated_reason in {
+            "cancelled",
+            "interrupted",
+        }:
+            return []
+        if not task_id:
+            return []
+        rows: list[Any] = []
+        if self._artifacts is not None:
+            rows = await self._artifacts.list_by_task(task_id)
+        required = list(plan.verification_plan.required_outputs) or list(plan.outputs)
+        inventory = _task_contract_inventory(rows, drained)
+        unpaid = remaining_contract_files(remaining_deliverables(required, inventory))
+        slide_debt = remaining_slides(unpaid)
+        if slide_debt and submitted:
+            unpaid = [name for name in unpaid if name not in slide_debt]
+        if not unpaid:
+            return []
+        notice = (
+            f"This task still owes {', '.join(unpaid)} on this task_id. "
+            "Say continue or resume to reopen this task. The host will not write the file."
+        )
+        text = (result.content or "").rstrip()
+        result.content = f"{text}\n\n{notice}" if text else notice
+        return [notice]
+
     async def _fill_remaining_figure(
         self,
         plan: IntentPlan,
@@ -790,11 +927,11 @@ class TurnCompletion:
         task_id: str,
         session_id: str,
     ) -> list[str]:
-        """If the loop stopped still owing a figure, run scientific-figure here.
+        """If this task already has unrendered DOT, render it here.
 
-        Only artifacts on this ``task_id`` count. A PNG from an earlier sibling
-        task is not delivery. Waits in-turn (``queue=False``) so IM
-        ``drain_tasks=False`` does not leave the parent running.
+        Does not invent a figure. A PNG from an earlier sibling task is not
+        delivery. Waits in-turn (``queue=False``) so IM ``drain_tasks=False``
+        does not leave the parent running.
         """
         if result.kind in {"error", "needs_input"} or result.terminated_reason in {
             "cancelled",
@@ -807,12 +944,16 @@ class TurnCompletion:
         rows: list[Any] = []
         if self._artifacts is not None:
             rows = await self._artifacts.list_by_task(task_id)
-        if not remaining_figure(remaining_deliverables(required, rows)):
+        inventory = _task_contract_inventory(rows, drained)
+        if not remaining_figure(remaining_deliverables(required, inventory)):
+            return []
+        from omni.agent.figure_runner import host_fill_figure, unrendered_authored_dot
+
+        if not unrendered_authored_dot(inventory):
             return []
         enqueue = getattr(self._runtime, "enqueue", None)
         if not callable(enqueue):
             return ["Host could not fill remaining artifact.figure (runtime unavailable)."]
-        from omni.agent.figure_runner import host_fill_figure, unrendered_authored_dot
 
         try:
             filled = await host_fill_figure(
@@ -822,7 +963,7 @@ class TurnCompletion:
                 session_id=session_id,
                 user_message=plan.user_message,
                 title=short_task_title(plan.user_message),
-                source_artifact_path=unrendered_authored_dot(rows),
+                source_artifact_path=unrendered_authored_dot(inventory),
             )
         except Exception:  # noqa: BLE001 — host fill is best-effort
             return ["Host could not fill remaining artifact.figure."]
@@ -857,12 +998,10 @@ class TurnCompletion:
         task_id: str,
         session_id: str,
     ) -> list[str]:
-        """If the loop stopped still owing a manuscript, write it natively.
+        """Unused salvage: write a manuscript natively. Not the default path.
 
-        Salvage only: the turn must already have retrieved or run scientific
-        work. Memory or task archaeology is not enough. Runs outside the
-        sampling idle clock. Does not restore a sealed DAG and does not rerun
-        skills that already produced artifacts.
+        ``complete_react`` / ``complete_plan`` do not call this. Tests may
+        still invoke it. The produce path is the model calling ``write_file``.
         """
         if result.kind in {"error", "needs_input"} or result.terminated_reason in {
             "cancelled",
@@ -941,11 +1080,11 @@ class TurnCompletion:
         drain_tasks: bool,
         channel: str,
     ) -> list[str]:
-        """If the loop stopped still owing a deck, submit research-pptx here.
+        """If this task already has a manuscript, submit research-pptx here.
 
-        Twin-task files do not satisfy this task's required_outputs. IM does
-        not drain inline, so the child is queued and the parent stays
-        ``pending_child_task`` until the deck lands.
+        Does not invent a deck. Twin-task files do not satisfy this task's
+        required_outputs. IM does not drain inline, so the child is queued
+        and the parent stays ``pending_child_task`` until the deck lands.
         """
         if result.kind in {"error", "needs_input"} or result.terminated_reason in {
             "cancelled",
@@ -960,12 +1099,15 @@ class TurnCompletion:
         rows: list[Any] = []
         if self._artifacts is not None:
             rows = await self._artifacts.list_by_task(task_id)
-        if not remaining_slides(remaining_deliverables(required, rows)):
+        inventory = _task_contract_inventory(rows, drained)
+        if not remaining_slides(remaining_deliverables(required, inventory)):
+            return []
+        if not any(_is_task_manuscript(row) for row in inventory):
             return []
         enqueue = getattr(self._runtime, "enqueue", None)
         if not callable(enqueue):
             return ["Host could not fill remaining artifact.slides (runtime unavailable)."]
-        markdown_uri = await _manuscript_uri(self._artifacts, rows)
+        markdown_uri = await _manuscript_uri(self._artifacts, inventory)
         try:
             filled = await host_fill_slides(
                 runtime=self._runtime,
@@ -1239,9 +1381,18 @@ class TurnExecution:
             # injected at a ReAct boundary.
             result._delivered_control_ids = control.delivered_control_ids  # type: ignore[attr-defined]
             if result.terminated_reason == "cancelled":
-                await self._settle_cancelled_children(
-                    result.task_id or acknowledged["task_id"]
-                )
+                from omni.runtime.cancel_persist import run_uncancelled
+
+                async def settle_returned() -> None:
+                    task_id = result.task_id or acknowledged["task_id"]
+                    await self._settle_cancelled_children(task_id)
+                    still_open = getattr(self._tasks, "has_active_children", None)
+                    if callable(still_open) and await still_open(task_id):
+                        await asyncio.sleep(0.35)
+                        await self._settle_cancelled_children(task_id)
+
+                # wait_for() can cancel this wrapper; the checkpoint must land.
+                await run_uncancelled(settle_returned, serialize=False)
             return result
         except ExecutionCancelled:
             result = await self._stopped_result(
@@ -1279,8 +1430,15 @@ class TurnExecution:
         if not task_id:
             return
         settler = getattr(self._tasks, "settle_open_children_for_cancel", None)
-        if callable(settler):
+        if not callable(settler):
+            return
+        try:
             await settler(task_id)
+        except OperationalError as exc:
+            # A leftover aiosqlite lock must not replace user cancel with a
+            # store failure. The child row is retried by the skill persist.
+            if not sqlite_busy(exc):
+                raise
 
     async def _cancelled_result(
         self,
@@ -1319,10 +1477,12 @@ class TurnExecution:
             if cancelled
             else f"Interrupted before completing: {user_message[:160]}"
         )
-        if cancelled:
-            await self._settle_cancelled_children(task_id)
-        task = await self._tasks.get_task(task_id) if task_id else None
-        if task is not None and task.status in {"running", "recovering"}:
+        from omni.runtime.cancel_persist import run_uncancelled
+
+        async def persist_stop() -> None:
+            task = await self._tasks.get_task(task_id) if task_id else None
+            if task is None or task.status not in {"running", "recovering"}:
+                return
             if session_id:
                 await self._persist_message(
                     session_id,
@@ -1339,12 +1499,30 @@ class TurnExecution:
                 output_json={"kind": "partial", "terminated_reason": reason},
                 summary=summary,
             )
+            # Close the ReAct span. complete_react never ran on this path.
+            await self._tasks.append_event(
+                task_id,
+                event_type="react.finished",
+                status=reason,
+                name="react",
+                output_json={"kind": "partial", "terminated_reason": reason},
+                summary=f"react partial: {reason}",
+            )
             await self._task_controller.finish_turn(
                 task_id,
                 kind="partial",
                 text=text,
                 task_status=reason,
             )
+
+        if cancelled:
+            # serialize=False so settle can drop persist_lock between busy
+            # retries. Still a sibling: wait_for(8) must not abort the sleep.
+            async def settle() -> None:
+                await self._settle_cancelled_children(task_id)
+
+            await run_uncancelled(settle, serialize=False)
+        await run_uncancelled(persist_stop)
         return TurnResult(
             text=text,
             session_id=session_id,

@@ -15,10 +15,12 @@ from omni.cli.repl_layout import (
     COMPOSER_PLACEHOLDER,
     COMPOSER_PLACEHOLDER_MEDIUM,
     COMPOSER_PLACEHOLDER_NARROW,
+    COMPOSER_PLACEHOLDER_SHIFT,
     center_truncate_path,
     clip_display,
     display_width,
     fit_hint_parts,
+    newline_hint,
     placeholder_for_width,
 )
 from omni.cli.repl_tui import ApprovalOption, ReplTui
@@ -90,10 +92,13 @@ def test_center_truncate_path_keeps_the_basename():
 
 def test_placeholder_for_width_compacts_instead_of_overflowing():
     assert placeholder_for_width(80) == COMPOSER_PLACEHOLDER
+    assert placeholder_for_width(80, shift_enter_ready=True) == COMPOSER_PLACEHOLDER_SHIFT
     assert placeholder_for_width(40) == COMPOSER_PLACEHOLDER_MEDIUM
     assert placeholder_for_width(20) == COMPOSER_PLACEHOLDER_NARROW
     assert display_width(placeholder_for_width(40)) <= 40
     assert display_width(placeholder_for_width(20)) <= 20
+    assert newline_hint(False) == "Ctrl+J newline"
+    assert newline_hint(True) == "Shift+Enter newline"
 
 
 @pytest.mark.parametrize("columns", (20, 40, 60, 80))
@@ -130,12 +135,19 @@ def test_unfitted_footer_text_stays_complete_for_existing_callers():
     assert tui.footer_text() == (
         "auto mode · Enter send · Ctrl+J newline · select to copy · Ctrl+D exit"
     )
+    ready = ReplTui(commands=(), shift_enter_ready=True)
+    assert ready.footer_text() == (
+        "auto mode · Enter send · Shift+Enter newline · select to copy · Ctrl+D exit"
+    )
 
 
 def test_placeholder_tracks_terminal_width():
     tui = ReplTui(commands=())
     _set_columns(tui, 80)
     assert tui._placeholder_text() == COMPOSER_PLACEHOLDER
+    ready = ReplTui(commands=(), shift_enter_ready=True)
+    _set_columns(ready, 80)
+    assert ready._placeholder_text() == COMPOSER_PLACEHOLDER_SHIFT
     _set_columns(tui, 40)
     assert tui._placeholder_text() == COMPOSER_PLACEHOLDER_MEDIUM
     _set_columns(tui, 20)

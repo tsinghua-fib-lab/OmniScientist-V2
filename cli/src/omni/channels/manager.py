@@ -26,7 +26,7 @@ from omni.runtime.notifications import TaskNotification
 
 logger = logging.getLogger(__name__)
 
-KNOWN_CHANNELS = ("cli", "wechat", "feishu", "dingtalk")
+KNOWN_CHANNELS = ("cli", "wechat", "feishu", "dingtalk", "web")
 # IM channels whose credentials live home-level (``~/.omni/channels``): exactly
 # one daemon machine-wide may bind each of these, guarded by a home-level lock.
 # ``cli`` has no external poll loop, so it never needs the lock.
@@ -42,17 +42,10 @@ _RELOAD_SENTINEL = ".reload"
 _RELOAD_POLL_INTERVAL = 0.5
 
 
-def _required_fields(name: str, data: dict[str, Any]) -> tuple[str, ...]:
-    """Required config fields for static completeness, mode-aware for WeChat."""
+def _required_fields(name: str, _data: dict[str, Any]) -> tuple[str, ...]:
+    """Required config fields for static completeness."""
     if name == "wechat":
-        from omni.channels.wechat import resolve_wechat_mode
-
-        mode = resolve_wechat_mode(data)
-        if mode == "ilink":
-            return ("bot_token",)
-        if mode == "wecom":
-            return ("gateway_url", "inbox_path", "send_path")
-        return ("gateway_url", "inbox_path", "send_path")
+        return ("bot_token",)
     return _REQUIRED.get(name, ())
 
 
@@ -277,8 +270,12 @@ class ChannelManager:
                 self._channels.pop(name, None)
 
             if now < self._retry_after.get(name, 0.0):
-                self._health.setdefault(name, {"status": "degraded", "reason": "waiting before retry"})
-                continue
+                # A fresh scan rewrites this channel's config; skip the backoff
+                # so the new token can start immediately. Lock failures never
+                # captured a fingerprint and must keep waiting.
+                if self._fingerprints.get(name) is None or not self._config_changed(name):
+                    self._health.setdefault(name, {"status": "degraded", "reason": "waiting before retry"})
+                    continue
 
             self._start_channel(name)
 
@@ -389,9 +386,10 @@ class ChannelManager:
             raise
         except Exception as exc:  # noqa: BLE001
             if not self._stopping:
-                reason = _short_error(exc)
+                reason = str(getattr(exc, "health_reason", None) or _short_error(exc))
                 self._health[name] = {"status": "degraded", "reason": reason}
-                self._retry_after[name] = time.time() + self.retry_interval
+                delay = 3600.0 if getattr(exc, "health_reason", None) else self.retry_interval
+                self._retry_after[name] = time.time() + delay
                 logger.warning("channel %s adapter degraded: %s", name, reason)
                 logger.debug("channel %s adapter error", name, exc_info=True)
 

@@ -8,13 +8,16 @@ from omni.core.tool_result import (
     ToolCallOutcome,
     ToolResultEnvelope,
     _mint_host_tool_rejection,
+    attach_tool_outcome,
     command_exit_summary,
     command_failure_hint,
     command_output_window,
     command_result_status,
     first_command_output_line,
+    fs_result_outcome,
     is_tool_rejection,
     owned_result_outcome,
+    tool_call_outcome,
     tool_event_output,
     tool_event_suffix,
     tool_observation,
@@ -130,6 +133,33 @@ def test_typed_unsuccessful_result_retains_invocation_authority() -> None:
 
     assert tool_result_failure(result) == ("failed", "source unavailable")
     assert tool_event_output(result) is output
+
+
+def test_fs_policy_denial_is_blocked_not_succeeded() -> None:
+    denied = (
+        "ERROR: read denied because the path is outside the accessible roots: "
+        "/Users/antonio/.omni/cache/spillover/source_ids-deadbeef.txt. "
+        "Accessible roots: /tmp/project."
+    )
+    wrapped = attach_tool_outcome(denied, fs_result_outcome(denied))
+    outcome = tool_call_outcome(wrapped)
+
+    assert outcome.lifecycle == "blocked"
+    assert outcome.result_success is not True
+    assert tool_result_failure(wrapped) == ("rejected", denied)
+
+
+def test_fs_missing_path_is_completed_failure() -> None:
+    missing = "ERROR: path does not exist: /tmp/project/nope.md"
+    outcome = fs_result_outcome(missing)
+
+    assert outcome is not None
+    assert outcome.lifecycle == "completed"
+    assert outcome.result_success is False
+    assert tool_result_failure(attach_tool_outcome(missing, outcome)) == (
+        "failed",
+        missing,
+    )
 
 
 def test_owned_result_resolver_preserves_declared_cancellation() -> None:

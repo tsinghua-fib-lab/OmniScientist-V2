@@ -261,7 +261,7 @@ async def test_analysis_followup_is_not_preempted_by_historical_lookup() -> None
     agent.llm = llm
     try:
         turn = await agent.handle_turn(
-            "分析一下前面 RAG 系统综述 & Transformer 架构图的结果是否可靠",
+            "分析一下前面问的 RAG 系统综述 & Transformer 架构图的结果是否可靠",
             channel="cli",
             drain_tasks=False,
         )

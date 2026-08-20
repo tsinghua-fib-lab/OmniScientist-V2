@@ -23,10 +23,6 @@ from omni.agent.plan_runner_utils import (
 )
 from omni.core.react_agent import ToolInvocationRecord
 from omni.core.tool_contracts import skill_input_contract_error
-from omni.runtime.task_results import (
-    action_required_presentation,
-    installation_required_presentation,
-)
 from omni.skills_runtime.context import SKILL_SOURCE_PARAM, ExecContext, Tool
 
 
@@ -212,37 +208,6 @@ class SkillTaskRunner:
                 "skill_name": skill,
                 "mode": "background",
             }
-        action_required = action_required_presentation(drained)
-        if action_required is not None:
-            text, reason, _ = action_required
-            return PlanExecutionResult(
-                handled=True,
-                text=text,
-                kind="needs_input",
-                submitted_subtask_ids=[subtask_id],
-                drained_results=drained,
-                tool_trace=[trace_record],
-                terminated_reason=reason,
-                plan_summary=plan_summary(plan),
-                degraded_warnings=list(plan.degraded_warnings),
-                settlement_status="needs_input",
-            )
-        installation_required = installation_required_presentation(drained)
-        if installation_required is not None:
-            text, reason, _ = installation_required
-            return PlanExecutionResult(
-                handled=True,
-                text=text,
-                kind="error",
-                submitted_subtask_ids=[subtask_id],
-                drained_results=drained,
-                tool_trace=[trace_record],
-                terminated_reason=reason,
-                error=text,
-                plan_summary=plan_summary(plan),
-                degraded_warnings=list(plan.degraded_warnings),
-                settlement_status="failed",
-            )
         if drain_tasks and drained and settlement_status(drained) == "failed":
             # The plan bet the whole turn on one skill and the skill did not
             # deliver. Reporting that as the answer makes a routing choice look

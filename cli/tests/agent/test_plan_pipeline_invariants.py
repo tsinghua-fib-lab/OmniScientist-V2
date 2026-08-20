@@ -38,7 +38,7 @@ def _search_skill() -> SkillEntry:
             args=["-c", "print('{}')"],
             stdout_format="json",
         ),
-        capabilities=["literature.search"],
+        capabilities=["pipeline.probe"],
         workflow={
             "failure_policy": "continue_with_partial",
             "allow_failed_dependencies": True,
@@ -148,7 +148,7 @@ async def test_final_bind_rejects_provider_identity_changed_after_acceptance() -
                 "workflow_steps": [
                     {
                         "id": "search",
-                        "capability": "literature.search",
+                        "capability": "pipeline.probe",
                         "input": {"query": "authority closure"},
                     }
                 ],
@@ -370,7 +370,7 @@ async def test_accepted_v1_workflow_binds_without_hash_migration() -> None:
                 "id": "search",
                 "skill_name": "pipeline-search",
                 "skill_source": "project_omni",
-                "capability": "literature.search",
+                "capability": "pipeline.probe",
                 "input": {"query": "accepted v1 workflow compatibility"},
             }
         ],

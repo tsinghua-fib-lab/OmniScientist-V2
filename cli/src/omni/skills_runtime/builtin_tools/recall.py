@@ -206,9 +206,8 @@ async def _all_workspace_tasks(
 ) -> list[Any]:
     """Recent tasks across every registered workspace (newest-first, index-synced).
 
-    Reuses the same catalog aggregate that powers ``omni task --all`` / ``/task
-    all``, so the agent sees exactly what that command sees — and the read also
-    keeps the global index in sync as a side effect.
+    Reuses the same global task-index read that powers ``omni task --all`` /
+    ``/task all``, so the agent sees the same rows as that command.
     """
     from omni.runtime.aggregate import list_tasks_all_workspaces
 

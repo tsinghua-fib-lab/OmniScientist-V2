@@ -1,0 +1,143 @@
+- generic [ref=f2e3]:
+  - complementary "工作区与会话导航" [ref=f2e4]:
+    - generic [ref=f2e5]:
+      - generic [ref=f2e6]:
+        - generic [ref=f2e7]: Omni
+        - generic [ref=f2e8]: Scientist
+      - button "收起侧栏" [ref=f2e10] [cursor=pointer]
+    - button "新会话" [ref=f2e14] [cursor=pointer]
+    - generic [ref=f2e16]:
+      - button "搜索" [ref=f2e17] [cursor=pointer]
+      - button "打开目录" [ref=f2e21] [cursor=pointer]
+      - button "刷新工作区" [ref=f2e24] [cursor=pointer]
+    - generic [ref=f2e30]:
+      - generic [ref=f2e31]:
+        - generic [ref=f2e32]:
+          - generic [ref=f2e33]: 工作区
+          - generic [ref=f2e34]: "1"
+        - list [ref=f2e35]:
+          - button "workspace /private/tmp/omni-acceptance-20260825.WpUEbV/workspace" [ref=f2e36] [cursor=pointer]:
+            - generic [ref=f2e39]:
+              - generic [ref=f2e40]: workspace
+              - generic [ref=f2e41]: /private/tmp/omni-acceptance-20260825.WpUEbV/workspace
+      - separator "调整工作区与会话区域高度" [ref=f2e43]
+      - generic [ref=f2e45]:
+        - generic [ref=f2e46]:
+          - generic [ref=f2e47]: 会话
+          - generic [ref=f2e48] [cursor=pointer]: 按渠道筛选会话
+          - combobox "按渠道筛选会话" [ref=f2e49] [cursor=pointer]:
+            - option "全部渠道" [selected]
+            - option "cli"
+            - option "web"
+            - option "wechat"
+            - option "feishu"
+            - option "dingtalk"
+        - generic [ref=f2e50]:
+          - generic [ref=f2e248]:
+            - button "打开会话：WEB_ENTER_ACCEPTANCE SECOND_LINE" [active] [ref=f2e249] [cursor=pointer]:
+              - generic [ref=f2e250]:
+                - generic "WEB_ENTER_ACCEPTANCE SECOND_LINE" [ref=f2e251]
+                - generic [ref=f2e252]:
+                  - generic [ref=f2e253]: web
+                  - generic [ref=f2e254]: 1 分钟前
+                - generic [ref=f2e255]:
+                  - generic [ref=f2e256]: 创建 1 分钟前
+                  - generic [ref=f2e257]: Task 7fa0a32e
+            - button "会话菜单：WEB_ENTER_ACCEPTANCE SECOND_LINE" [ref=f2e258] [cursor=pointer]: ···
+          - generic [ref=f2e91]:
+            - button "打开会话：acceptance-fork" [ref=f2e92] [cursor=pointer]:
+              - generic [ref=f2e93]:
+                - generic "acceptance-fork" [ref=f2e94]
+                - generic [ref=f2e95]:
+                  - generic [ref=f2e96]: cli
+                  - generic [ref=f2e97]: 17 分钟前
+                - generic [ref=f2e98]:
+                  - generic [ref=f2e99]: 创建 17 分钟前
+                  - generic [ref=f2e100]: Task 1556e987
+            - button "会话菜单：acceptance-fork" [ref=f2e101] [cursor=pointer]: ···
+          - generic [ref=f2e102]:
+            - button "打开会话：只读总结当前空工作区，不修改文件。" [ref=f2e103] [cursor=pointer]:
+              - generic [ref=f2e104]:
+                - generic "只读总结当前空工作区，不修改文件。" [ref=f2e105]
+                - generic [ref=f2e106]:
+                  - generic [ref=f2e107]: cli
+                  - generic [ref=f2e108]: 17 分钟前
+                - generic [ref=f2e109]:
+                  - generic [ref=f2e110]: 创建 17 分钟前
+                  - generic [ref=f2e111]: Task 0f866646
+            - button "会话菜单：只读总结当前空工作区，不修改文件。" [ref=f2e112] [cursor=pointer]: ···
+          - generic [ref=f2e113]:
+            - button "打开会话：只回复 READY，并说明你召回到的长期语言偏好。" [ref=f2e114] [cursor=pointer]:
+              - generic [ref=f2e115]:
+                - generic "只回复 READY，并说明你召回到的长期语言偏好。" [ref=f2e116]
+                - generic [ref=f2e117]:
+                  - generic [ref=f2e118]: cli
+                  - generic [ref=f2e119]: 17 分钟前
+                - generic [ref=f2e120]:
+                  - generic [ref=f2e121]: 创建 17 分钟前
+                  - generic [ref=f2e122]: Task 4420d48d
+            - button "会话菜单：只回复 READY，并说明你召回到的长期语言偏好。" [ref=f2e123] [cursor=pointer]: ···
+    - generic [ref=f2e52]:
+      - group "渠道与设置" [ref=f2e53]:
+        - button "配置消息渠道" [ref=f2e54] [cursor=pointer]
+        - button "设置" [ref=f2e60] [cursor=pointer]
+      - generic [ref=f2e64]:
+        - strong [ref=f2e124]: workspace
+        - generic [ref=f2e125]: 已信任 · 可写入
+  - separator "调整左侧导航宽度" [ref=f2e66]
+  - main [ref=f2e68]:
+    - generic [ref=f2e69]:
+      - generic [ref=f2e70]:
+        - heading "WEB_ENTER_ACCEPTANCE SECOND_LINE" [level=2] [ref=f2e340]
+        - generic [ref=f2e260]: workspace
+      - button "选择学术人格" [ref=f2e128] [cursor=pointer]:
+        - generic [ref=f2e137]: 学术人格
+      - generic [ref=f2e261]: web
+      - button "专注主内容" [ref=f2e138] [cursor=pointer]
+      - navigation "工作区详情" [ref=f2e144]:
+        - button "打开任务" [ref=f2e145] [cursor=pointer]:
+          - generic [ref=f2e149]: 任务
+        - button "打开产物" [ref=f2e150] [cursor=pointer]:
+          - generic [ref=f2e156]: 产物
+        - button "打开ROM" [ref=f2e157] [cursor=pointer]:
+          - generic [ref=f2e170]: ROM
+        - button "打开笔记" [ref=f2e171] [cursor=pointer]:
+          - generic [ref=f2e175]: 笔记
+        - button "打开费用" [ref=f2e176] [cursor=pointer]:
+          - generic [ref=f2e180]: 费用
+    - generic [ref=f2e183]:
+      - generic "workspace · WEB_ENTER_ACCEPTANCE SECOND_LINE" [ref=f2e341]: workspace · WEB_ENTER_ACCEPTANCE SECOND_LINE · Task 7fa0a32e · Session 664a27fd
+      - generic [ref=f2e342]: WEB_ENTER_ACCEPTANCE SECOND_LINE
+      - generic [ref=f2e343]:
+        - generic [ref=f2e344]:
+          - generic [ref=f2e349]:
+            - strong [ref=f2e350]: WEB_ENTER_ACCEPTANCE SEC
+            - generic [ref=f2e351]: Task 7fa0a32e · succeeded
+          - button "查看任务 7fa0a32e 的产物" [ref=f2e352] [cursor=pointer]: 查看产物
+        - group [ref=f2e358]:
+          - generic "查看任务 7fa0a32e 的执行过程" [ref=f2e359] [cursor=pointer]: 执行完成 · 11 条活动
+      - generic [ref=f2e366]:
+        - generic [ref=f2e367]:
+          - paragraph [ref=f2e368]: "[Offline mock model] Request received: “WEB_ENTER_ACCEPTANCE SECOND_LINE”"
+          - paragraph [ref=f2e369]:
+            - text: This is an offline placeholder. The mock model does not invoke tools automatically. Configure a real provider, for example
+            - code [ref=f2e370]: /config set model.provider openai
+            - text: ; the API key is stored in secrets.toml under the active Omni data directory.
+        - generic [ref=f2e371]:
+          - button "复制回复" [ref=f2e372] [cursor=pointer]:
+            - generic [ref=f2e376]: 复制
+          - generic [ref=f2e377]: 1 分钟前
+    - generic [ref=f2e228]:
+      - generic [ref=f2e229]:
+        - textbox "给 Omni 发送消息" [ref=f2e230]:
+          - /placeholder: 询问、斜杠命令，或继续这条会话…
+        - generic [ref=f2e231]:
+          - generic "添加附件" [ref=f2e232]
+          - group "交互模式" [ref=f2e235]:
+            - button "自动" [pressed] [ref=f2e236] [cursor=pointer]
+            - button "计划" [ref=f2e237] [cursor=pointer]
+            - button "审阅" [ref=f2e238] [cursor=pointer]
+          - button "发送" [disabled] [ref=f2e239]
+      - generic [ref=f2e243]:
+        - generic "/private/tmp/omni-acceptance-20260825.WpUEbV/workspace" [ref=f2e244]: workspace
+        - generic [ref=f2e247]: Enter 发送 · Shift + Enter 换行 · 内容保存在本机工作区

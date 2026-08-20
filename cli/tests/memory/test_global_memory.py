@@ -130,3 +130,60 @@ async def test_global_store_preserves_peer_isolation() -> None:
     # The owning peer recalls their own memory.
     res_bob = await mem.recall("protein folding", principal="feishu:bob", cross_session=True)
     assert any("bob" in sm.entry.summary for sm in res_bob)
+
+
+@pytest.mark.asyncio
+async def test_manual_link_writes_edge_on_the_global_store() -> None:
+    from sqlalchemy import select
+
+    from omni.storage.models import MemoryEdgeORM
+
+    mem, workspace_db, global_db = await _memory_for("proj_link")
+    src = await mem.record(
+        layer=MemoryLayer.SEMANTIC, scope="user",
+        summary="user prefers Chinese group-meeting slides",
+        memory_type="user_note",
+    )
+    dst = await mem.record(
+        layer=MemoryLayer.SEMANTIC, scope="user",
+        summary="user prefers arXiv-only sources",
+        memory_type="user_note",
+    )
+
+    status, src_row, dst_row = await mem.link(src, dst, relation="related")
+    assert status == "ok"
+    assert src_row is not None and dst_row is not None
+    assert {src_row.id, dst_row.id} == {src, dst}
+
+    async with global_db.session() as session:
+        global_edges = list((await session.execute(select(MemoryEdgeORM))).scalars().all())
+    assert any(
+        {edge.src_id, edge.dst_id} == {src, dst} and edge.relation == "related"
+        for edge in global_edges
+    )
+    async with workspace_db.session() as session:
+        workspace_edges = list((await session.execute(select(MemoryEdgeORM))).scalars().all())
+    assert not any({edge.src_id, edge.dst_id} == {src, dst} for edge in workspace_edges)
+
+    view_status, _row, neighbors = await mem.neighbors_for(src)
+    assert view_status == "ok"
+    assert dst in {item.id for item in neighbors}
+
+
+@pytest.mark.asyncio
+async def test_manual_link_rejects_cross_store_pair() -> None:
+    mem, _workspace_db, _global_db = await _memory_for("proj_cross")
+    global_id = await mem.record(
+        layer=MemoryLayer.SEMANTIC, scope="user",
+        summary="user prefers SI units",
+        memory_type="user_note",
+    )
+    workspace_id = await mem.record(
+        layer=MemoryLayer.SEMANTIC, scope="project",
+        summary="this workspace uses a toy RAG corpus",
+        memory_type="finding",
+    )
+
+    status, src_row, dst_row = await mem.link(global_id, workspace_id)
+    assert status == "cross_store"
+    assert src_row is not None and dst_row is not None

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from omni.core.funnel_facts import (
     has_literature_hits,
     is_empty_literature_funnel,
@@ -100,6 +103,8 @@ def test_wrapper_projects_empty_funnel_as_degraded() -> None:
     assert wrapped["queries"] == ["latent space"]
     assert "zero relevant papers" in wrapped["warning"]
     assert wrapped["skill_name"] == "research-ideation"
+    assert wrapped["observation"]["schema"] == "omni.engine.observation/v1"
+    assert wrapped["observation"]["metrics"]["n_kept"] == 0
 
 
 def test_compact_observation_keeps_funnel_facts_above_paper_bodies() -> None:
@@ -115,3 +120,65 @@ def test_compact_observation_keeps_funnel_facts_above_paper_bodies() -> None:
     assert "latent space" in observation
     assert "zero relevant papers" in observation
     assert observation.count("A" * 2000) == 0
+
+
+def test_compact_observation_head_tail_truncates_a_plain_string() -> None:
+    text = "HEAD\n" + ("body\n" * 200) + "TAIL"
+    observation = compact_observation(text, max_chars=200)
+    assert len(observation) <= 200
+    assert observation.startswith("Warning: truncated output")
+    assert "original token count:" in observation
+    assert "Total output lines:" in observation
+    assert "HEAD" in observation
+    assert "TAIL" in observation
+    assert "chars truncated" in observation
+
+
+def test_compact_observation_keeps_full_source_id_list() -> None:
+    source_ids = [f"src-{index:02d}" for index in range(22)]
+    observation = compact_observation(
+        {
+            "status": "ok",
+            "count": 17,
+            "source_ids": source_ids,
+            "results": [{"title": f"Paper {index}"} for index in range(17)],
+        },
+        max_chars=8000,
+    )
+    parsed = json.loads(observation)
+    assert parsed["source_ids"] == source_ids
+    assert parsed["count"] == 17
+    assert parsed["results"][-1] == "… 9 more"
+
+
+def test_compact_observation_spills_source_ids_when_over_budget(tmp_path) -> None:
+    source_ids = [f"source-{index:04d}-{'x' * 80}" for index in range(80)]
+    observation = compact_observation(
+        {"status": "ok", "source_ids": source_ids, "count": 80},
+        max_chars=1500,
+        spill_dir=tmp_path,
+    )
+    parsed = json.loads(observation)
+    assert parsed["source_ids_count"] == 80
+    spilled = Path(parsed["source_ids_spill"])
+    assert spilled.is_file()
+    assert spilled.read_text(encoding="utf-8").splitlines() == source_ids
+    assert parsed["source_ids"][-1].endswith("more")
+    assert parsed["source_ids"][0] == source_ids[0]
+
+
+def test_compact_observation_uses_head_tail_when_spill_still_overflows(tmp_path) -> None:
+    source_ids = [f"source-{index:04d}-{'x' * 80}" for index in range(80)]
+    payload = {"status": "ok", "source_ids": source_ids, "count": 80}
+    fitted = compact_observation(payload, max_chars=1500, spill_dir=tmp_path)
+    cap = len(fitted) - 1
+    observation = compact_observation(payload, max_chars=cap, spill_dir=tmp_path)
+    assert len(observation) <= cap
+    assert "Warning: truncated output" in observation
+    assert "original token count:" in observation
+    assert "Total output lines:" in observation
+    assert "chars truncated" in observation
+    assert '"status"' in observation
+    assert "Full source_ids saved to:" in observation
+    spilled = Path(json.loads(fitted)["source_ids_spill"])
+    assert spilled.read_text(encoding="utf-8").splitlines() == source_ids

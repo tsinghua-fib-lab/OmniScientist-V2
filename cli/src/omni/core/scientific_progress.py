@@ -43,6 +43,8 @@ RESEARCH_PRODUCE_TOOLS = frozenset(
         "build_research_artifact",
         "web_search",
         "web_fetch",
+        "write_file",
+        "edit_file",
         "arxiv-fetch",
         "arxiv_search",
         "openalex-search",
@@ -61,8 +63,9 @@ MIN_LOOKUP_STREAK = 2
 # sibling task's file as delivery, so the host names the produce path instead.
 LOOKUP_STEER = (
     "This turn still owes a manuscript on this task_id. Files from another task "
-    "do not count. Retrieve sources now (search_literature or run_skill). The "
-    "host will write the file after this-turn research exists."
+    "do not count. Retrieve sources if this task has none, then produce the file "
+    "with write_file or the relevant skill. Do not stop after lookup and wait "
+    "for the host to write."
 )
 
 

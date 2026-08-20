@@ -44,6 +44,12 @@ from omni.cli.repl_tui import ReplTui
         ["task", "watch", "--once"],
         ["skills", "trust", "demo", "--yes"],
         ["serve", "prune", "--yes"],
+        ["web", "start"],
+        ["web", "stop"],
+        ["web", "status"],
+        ["web", "restart"],
+        ["web", "port", "1290"],
+        ["web", "help"],
     ],
 )
 def test_noninteractive_variants_use_captured_transcript(tokens: list[str]) -> None:
@@ -69,6 +75,7 @@ def test_noninteractive_variants_use_captured_transcript(tokens: list[str]) -> N
         (["serve", "daemon"], "foreground_tty"),
         (["serve", "poller"], "foreground_tty"),
         (["mcp", "serve"], "foreground_tty"),
+        (["web"], "foreground_tty"),
     ],
 )
 def test_interactive_variants_get_the_required_terminal_mode(

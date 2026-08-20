@@ -351,7 +351,12 @@ def test_undeclared_skill_metadata_has_no_contract_or_role_privilege() -> None:
 # Omni only through a language-agnostic surface (SKILL.md frontmatter, the
 # ``.soulagent`` state protocol, and the ``role.md`` persona stoma read by
 # ``omni.agent.persona_stoma``), so the English-only rule does not extend into
-# their internals. English stays enforced everywhere else under ``skills/``.
+# their internals.
+#
+# Portable ``SKILL.md`` bodies are the same class of document as Codex / Claude
+# Code skill text: model-facing instructions that may name a user's file
+# (``综述.md``). They are not Omni's control plane. English stays enforced on
+# skill engines, tests, and the rest of ``skills/``.
 _VENDORED_PERSONA_SKILLS = (
     ROOT.parent / "skills" / "soulagent",
     ROOT.parent / "skills" / "scientist-kg-distiller",
@@ -378,6 +383,7 @@ def test_production_control_plane_and_public_docs_are_english_only() -> None:
         str(path.relative_to(ROOT.parent))
         for path in files
         if not any(root in path.parents for root in exempt)
+        and path.name != "SKILL.md"
         and han.search(path.read_text(encoding="utf-8"))
     ]
 

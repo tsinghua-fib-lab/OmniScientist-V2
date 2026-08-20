@@ -29,6 +29,26 @@ def _write_executable(path: Path, text: str) -> None:
     path.chmod(0o755)
 
 
+def _installer_copy(tmp_path: Path, *, with_web: bool = False) -> Path:
+    """Return an isolated checkout so installer tests never use live ``web/dist``."""
+
+    root = tmp_path / "checkout"
+    cli = root / "cli"
+    script = cli / "scripts" / "install.sh"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(INSTALL_SH, script)
+    (cli / "pyproject.toml").write_text("[project]\nname='test'\n", encoding="utf-8")
+    init = cli / "src" / "omni" / "__init__.py"
+    init.parent.mkdir(parents=True, exist_ok=True)
+    init.write_text('__version__ = "2.0.0rc4"\n', encoding="utf-8")
+    if with_web:
+        shutil.copyfile(ROOT / "cli" / "scripts" / "build_web_ui.sh", script.parent / "build_web_ui.sh")
+        web = root / "web"
+        web.mkdir(parents=True, exist_ok=True)
+        (web / "package.json").write_text("{}\n", encoding="utf-8")
+    return script
+
+
 def _fake_uv(tmp_path: Path) -> tuple[Path, Path, Path]:
     bin_dir = tmp_path / "bin"
     uv_bin = tmp_path / "uv-bin"
@@ -57,6 +77,24 @@ def _fake_uv(tmp_path: Path) -> tuple[Path, Path, Path]:
         '  printf "%s\\n" "${UV_TOOL_BIN_DIR:-$UV_BIN}"\n'
         "fi\n",
     )
+    _write_executable(
+        bin_dir / "pnpm",
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> "$OMNI_WEB_BUILD_LOG"\n'
+        'if [ -n "${OMNI_WEB_BUILD_FAIL:-}" ] && [ "$*" != "install --frozen-lockfile" ]; then\n'
+        '  target="dist"\n'
+        '  case "$*" in *"--outDir "*) for arg in "$@"; do target="$arg"; done ;; esac\n'
+        '  rm -rf "$target"\n'
+        '  exit "$OMNI_WEB_BUILD_FAIL"\n'
+        'fi\n'
+        'target="dist"\n'
+        'case "$*" in *"--outDir "*) for arg in "$@"; do target="$arg"; done ;; esac\n'
+        'if [ "$*" = "build" ] || printf "%s" "$*" | grep -q "vite build"; then\n'
+        '  mkdir -p "$target/assets"\n'
+        '  printf "<!doctype html><title>fresh</title>\\n" > "$target/index.html"\n'
+        '  printf "window.fresh=true\\n" > "$target/assets/app.js"\n'
+        'fi\n',
+    )
     return bin_dir, uv_bin, uv_log
 
 
@@ -71,6 +109,7 @@ def _installer_env(tmp_path: Path, bin_dir: Path, uv_bin: Path, uv_log: Path) ->
         "UV_LOG": str(uv_log),
         "OMNI_EXACT_LOG": str(tmp_path / "installed-omni.log"),
         "OMNI_TEMPLATE": str(tmp_path / "omni-template"),
+        "OMNI_WEB_BUILD_LOG": str(tmp_path / "web-build.log"),
     }
 
 
@@ -90,7 +129,7 @@ def test_shell_installer_defaults_to_uv_even_with_active_environments(tmp_path: 
     env["CONDA_DEFAULT_ENV"] = "base"
 
     result = subprocess.run(
-        ["bash", str(INSTALL_SH), "--local", "--on-conflict", "cancel"],
+        ["bash", str(_installer_copy(tmp_path)), "--local", "--on-conflict", "cancel"],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -108,6 +147,64 @@ def test_shell_installer_defaults_to_uv_even_with_active_environments(tmp_path: 
     assert "--version" in exact_calls
     assert "_record-install --method uv" in exact_calls
     assert "_converge-install" in exact_calls
+
+
+def test_shell_installer_builds_web_before_local_snapshot_install(tmp_path: Path) -> None:
+    bin_dir, uv_bin, uv_log = _fake_uv(tmp_path)
+    env = _installer_env(tmp_path, bin_dir, uv_bin, uv_log)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(_installer_copy(tmp_path, with_web=True)),
+            "--local",
+            "--on-conflict",
+            "cancel",
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    build_calls = (tmp_path / "web-build.log").read_text(encoding="utf-8").splitlines()
+    assert build_calls[0] == "install --frozen-lockfile"
+    assert build_calls[1].startswith("exec vite build --outDir ")
+    built = tmp_path / "checkout" / "web" / "dist"
+    assert "fresh" in (built / "index.html").read_text(encoding="utf-8")
+    assert (built / "version.json").is_file()
+    assert "tool install --force" in uv_log.read_text(encoding="utf-8")
+
+
+def test_shell_installer_stops_before_install_when_web_build_fails(tmp_path: Path) -> None:
+    bin_dir, uv_bin, uv_log = _fake_uv(tmp_path)
+    env = _installer_env(tmp_path, bin_dir, uv_bin, uv_log)
+    env["OMNI_WEB_BUILD_FAIL"] = "17"
+    installer = _installer_copy(tmp_path, with_web=True)
+    old_dist = tmp_path / "checkout" / "web" / "dist"
+    old_dist.mkdir()
+    (old_dist / "index.html").write_text("last-known-good\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(installer),
+            "--local",
+            "--on-conflict",
+            "cancel",
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 17, result.stdout + result.stderr
+    assert not uv_log.exists() or "tool install" not in uv_log.read_text(encoding="utf-8")
+    assert (old_dist / "index.html").read_text(encoding="utf-8") == "last-known-good\n"
 
 
 def test_standalone_shell_installer_defaults_to_pypi(tmp_path: Path) -> None:
@@ -134,7 +231,7 @@ def test_standalone_shell_installer_defaults_to_pypi(tmp_path: Path) -> None:
         for line in uv_log.read_text(encoding="utf-8").splitlines()
         if line.startswith("tool install ")
     )
-    assert "OmniScientist-V2[mcp,vec,channels]" in install_call
+    assert "OmniScientist-V2[mcp,vec,channels,web]" in install_call
     assert "git+" not in install_call
 
 
@@ -145,7 +242,7 @@ def test_shell_installer_allows_package_index_override(tmp_path: Path) -> None:
     result = subprocess.run(
         [
             "bash",
-            str(INSTALL_SH),
+            str(_installer_copy(tmp_path)),
             "--local",
             "--index-url",
             "aliyun",
@@ -172,7 +269,7 @@ def test_shell_installer_reads_package_index_from_environment(tmp_path: Path) ->
     env["OMNI_PYPI_INDEX_URL"] = custom_index
 
     result = subprocess.run(
-        ["bash", str(INSTALL_SH), "--local", "--on-conflict", "cancel"],
+        ["bash", str(_installer_copy(tmp_path)), "--local", "--on-conflict", "cancel"],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -205,7 +302,7 @@ def test_shell_installer_bootstraps_missing_uv_and_continues(tmp_path: Path) -> 
     env["UV_INSTALL_TEMPLATE"] = str(uv_template)
 
     result = subprocess.run(
-        ["bash", str(INSTALL_SH), "--local", "--on-conflict", "cancel"],
+        ["bash", str(_installer_copy(tmp_path)), "--local", "--on-conflict", "cancel"],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -230,7 +327,7 @@ def test_shell_installer_rejects_explicit_conda_base_without_force(tmp_path: Pat
     env.pop("VIRTUAL_ENV", None)
 
     result = subprocess.run(
-        ["bash", str(INSTALL_SH), "--local", "--method", "env"],
+        ["bash", str(_installer_copy(tmp_path)), "--local", "--method", "env"],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -249,7 +346,7 @@ def test_shell_installer_rejects_mutable_git_refs(tmp_path: Path) -> None:
     env = _installer_env(tmp_path, bin_dir, uv_bin, uv_log)
 
     result = subprocess.run(
-        ["bash", str(INSTALL_SH), "--remote", "--ref", "main"],
+        ["bash", str(_installer_copy(tmp_path)), "--remote", "--ref", "main"],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -274,7 +371,7 @@ def test_shell_installer_requires_a_duplicate_install_decision_when_noninteracti
     env = _installer_env(tmp_path, bin_dir, uv_bin, uv_log)
 
     result = subprocess.run(
-        ["bash", str(INSTALL_SH), "--local"],
+        ["bash", str(_installer_copy(tmp_path)), "--local"],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -305,7 +402,7 @@ def test_shell_installer_automatically_reinstalls_the_same_uv_owner(tmp_path: Pa
     env = _installer_env(tmp_path, bin_dir, uv_bin, uv_log)
 
     result = subprocess.run(
-        ["bash", str(INSTALL_SH), "--local"],
+        ["bash", str(_installer_copy(tmp_path)), "--local"],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -346,7 +443,7 @@ def test_shell_installer_deduplicates_uv_launcher_and_manifest_owner(tmp_path: P
     (omni_home / "install.json").write_text("{}", encoding="utf-8")
 
     result = subprocess.run(
-        ["bash", str(INSTALL_SH), "--local"],
+        ["bash", str(_installer_copy(tmp_path)), "--local"],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -375,7 +472,13 @@ def test_shell_installer_waits_for_a_pending_uninstall(tmp_path: Path) -> None:
     started = time.monotonic()
     try:
         result = subprocess.run(
-            ["bash", str(INSTALL_SH), "--local", "--on-conflict", "cancel"],
+            [
+                "bash",
+                str(_installer_copy(tmp_path)),
+                "--local",
+                "--on-conflict",
+                "cancel",
+            ],
             cwd=ROOT,
             env=env,
             capture_output=True,
@@ -409,7 +512,13 @@ def test_shell_installer_times_out_an_unresponsive_old_launcher(tmp_path: Path) 
     started = time.monotonic()
 
     result = subprocess.run(
-        ["bash", str(INSTALL_SH), "--local", "--on-conflict", "migrate"],
+        [
+            "bash",
+            str(_installer_copy(tmp_path)),
+            "--local",
+            "--on-conflict",
+            "migrate",
+        ],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -465,7 +574,7 @@ def test_shell_installer_ignores_a_stale_manifest_in_preserved_omni_home(tmp_pat
     )
 
     result = subprocess.run(
-        ["bash", str(INSTALL_SH), "--local", "--on-conflict", "cancel"],
+        ["bash", str(_installer_copy(tmp_path)), "--local", "--on-conflict", "cancel"],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -493,7 +602,7 @@ def test_shell_installer_migrates_a_verified_env_copy_to_uv(tmp_path: Path) -> N
     result = subprocess.run(
         [
             "bash",
-            str(INSTALL_SH),
+            str(_installer_copy(tmp_path)),
             "--local",
             "--on-conflict",
             "migrate",
@@ -563,7 +672,7 @@ def test_shell_installer_upgrades_the_exact_custom_uv_registry(
     env["UV_ENV_LOG"] = str(uv_env_log)
 
     result = subprocess.run(
-        ["bash", str(INSTALL_SH), "--local"],
+        ["bash", str(_installer_copy(tmp_path)), "--local"],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -587,7 +696,7 @@ def test_shell_installer_never_mutates_a_pipx_venv_as_plain_env(
     result = subprocess.run(
         [
             "bash",
-            str(INSTALL_SH),
+            str(_installer_copy(tmp_path)),
             "--local",
             "--on-conflict",
             "upgrade",
@@ -625,7 +734,7 @@ def test_shell_installer_migration_uninstalls_through_the_exact_pipx_owner(
     result = subprocess.run(
         [
             "bash",
-            str(INSTALL_SH),
+            str(_installer_copy(tmp_path)),
             "--local",
             "--on-conflict",
             "migrate",
@@ -654,7 +763,7 @@ def test_shell_installer_migration_fails_when_old_owner_cleanup_fails(
     result = subprocess.run(
         [
             "bash",
-            str(INSTALL_SH),
+            str(_installer_copy(tmp_path)),
             "--local",
             "--on-conflict",
             "migrate",
@@ -691,7 +800,7 @@ def test_shell_installer_migration_cleans_pipx_when_launcher_path_is_reused(
     result = subprocess.run(
         [
             "bash",
-            str(INSTALL_SH),
+            str(_installer_copy(tmp_path)),
             "--local",
             "--on-conflict",
             "migrate",
@@ -733,7 +842,7 @@ def test_shell_installer_migration_removes_old_uv_through_its_registry(
     result = subprocess.run(
         [
             "bash",
-            str(INSTALL_SH),
+            str(_installer_copy(tmp_path)),
             "--local",
             "--on-conflict",
             "migrate",
@@ -774,6 +883,8 @@ def test_powershell_installer_has_the_same_ownership_guards() -> None:
     assert "[System.IO.FileShare]::None" in text
     assert "Release-InstallLock" in text
     assert "Wait-PreviousUninstall" in text
+    assert "Prepare-LocalWebUi" in text
+    assert 'scripts\\build_web_ui.ps1' in text
     assert "Invoke-OmniVersionProbe" in text
     assert "& $InstalledOmni _converge-install" in text
     assert 'Get-PipxEnvironmentValue "PIPX_HOME"' in text

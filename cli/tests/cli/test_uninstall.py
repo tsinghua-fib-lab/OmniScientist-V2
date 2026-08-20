@@ -29,10 +29,11 @@ def _paths(tmp_path: Path):  # noqa: ANN202
 
 def test_uninstall_plan_is_pure_and_dry_run_json_creates_no_home(tmp_path):
     paths = _paths(tmp_path)
-    # ``isolated_home`` pre-creates an empty ``$OMNI_HOME`` so sqlite init cannot
-    # race under the full suite. Planning / dry-run must leave that shell untouched.
+    # ``isolated_home`` pre-creates ``$OMNI_HOME`` (and may record
+    # ``update-state.json``) so sqlite init cannot race. Codex-style dry-run
+    # must leave that shell exactly as the fixture left it.
     assert paths.home.is_dir()
-    assert list(paths.home.iterdir()) == []
+    before = sorted(path.name for path in paths.home.iterdir())
 
     plan = uninstall.build_uninstall_plan(
         paths,
@@ -43,7 +44,7 @@ def test_uninstall_plan_is_pure_and_dry_run_json_creates_no_home(tmp_path):
         remove_untracked_exports=False,
     )
 
-    assert list(paths.home.iterdir()) == []
+    assert sorted(path.name for path in paths.home.iterdir()) == before
     assert any(action.category == "service" for action in plan.actions)
 
     result = runner.invoke(
@@ -54,7 +55,7 @@ def test_uninstall_plan_is_pure_and_dry_run_json_creates_no_home(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["purge"] is False
     assert payload["remove_program"] is False
-    assert list(paths.home.iterdir()) == []
+    assert sorted(path.name for path in paths.home.iterdir()) == before
 
 
 def test_all_project_data_requires_explicit_purge():

@@ -21,13 +21,14 @@ from omni.agent.capabilities import (
     CAPABILITY_FIGURE,
     CAPABILITY_GROUNDED_QA,
     CAPABILITY_LITERATURE_SEARCH,
-    CAPABILITY_SYNTHESIS_FINAL,
     CAPABILITY_TASK_INSPECT,
     CAPABILITY_TASK_REVIEW,
     contract_outputs,
     contract_outputs_from_capabilities,
     deliverables_from_capabilities,
+    is_qa_figure_pair,
     is_survey_pair,
+    native_tool_for_capability,
 )
 from omni.agent.intent_plan import (
     ContextPolicy,
@@ -39,9 +40,12 @@ from omni.agent.intent_plan import (
 from omni.agent.model_planner import ModelPlanProposal, has_refused_value
 from omni.agent.plan_factory import (
     build_assistant_plan,
+    build_named_native_tool_plan,
+    build_native_retrieve_plan,
     build_schedule_plan,
     build_task_inspect_plan,
     build_task_review_plan,
+    carry_capability_inputs,
     needs_input_plan,
 )
 from omni.agent.plan_runner_utils import gap_default, gap_question
@@ -193,7 +197,7 @@ class IntentPlanner:
                 mode="direct",
                 rationale=rationale,
             )
-            return _carry_inputs(plan, proposal, "memory.update")
+            return carry_capability_inputs(plan, proposal, "memory.update")
 
         # In-place edit of an existing figure. The runtime grounds the edit
         # target against the active artifact and runs the deterministic patch;
@@ -206,7 +210,7 @@ class IntentPlanner:
                 rationale=rationale,
                 confidence=proposal.confidence or 0.75,
             )
-            return _carry_inputs(plan, proposal, CAPABILITY_ARTIFACT_REVISE)
+            return carry_capability_inputs(plan, proposal, CAPABILITY_ARTIFACT_REVISE)
 
         # A multi-task / time-window retrospective is broader than a single-task
         # status lookup, so it is matched first: it keeps the model's narrative and
@@ -219,7 +223,7 @@ class IntentPlanner:
                 rationale=rationale,
                 confidence=proposal.confidence or 0.8,
             )
-            return _carry_inputs(plan, proposal, CAPABILITY_TASK_REVIEW)
+            return carry_capability_inputs(plan, proposal, CAPABILITY_TASK_REVIEW)
 
         if CAPABILITY_TASK_INSPECT in all_caps:
             plan = build_task_inspect_plan(
@@ -228,24 +232,26 @@ class IntentPlanner:
                 rationale=rationale,
                 confidence=proposal.confidence or 0.8,
             )
-            return _carry_inputs(plan, proposal, CAPABILITY_TASK_INSPECT)
+            return carry_capability_inputs(plan, proposal, CAPABILITY_TASK_INSPECT)
 
         figure_and_paper = bool(infer_figure_and_paper_outputs(text))
         if is_survey_pair(all_caps, proposal.outputs) and not figure_and_paper:
-            # Codex keeps the produce path on the critical path (apply_patch).
-            # Omni's produce path for a written survey is host retrieval plus
-            # native synthesis. Demoting this pair to ReAct made orientation
-            # look like a stall and left the manuscript unwritten.
-            return self._survey_plan(
+            # A written survey owes a manuscript. SINGLE_SKILL retrieve has no
+            # write_file; host fill is not the produce path. Sequence search
+            # then write_file against live results (same floor as figure+paper).
+            plan = build_assistant_plan(
                 text,
                 task_id=task_id,
-                rationale=rationale,
-                confidence=proposal.confidence or 0.86,
-                proposal=proposal,
+                rationale=rationale
+                or "written survey sequenced by the model against live results",
             )
+            plan.confidence = proposal.confidence or 0.86
+            plan.provenance_mode = proposal.provenance_mode
+            plan.outputs = list(proposal.outputs) or plan.outputs
+            return _carry_survey_retrieve(plan, proposal, text)
         if figure_and_paper:
             # The user named both a figure and a paper. A literature+write
-            # proposal must not collapse to the survey closer and drop the
+            # proposal must not collapse to retrieve-only and drop the
             # figure; sequence the independent deliverables live.
             plan = build_assistant_plan(
                 text,
@@ -282,9 +288,9 @@ class IntentPlanner:
             # existed to seed steps of a plan-time DAG. The model now passes its
             # own arguments in the run_workflow call it makes, and carrying a
             # second, staler copy on the plan only invites the two to disagree.
-            # literature.search is the exception: the host survey closer still
-            # needs the query after this demote, or a ReAct turn that only
-            # looked up memory never retrieves.
+            # literature.search is the exception: the live turn still needs the
+            # query after this demote, or a ReAct turn that only looked up
+            # memory never retrieves.
             return _carry_survey_retrieve(plan, proposal, text)
         if _live_sequence_required(proposal, all_caps, self._registry):
             # A single-skill route would drop every capability after the first,
@@ -306,11 +312,21 @@ class IntentPlanner:
             plan.confidence = proposal.confidence or plan.confidence
             plan.rationale = rationale
             plan.provenance_mode = proposal.provenance_mode
-            return _carry_inputs(plan, proposal, CAPABILITY_FIGURE)
+            return carry_capability_inputs(plan, proposal, CAPABILITY_FIGURE)
         if host_capability or caps:
             capability = host_capability or caps[0]
             proposal = _lift_lone_step_inputs(proposal, capability)
             outputs = proposal.outputs or deliverables_from_capabilities([capability])
+            if native_tool_for_capability(capability):
+                plan = build_native_retrieve_plan(
+                    text,
+                    task_id=task_id,
+                    capability=capability,
+                    rationale=rationale,
+                    confidence=proposal.confidence or 0.72,
+                    outputs=outputs,
+                )
+                return carry_capability_inputs(plan, proposal, capability)
             mode = proposal.execution_mode if proposal.execution_mode in {"background", "foreground"} else "background"
             plan = self._single_capability(
                 text,
@@ -321,7 +337,7 @@ class IntentPlanner:
                 mode=mode,
                 confidence=proposal.confidence or 0.72,
             )
-            return _carry_inputs(plan, proposal, capability)
+            return carry_capability_inputs(plan, proposal, capability)
         if proposal.intent_type == "direct_answer":
             return build_assistant_plan(
                 text,
@@ -382,6 +398,10 @@ class IntentPlanner:
             explicit = self._explicit_skill_plan(text, task_id=task_id)
             if explicit is not None:
                 return bind_contract_outputs(explicit)
+        if decision.kind == "explicit_tool":
+            return bind_contract_outputs(
+                build_named_native_tool_plan(text, tool=decision.tool, task_id=task_id)
+            )
         # A gate matched but could not be materialised (e.g. explicit skill not
         # found) — hand the turn to the capable model/react path.
         return bind_contract_outputs(
@@ -485,51 +505,6 @@ class IntentPlanner:
             rationale=rationale,
         )
 
-    def _survey_plan(
-        self,
-        text: str,
-        *,
-        task_id: str,
-        rationale: str,
-        confidence: float,
-        proposal: ModelPlanProposal,
-    ) -> IntentPlan:
-        """Host-owned literature search; the closer writes the manuscript.
-
-        ``synthesis.final`` is not a second selected skill. Native synthesis
-        runs after the search drains, on this ``task_id``.
-        """
-        proposal = _lift_lone_step_inputs(proposal, CAPABILITY_LITERATURE_SEARCH)
-        lit_input = dict(proposal.capability_inputs.get(CAPABILITY_LITERATURE_SEARCH) or {})
-        if not str(lit_input.get("query") or lit_input.get("topic") or "").strip():
-            lit_input["query"] = text
-            proposal.capability_inputs[CAPABILITY_LITERATURE_SEARCH] = lit_input
-        outputs = list(
-            dict.fromkeys(
-                [
-                    *(proposal.outputs or []),
-                    *deliverables_from_capabilities(
-                        [CAPABILITY_LITERATURE_SEARCH, CAPABILITY_SYNTHESIS_FINAL]
-                    ),
-                ]
-            )
-        )
-        mode = (
-            proposal.execution_mode
-            if proposal.execution_mode in {"background", "foreground"}
-            else "background"
-        )
-        plan = self._single_capability(
-            text,
-            task_id=task_id,
-            capability=CAPABILITY_LITERATURE_SEARCH,
-            reason=rationale or "written survey: host retrieves then synthesizes",
-            outputs=outputs,
-            mode=mode,
-            confidence=confidence,
-        )
-        return _carry_inputs(plan, proposal, CAPABILITY_LITERATURE_SEARCH)
-
     def _qa_plus_artifact(self, text: str, *, task_id: str) -> IntentPlan:
         selection = self._arbitrator.select_capability(
             CAPABILITY_FIGURE,
@@ -605,12 +580,6 @@ class IntentPlanner:
         )
 
 
-def _qa_figure_pair(capabilities: list[str]) -> bool:
-    """The one multi-capability shape that already has a dedicated runner."""
-    named = {item for item in capabilities if item}
-    return named == {CAPABILITY_GROUNDED_QA, CAPABILITY_FIGURE}
-
-
 def _single_host_capability(
     proposal: ModelPlanProposal,
     all_caps: list[str],
@@ -665,7 +634,7 @@ def _live_sequence_required(
     """Whether a single-skill route would drop independent requested work."""
     unique = list(dict.fromkeys(item for item in all_caps if item))
     if len(unique) > 1:
-        return not _qa_figure_pair(unique) and not is_survey_pair(unique)
+        return not is_qa_figure_pair(unique)
     if len(unique) != 1:
         return False
     capability = unique[0]
@@ -685,8 +654,8 @@ def _carry_survey_retrieve(
 ) -> IntentPlan:
     """Keep literature.search inputs when a workflow is demoted to ReAct.
 
-    The host closer resolves the skill from the registry if the plan has no
-    selection. It still needs a query. Copy the proposal's, or the user text.
+    The live turn still needs a query after this demote, or a ReAct turn that
+    only looked up memory never retrieves. Copy the proposal's, or the user text.
     """
     caps = [str(item) for item in (proposal.required_capabilities or []) if item]
     raw = proposal.capability_inputs.get(CAPABILITY_LITERATURE_SEARCH)
@@ -719,16 +688,6 @@ def _carry_survey_retrieve(
         payload["query"] = text
     inputs[CAPABILITY_LITERATURE_SEARCH] = payload
     plan.capability_inputs = inputs
-    return plan
-
-
-def _carry_inputs(plan: IntentPlan, proposal: ModelPlanProposal, capability: str) -> IntentPlan:
-    """Forward only the proposal inputs belonging to the capability being planned.
-
-    Copied rather than aliased, and narrowed to the one capability, so a plan
-    cannot execute with arguments the model proposed for a different step.
-    """
-    plan.capability_inputs = {capability: dict(proposal.capability_inputs.get(capability) or {})}
     return plan
 
 

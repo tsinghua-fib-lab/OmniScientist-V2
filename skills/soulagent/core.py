@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import os
 import re
 import sys
 from pathlib import Path
@@ -155,19 +153,6 @@ def _distillation_offer(
         summary=question,
         text=question,
     )
-
-
-def _atomic_json(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    try:
-        temporary.write_text(
-            json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        os.replace(temporary, path)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
 
 
 def _needs_refresh(
@@ -474,10 +459,6 @@ def run_pipeline(
         and state.get("scientist_id")
         and state.get("scientist_id") != actual_scientist_id
     )
-    stoma_paths = write_persona(
-        project, persona_text, host, switching_scientist=switching
-    )
-
     new_state = {
         "version": 1,
         "scientist_id": actual_scientist_id,
@@ -486,21 +467,15 @@ def run_pipeline(
         "manifest_sha256": kg["manifest_sha256"],
         "decoder_contract_version": DECODER_CONTRACT_VERSION,
         "task_frame": task_frame,
-        "persona_sha256": hashlib.sha256(persona_text.encode("utf-8")).hexdigest(),
-        "stoma_paths": stoma_paths,
     }
-    try:
-        _atomic_json(_state_path(project), new_state)
-    except Exception as exc:
-        try:
-            unload_persona(project, host)
-        finally:
-            state_path = _state_path(project)
-            if state_path.exists():
-                state_path.unlink()
-        raise SoulAgentError(
-            f"状态提交失败，已恢复原始造口：{exc}"
-        ) from exc
+    stoma_paths = write_persona(
+        project,
+        persona_text,
+        host,
+        switching_scientist=switching,
+        state_payload=new_state,
+    )
+    new_state["stoma_paths"] = stoma_paths
     return _pipeline_result(
         project_root=project,
         state=new_state,
@@ -528,10 +503,7 @@ def unload(project_root: str | Path) -> dict[str, Any]:
     if state is None or not state.get("host"):
         raise SoulAgentError("SoulAgent 状态缺少 Host，无法确定应恢复哪个造口")
     host = str(state["host"])
-    unload_persona(project, host)
-    state_path = _state_path(project)
-    if state_path.exists():
-        state_path.unlink()
+    unload_persona(project, host, remove_state=True)
     scientist_name = str(state.get("scientist_name") or "").strip()
     return {
         "status": "unloaded",

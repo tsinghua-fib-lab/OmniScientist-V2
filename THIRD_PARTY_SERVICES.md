@@ -8,8 +8,8 @@ are not operated or guaranteed by the OmniScientist project.
 | LLM/embedding provider | prompts, context, selected file/artifact text | configure an approved endpoint and review its privacy/retention terms |
 | arXiv/OpenAlex/Crossref/PubMed/Semantic Scholar | queries, identifiers, optional contact email | follow API terms, attribution, and rate limits |
 | Unpaywall | DOI and required contact email | use only lawful open-access locations |
-| Feishu/DingTalk/WeCom/gateway | messages, user/channel identifiers, files | configure app permissions and retention appropriately |
-| Experimental WeChat iLink | QR login state, messages, files | explicitly opt in and assess account/service-term risk |
+| Feishu/DingTalk | messages, user/channel identifiers, files | configure app permissions and retention appropriately |
+| WeChat ClawBot (iLink) | QR login state, messages, files | Tencent's ClawBot terms govern the paired account |
 | Docker/SSH/Slurm/Modal | commands, environment, mounted/input files | control compute credentials, isolation, and data residency |
 
 Metadata availability does not grant redistribution rights to article full text, figures, datasets,

@@ -14,6 +14,11 @@ omni -P skill-verify config test
 The offline `mock` provider is intentionally limited; it is useful for deterministic unit tests and
 tool smoke tests, but it does not validate real model-side workflow planning.
 
+Copy-pasteable user prompts for named `search_literature`, retrieve-only host
+policy, contradiction scan, stacked 3–8 capability utterances, long-horizon
+campaigns, `memory link`/`graph`, and `task all` are in the
+[User Walkthrough Catalog](user-walkthrough-cases.md).
+
 ## What Must Be Validated
 
 | Area | Why it matters | Visible checks |

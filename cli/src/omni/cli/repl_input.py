@@ -37,6 +37,7 @@ from omni.cli.repl_composer import install_multiline_bindings
 from omni.cli.repl_layout import clip_display as _clip_display
 from omni.cli.repl_layout import compact_number as _compact_number
 from omni.cli.repl_layout import display_width as _display_width
+from omni.cli.repl_layout import newline_hint as _newline_hint
 from omni.cli.terminal_harness import TerminalKeyboardProtocol
 from omni.core.file_mentions import active_mention_token
 
@@ -47,6 +48,7 @@ _STYLE = Style.from_dict(
         "omni.mode": theme.PTK_STRONG,
         "omni.hint": theme.PTK_MUTED,
         "omni.key": theme.PTK_ACCENT,
+        **theme.completion_menu_styles(),
     }
 )
 
@@ -117,9 +119,16 @@ class SlashCommandCompleter(Completer):
             yield from self._complete_subcommands(command, current)
 
     def _complete_names(self, current: str) -> Iterator[Completion]:
-        # Alphabetical within the exact/prefix buckets: the top-level list is long
-        # (~50 commands), so a predictable order beats registration order here.
-        commands = sorted(self._catalog.commands, key=lambda command: command.name)
+        # Bare ``/`` lists session verbs first (``/help``, ``/web``, ``/model``)
+        # then the research appendix, each bucket alphabetical. A typed prefix
+        # stays alphabetical so ``/in`` is still ``inbox`` then ``init``.
+        if current:
+            commands = sorted(self._catalog.commands, key=lambda command: command.name)
+        else:
+            commands = sorted(
+                self._catalog.commands,
+                key=lambda command: (0 if command.group == "session" else 1, command.name),
+            )
         rows = [(command.name, command.token, command.help) for command in commands]
         for insert, display, meta in _ranked(rows, current):
             yield Completion(
@@ -267,8 +276,10 @@ class ReplInputBox:
         enabled: bool | None = None,
         commands: CommandCatalog | Sequence[str] = (),
         output_base: Path | None = None,
+        shift_enter_ready: bool = False,
     ) -> None:
         self._enabled = _interactive_terminal() if enabled is None else enabled
+        self._shift_enter_ready = bool(shift_enter_ready)
         self._mode = "auto"
         self._model = ""
         self._focus = ""
@@ -390,10 +401,11 @@ class ReplInputBox:
             details.append(f"/clear saves {_compact_number(self._clearable_tokens)}")
         if width >= 58 and self._last_elapsed_seconds is not None:
             details.append(f"last {_format_elapsed(self._last_elapsed_seconds)}")
+        newline = _newline_hint(self._shift_enter_ready)
         if width >= 112:
-            details.append("Enter send · Ctrl+J newline · Ctrl+C cancel · Ctrl+L redraw")
+            details.append(f"Enter send · {newline} · Ctrl+C cancel · Ctrl+L redraw")
         elif width >= 88:
-            details.append("Enter send · Ctrl+J newline · Ctrl+C cancel")
+            details.append(f"Enter send · {newline} · Ctrl+C cancel")
         elif width >= 60:
             details.append("Enter send · Ctrl+C cancel")
         elif width >= 28:

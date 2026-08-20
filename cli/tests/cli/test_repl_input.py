@@ -57,6 +57,16 @@ def test_repl_input_box_advertises_the_portable_newline_shortcut(monkeypatch):
     assert "Ctrl+J newline" in toolbar
 
 
+def test_repl_input_box_advertises_shift_enter_when_modified_keys_are_ready(monkeypatch):
+    monkeypatch.setattr("omni.cli.repl_input._terminal_width", lambda: 112)
+    box = ReplInputBox(enabled=False, shift_enter_ready=True)
+
+    toolbar = "".join(fragment for _style, fragment in box._bottom_toolbar())
+
+    assert "Shift+Enter newline" in toolbar
+    assert "Ctrl+J newline" not in toolbar
+
+
 def test_repl_input_box_never_exceeds_very_narrow_terminal(monkeypatch):
     monkeypatch.setattr("omni.cli.repl_input._terminal_width", lambda: 8)
     box = ReplInputBox(enabled=False)

@@ -15,6 +15,7 @@ import pytest
 
 from omni.config import load_settings
 from omni.config.paths import get_paths
+from omni.runtime.remaining import remaining_deliverables
 from omni.skills_runtime.builtin_tools.fs import build_fs_tools
 from omni.skills_runtime.context import ExecContext
 from omni.storage.artifacts import ArtifactStore
@@ -139,6 +140,55 @@ async def test_bare_outputs_publish_into_the_trusted_task_bundle(tmp_path: Path)
         )
         assert expected.read_text(encoding="utf-8") == "# visible\n"
         assert str(expected) in result
+    finally:
+        await db.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_ledger_token_lands_in_the_task_report_bundle(tmp_path: Path) -> None:
+    settings = load_settings()
+    paths = get_paths(project="writtenartifacts-contract")
+    paths.ensure_dirs()
+    db = get_database(paths.project_db)
+    await db.init()
+    task_id = "visible-task-abcdef"
+    async with db.session() as session:
+        session.add(
+            TaskORM(
+                id=task_id,
+                session_id="visible-session",
+                project=paths.project_name,
+                title="Latent space survey",
+            )
+        )
+        await session.commit()
+    ctx = ExecContext(
+        settings=settings,
+        paths=paths,
+        working_dir=tmp_path,
+        artifacts=ArtifactStore(paths, db, mirror_dir=tmp_path, mirror_formats=["md"]),
+        task_id=task_id,
+        session_id="visible-session",
+        db=db,
+    )
+    stray = tmp_path / "draft.section"
+    stray.write_text("old cwd token\n", encoding="utf-8")
+
+    try:
+        result = await _tool(build_fs_tools(ctx), "write_file")(
+            {"path": "draft.section", "contents": "# rewritten survey\n"}
+        )
+        expected = (
+            tmp_path
+            / "reports"
+            / "Latent-space-survey_visible-"
+            / "Latent-space-survey.md"
+        )
+        assert expected.read_text(encoding="utf-8") == "# rewritten survey\n"
+        assert str(expected) in result
+        assert stray.read_text(encoding="utf-8") == "old cwd token\n"
+        rows = await ctx.artifacts.list_by_task(task_id)
+        assert remaining_deliverables(["draft.section"], rows) == []
     finally:
         await db.dispose()
 

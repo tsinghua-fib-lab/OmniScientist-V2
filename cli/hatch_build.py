@@ -1,4 +1,4 @@
-"""Build hook: bundle the sibling skill collection into the wheel.
+"""Build hook: bundle sibling product assets into the wheel.
 
 The skills live at ``<repo>/skills`` — a sibling of this Python project
 (``<repo>/cli``) — so CLI code and skill content can be versioned and edited
@@ -8,6 +8,11 @@ Paper Review's large immutable retrieval generations are the one exception:
 their small integrity manifests ship, while first use fetches the pinned
 data-only repository into Omni's cache.
 
+The loopback SPA is the same idea: Vite writes ``<repo>/web/dist``, which is
+gitignored. Release CI runs ``cli/scripts/build_web_ui.sh`` first; this hook
+then copies that directory to ``omni/data/web`` so ``pip install`` users never
+need Node. Editable checkouts resolve ``web/dist`` at runtime instead.
+
 Editable/source installs don't run this hook; ``omni.data`` resolves the
 sibling ``skills`` directory at runtime instead.
 """
@@ -15,6 +20,8 @@ sibling ``skills`` directory at runtime instead.
 from __future__ import annotations
 
 import importlib.util
+import json
+import tempfile
 from pathlib import Path
 
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
@@ -60,6 +67,45 @@ def _indexed_skill_dirs(skills: Path) -> tuple[Path, list[Path]]:
     return skills / module.SKILL_INDEX_FILENAME, module.indexed_skill_dirs(skills)
 
 
+def _stamp_web_version(
+    force: dict[str, str], *, destination: str, version: str
+) -> tempfile.TemporaryDirectory:
+    """Tie the bundled SPA to this package version (not the Vite compile clock)."""
+    temporary = tempfile.TemporaryDirectory(
+        prefix="omni-web-", ignore_cleanup_errors=True
+    )
+    try:
+        stamp = Path(temporary.name) / "version.json"
+        stamp.write_text(
+            json.dumps({"version": version}, indent=2) + "\n", encoding="utf-8"
+        )
+        force[str(stamp)] = f"{destination}/version.json"
+    except BaseException:
+        temporary.cleanup()
+        raise
+    return temporary
+
+
+def _force_include_web_dist(
+    force: dict[str, str], *, root: Path, target_name: str, version: str
+) -> tempfile.TemporaryDirectory | None:
+    """Copy a prebuilt SPA into the archive when ``web/dist/index.html`` exists.
+
+    Checkout layout is ``<repo>/web/dist``; an unpacked sdist keeps the same
+    files at ``web/dist`` so a wheel built from that sdist stays self-contained.
+    Missing dist is not a hook error: ``check_dist.py`` is the release gate.
+    """
+    candidates = ((root.parent / "web" / "dist"), (root / "web" / "dist"))
+    dist = next((path.resolve() for path in candidates if (path / "index.html").is_file()), None)
+    if dist is None:
+        return None
+    destination = "web/dist" if target_name == "sdist" else "omni/data/web"
+    for path in sorted(dist.rglob("*")):
+        if path.is_file() and path.name != "version.json":
+            force[str(path)] = f"{destination}/{path.relative_to(dist).as_posix()}"
+    return _stamp_web_version(force, destination=destination, version=version)
+
+
 def _validate_bundled_personas(skill_dirs: list[Path]) -> None:
     """Fail the build before packaging a damaged or incomplete persona snapshot."""
     soulagent = next((path for path in skill_dirs if path.name == "soulagent"), None)
@@ -81,7 +127,26 @@ def _validate_bundled_personas(skill_dirs: list[Path]) -> None:
 class CustomBuildHook(BuildHookInterface):
     PLUGIN_NAME = "custom"
 
-    def initialize(self, version: str, build_data: dict) -> None:  # noqa: ARG002
+    def _cleanup_web_stamps(self) -> None:
+        temporary_directories = getattr(self, "_web_stamp_directories", ())
+        self._web_stamp_directories = []
+        for temporary in temporary_directories:
+            temporary.cleanup()
+
+    def clean(self, _build_variants: list[str]) -> None:
+        """Release generated stamp files when Hatch cleans build hooks."""
+        self._cleanup_web_stamps()
+
+    def finalize(
+        self,
+        _build_variant: str,
+        _build_data: dict,
+        _artifact_path: str,
+    ) -> None:
+        """Release generated stamp files after Hatch has written the artifact."""
+        self._cleanup_web_stamps()
+
+    def initialize(self, _build_variant: str, build_data: dict) -> None:
         force = build_data.setdefault("force_include", {})
 
         # Source checkouts keep skills beside ``cli``. An unpacked sdist keeps a
@@ -129,3 +194,16 @@ class CustomBuildHook(BuildHookInterface):
         if self.target_name == "wheel" and docs.is_dir():
             for md in sorted(docs.rglob("*.md")):
                 force[str(md)] = f"omni/data/docs/{md.relative_to(docs)}"
+
+        web_stamp = _force_include_web_dist(
+            force,
+            root=Path(self.root),
+            target_name=self.target_name,
+            version=str(self.metadata.version),
+        )
+        if web_stamp is not None:
+            temporary_directories = getattr(self, "_web_stamp_directories", None)
+            if temporary_directories is None:
+                temporary_directories = []
+                self._web_stamp_directories = temporary_directories
+            temporary_directories.append(web_stamp)

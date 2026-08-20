@@ -294,7 +294,11 @@ def test_git_fetch_progress_streams_carriage_return_frames(
 ) -> None:
     module = _load_module("index_assets.py", "paper_review_index_assets_progress_test")
     messages: list[str] = []
-    (tmp_path / "received.pack").write_bytes(b"x" * 2048)
+    # Heartbeat sizes the Git objects dir, not the pytest tmp that also holds
+    # ``isolated_home``'s ``.omni`` / ``home`` trees (Codex reports pack bytes).
+    objects = tmp_path / "objects"
+    objects.mkdir()
+    (objects / "received.pack").write_bytes(b"x" * 2048)
     monkeypatch.setattr(module, "GIT_PROGRESS_HEARTBEAT_SECONDS", 0.01)
     script = (
         "import sys, time; "
@@ -309,7 +313,7 @@ def test_git_fetch_progress_streams_carriage_return_frames(
         timeout_s=5,
         progress_callback=module._GitProgressRelay(messages.append),
         heartbeat_callback=messages.append,
-        progress_size_path=tmp_path,
+        progress_size_path=objects,
     )
 
     assert completed.stdout == "ok\n"

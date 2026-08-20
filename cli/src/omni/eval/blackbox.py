@@ -115,6 +115,10 @@ class BlackBoxReport:
     def skipped(self) -> int:
         return len(self.skips)
 
+    def ci_gate_failed(self) -> bool:
+        """True when CI must fail: no attempts, or any attempted scenario failed."""
+        return not self.attempts or any(not attempt.passed for attempt in self.attempts)
+
     @property
     def success_rate(self) -> float:
         if not self.attempts:

@@ -325,7 +325,7 @@ async def test_react_fallback_survey_wording_still_retrieves_then_writes() -> No
 
 
 @pytest.mark.asyncio
-async def test_complete_plan_writes_the_manuscript_after_a_drained_search() -> None:
+async def test_complete_plan_does_not_host_fill_the_manuscript() -> None:
     recorder = SimpleNamespace(timeline=[])
 
     async def _emit(*_args, **_kwargs):  # noqa: ANN002, ANN003
@@ -374,12 +374,7 @@ async def test_complete_plan_writes_the_manuscript_after_a_drained_search() -> N
     )
 
     async def fake_synth(*_args, **_kwargs):  # noqa: ANN002, ANN003
-        return {
-            "text": "# survey",
-            "summary": "Wrote the manuscript as a file.",
-            "artifacts": [{"uri": "artifact://survey"}],
-            "report_uri": "artifact://survey",
-        }
+        raise AssertionError("same-turn host fill must not write the manuscript")
 
     with patch("omni.runtime.final_synthesis.run_native_synthesis", fake_synth):
         turn = await completion.complete_plan(
@@ -393,6 +388,9 @@ async def test_complete_plan_writes_the_manuscript_after_a_drained_search() -> N
             apply_settlement=_settle,
         )
 
-    assert "Wrote the manuscript as a file." in execution.text or execution.text == "OpenAlex returned 6 papers."
-    assert any("native synthesis" in note.lower() for note in turn.degraded_warnings)
+    assert "OpenAlex returned 6 papers." in execution.text
+    assert "still owes" in execution.text
+    assert "draft.section" in execution.text
+    assert any("still owes" in note for note in turn.degraded_warnings)
+    assert turn.settlement_status == "degraded"
     assert recorder.timeline[:2] == ["hook", "persist"]

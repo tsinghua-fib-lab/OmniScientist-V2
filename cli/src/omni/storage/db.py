@@ -18,13 +18,14 @@ import asyncio
 import json
 import logging
 import sqlite3
+import threading
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
-from types import ModuleType
-from typing import TypeVar
+from typing import Any, NamedTuple, TypeVar
 
 from sqlalchemy import event, text
 from sqlalchemy.exc import OperationalError
@@ -59,6 +60,11 @@ _COLUMN_RENAMES: dict[str, list[tuple[str, str]]] = {}
 
 # How many pre-migration snapshots to keep per database file (older pruned).
 _BACKUP_KEEP = 5
+# Exclusive flock wait for a needed schema write. Read-only init never waits.
+_INIT_LOCK_TIMEOUT_S = 8.0
+_INIT_LOCK_POLL_S = 0.05
+_ASYNC_INIT_LOCKS: dict[str, asyncio.Lock] = {}
+_ASYNC_INIT_LOCKS_GUARD = threading.Lock()
 
 
 class Database:
@@ -103,8 +109,10 @@ class Database:
 
         When the on-disk generation, watermark, journal, and ORM shape already
         match this build, init is a read of sqlite_master / PRAGMA and returns
-        without a write transaction — so ``omni serve`` can keep writing while
-        a CLI inspects the same file.
+        without a write transaction or interprocess flock — so ``omni serve``
+        can keep writing while a CLI inspects the same file. Concurrent inits
+        in one process wait on an ``asyncio.Lock``; a needed schema write takes
+        a timed non-blocking flock off the event-loop thread.
 
         A store whose watermark is *ahead* of this build is left intact
         (forward-compatible), never rebuilt. A store from an **older
@@ -118,51 +126,88 @@ class Database:
         # Fail closed on a missing parent rather than ``unable to open database
         # file`` from sqlite (common when a caller opens a brand-new OMNI_HOME).
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with _database_init_lock(self.path):
-            dialect = self.engine.sync_engine.dialect
-            async with self.engine.connect() as conn:
-                stored, generation, has_tables, journal = await _read_store_fingerprint(conn)
-                legacy = has_tables and generation != _SCHEMA_GENERATION
-                normalize_watermark = (
-                    has_tables and not legacy and stored > _SCHEMA_VERSION and stored < 100
-                )
-                future = has_tables and not legacy and stored >= 100
-                needs_ddl = (not has_tables) or legacy or await _schema_needs_ddl(conn)
-            needs_write = needs_ddl or (
-                has_tables
-                and not future
-                and (stored != _SCHEMA_VERSION or normalize_watermark or journal != "wal")
-            )
-            if not needs_write:
+        async with _async_init_lock(self.path):
+            if self._initialized:
+                return
+            snapshot = await self._read_init_snapshot()
+            if not snapshot.needs_write:
                 self._initialized = True
                 return
-            backup: Path | None = None
-            if has_tables and (legacy or stored != _SCHEMA_VERSION):
-                backup = await self._backup(stored)
-
-            async def _write() -> None:
-                async with self.engine.begin() as conn:
-                    await _apply_schema_writes(
-                        conn,
-                        dialect=dialect,
-                        legacy=legacy,
-                        future=future,
-                        has_tables=has_tables,
-                        needs_ddl=needs_ddl,
-                        stored=stored,
-                        backup=backup,
-                    )
-
+            holder = _InterprocessInitLock(self.path)
+            acquired = await asyncio.to_thread(holder.acquire, _INIT_LOCK_TIMEOUT_S)
             try:
-                await retry_while_busy(_write)
-            except OperationalError as exc:
-                if sqlite_busy(exc):
+                snapshot = await self._read_init_snapshot()
+                if not snapshot.needs_write:
+                    self._initialized = True
+                    return
+                if not acquired:
                     logger.warning(
-                        "Schema update deferred; another process holds the write lock on %s",
+                        "Schema update deferred; another process holds the init lock on %s",
                         self.path,
                     )
-                raise
-        self._initialized = True
+                    raise OperationalError(
+                        None,
+                        None,
+                        TimeoutError(f"database init lock timeout: {self.path}"),
+                    )
+                await self._apply_init_write(snapshot)
+                self._initialized = True
+            finally:
+                if acquired:
+                    await asyncio.to_thread(holder.release)
+
+    async def _read_init_snapshot(self) -> _InitSnapshot:
+        dialect = self.engine.sync_engine.dialect
+        async with self.engine.connect() as conn:
+            stored, generation, has_tables, journal = await _read_store_fingerprint(conn)
+            legacy = has_tables and generation != _SCHEMA_GENERATION
+            normalize_watermark = (
+                has_tables and not legacy and stored > _SCHEMA_VERSION and stored < 100
+            )
+            future = has_tables and not legacy and stored >= 100
+            needs_ddl = (not has_tables) or legacy or await _schema_needs_ddl(conn)
+        needs_write = needs_ddl or (
+            has_tables
+            and not future
+            and (stored != _SCHEMA_VERSION or normalize_watermark or journal != "wal")
+        )
+        return _InitSnapshot(
+            dialect=dialect,
+            stored=stored,
+            has_tables=has_tables,
+            legacy=legacy,
+            future=future,
+            needs_ddl=needs_ddl,
+            needs_write=needs_write,
+        )
+
+    async def _apply_init_write(self, snapshot: _InitSnapshot) -> None:
+        backup: Path | None = None
+        if snapshot.has_tables and (snapshot.legacy or snapshot.stored != _SCHEMA_VERSION):
+            backup = await self._backup(snapshot.stored)
+
+        async def _write() -> None:
+            async with self.engine.begin() as conn:
+                await _apply_schema_writes(
+                    conn,
+                    dialect=snapshot.dialect,
+                    legacy=snapshot.legacy,
+                    future=snapshot.future,
+                    has_tables=snapshot.has_tables,
+                    needs_ddl=snapshot.needs_ddl,
+                    stored=snapshot.stored,
+                    backup=backup,
+                )
+
+        try:
+            await retry_while_busy(_write)
+        except OperationalError as exc:
+            if sqlite_busy(exc):
+                logger.warning(
+                    "Schema update deferred; another process holds the write lock on %s",
+                    self.path,
+                )
+            raise
 
     async def _backup(self, stored_version: int) -> Path | None:
         """Snapshot the SQLite file before a structural change; return its path.
@@ -185,8 +230,11 @@ class Database:
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
-        async with self._sessionmaker() as session:
+        session = self._sessionmaker()
+        try:
             yield session
+        finally:
+            await _close_session_despite_cancel(session)
 
     async def healthcheck(self) -> bool:
         try:
@@ -198,6 +246,44 @@ class Database:
 
     async def dispose(self) -> None:
         await self.engine.dispose()
+
+
+async def _close_session(session: AsyncSession) -> None:
+    try:
+        await session.close()
+    except Exception:
+        pass
+
+
+async def _close_session_despite_cancel(session: AsyncSession) -> None:
+    """Check the connection in even when the caller task is being cancelled.
+
+    Windows keeps the aiosqlite write lock if a cancelled task abandons a
+    session. The parent cancel settler then finds the workflow still
+    ``running`` after the turn already returned ``cancelled``.
+    """
+    task = asyncio.current_task()
+    if task is None or task.cancelling() == 0:
+        await _close_session(session)
+        return
+    worker = asyncio.ensure_future(_close_session(session))
+    held = 0
+    try:
+        while True:
+            while task.cancelling() > 0:
+                task.uncancel()
+                held += 1
+            try:
+                await asyncio.shield(worker)
+                return
+            except asyncio.CancelledError:
+                if worker.done():
+                    return
+    finally:
+        if not worker.done():
+            await asyncio.gather(worker, return_exceptions=True)
+        for _ in range(held):
+            task.cancel()
 
 
 def sqlite_busy(exc: BaseException) -> bool:
@@ -226,6 +312,7 @@ async def retry_while_busy(
     *,
     attempts: int = 15,
     backoff_seconds: float = 0.05,
+    max_backoff_seconds: float = 0.08,
 ) -> T:
     """Run ``write`` again while SQLite says another writer holds the lock.
 
@@ -241,13 +328,14 @@ async def retry_while_busy(
     if cap is not None:
         attempts = min(attempts, cap)
         backoff_seconds = min(backoff_seconds, 0.02)
+        max_backoff_seconds = min(max_backoff_seconds, 0.02)
     for attempt in range(attempts):
         try:
             return await write()
         except OperationalError as exc:
             if not sqlite_busy(exc) or attempt == attempts - 1:
                 raise
-            await asyncio.sleep(min(0.08, backoff_seconds * (attempt + 1)))
+            await asyncio.sleep(min(max_backoff_seconds, backoff_seconds * (attempt + 1)))
     raise AssertionError("unreachable: the loop above either returns or raises")
 
 
@@ -799,24 +887,64 @@ def _quote_identifier(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
 
 
-@contextmanager
-def _database_init_lock(path: Path) -> Iterator[None]:
-    """Serialize WAL/schema setup across Omni processes for one SQLite file."""
-    lock_path = path.with_name(f"{path.name}.init.lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_file = lock_path.open("a", encoding="utf-8")
-    lock_impl: ModuleType | None = None
-    try:
+class _InitSnapshot(NamedTuple):
+    dialect: Any
+    stored: int
+    has_tables: bool
+    legacy: bool
+    future: bool
+    needs_ddl: bool
+    needs_write: bool
+
+
+def _async_init_lock(path: Path) -> asyncio.Lock:
+    """One in-process lock per SQLite file so concurrent init() cannot flock-deadlock."""
+    key = str(path.resolve())
+    with _ASYNC_INIT_LOCKS_GUARD:
+        lock = _ASYNC_INIT_LOCKS.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _ASYNC_INIT_LOCKS[key] = lock
+        return lock
+
+
+class _InterprocessInitLock:
+    """Exclusive flock for schema writes, acquired off the event-loop thread."""
+
+    def __init__(self, path: Path) -> None:
+        self._lock_path = path.with_name(f"{path.name}.init.lock")
+        self._file: Any = None
+        self._fcntl: Any = None
+
+    def acquire(self, timeout_s: float) -> bool:
+        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self._lock_path.open("a", encoding="utf-8")
         try:
             import fcntl as lock_impl
-
-            lock_impl.flock(lock_file.fileno(), lock_impl.LOCK_EX)
         except ImportError:
-            lock_impl = None
-        yield
-    finally:
+            self._file = handle
+            return True
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while True:
+            try:
+                lock_impl.flock(handle.fileno(), lock_impl.LOCK_EX | lock_impl.LOCK_NB)
+                self._file = handle
+                self._fcntl = lock_impl
+                return True
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    handle.close()
+                    return False
+                time.sleep(_INIT_LOCK_POLL_S)
+
+    def release(self) -> None:
+        handle = self._file
+        if handle is None:
+            return
         try:
-            if lock_impl is not None:
-                lock_impl.flock(lock_file.fileno(), lock_impl.LOCK_UN)
+            if self._fcntl is not None:
+                self._fcntl.flock(handle.fileno(), self._fcntl.LOCK_UN)
         finally:
-            lock_file.close()
+            handle.close()
+            self._file = None
+            self._fcntl = None

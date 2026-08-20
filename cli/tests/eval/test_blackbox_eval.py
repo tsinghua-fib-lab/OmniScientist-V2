@@ -10,6 +10,8 @@ from omni.agent import OmniAgent
 from omni.agent.capabilities import CAPABILITY_GROUNDED_QA
 from omni.core.llm.client import ChatWithToolsResult, ToolCall
 from omni.eval.blackbox import (
+    BlackBoxAttempt,
+    BlackBoxReport,
     BlackBoxScenario,
     BlackBoxTurn,
     load_blackbox_scenarios,
@@ -146,6 +148,42 @@ def test_bundled_blackbox_corpus_contains_only_natural_language() -> None:
     assert any(scenario.requires_model for scenario in scenarios)
     assert any(not scenario.requires_model for scenario in scenarios)
     assert all(turn.user and turn.expect for scenario in scenarios for turn in scenario.turns)
+    smoke = next(item for item in scenarios if item.id == "offline_mock_smoke")
+    assert smoke.requires_model is False
+    memory = [item for item in scenarios if item.id.startswith("memory_")]
+    assert memory and all(item.requires_model for item in memory)
+
+
+@pytest.mark.asyncio
+async def test_offline_mock_smoke_scenario_passes(settings) -> None:  # noqa: ANN001
+    scenarios = [item for item in load_blackbox_scenarios() if item.id == "offline_mock_smoke"]
+    report = await run_blackbox_benchmark(scenarios, settings=settings)
+    assert not report.ci_gate_failed()
+    assert report.attempted == 1
+    assert report.attempts[0].passed
+
+
+def test_blackbox_ci_gate_fails_when_nothing_succeeds() -> None:
+    empty = BlackBoxReport()
+    assert empty.ci_gate_failed()
+    failed = BlackBoxReport(
+        attempts=[
+            BlackBoxAttempt(scenario_id="a", repeat=1, passed=False),
+            BlackBoxAttempt(scenario_id="b", repeat=1, passed=False),
+        ]
+    )
+    assert failed.ci_gate_failed()
+    mixed = BlackBoxReport(
+        attempts=[
+            BlackBoxAttempt(scenario_id="a", repeat=1, passed=True),
+            BlackBoxAttempt(scenario_id="b", repeat=1, passed=False),
+        ]
+    )
+    assert mixed.ci_gate_failed()
+    ok = BlackBoxReport(
+        attempts=[BlackBoxAttempt(scenario_id="a", repeat=1, passed=True)]
+    )
+    assert not ok.ci_gate_failed()
 
 
 def test_bundled_product_scenarios_only_require_active_or_native_capabilities() -> None:

@@ -43,6 +43,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    literal_column,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -92,6 +93,13 @@ class ConversationMessageORM(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, index=True
     )
+
+
+# SQLite can stamp two inserts with the same ``created_at`` (common on Windows).
+# ``rowid`` is insertion order and is the stable tie-break for a transcript.
+_MESSAGE_ROWID = literal_column("rowid")
+MESSAGE_ORDER_ASC = (ConversationMessageORM.created_at.asc(), _MESSAGE_ROWID.asc())
+MESSAGE_ORDER_DESC = (ConversationMessageORM.created_at.desc(), _MESSAGE_ROWID.desc())
 
 
 class TaskORM(Base):

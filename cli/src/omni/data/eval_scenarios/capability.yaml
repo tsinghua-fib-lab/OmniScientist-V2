@@ -121,7 +121,7 @@
         capabilities_include: [review.response]
 
 - id: openalex_search_routing
-  title: "Broad scholarly search resolves to the active OpenAlex provider"
+  title: "Lone scholarly search stays on the native literature tool"
   channel: cli
   tags: [routing, capability_selection]
   turns:
@@ -134,7 +134,17 @@
         outputs: [sources]
         execution_mode: background
         confidence: 0.94
-        rationale: "the active OpenAlex provider searches cross-disciplinary scholarly works"
+        rationale: "lone literature.search stays on native search_literature"
+      expect:
+        skill_selected: "!openalex-search"
+        skills_exclude: [openalex-search]
+
+- id: openalex_search_explicit_routing
+  title: "An explicit OpenAlex request resolves the OpenAlex provider"
+  channel: cli
+  tags: [routing, capability_selection]
+  turns:
+    - user: '$openalex-search query="single-cell foundation models"'
       expect:
         skill_selected: openalex-search
         capabilities_include: [literature.search]

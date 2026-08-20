@@ -450,6 +450,17 @@ class ArtifactStore:
             scope = await self._task_scope(task_id, kind, create=False)
             return scope.bundle_dir / Path(filename).name if scope is not None else None
 
+    async def task_label(self, task_id: str = "") -> str:
+        """Human title for a task, used to name rewritten contract writes."""
+        tid = str(task_id or "").strip()
+        if not tid:
+            return ""
+        async with self._db.session() as session:
+            task = await session.get(TaskORM, tid)
+        if task is None:
+            return ""
+        return str(task.title or task.user_input or "")
+
     async def put_bytes(
         self,
         data: bytes,
@@ -926,6 +937,11 @@ class ContextArtifactStore:
             filename,
             task_id=str(getattr(self._context, "task_id", "") or ""),
             kind=kind,
+        )
+
+    async def task_label(self, task_id: str = "") -> str:
+        return await self._store.task_label(
+            task_id or str(getattr(self._context, "task_id", "") or "")
         )
 
     def __getattr__(self, name: str) -> Any:

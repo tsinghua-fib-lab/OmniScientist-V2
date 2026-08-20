@@ -126,11 +126,14 @@ def test_ppt_survey_wording_binds_slides_not_a_manuscript(message: str) -> None:
     assert infer_figure_and_paper_outputs(message) == []
 
 
-# ── latent-space survey: host closer ─────────────────────────────────────────
-def test_latent_survey_uses_the_host_closer() -> None:
+# ── latent-space survey: capable ReAct with write_file ───────────────────────
+def test_latent_survey_uses_capable_react_with_write_file() -> None:
     plan = _planner().plan_from_proposal(SURVEY, _SURVEY_PROPOSAL, task_id="live-survey")
-    assert plan.intent_type is IntentType.SINGLE_SKILL_TASK
-    assert [sel.skill for sel in plan.selected_skills] == ["openalex-search"]
+    assert plan.intent_type is IntentType.REACT_FALLBACK
+    assert plan.selected_skills == []
+    assert plan.tool_policy.allows("search_literature")
+    assert plan.tool_policy.allows("write_file")
+    assert not plan.tool_policy.allows("bash")
     assert "draft.section" in plan.verification_plan.required_outputs
     assert "artifact.figure" not in plan.verification_plan.required_outputs
     assert plan_owes_scientific_outputs(plan)
@@ -149,8 +152,10 @@ def test_figure_and_paper_requests_stay_live_and_owe_both(
     assert "draft.manuscript" in required or "draft.section" in required
     assert plan_owes_scientific_outputs(plan)
     assert survey_closer_eligible(plan) is False
-    for blocked in ASSISTANT_BLOCKED_TOOLS:
-        assert plan.tool_policy.allows(blocked) is False
+    assert plan.tool_policy.allows("write_file")
+    assert plan.tool_policy.allows("edit_file")
+    assert not plan.tool_policy.allows("bash")
+    assert not plan.tool_policy.allows("run_compute")
 
 
 @pytest.mark.parametrize("message,task_id", [(RAG, "live-rag-confused"), (LOOP, "live-loop-confused")])
@@ -299,8 +304,9 @@ def test_ppt_survey_plan_is_not_closer_eligible() -> None:
 
 def test_confused_survey_demote_keeps_the_retrieve_query() -> None:
     plan = _planner().plan_from_proposal(SURVEY, _CONFUSED_SURVEY_PROPOSAL, task_id="live-carry")
-    # SURVEY is not figure+paper, so the pair stays on the host closer.
-    assert plan.intent_type is IntentType.SINGLE_SKILL_TASK
+    # SURVEY is not figure+paper; the pair stays on capable ReAct with write_file.
+    assert plan.intent_type is IntentType.REACT_FALLBACK
+    assert plan.tool_policy.allows("write_file")
     rag_plan = _planner().plan_from_proposal(
         RAG, _CONFUSED_SURVEY_PROPOSAL, task_id="live-rag-carry"
     )

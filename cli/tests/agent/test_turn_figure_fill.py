@@ -45,7 +45,7 @@ def _completion(*, artifacts: Any, runtime: Any, registry: Any = None) -> TurnCo
 
 
 @pytest.mark.asyncio
-async def test_owed_figure_is_filled_on_this_task() -> None:
+async def test_owed_figure_without_authored_dot_is_not_invented() -> None:
     runtime = SimpleNamespace(
         enqueue=AsyncMock(return_value="sub-figure-1"),
         process=AsyncMock(),
@@ -73,14 +73,9 @@ async def test_owed_figure_is_filled_on_this_task() -> None:
         _plan(), result, drained, task_id=_plan().task_id, session_id="s1"
     )
 
-    runtime.enqueue.assert_awaited_once()
-    kwargs = runtime.enqueue.await_args
-    assert kwargs.args[0] == "scientific-figure"
-    assert kwargs.kwargs["task_id"] == _plan().task_id
-    assert kwargs.kwargs["queue"] is False
-    runtime.process.assert_awaited_once_with("sub-figure-1")
-    assert any("artifact.figure" in note for note in notes)
-    assert drained[0]["subtask_id"] == "sub-figure-1"
+    runtime.enqueue.assert_not_called()
+    assert notes == []
+    assert drained == []
 
 
 @pytest.mark.asyncio
@@ -132,7 +127,7 @@ async def test_other_task_files_are_not_in_this_task_inventory() -> None:
         session_id="s1",
     )
 
-    runtime.enqueue.assert_awaited_once()
+    runtime.enqueue.assert_not_called()
 
 
 def test_unrendered_authored_dot_skips_skill_sidecar_and_keeps_custom() -> None:

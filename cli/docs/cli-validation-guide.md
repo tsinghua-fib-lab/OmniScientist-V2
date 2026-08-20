@@ -20,6 +20,10 @@ omni -P skill-verify skills examples
 > `omni exec` in these scenarios is workspace-auto: in-workspace writes and sandboxed
 > `bash` / `run_compute` run without a TTY prompt. Use `omni exec --ask` when you want
 > to exercise the approval loop.
+>
+> Numbered user-facing prompts (including stacked 3–8 capability utterances,
+> long-horizon campaigns, `task all`, `memory link`/`graph`, and in-process
+> REPL inspect) live in the [User Walkthrough Catalog](user-walkthrough-cases.md).
 
 ## Core Validation Loop
 

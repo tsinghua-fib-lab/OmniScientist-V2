@@ -27,6 +27,36 @@ import typer
 # Root-level commands that are never user-facing slash commands.
 _HIDDEN_ROOT = {"chat"}
 
+# Research verbs. Everything else is session/workspace (dialogue, setup, ops).
+# ``/help`` and the bare-``/`` completer both use this split so the two surfaces
+# cannot drift: conversation first, then the research appendix.
+RESEARCH_COMMANDS = frozenset(
+    {
+        "artifacts",
+        "bench",
+        "cite",
+        "claim",
+        "eval",
+        "evidence",
+        "hypo",
+        "lit",
+        "memory",
+        "plan",
+        "review",
+        "run",
+        "skills",
+        "soul",
+        "source",
+        "task",
+        "verify",
+    }
+)
+
+
+def command_group(name: str) -> str:
+    """``research`` or ``session`` for a bare or ``/``-prefixed command name."""
+    return "research" if name.strip().lstrip("/").lower() in RESEARCH_COMMANDS else "session"
+
 
 def _first_line(text: str | None) -> str:
     """First non-empty line of a help string with internal whitespace collapsed."""
@@ -77,7 +107,7 @@ class SlashSubcommand:
 class SlashCommand:
     """A top-level slash command with any subcommands and options."""
 
-    __slots__ = ("name", "help", "kind", "subcommands", "options")
+    __slots__ = ("name", "help", "kind", "group", "subcommands", "options")
 
     def __init__(
         self,
@@ -85,12 +115,14 @@ class SlashCommand:
         help: str = "",
         kind: str = "external",
         *,
+        group: str | None = None,
         subcommands: Sequence[SlashSubcommand] = (),
         options: Sequence[SlashOption] = (),
     ) -> None:
         self.name = name
         self.help = help
         self.kind = kind  # "external" (a Typer command) | "in_process" (REPL-only)
+        self.group = group if group is not None else command_group(name)
         self.subcommands: tuple[SlashSubcommand, ...] = tuple(subcommands)
         self.options: tuple[SlashOption, ...] = tuple(options)
 

@@ -130,13 +130,17 @@ class ResearchStore:
                 await s.execute(select(SourceORM).where(SourceORM.dedup_key == key))
             ).scalars().first()
 
-    async def list_sources(self, *, limit: int = 50) -> list[SourceORM]:
+    async def list_sources(self, *, limit: int = 50, session_id: str = "") -> list[SourceORM]:
         async with self._db.session() as s:
-            rows = (
-                await s.execute(
-                    select(SourceORM).order_by(SourceORM.created_at.desc()).limit(limit)
+            q = select(SourceORM).order_by(SourceORM.created_at.desc())
+            if session_id:
+                claim_ids = select(ClaimORM.id).where(ClaimORM.session_id == session_id)
+                source_ids = select(EvidenceORM.source_id).where(
+                    EvidenceORM.claim_id.in_(claim_ids),
+                    EvidenceORM.source_id != "",
                 )
-            ).scalars().all()
+                q = q.where(SourceORM.id.in_(source_ids))
+            rows = (await s.execute(q.limit(limit))).scalars().all()
         return list(rows)
 
     # ── chunks ────────────────────────────────────────────────────────────
@@ -330,11 +334,15 @@ class ResearchStore:
     async def get_hypothesis(self, hyp_id: str) -> HypothesisORM | None:
         return await self._get_by_id_or_prefix(HypothesisORM, hyp_id)
 
-    async def list_hypotheses(self, *, limit: int = 50, status: str = "") -> list[HypothesisORM]:
+    async def list_hypotheses(
+        self, *, limit: int = 50, status: str = "", session_id: str = ""
+    ) -> list[HypothesisORM]:
         async with self._db.session() as s:
             q = select(HypothesisORM).order_by(HypothesisORM.updated_at.desc())
             if status:
                 q = q.where(HypothesisORM.status == status)
+            if session_id:
+                q = q.where(HypothesisORM.session_id == session_id)
             rows = (await s.execute(q.limit(limit))).scalars().all()
         return list(rows)
 
@@ -512,19 +520,45 @@ class ResearchStore:
         return list(rows)
 
     # ── aggregate ───────────────────────────────────────────────────────────
-    async def counts(self) -> dict[str, int]:
+    async def counts(self, *, session_id: str = "") -> dict[str, int]:
         async with self._db.session() as s:
-            async def _n(model: Any) -> int:
-                return int((await s.execute(select(func.count()).select_from(model))).scalar() or 0)
+            async def _n(model: Any, *clauses: Any) -> int:
+                q = select(func.count()).select_from(model)
+                for clause in clauses:
+                    q = q.where(clause)
+                return int((await s.execute(q)).scalar() or 0)
 
+            if not session_id:
+                return {
+                    "sources": await _n(SourceORM),
+                    "chunks": await _n(ChunkORM),
+                    "citations": await _n(CitationORM),
+                    "hypotheses": await _n(HypothesisORM),
+                    "claims": await _n(ClaimORM),
+                    "evidence": await _n(EvidenceORM),
+                    "runs": await _n(RunORM),
+                }
+
+            claim_ids = select(ClaimORM.id).where(ClaimORM.session_id == session_id)
+            source_ids = (
+                select(EvidenceORM.source_id)
+                .where(
+                    EvidenceORM.claim_id.in_(claim_ids),
+                    EvidenceORM.source_id != "",
+                )
+                .distinct()
+            )
             return {
-                "sources": await _n(SourceORM),
-                "chunks": await _n(ChunkORM),
-                "citations": await _n(CitationORM),
-                "hypotheses": await _n(HypothesisORM),
-                "claims": await _n(ClaimORM),
-                "evidence": await _n(EvidenceORM),
-                "runs": await _n(RunORM),
+                "sources": int(
+                    (await s.execute(select(func.count()).select_from(source_ids.subquery()))).scalar()
+                    or 0
+                ),
+                "chunks": await _n(ChunkORM, ChunkORM.source_id.in_(source_ids)),
+                "citations": 0,
+                "hypotheses": await _n(HypothesisORM, HypothesisORM.session_id == session_id),
+                "claims": await _n(ClaimORM, ClaimORM.session_id == session_id),
+                "evidence": await _n(EvidenceORM, EvidenceORM.claim_id.in_(claim_ids)),
+                "runs": await _n(RunORM, RunORM.session_id == session_id),
             }
 
     async def _get_by_id_or_prefix(self, model: Any, ident: str) -> Any | None:
