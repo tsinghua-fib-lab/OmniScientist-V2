@@ -680,15 +680,23 @@ async def test_prompt_only_skill_runs_subagent():
 
 
 @pytest.mark.asyncio
-async def test_prompt_only_skill_emits_nested_tool_progress():
+async def test_prompt_only_skill_emits_nested_tool_progress(tmp_path):
+    """Nested prompt-skill tools must surface start/done, and a used write.
+
+    The hermetic home is store-shaped (``tmp/.omni``). Codex-style FS policy
+    treats a write inside that tree as a rejected invocation, which
+    ``tool_names()`` then omits. Aim the write at the pytest workspace so the
+    progress contract is measured on a successful call, not a jail denial.
+    """
+    dest = tmp_path / "out.txt"
     entry = SkillEntry(
         name="p", description="d", kind=SkillKind.PROMPT_ONLY,
         delivery_mode=DeliveryMode.ASYNC_TASK, body="Write a file.",
     )
-    ctx = _ctx()
+    ctx = _ctx(working_dir=tmp_path)
     ctx.llm = ScriptedLLM([
         ChatWithToolsResult(
-            tool_calls=[ToolCall("c1", "write_file", {"path": str(ctx.paths.project_dir / "out.txt"), "contents": "ok"})]
+            tool_calls=[ToolCall("c1", "write_file", {"path": str(dest), "contents": "ok"})]
         ),
         ChatWithToolsResult(content="done"),
     ])
@@ -700,6 +708,7 @@ async def test_prompt_only_skill_emits_nested_tool_progress():
     out = await execute_skill(entry, {"input": "go"}, ctx, progress_callback=progress)
 
     assert out["status"] == "ok"
+    assert dest.read_text(encoding="utf-8") == "ok"
     assert any(e["stage"] == "tool.start" and e.get("tool") == "write_file" for e in events)
     assert any(e["stage"] == "tool.done" and e.get("tool") == "write_file" for e in events)
     assert "write_file" in out["tools_used"]
