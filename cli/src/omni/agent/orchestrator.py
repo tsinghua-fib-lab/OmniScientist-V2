@@ -124,20 +124,26 @@ logger = logging.getLogger(__name__)
 
 
 def _artifact_mirror_dir(settings: OmniSettings) -> Path | None:
-    """Resolve where trusted-directory deliverables are mirrored, or ``None``.
+    """Resolve the single user-facing output folder.
 
-    ``settings.artifacts.mirror_outputs`` is the effective (trust-gated) switch
-    set in ``load_settings``. A relative ``output_dir`` resolves against the
-    directory omni was launched in (the process CWD), so "." means "put the
-    generated files in the folder where I ran omni".
+    Trusted launches write into ``artifacts.output_dir`` (default ``outputs/``
+    next to cwd). Untrusted / named home projects still get one findable folder
+    at ``<project_dir>/outputs`` rather than scattering into ``artifacts/<kind>``.
+    ``artifact://`` is not a directory — it is the SQLite id used to resolve
+    these files after they move.
     """
+    from omni.storage.artifacts import USER_OUTPUT_DIRNAME
+
     cfg = getattr(settings, "artifacts", None)
-    if cfg is None or not cfg.mirror_outputs:
+    if cfg is not None and cfg.mirror_outputs:
+        base = Path((cfg.output_dir or USER_OUTPUT_DIRNAME).strip()).expanduser()
+        if not base.is_absolute():
+            base = Path.cwd() / base
+        return base.resolve()
+    paths = getattr(settings, "paths", None)
+    if paths is None:
         return None
-    base = Path((cfg.output_dir or ".").strip()).expanduser()
-    if not base.is_absolute():
-        base = Path.cwd() / base
-    return base.resolve()
+    return (paths.project_dir / USER_OUTPUT_DIRNAME).resolve()
 
 
 def _react_on_token(plan: IntentPlan, on_token: Any) -> Any:

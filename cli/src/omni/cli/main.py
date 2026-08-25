@@ -2019,10 +2019,11 @@ async def _repl_async(state: AppState, *, resume_session_id: str | None = None) 
     # One catalog (command names + subcommands + options) drives completion on both
     # interactive surfaces, so the menu, the dispatcher, and /help stay in sync.
     commands: CommandCatalog = build_command_catalog(app)
-    # Where omni writes deliverables. Its per-kind subfolders (``figures/`` …)
-    # stay mentionable even when the repository gitignores them, which projects
-    # routinely do precisely because those files are generated.
-    output_base = Path(str(getattr(s.artifacts, "output_dir", ".") or ".")).expanduser()
+    # Where omni writes deliverables. ``outputs/`` and leftover per-kind
+    # siblings stay mentionable even when the repository gitignores them.
+    output_base = Path(
+        str(getattr(s.artifacts, "output_dir", "outputs") or "outputs")
+    ).expanduser()
     # xterm modifyOtherKeys readiness — not a Kitty CSI-u probe. Footer and
     # placeholder advertise Shift+Enter only when this report says they work.
     shift_enter_ready = inspect_terminal().shift_enter_ready

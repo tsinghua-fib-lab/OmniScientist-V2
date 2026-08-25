@@ -166,17 +166,23 @@ class HomeService:
         # Honour the persisted folder-trust decision the same way the interactive
         # CLI does (``omni.cli.state.resolve_workspace_trust``): a scheduled or
         # background task in a directory the user already trusted must still write
-        # its figures/reports INTO that directory, not silently divert them to the
-        # durable ``~/.omni`` store. The daemon never prompts — only an already
-        # trusted root mirrors — and ``output_dir`` is pinned to that absolute root
-        # because the service CWD is not the workspace, so a relative "." (the
-        # default) would otherwise resolve against the daemon's own directory.
+        # deliverables INTO that directory's ``outputs/``, not silently divert
+        # them to the durable ``~/.omni`` store. The daemon never prompts — only
+        # an already trusted root mirrors — and ``output_dir`` is pinned to that
+        # workspace's ``outputs/`` folder because the service CWD is not the
+        # workspace.
+        from omni.storage.artifacts import USER_OUTPUT_DIRNAME
+
         root_path = Path(root)
         if self._workspace_trusted(root_path):
             return load_settings(
                 cwd=root_path,
                 trusted=True,
-                overrides={"artifacts": {"output_dir": str(root_path.resolve())}},
+                overrides={
+                    "artifacts": {
+                        "output_dir": str((root_path / USER_OUTPUT_DIRNAME).resolve())
+                    }
+                },
             )
         return load_settings(cwd=root_path, trusted=None)
 

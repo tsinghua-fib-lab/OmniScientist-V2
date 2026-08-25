@@ -141,6 +141,16 @@ def test_deliverable_roots_only_reports_existing_directories(tmp_path: Path) -> 
     assert [d.name for d in deliverable_roots(tmp_path)] == ["figures"]
 
 
+def test_deliverable_roots_include_outputs_and_leftover_siblings(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    reports = tmp_path / "reports"
+    outputs.mkdir()
+    reports.mkdir()
+    found = {path.name: path for path in deliverable_roots(outputs)}
+    assert found["outputs"] == outputs
+    assert found["reports"] == reports
+
+
 def test_deliverables_are_still_secret_free(tmp_path: Path) -> None:
     """Re-including a directory must not re-include secrets inside it."""
     figures = tmp_path / "figures"

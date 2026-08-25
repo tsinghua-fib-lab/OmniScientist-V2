@@ -205,13 +205,13 @@ def _task_result_message(
         lines.append("\nArtifacts:")
         for artifact in visible_artifacts[:12]:
             label = artifact.get("label") or "artifact"
-            uri = artifact.get("uri") or ""
-            path = artifact.get("path") or ""
-            lines.append(
-                f"- {label}: {path} ({uri})"
-                if path and uri
-                else f"- {label}: {uri or path}"
-            )
+            path = str(artifact.get("path") or "").strip()
+            if path.startswith("artifact://"):
+                path = ""
+            if path:
+                lines.append(f"- {label}: {path}")
+            else:
+                lines.append(f"- {label}")
         continuation = (
             "\nTo continue from these artifacts, use open_artifact to read content "
             "or list_session_artifacts to list session artifacts."

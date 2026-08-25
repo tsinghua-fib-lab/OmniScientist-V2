@@ -318,7 +318,7 @@ async def _resolve_task_artifacts(
 
 
 def _print_artifacts(rows: Sequence[tuple[str, str, str]], *, limit: int = 24) -> None:
-    """Render artifacts as a bold **title** plus its path and dim ``artifact://``."""
+    """Render artifacts as a bold **title** plus the filesystem path."""
     if not rows:
         return
     console.print(f"\n[{theme.STRONG} {theme.ACCENT}]artifacts[/]")

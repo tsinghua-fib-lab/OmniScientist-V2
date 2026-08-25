@@ -486,8 +486,9 @@ def _bare_filename(reference: str) -> str:
 def _bare_name_candidates(name: str, ctx: Any | None) -> list[Path]:
     """Omni deliverable roots for a bare filename (same idea as write_file).
 
-    Order matches ``resolve_write_target``'s *read* side: this task's reports
-    bundle, then workspace ``artifacts/``, then a real file already in cwd.
+    Order matches ``resolve_write_target``'s *read* side: this task's
+    ``outputs/`` (and leftover ``reports/``) bundle, then workspace
+    ``artifacts/``, then a real file already in cwd.
     Cwd is last so a stray source-root copy cannot hide the managed deliverable.
     """
 
@@ -502,9 +503,10 @@ def _bare_name_candidates(name: str, ctx: Any | None) -> list[Path]:
     if root is None and working:
         root = working
     if root:
-        reports = Path(root) / "reports"
-        if reports.is_dir():
-            found.extend(sorted(p for p in reports.glob(f"*/{name}") if p.is_file()))
+        for collection in ("outputs", "reports"):
+            folder = Path(root) / collection
+            if folder.is_dir():
+                found.extend(sorted(p for p in folder.glob(f"*/{name}") if p.is_file()))
     if paths is not None:
         artifacts = getattr(paths, "artifacts_dir", None)
         if artifacts:

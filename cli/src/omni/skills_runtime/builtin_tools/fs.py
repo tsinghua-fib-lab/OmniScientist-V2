@@ -642,7 +642,7 @@ def build_fs_tools(ctx: ExecContext) -> list[Tool]:
                         "type": "string",
                         "description": (
                             "A human filename (Survey.md). A bare name lands in "
-                            "this task's reports (or the matching collection). "
+                            "this task's outputs bundle (outputs/<title>_<task8>/). "
                             "Do not use plan output tokens such as draft.section "
                             "or draft.manuscript as the path — those are ledger "
                             "names. Give a directory to write somewhere specific."

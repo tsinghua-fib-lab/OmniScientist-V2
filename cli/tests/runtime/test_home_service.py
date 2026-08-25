@@ -105,19 +105,22 @@ def test_settings_for_record_mirrors_into_trusted_root(tmp_path):
     root.mkdir()
     record = {"kind": "path", "root": str(root), "name": "repo"}
 
-    # Not yet vouched for → outputs stay in the durable store (no mirror).
+    # Not yet vouched for → no cwd mirror, but still one findable outputs/ folder
+    # under the named project store.
     untrusted = service._settings_for_record(record)
     assert untrusted.artifacts.mirror_outputs is False
-    assert _artifact_mirror_dir(untrusted) is None
+    assert _artifact_mirror_dir(untrusted) == (
+        untrusted.paths.project_dir / "outputs"
+    ).resolve()
 
     # After the user trusts the directory the daemon mirrors into it, with
-    # output_dir pinned to the absolute root (not the service's own CWD, which is
-    # never the workspace for a background daemon).
+    # output_dir pinned to that workspace's outputs/ (not the service's own CWD).
     trustmod.set_trusted(root, home=service.paths.home)
     trusted = service._settings_for_record(record)
+    pinned = (root / "outputs").resolve()
     assert trusted.artifacts.mirror_outputs is True
-    assert trusted.artifacts.output_dir == str(root.resolve())
-    assert _artifact_mirror_dir(trusted) == root.resolve()
+    assert trusted.artifacts.output_dir == str(pinned)
+    assert _artifact_mirror_dir(trusted) == pinned
 
 
 def _service() -> HomeService:
@@ -175,7 +178,7 @@ def test_settings_for_record_respects_disabled_trust_gate(tmp_path, monkeypatch)
 
     settings = service._settings_for_record({"kind": "path", "root": str(root)})
     assert settings.artifacts.mirror_outputs is True
-    assert settings.artifacts.output_dir == str(root.resolve())
+    assert settings.artifacts.output_dir == str((root / "outputs").resolve())
 
 
 @pytest.mark.asyncio

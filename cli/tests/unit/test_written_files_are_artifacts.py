@@ -134,7 +134,6 @@ async def test_bare_outputs_publish_into_the_trusted_task_bundle(tmp_path: Path)
         )
         expected = (
             tmp_path
-            / "reports"
             / "Visible-research-report_visible-"
             / "report.md"
         )
@@ -180,7 +179,6 @@ async def test_a_ledger_token_lands_in_the_task_report_bundle(tmp_path: Path) ->
         )
         expected = (
             tmp_path
-            / "reports"
             / "Latent-space-survey_visible-"
             / "Latent-space-survey.md"
         )

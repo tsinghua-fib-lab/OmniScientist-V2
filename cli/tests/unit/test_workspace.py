@@ -570,7 +570,7 @@ def test_tasks_show_watch_and_attach():
     assert "input" not in shown.stdout
     assert "result" not in shown.stdout
     assert "artifacts" in shown.stdout
-    assert "artifact://report-1" in shown.stdout
+    assert "artifact://report-1" not in shown.stdout
     assert "/tmp/report.md" in shown.stdout
     assert "skill deleted" in shown.stdout
     assert "physical_delete" in shown.stdout

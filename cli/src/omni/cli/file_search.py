@@ -199,19 +199,25 @@ def _git_files(root: Path) -> list[str] | None:
 
 
 def deliverable_roots(base: Path) -> list[Path]:
-    """omni's own output subfolders under ``base`` that currently exist.
+    """Generated-file folders that must stay mentionable even if gitignored.
 
-    Kept in step with the artifact store's own mapping rather than hardcoded
-    here: a new deliverable kind must not silently become unmentionable.
+    ``base`` is either the workspace (cwd) or the configured output directory
+    (``outputs/``). The unified folder itself is included, plus leftover
+    per-kind siblings (``reports/``, ``figures/``, …) so older bundles can
+    still be ``@``-referenced.
     """
-    from omni.storage.artifacts import deliverable_subdirs
+    from omni.storage.artifacts import USER_OUTPUT_DIRNAME, deliverable_subdirs
 
     resolved = base.expanduser()
-    return [
-        candidate
-        for candidate in (resolved / name for name in deliverable_subdirs())
-        if candidate.is_dir()
-    ]
+    names = {USER_OUTPUT_DIRNAME, "out", *deliverable_subdirs()}
+    candidates: list[Path] = []
+    search_roots = [resolved]
+    if resolved.name in names:
+        candidates.append(resolved)
+        search_roots = [resolved.parent, resolved]
+    for root in search_roots:
+        candidates.extend(root / name for name in deliverable_subdirs())
+    return [path for path in dict.fromkeys(candidates) if path.is_dir()]
 
 
 def _walk_files(root: Path, start: Path | None = None) -> list[str]:

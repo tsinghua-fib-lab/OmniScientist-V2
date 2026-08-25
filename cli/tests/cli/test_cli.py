@@ -1961,7 +1961,7 @@ def test_tasks_show_artifact_list_hides_dot_sources():
         _print_artifacts(artifacts)
     out = capture.get()
     assert "PNG: /tmp/figure.png" in out
-    assert "artifact://png" in out
+    assert "artifact://png" not in out
     assert "figure.dot" not in out
 
 

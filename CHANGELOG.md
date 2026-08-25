@@ -4,11 +4,21 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) and semanti
 
 ## Unreleased
 
+### Changed
+
+- Generated files now land in one user-facing folder:
+  ``outputs/<title>_<task8>/``. Task-bundle and filename rules are unchanged
+  (``<title>_<task8>/`` and ``<slug>-<task8>-<art8>.ext``). Leftover
+  ``reports/`` / ``figures/`` trees still resolve. ``outputs/`` and ``out/``
+  are gitignored. ``artifact://<id>`` stays an internal SQLite handle for
+  skills and ``resolve_path``; CLI and the Artifacts panel show the filesystem
+  path (or nothing) instead of that URI.
+
 ### Fixed
 
 - ``research-pptx`` no longer treats a bare filename in ``topic`` as a
   cwd-required ``markdown_uri``. Mentions bind only when the file already
-  exists as ``artifact://``, an absolute path, or a task reports/artifacts
+  exists as ``artifact://``, an absolute path, or a task outputs/reports
   deliverable. An explicit missing ``markdown_uri`` still fails with a
   retryable not-found error.
 

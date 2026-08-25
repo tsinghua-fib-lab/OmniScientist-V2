@@ -21,13 +21,15 @@ export function shortId(id: string): string {
 
 export function displayFileName(path?: string, uri?: string): string {
   const filePath = (path || "").trim();
+  if (filePath) {
+    const cleaned = filePath.replace(/\\/g, "/").replace(/\/+$/, "");
+    if (!cleaned.includes("/")) return filePath;
+    return cleaned.split("/").filter(Boolean).pop() || filePath;
+  }
   const fallback = (uri || "").trim();
-  const raw = filePath || fallback;
-  if (!raw) return "";
-  if (!filePath && fallback.startsWith("artifact://")) return fallback;
-  const cleaned = raw.replace(/\\/g, "/").replace(/\/+$/, "");
-  if (!cleaned.includes("/")) return raw;
-  return cleaned.split("/").filter(Boolean).pop() || raw;
+  // artifact:// is an internal store id, not a user path.
+  if (!fallback || fallback.startsWith("artifact://")) return "";
+  return fallback;
 }
 
 export function displayTitle(session: Session): string {

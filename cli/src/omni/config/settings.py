@@ -826,21 +826,15 @@ class ArtifactsCfg(BaseModel):
     """Where generated deliverables are surfaced.
 
     When the launch directory is trusted, omni writes user-facing deliverables
-    (figures / reports / slides) DIRECTLY into per-kind subfolders of
-    ``output_dir`` — e.g. ``<output_dir>/figures/<name>.svg`` — by default the
-    directory omni was started in, as the single canonical copy, so results land
-    next to the user's work like Codex / Claude Code (a clean ``figures/`` bundle,
-    no duplicate under ``~/.omni``). Intermediate sidecars (``.dot`` / ``.json``)
-    and untrusted or library/direct runs keep the durable workspace store
-    (``~/.omni/...``).
-    ``mirror_outputs`` is the *effective* switch: it is forced off unless the
-    launch directory is trusted (resolved in ``load_settings``). The name is
-    retained for compatibility; it now means "write deliverables to output_dir",
-    not "copy them there".
+    (figures / reports / slides) DIRECTLY into ``output_dir`` — default
+    ``outputs/`` next to cwd — as one canonical copy so ``ls outputs/`` finds
+    every task bundle. Intermediate sidecars stay in the durable store
+    (``<project>/artifacts/``). ``mirror_outputs`` is trust-gated in
+    ``load_settings``: off unless the launch directory is trusted.
     """
 
     mirror_outputs: bool = False
-    output_dir: str = "."
+    output_dir: str = "outputs"
     mirror_formats: list[str] = Field(
         default_factory=lambda: [
             "svg", "png", "pdf", "docx", "pptx", "html", "md", "csv", "xlsx",

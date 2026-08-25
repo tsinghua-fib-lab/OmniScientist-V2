@@ -406,20 +406,16 @@ def assistant_answer(text: str) -> None:
 
 
 def artifact_line(label: str, target: str = "", uri: str = "", *, indent: str = "  ") -> None:
-    """One produced file: bold what it is, plain where it is, dim how to reopen it.
+    """One produced file: bold what it is, plain filesystem path.
 
-    The emphasis belongs on the label because that is what the reader scans a
-    result block for — which outputs exist — while the path is what they copy
-    once they have found the right line. Codex makes the same split (bold
-    ``Added``/``Edited`` verb, plainly-styled path) and so does OpenClaw (bold
-    tool title over a dim argument line).
+    ``uri`` is accepted for call-site compatibility but never printed:
+    ``artifact://<id>`` is an internal store handle, not a user path.
     """
+    del uri
     name = escape(artifact_display_label(label))
     body = f"{indent}[{theme.ACCENT}]•[/] [{theme.STRONG}]{name}[/]"
-    if target:
+    if target and not str(target).startswith("artifact://"):
         body += f": {escape(target)}"
-    if uri and uri != target:
-        body += f" [{theme.MUTED}]{escape(uri)}[/]"
     console.print(body)
 
 
