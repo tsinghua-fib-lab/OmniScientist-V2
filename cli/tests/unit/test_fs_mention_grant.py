@@ -1,14 +1,13 @@
-"""``@`` mentions as an explicit read grant, and the limit of that grant.
+"""Read grants: ``@`` mentions, named absolute paths, and the shared envelope.
 
-The read roots stop the *model* from wandering the filesystem; they must not
-veto the owner, so a file the user explicitly attached is readable even from
-outside them. The grant widens *which paths* — never *which kinds*: a mentioned
-secret stays refused, otherwise ``@~/.ssh/id_rsa`` would be a way to launder a
-sensitive file past the policy.
+Reads follow Codex WorkspaceWrite (any path except secrets and Omni control
+stores). ``@`` and a bare absolute path in the user message are the same
+owner consent. Sensitivity still wins: ``@~/.ssh/id_rsa`` stays refused.
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -31,14 +30,14 @@ def _ctx(file_uris: list[str] | None = None) -> ExecContext:
 
 
 @pytest.mark.asyncio
-async def test_outside_file_is_denied_without_a_mention(tmp_path: Path) -> None:
+async def test_outside_file_is_readable_without_a_mention(tmp_path: Path) -> None:
+    """WorkspaceWrite read envelope: a sibling tree is a list_dir, not a jail."""
     target = tmp_path / "paper.md"
     target.write_text("findings", encoding="utf-8")
 
     out = await _tool(build_fs_tools(_ctx()), "read_file")({"path": str(target)})
 
-    assert out.startswith("ERROR")
-    assert "outside the accessible roots" in out
+    assert out == "findings"
 
 
 @pytest.mark.asyncio
@@ -53,16 +52,20 @@ async def test_mentioned_file_becomes_readable(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_grant_does_not_extend_to_siblings(tmp_path: Path) -> None:
-    granted = tmp_path / "paper.md"
-    granted.write_text("findings", encoding="utf-8")
-    other = tmp_path / "private.md"
-    other.write_text("nope", encoding="utf-8")
+async def test_named_message_path_is_a_read_root(tmp_path: Path) -> None:
+    from omni.core.action_contracts import ResolverContext
 
-    ctx = _ctx([str(granted)])
-    out = await _tool(build_fs_tools(ctx), "read_file")({"path": str(other)})
-
-    assert out.startswith("ERROR")
+    corpus = tmp_path / "sourcecode"
+    corpus.mkdir()
+    (corpus / "README.md").write_text("codex", encoding="utf-8")
+    ctx = _ctx()
+    ctx.resolver_context = ResolverContext(
+        user_message=f"对标源码目录 {corpus} 实现",
+        reference_time=datetime.now(UTC),
+        timezone="UTC",
+    )
+    listing = await _tool(build_fs_tools(ctx), "list_dir")({"path": str(corpus)})
+    assert "README.md" in listing
 
 
 @pytest.mark.asyncio

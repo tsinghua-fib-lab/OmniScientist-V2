@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { displayTitle, relativeTime, shortId, workerLabel } from "../format";
+import { displayTitle, relativeTime, shortId } from "../format";
+import { sessionStatusGroup, sessionStatusLabel } from "../sessionManagement";
 import {
   IconChannels,
   IconClose,
@@ -24,10 +25,54 @@ import {
   serializeWorkspaceSectionHeight,
 } from "../sidebarSplit";
 import { actions, useAppState } from "../store";
-import type { Session } from "../types";
+import type {
+  CatalogWorkspace,
+  Session,
+  SessionScope,
+  SessionSort,
+  SessionStatusGroup,
+} from "../types";
 import { SidebarSplitResizer } from "./SidebarSplitResizer";
 
 const CHANNELS = ["", "cli", "web", "wechat", "feishu", "dingtalk"];
+const SESSION_SORTS: Array<{ value: SessionSort; label: string }> = [
+  { value: "activity", label: "最近活动" },
+  { value: "started", label: "最近执行" },
+  { value: "completed", label: "最近完成" },
+  { value: "created", label: "创建时间" },
+];
+const SESSION_STATUSES: Array<{ value: SessionStatusGroup | ""; label: string }> = [
+  { value: "", label: "全部状态" },
+  { value: "running", label: "执行中" },
+  { value: "needs_attention", label: "待处理" },
+  { value: "completed", label: "已完成" },
+  { value: "warning", label: "有警告" },
+  { value: "error", label: "有问题" },
+  { value: "cancelled", label: "已取消" },
+  { value: "empty", label: "暂无任务" },
+];
+
+function SessionCopy({ session, global }: { session: Session; global: boolean }) {
+  const title = displayTitle(session);
+  const status = sessionStatusGroup(session);
+  return (
+    <span className="item-copy">
+      <span className="title session-title" title={title}>
+        {title}
+      </span>
+      <span className="meta">
+        <span className={`badge ${session.channel}`}>{session.channel}</span>
+        <span className={`session-status ${status}`}>{sessionStatusLabel(session)}</span>
+        <span>{relativeTime(session.last_activity_at || session.updated_at)}</span>
+      </span>
+      <span className="meta session-sub">
+        {global && <span className="workspace-chip">{session.workspace_label || "未知工作区"}</span>}
+        <span>创建 {relativeTime(session.first_task_at || session.created_at)}</span>
+        {session.latest_task_id && <span>Task {shortId(session.latest_task_id)}</span>}
+      </span>
+    </span>
+  );
+}
 
 function readWorkspaceSectionHeight(): number {
   if (typeof window === "undefined") return DEFAULT_WORKSPACE_SECTION_HEIGHT;
@@ -78,11 +123,30 @@ export function Sidebar({
   onOpenChannels,
   locale = "zh",
 }: SidebarProps) {
-  const { catalog, sessions, sessionId, workspace, channelFilter } = useAppState();
+  const {
+    catalog,
+    hiddenWorkspaces = [],
+    sessions,
+    sessionResults = sessions,
+    sessionId,
+    workspace,
+    channelFilter,
+    sessionScope = "workspace",
+    sessionSort = "activity",
+    sessionStatusFilter = "",
+    sessionNextCursor = null,
+    sessionListLoading = false,
+    sessionListError = "",
+  } = useAppState();
   const [query, setQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [menuId, setMenuId] = useState<string | null>(null);
-  const [pendingDelete, setPendingDelete] = useState<Session | null>(null);
+  const [workspaceManage, setWorkspaceManage] = useState(false);
+  const [sessionManage, setSessionManage] = useState(false);
+  const [selectedWorkspaces, setSelectedWorkspaces] = useState<Set<string>>(() => new Set());
+  const [selectedSessions, setSelectedSessions] = useState<Set<string>>(() => new Set());
+  const [pendingDelete, setPendingDelete] = useState<Session[] | null>(null);
+  const [pendingHide, setPendingHide] = useState<CatalogWorkspace[] | null>(null);
   const [preferredWorkspaceHeight, setPreferredWorkspaceHeight] = useState(
     readWorkspaceSectionHeight,
   );
@@ -96,6 +160,26 @@ export function Sidebar({
     window.addEventListener("click", close);
     return () => window.removeEventListener("click", close);
   }, [menuId]);
+
+  useEffect(() => {
+    setSelectedWorkspaces((current) => {
+      const available = new Set(catalog.map((item) => item.project_dir));
+      return new Set([...current].filter((id) => available.has(id)));
+    });
+  }, [catalog]);
+
+  useEffect(() => {
+    setSelectedSessions((current) => {
+      const available = new Set(sessionResults.map((item) => item.id));
+      return new Set([...current].filter((id) => available.has(id)));
+    });
+  }, [sessionResults]);
+
+  useEffect(() => {
+    if (sessionScope !== "all") return;
+    setSessionManage(false);
+    setSelectedSessions(new Set());
+  }, [sessionScope]);
 
   useEffect(() => {
     const container = splitContainerRef.current;
@@ -142,6 +226,34 @@ export function Sidebar({
       ? channelSummaryLabel(channelSummary, locale)
       : channelStatusUnavailableLabel(locale)
     : "";
+  const selectedWorkspaceRows = filteredCatalog.filter((item) =>
+    selectedWorkspaces.has(item.project_dir),
+  );
+  const selectedSessionRows = sessionResults.filter((item) => selectedSessions.has(item.id));
+  const pendingDeleteMessageCount =
+    pendingDelete?.reduce(
+      (total, item) => total + (item.message_count ?? item.messages ?? 0),
+      0,
+    ) || 0;
+
+  const toggleWorkspace = (projectDir: string) => {
+    setSelectedWorkspaces((current) => {
+      const next = new Set(current);
+      if (next.has(projectDir)) next.delete(projectDir);
+      else next.add(projectDir);
+      return next;
+    });
+  };
+
+  const toggleSession = (session: Session) => {
+    if (sessionStatusGroup(session) === "running") return;
+    setSelectedSessions((current) => {
+      const next = new Set(current);
+      if (next.has(session.id)) next.delete(session.id);
+      else next.add(session.id);
+      return next;
+    });
+  };
 
   return (
     <aside
@@ -218,7 +330,10 @@ export function Sidebar({
           type="button"
           className="icon-btn square"
           aria-label="刷新工作区"
-          onClick={() => void actions.refreshCatalog()}
+          onClick={() => {
+            void actions.refreshCatalog();
+            void actions.refreshSessions();
+          }}
         >
           <IconRefresh size={16} />
         </button>
@@ -240,32 +355,101 @@ export function Sidebar({
       >
       <section id="workspace-section" className="section workspace-section">
         <div className="section-head">
-          <span>工作区</span>
-          <span>{filteredCatalog.length}</span>
+          <span>
+            工作区 · {filteredCatalog.length}
+            {hiddenWorkspaces.length ? ` · 已隐藏 ${hiddenWorkspaces.length}` : ""}
+          </span>
+          <button
+            type="button"
+            className={`section-manage${workspaceManage ? " active" : ""}`}
+            aria-label="管理工作区"
+            aria-pressed={workspaceManage}
+            onClick={() => {
+              setWorkspaceManage((current) => !current);
+              setSelectedWorkspaces(new Set());
+            }}
+          >
+            {workspaceManage ? "取消" : "管理"}
+          </button>
         </div>
         <div className="list" role="list">
           {filteredCatalog.length === 0 && <div className="empty">还没有打开过目录</div>}
-          {filteredCatalog.map((item) => (
-            <button
-              key={item.project_dir}
-              type="button"
-              className={`item ${workspace?.project_dir === item.project_dir ? "active" : ""}`}
-              aria-current={workspace?.project_dir === item.project_dir ? "page" : undefined}
-              onClick={() => {
-                void actions.selectCatalog(item);
-                onNavigate?.();
-              }}
-            >
-              <IconFolder size={15} className="item-leading" />
-              <span className="item-copy">
-                <span className="title">{item.label}</span>
-                <span className="meta">
-                  <span>{item.root || item.project_dir}</span>
+          {filteredCatalog.map((item) => {
+            const current = workspace?.project_dir === item.project_dir;
+            if (workspaceManage) {
+              return (
+                <label
+                  key={item.project_dir}
+                  className={`item selectable-item${current ? " active protected" : ""}`}
+                  title={current ? "当前工作区不能从侧栏移除" : "选择工作区"}
+                >
+                  <input
+                    type="checkbox"
+                    checked={selectedWorkspaces.has(item.project_dir)}
+                    disabled={current}
+                    aria-label={`选择工作区：${item.label}`}
+                    onChange={() => toggleWorkspace(item.project_dir)}
+                  />
+                  <IconFolder size={15} className="item-leading" />
+                  <span className="item-copy">
+                    <span className="title">{item.label}</span>
+                    <span className="meta">
+                      <span>{current ? "当前工作区 · 不可移除" : item.root || item.project_dir}</span>
+                    </span>
+                  </span>
+                </label>
+              );
+            }
+            return (
+              <button
+                key={item.project_dir}
+                type="button"
+                className={`item ${current ? "active" : ""}`}
+                aria-current={current ? "page" : undefined}
+                onClick={() => {
+                  void actions.selectCatalog(item);
+                  onNavigate?.();
+                }}
+              >
+                <IconFolder size={15} className="item-leading" />
+                <span className="item-copy">
+                  <span className="title">{item.label}</span>
+                  <span className="meta">
+                    <span>{item.root || item.project_dir}</span>
+                  </span>
                 </span>
-              </span>
-            </button>
-          ))}
+              </button>
+            );
+          })}
         </div>
+        {workspaceManage && (
+          <div className="selection-bar">
+            <span>已选 {selectedWorkspaceRows.length}</span>
+            <span className="selection-actions">
+              {hiddenWorkspaces.length > 0 && (
+                <button
+                  type="button"
+                  className="section-manage"
+                  onClick={() =>
+                    void actions.unhideWorkspaces(
+                      hiddenWorkspaces.map((item) => item.project_dir),
+                    )
+                  }
+                >
+                  恢复已隐藏
+                </button>
+              )}
+              <button
+                type="button"
+                className="danger-link"
+                disabled={!selectedWorkspaceRows.length}
+                onClick={() => setPendingHide(selectedWorkspaceRows)}
+              >
+                从侧栏移除
+              </button>
+            </span>
+          </div>
+        )}
       </section>
       <SidebarSplitResizer
         controlsId="workspace-section session-section"
@@ -282,31 +466,109 @@ export function Sidebar({
       />
       <section id="session-section" className="section session-section">
         <div className="section-head">
-          <span>会话</span>
-          <label className="sr-only" htmlFor="channel-filter">
-            按渠道筛选会话
-          </label>
+          <span>会话 · {sessionResults.length}</span>
+          <button
+            type="button"
+            className={`section-manage${sessionManage ? " active" : ""}`}
+            aria-label="管理会话"
+            aria-pressed={sessionManage}
+            disabled={sessionScope === "all" || !workspace?.writable}
+            title={sessionScope === "all" ? "批量删除仅支持当前工作区" : "批量管理会话"}
+            onClick={() => {
+              setSessionManage((current) => !current);
+              setSelectedSessions(new Set());
+            }}
+          >
+            {sessionManage ? "取消" : "管理"}
+          </button>
+        </div>
+        <div className="session-filters">
+          <select
+            className="select"
+            aria-label="会话范围"
+            value={sessionScope}
+            onChange={(event) => void actions.setSessionScope(event.target.value as SessionScope)}
+          >
+            <option value="workspace">当前工作区</option>
+            <option value="all">全部工作区</option>
+          </select>
+          <select
+            className="select"
+            aria-label="会话排序"
+            value={sessionSort}
+            onChange={(event) => void actions.setSessionSort(event.target.value as SessionSort)}
+          >
+            {SESSION_SORTS.map((item) => (
+              <option key={item.value} value={item.value}>
+                {item.label}
+              </option>
+            ))}
+          </select>
+          <select
+            className="select"
+            aria-label="会话状态"
+            value={sessionStatusFilter}
+            onChange={(event) =>
+              void actions.setSessionStatusFilter(event.target.value as SessionStatusGroup | "")
+            }
+          >
+            {SESSION_STATUSES.map((item) => (
+              <option key={item.value || "all"} value={item.value}>
+                {item.label}
+              </option>
+            ))}
+          </select>
           <select
             id="channel-filter"
             className="select"
+            aria-label="按渠道筛选会话"
             value={channelFilter}
-            onChange={(e) => actions.setChannelFilter(e.target.value)}
+            onChange={(event) => actions.setChannelFilter(event.target.value)}
           >
-            {CHANNELS.map((ch) => (
-              <option key={ch || "all"} value={ch}>
-                {ch || "全部渠道"}
+            {CHANNELS.map((channel) => (
+              <option key={channel || "all"} value={channel}>
+                {channel || "全部渠道"}
               </option>
             ))}
           </select>
         </div>
         <div className="list">
-          {!workspace && <div className="empty">选择一个工作区开始</div>}
-          {workspace && sessions.length === 0 && <div className="empty">暂无会话</div>}
-          {sessions.map((session) => {
+          {!workspace && sessionScope === "workspace" && (
+            <div className="empty">选择一个工作区开始</div>
+          )}
+          {sessionListLoading && sessionResults.length === 0 && (
+            <div className="empty">正在加载会话…</div>
+          )}
+          {!sessionListLoading && (workspace || sessionScope === "all") && sessionResults.length === 0 && (
+            <div className="empty">没有符合条件的会话</div>
+          )}
+          {sessionListError && <div className="session-list-warning">{sessionListError}</div>}
+          {sessionResults.map((session) => {
             const title = displayTitle(session);
+            const busy = sessionStatusGroup(session) === "running";
+            if (sessionManage) {
+              return (
+                <label
+                  key={session.id}
+                  className={`item session-item selectable-item${
+                    sessionId === session.id ? " active" : ""
+                  }${busy ? " protected" : ""}`}
+                  title={busy ? "执行中的会话不能删除" : "选择会话"}
+                >
+                  <input
+                    type="checkbox"
+                    checked={selectedSessions.has(session.id)}
+                    disabled={busy}
+                    aria-label={`选择会话：${title}`}
+                    onChange={() => toggleSession(session)}
+                  />
+                  <SessionCopy session={session} global={false} />
+                </label>
+              );
+            }
             return (
               <div
-                key={session.id}
+                key={`${session.project_dir || workspace?.project_dir || ""}:${session.id}`}
                 className={`item session-item${sessionId === session.id ? " active" : ""}${
                   menuId === session.id ? " menu-open" : ""
                 }`}
@@ -317,39 +579,28 @@ export function Sidebar({
                   aria-label={`打开会话：${title}`}
                   aria-current={sessionId === session.id ? "page" : undefined}
                   onClick={() => {
-                    void actions.openSession(session.id);
+                    void actions.openSessionResult(session);
                     onNavigate?.();
                   }}
                 >
-                  <span className="item-copy">
-                    <span className="title session-title" title={title}>
-                      {title}
-                    </span>
-                    <span className="meta">
-                      <span className={`badge ${session.channel}`}>{session.channel}</span>
-                      {workerLabel(session) && <span>{workerLabel(session)}</span>}
-                      <span>{relativeTime(session.last_activity_at || session.updated_at)}</span>
-                    </span>
-                    <span className="meta session-sub">
-                      <span>创建 {relativeTime(session.first_task_at || session.created_at)}</span>
-                      {session.latest_task_id && <span>Task {shortId(session.latest_task_id)}</span>}
-                    </span>
-                  </span>
+                  <SessionCopy session={session} global={sessionScope === "all"} />
                 </button>
-                <button
-                  type="button"
-                  className="session-more"
-                  aria-label={`会话菜单：${title}`}
-                  aria-expanded={menuId === session.id}
-                  title={`Session ${shortId(session.id)}`}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setMenuId((current) => (current === session.id ? null : session.id));
-                  }}
-                >
-                  ···
-                </button>
-                {menuId === session.id && (
+                {sessionScope === "workspace" && (
+                  <button
+                    type="button"
+                    className="session-more"
+                    aria-label={`会话菜单：${title}`}
+                    aria-expanded={menuId === session.id}
+                    title={`Session ${shortId(session.id)}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setMenuId((current) => (current === session.id ? null : session.id));
+                    }}
+                  >
+                    ···
+                  </button>
+                )}
+                {sessionScope === "workspace" && menuId === session.id && (
                   <div
                     className="session-menu"
                     role="menu"
@@ -376,7 +627,7 @@ export function Sidebar({
                       disabled={!workspace?.writable}
                       onClick={() => {
                         setMenuId(null);
-                        setPendingDelete(session);
+                        setPendingDelete([session]);
                       }}
                     >
                       删除
@@ -386,7 +637,30 @@ export function Sidebar({
               </div>
             );
           })}
+          {sessionNextCursor && (
+            <button
+              type="button"
+              className="load-more"
+              disabled={sessionListLoading}
+              onClick={() => void actions.loadMoreSessionResults()}
+            >
+              {sessionListLoading ? "正在加载…" : "加载更多"}
+            </button>
+          )}
         </div>
+        {sessionManage && (
+          <div className="selection-bar">
+            <span>已选 {selectedSessionRows.length}</span>
+            <button
+              type="button"
+              className="danger-link"
+              disabled={!selectedSessionRows.length}
+              onClick={() => setPendingDelete(selectedSessionRows)}
+            >
+              删除会话
+            </button>
+          </div>
+        )}
       </section>
       </div>
       <div className="side-foot">
@@ -459,10 +733,10 @@ export function Sidebar({
               <div>
                 <h2 id="session-delete-title">删除会话</h2>
                 <p className="muted">
-                  {displayTitle(pendingDelete)}
-                  {pendingDelete.messages
-                    ? ` · ${pendingDelete.messages} 条消息`
-                    : ""}
+                  {pendingDelete.length === 1
+                    ? displayTitle(pendingDelete[0])
+                    : `${pendingDelete.length} 个会话`}
+                  {pendingDeleteMessageCount ? ` · ${pendingDeleteMessageCount} 条消息` : ""}
                 </p>
               </div>
               <button
@@ -476,7 +750,7 @@ export function Sidebar({
             </header>
             <div className="session-delete-body">
               <p>
-                将删除这条会话及其关联的 Task。产物文件会保留。若仍有运行中的任务，删除会被拒绝。
+                将删除所选会话及其关联的 Task。产物文件和长期科研数据会保留；若任一会话仍在运行，整批删除都会被拒绝。
               </p>
             </div>
             <footer>
@@ -487,13 +761,72 @@ export function Sidebar({
                 type="button"
                 className="btn danger"
                 onClick={() => {
-                  const id = pendingDelete.id;
+                  const ids = pendingDelete.map((item) => item.id);
                   setPendingDelete(null);
-                  void actions.deleteSession(id);
+                  setSelectedSessions(new Set());
+                  setSessionManage(false);
+                  void actions.deleteSessions(ids);
                   onNavigate?.();
                 }}
               >
                 删除
+              </button>
+            </footer>
+          </div>
+        </div>
+      )}
+      {pendingHide && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => setPendingHide(null)}>
+          <div
+            className="modal compact"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="workspace-hide-title"
+            tabIndex={-1}
+            onMouseDown={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                setPendingHide(null);
+              }
+              trapFocus(event);
+            }}
+          >
+            <header>
+              <div>
+                <h2 id="workspace-hide-title">从侧栏移除工作区</h2>
+                <p className="muted">已选择 {pendingHide.length} 个工作区</p>
+              </div>
+              <button
+                type="button"
+                className="icon-btn square"
+                aria-label="取消移除"
+                onClick={() => setPendingHide(null)}
+              >
+                <IconClose size={17} />
+              </button>
+            </header>
+            <div className="session-delete-body">
+              <p>
+                仅从 Web 侧栏隐藏这些工作区，不会删除源目录、会话、Task、产物或科研数据。再次打开目录即可恢复。
+              </p>
+            </div>
+            <footer>
+              <button type="button" className="btn ghost" onClick={() => setPendingHide(null)}>
+                取消
+              </button>
+              <button
+                type="button"
+                className="btn danger"
+                onClick={() => {
+                  const ids = pendingHide.map((item) => item.project_dir);
+                  setPendingHide(null);
+                  setSelectedWorkspaces(new Set());
+                  setWorkspaceManage(false);
+                  void actions.hideWorkspaces(ids);
+                }}
+              >
+                从侧栏移除
               </button>
             </footer>
           </div>

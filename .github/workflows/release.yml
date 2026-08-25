@@ -8,6 +8,13 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+
+# One Release at a time. A new v* tag cancels a stuck/queued prior attempt
+# (GitHub can leave a rerun in queued-but-not-queued limbo).
+concurrency:
+  group: release
+  cancel-in-progress: true
 
 jobs:
   compatibility:

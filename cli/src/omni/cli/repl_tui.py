@@ -341,6 +341,9 @@ class ReplTui:
         input: Input | None = None,
         output: Output | None = None,
         diagnostic_log_path: str | os.PathLike[str] | None = None,
+        diagnostic_max_bytes: int | None = None,
+        diagnostic_backup_count: int | None = None,
+        diagnostic_files: int | None = None,
         output_base: Path | None = None,
         shift_enter_ready: bool = False,
     ) -> None:
@@ -366,6 +369,9 @@ class ReplTui:
         self._app_task: asyncio.Task[object] | None = None
         self._sink_context = None
         self._diagnostic_log_path = diagnostic_log_path
+        self._diagnostic_max_bytes = diagnostic_max_bytes
+        self._diagnostic_backup_count = diagnostic_backup_count
+        self._diagnostic_files = diagnostic_files
         # Live "tail": replace_key entries (streaming answer, plan checklist) that
         # are still changing. Committed to scrollback on finalize / turn end.
         self._live: OrderedDict[tuple[str, str], TranscriptEvent] = OrderedDict()
@@ -1613,6 +1619,9 @@ class ReplTui:
         self._sink_context = use_managed_output_sink(
             self,
             diagnostic_log_path=self._diagnostic_log_path,
+            max_bytes=self._diagnostic_max_bytes,
+            backup_count=self._diagnostic_backup_count,
+            files=self._diagnostic_files,
         )
         self._sink_context.__enter__()
         try:

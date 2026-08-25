@@ -7,6 +7,7 @@ description: >
   report, or a seminar. Renders in one shot by default; only pauses for a human
   review checkpoint when the user explicitly asks to approve the outline first.
   Do not use for one editable single-slide scientific figure; use LiveFigure.
+  Ordinary architecture / flowchart figures are scientific-figure.
 license: Apache-2.0
 metadata:
   helixforge:

@@ -80,6 +80,18 @@ def test_watch_once_follows_a_task_owned_by_another_workspace():
     assert "was not found" not in res.output
 
 
+def test_watch_finished_task_returns_terminal_status_without_once():
+    """C-TSK-06: watch a succeeded task prints the status and exits."""
+    _seed_task("alpha", "d17a5c00aabbccdd", title="already done")
+
+    res = runner.invoke(app, ["--project", "beta", "task", "watch", "d17a5c00"])
+
+    assert res.exit_code == 0, res.output
+    assert "d17a5c00aabbccdd" in res.output
+    assert "succeeded" in res.output
+    assert "nothing more to watch" in res.output
+
+
 def test_watch_once_reports_missing_for_unknown_id():
     res = runner.invoke(app, ["--project", "beta", "task", "watch", "0ff1ce00deadbeef", "--once"])
 

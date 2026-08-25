@@ -54,11 +54,11 @@ async def test_attached_file_outside_the_roots_is_readable(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_the_same_file_is_refused_without_the_attachment(tmp_path: Path) -> None:
+async def test_the_same_file_is_readable_without_the_attachment(tmp_path: Path) -> None:
     target = tmp_path / "paper.md"
     target.write_text(_SENTINEL, encoding="utf-8")
 
     observations = await _tool_observations(target, attach=False)
 
-    assert "SENTINEL" not in observations
-    assert "outside the accessible roots" in observations
+    assert "react.tool.done" in observations
+    assert _SENTINEL in observations

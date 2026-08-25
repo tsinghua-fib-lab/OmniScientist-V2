@@ -27,6 +27,7 @@ from omni.core.termination import is_bounded_termination
 from omni.core.timefmt import ensure_aware
 from omni.memory import policy
 from omni.memory.graph import MemoryGraph
+from omni.memory.profile_sanitize import is_tool_capability_ban, strip_tool_capability_bans
 from omni.memory.sanitize import redact_secrets
 from omni.memory.vectors import cosine
 from omni.storage.db import Database, get_database
@@ -1210,12 +1211,16 @@ class MemoryService:
         seen_txt: set[str] = set()
         for r in prefs[:20]:
             txt = " ".join(r.summary.strip().split())
+            if is_tool_capability_ban(txt):
+                txt = " ".join(strip_tool_capability_bans(txt).split())
+                if not txt:
+                    continue
             key = txt[:40]
             if txt and key not in seen_txt:
                 seen_txt.add(key)
                 candidates.append(txt[:160])
 
-        prior = self._prior_profile_body(principal)
+        prior = strip_tool_capability_bans(self._prior_profile_body(principal))
         body = await self._merge_profile_llm(
             prior,
             candidates,
@@ -1223,6 +1228,9 @@ class MemoryService:
         )
         if body is None:  # offline / no provider → deterministic dedup
             body = "\n".join(f"- {c}" for c in candidates[:12])
+        body = strip_tool_capability_bans(body)
+        if not body:
+            return None
         profile = redact_secrets(f"{self._PROFILE_HEADER}\n{body}")
 
         # replace this principal's prior profile entry (idempotent). The profile
@@ -1354,7 +1362,9 @@ class MemoryService:
         system = (
             "Maintain a researcher's durable user profile. Merge duplicates and remove stale or "
             "contradictory items. Keep stable preferences, research directions, writing conventions, "
-            "and tool habits. Preserve each item's original language; do not translate it. Return at "
+            "and tool habits. Never record bans of named tools (write_file, edit_file, bash, "
+            "run_skill, spawn_subagents, run_compute) — those belong in settings, not the profile. "
+            "Preserve each item's original language; do not translate it. Return at "
             "most ten `- item` bullets with no commentary, or an empty response when nothing is durable."
         )
         user = f"Existing profile:\n{prior_block}\n\nNew observations:\n{cand_block}"

@@ -2,8 +2,8 @@
 
 ``find_skill`` is the coordinator's Codex-style stage-2 lookup: the turn catalog
 stays a name list, and the model asks for a parameter list only when it needs
-one. The card must be enough to call ``run_skill`` — metadata without fields is
-what sent a slides request into ``docs_search`` / ``glob`` / ``search_tasks``.
+one. Domain choice lives in skill descriptions — this module does not
+rerank figure skills by format words or load the full SKILL.md body.
 """
 
 from __future__ import annotations
@@ -14,15 +14,13 @@ from omni.core.field_contract import instruction_field
 
 _CARD_PROPERTY_LIMIT = 16
 _CARD_DESCRIPTION_LIMIT = 160
+_CARD_ROUTING_LIMIT = 240
 _FIGURE_HINTS = frozenset(
     {
         "figure",
         "diagram",
         "architecture",
         "chart",
-        "svg",
-        "png",
-        "graphviz",
         "\u67b6\u6784\u56fe",
         "\u793a\u610f\u56fe",
         "\u7ed8\u56fe",
@@ -48,53 +46,106 @@ FIND_SKILL_NEXT_ACTION = (
 )
 
 
-def rank_skill_matches(entries: list[Any], query: str, *, limit: int = 15) -> list[Any]:
+def rank_skill_matches(
+    entries: list[Any],
+    query: str,
+    *,
+    limit: int = 15,
+    services: dict[str, Any] | None = None,
+    ctx: Any | None = None,
+) -> list[Any]:
     """Return catalog hits with an exact name before a mention-only neighbour.
 
     ``livefigure`` documents ``research-pptx`` in ``when_to_use``. A query for
     that name must not surface the neighbour first, or the model reads the
-    wrong card and keeps exploring.
+    wrong card and keeps exploring. Ranking is lexical (name, default_for,
+    description overlap) plus admission: unavailable skills sort after
+    available ones unless the query named them. A named skill (500+) stays
+    first even when unavailable so the card can say so.
     """
+    from omni.skills_runtime.slot_routing import skill_availability
+
     selectable = list(entries)
     normalized = str(query or "").lower().strip()
     if not normalized:
         return selectable[: max(0, limit)]
-    scored: list[tuple[float, int, str, Any]] = []
+    scored: list[tuple[int, float, int, str, Any]] = []
     for entry in selectable:
         score = _match_score(entry, normalized)
         if score <= 0:
             continue
-        scored.append((score, -int(getattr(entry, "priority", 0) or 0), str(entry.name or ""), entry))
-    scored.sort(key=lambda item: (-item[0], item[1], item[2]))
+        name = str(getattr(entry, "name", "") or "")
+        availability, _code = skill_availability(entry, services=services, ctx=ctx)
+        named = score >= 500
+        unavailable_rank = 0 if (availability == "available" or named) else 1
+        scored.append(
+            (
+                unavailable_rank,
+                score,
+                -int(getattr(entry, "priority", 0) or 0),
+                name,
+                entry,
+            )
+        )
+    scored.sort(key=lambda item: (item[0], -item[1], item[2], item[3]))
     return [entry for *_rank, entry in scored[: max(0, limit)]]
 
 
-def skill_contract_card(entry: Any) -> dict[str, Any]:
+def skill_contract_card(
+    entry: Any,
+    *,
+    services: dict[str, Any] | None = None,
+    ctx: Any | None = None,
+) -> dict[str, Any]:
     """Compact, callable contract for one catalog skill."""
+    from omni.agent.capabilities import CAPABILITY_FIGURE
+    from omni.skills_runtime.slot_routing import fallback_skill, skill_availability
+
     schema = getattr(entry, "input_schema", None)
     schema_object = schema if isinstance(schema, dict) else {}
     slot = instruction_field(schema_object)
     example: dict[str, Any] = {slot: "<user request>"} if slot else {}
-    return {
-        "name": str(getattr(entry, "name", "") or ""),
-        "description": entry.short_desc(160) if hasattr(entry, "short_desc") else str(getattr(entry, "description", "") or "")[:160],
+    name = str(getattr(entry, "name", "") or "")
+    availability, reason = skill_availability(entry, services=services, ctx=ctx)
+    sibling = fallback_skill(name, CAPABILITY_FIGURE)
+    trigger = getattr(entry, "trigger", None)
+    when_not = ""
+    if isinstance(trigger, dict):
+        when_not = str(trigger.get("when_not_to_use") or "").strip()
+    description = (
+        entry.short_desc(_CARD_DESCRIPTION_LIMIT)
+        if hasattr(entry, "short_desc")
+        else str(getattr(entry, "description", "") or "")[:_CARD_DESCRIPTION_LIMIT]
+    )
+    when_to = str(getattr(entry, "when_to_use", "") or "").strip()
+    card: dict[str, Any] = {
+        "name": name,
+        "description": description,
         "delivery": _enum_value(getattr(entry, "delivery_mode", "")),
         "kind": _enum_value(getattr(entry, "kind", "")),
         "status": str(getattr(entry, "status", "") or ""),
         "replaced_by": str(getattr(entry, "replaced_by", "") or ""),
-        "when_to_use": str(getattr(entry, "when_to_use", "") or "")[:160],
+        "when_to_use": when_to[:_CARD_ROUTING_LIMIT],
+        "availability": availability,
         "instruction_field": slot or None,
         "input_schema": {
             "type": "object",
-            "required": [str(name) for name in (schema_object.get("required") or []) if str(name)],
+            "required": [str(item) for item in (schema_object.get("required") or []) if str(item)],
             "properties": _compact_properties(schema_object, instruction_slot=slot),
         },
         "call": {
-            "skill_name": str(getattr(entry, "name", "") or ""),
+            "skill_name": name,
             "input": example,
         },
         "next_action": FIND_SKILL_NEXT_ACTION,
     }
+    if when_not:
+        card["when_not_to_use"] = when_not[:_CARD_ROUTING_LIMIT]
+    if sibling:
+        card["fallback"] = sibling
+    if reason:
+        card["unavailable_reason"] = reason
+    return card
 
 
 def _significant_words(text: str) -> list[str]:

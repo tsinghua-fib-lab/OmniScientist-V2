@@ -22,6 +22,45 @@ from tests.conftest import ScriptedLLM
 ECHO = ToolSpec("echo", "echo back", {"type": "object", "properties": {"x": {"type": "string"}}})
 
 
+def test_turn_constraint_rejects_a_forbidden_service_while_configured() -> None:
+    from omni.skills_runtime.admission import TurnConstraints, constraint_admission
+
+    entry = SkillEntry(
+        name="livefigure",
+        description="editable figure",
+        kind=SkillKind.PYTHON_ENGINE,
+        requires_services=["vlm"],
+    )
+    result = constraint_admission(
+        entry, TurnConstraints(unavailable_services=frozenset({"vlm"}))
+    )
+    assert result is not None
+    assert result["error_info"]["code"] == "vlm_unavailable_this_turn"
+    assert result["do_not_retry"] is True
+    assert skill_admission_rejection(
+        entry,
+        services={
+            "vlm": SimpleNamespace(available=True, setup_command="omni config vlm"),
+        },
+        constraints=TurnConstraints(unavailable_services=frozenset({"vlm"})),
+    ) == result
+
+
+def test_turn_constraint_rejects_a_forbidden_skill_name() -> None:
+    from omni.skills_runtime.admission import TurnConstraints
+
+    entry = SkillEntry(
+        name="livefigure",
+        description="editable figure",
+        kind=SkillKind.PYTHON_ENGINE,
+    )
+    result = skill_admission_rejection(
+        entry, constraints=TurnConstraints(unavailable_skills=frozenset({"livefigure"}))
+    )
+    assert result is not None
+    assert result["error_info"]["code"] == "skill_unavailable_this_turn"
+
+
 def test_admission_action_is_owner_lifecycle_not_confirm() -> None:
     assert is_admission_action({"kind": "configure", "service": "vlm", "command": "omni config vlm"})
     assert is_admission_action({"kind": "configure", "command": "omni config model"})

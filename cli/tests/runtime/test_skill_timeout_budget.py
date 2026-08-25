@@ -18,8 +18,10 @@ import pytest
 import yaml
 
 from omni.config.settings import load_settings
+from omni.runtime.skill_timeout import skill_exception_status
 from omni.skills_runtime.executor import (
     SkillBudget,
+    SkillExecutionTimeout,
     _await_skill_call,
     _ProgressHeartbeat,
     _skill_budget,
@@ -181,6 +183,25 @@ def test_a_stall_window_wider_than_the_deadline_is_an_authoring_defect():
 
     assert warnings
     assert "stall_seconds" in warnings[0]
+
+
+def test_a_budget_expiry_with_an_artifact_settles_degraded():
+    timeout = SkillExecutionTimeout(
+        "skill 'scientific-poster' timed out after 600s — declared",
+        kind="skill_budget",
+    )
+    assert skill_exception_status(timeout, has_durable_output=True) == "degraded"
+    assert skill_exception_status(timeout, has_durable_output=False) == "failed"
+    assert skill_exception_status(RuntimeError("cannot load engine")) == "failed"
+
+
+def test_a_workflow_envelope_timeout_is_failed_even_with_partial_output():
+    timeout = SkillExecutionTimeout(
+        "workflow execution envelope timed out",
+        kind="workflow_envelope",
+    )
+    assert skill_exception_status(timeout, has_durable_output=True) == "failed"
+    assert skill_exception_status(timeout, has_durable_output=False) == "failed"
 
 
 def test_a_stall_window_inside_the_deadline_is_accepted():

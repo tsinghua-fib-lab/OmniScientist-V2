@@ -15,9 +15,14 @@ The offline `mock` provider is intentionally limited; it is useful for determini
 tool smoke tests, but it does not validate real model-side workflow planning.
 
 Copy-pasteable user prompts for named `search_literature`, retrieve-only host
-policy, contradiction scan, stacked 3–8 capability utterances, long-horizon
-campaigns, `memory link`/`graph`, and `task all` are in the
-[User Walkthrough Catalog](user-walkthrough-cases.md).
+policy, contradiction scan, stacked 3–8 capability utterances, survey packs
+(P-01 is the Attention-abstract + four-box figure + manuscript + PPT shape),
+long-horizon campaigns, one-task-many-executions, execution-level degrade,
+third-party skill add/trust/invoke, `memory link` / `graph`, and `task all`
+are in the [User Walkthrough Catalog](user-walkthrough-cases.md). That catalog
+is the source of truth for later user-perspective walkthroughs, including the
+user-visible output format and the coverage inventory of every CLI group and
+built-in skill.
 
 ## What Must Be Validated
 
@@ -49,6 +54,10 @@ Use natural prompts rather than skill names. The agent should infer the skill:
 | `Make this one editable scientific figure in PowerPoint.` | Plan `figure.editable.pptx`. | The provider is `livefigure`; output is a single-slide PPTX. |
 | `Turn this study into a complete thesis-defense deck.` | Plan `slides.generate`. | The provider is `research-pptx`; output is a multi-slide PPTX. |
 
+Copy-pasteable **VLM on / VLM off** cases for `livefigure`, `paper-review`,
+and `scientific-poster` (probe `omni config vlm`, then branch) live in the
+[User Walkthrough Catalog](user-walkthrough-cases.md#vlm-driven-skills).
+
 ### LiveFigure VLM admission
 
 Before configuring a VLM, run the editable-figure prompt above and inspect the
@@ -66,7 +75,7 @@ single-slide PPTX. Host figure fill covers only a still-owed `artifact.figure` o
 After configuring the owner profile, validate without exposing the key:
 
 ```bash
-omni config vlm --endpoint <FULL_CHAT_COMPLETIONS_URL> --model <MODEL> --api-key <KEY> --test
+omni config vlm --endpoint <BASE_OR_CHAT_URL> --model <MODEL> --api-key <KEY> --test
 omni doctor
 ```
 

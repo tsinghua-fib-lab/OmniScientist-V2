@@ -588,8 +588,34 @@ async def _scan_observation(tasks: Any, task_id: str) -> dict[str, Any] | None:
     return None
 
 
+def _event_call_id(row: Any) -> str:
+    step_id = str(getattr(row, "step_id", "") or "")
+    if step_id:
+        return step_id
+    payload = getattr(row, "input_json", None)
+    if not isinstance(payload, dict):
+        payload = getattr(row, "output_json", None)
+    if isinstance(payload, dict):
+        return str(payload.get("_call_id") or payload.get("call_id") or "")
+    return ""
+
+
+_TOOL_TERMINAL_SUFFIXES = (
+    ".done",
+    ".failed",
+    ".cancelled",
+    ".aborted",
+    ".rejected",
+)
+
+
 async def _unmatched_tool_starts(tasks: Any, task_id: str) -> list[str]:
-    """Tools that recorded a start without a matching done/failed/cancelled."""
+    """Tools that recorded a start without any matching terminal event.
+
+    A policy deny (``react.tool.rejected``) is a known outcome — the model
+    already saw the ERROR. Treating it as unmatched replayed
+    ``unknown_outcome`` and stole the finish turn (afb9228d / 27803406).
+    """
     list_events = getattr(tasks, "list_events", None)
     if not callable(list_events) or not task_id:
         return []
@@ -597,17 +623,23 @@ async def _unmatched_tool_starts(tasks: Any, task_id: str) -> list[str]:
         rows = await list_events(task_id)
     except Exception:  # noqa: BLE001
         return []
-    open_starts: dict[str, str] = {}
+    open_by_id: dict[str, str] = {}
+    open_by_name: dict[str, str] = {}
     for row in rows:
         event_type = str(getattr(row, "event_type", "") or "")
         name = str(getattr(row, "tool_name", "") or getattr(row, "name", "") or "")
-        if not name:
-            continue
+        call_id = _event_call_id(row)
         if event_type.endswith(".start"):
-            open_starts[name] = event_type
-        elif event_type.endswith((".done", ".failed", ".cancelled", ".aborted")):
-            open_starts.pop(name, None)
-    return list(open_starts)
+            if call_id:
+                open_by_id[call_id] = name or event_type
+            elif name:
+                open_by_name[name] = event_type
+        elif event_type.endswith(_TOOL_TERMINAL_SUFFIXES):
+            if call_id:
+                open_by_id.pop(call_id, None)
+            elif name:
+                open_by_name.pop(name, None)
+    return list(dict.fromkeys([*open_by_id.values(), *open_by_name.values()]))
 
 
 def refresh_system_research_brief(system_prompt: str, snapshot: str) -> str:
@@ -656,6 +688,17 @@ def _observation_lines(observation: dict[str, Any] | None) -> list[str]:
     metrics = observation.get("metrics") if isinstance(observation.get("metrics"), dict) else {}
     if metrics.get("n_kept") is not None:
         lines.append(f"n_kept: {metrics.get('n_kept')}")
+    actions = [
+        str(item).strip()
+        for item in (observation.get("recommended_next_actions") or [])
+        if str(item).strip()
+    ]
+    if actions:
+        lines.append("suggested next: " + "; ".join(actions[:2]))
+        lines.append(
+            "Stop or ask the user is a legal next move; these suggestions "
+            "do not expand tools or debts."
+        )
     return lines
 
 

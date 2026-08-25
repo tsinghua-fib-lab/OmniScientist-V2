@@ -19,6 +19,7 @@ from omni.agent.capabilities import CAPABILITY_TASK_INSPECT, CAPABILITY_TASK_REV
 from omni.core.field_contract import instruction_field
 from omni.core.llm.client import LLMClient
 from omni.core.tool_contracts import skill_input_contract_error
+from omni.skills_runtime.admission import normalize_constraint_names
 from omni.skills_runtime.registry import SkillRegistry
 
 # One whitespace-free token ending in a letter-initial extension. The leading
@@ -152,6 +153,11 @@ class ModelPlanProposal:
     outputs: list[str] = field(default_factory=lambda: ["answer"])
     capability_inputs: dict[str, dict[str, Any]] = field(default_factory=dict)
     missing_inputs: list[dict[str, Any]] = field(default_factory=list)
+    # This-turn owner bans. Admission treats them as route facts, same as a
+    # missing host service. Not a keyword parser: the model names what the
+    # user forbade.
+    unavailable_services: list[str] = field(default_factory=list)
+    unavailable_skills: list[str] = field(default_factory=list)
     # An observation, never a control. Nothing branches on it, and nothing
     # should: run dc787efa was planned at 0.95 on a reading that was wrong, so a
     # self-reported score is not evidence about the world. It is carried to the
@@ -207,6 +213,8 @@ class ModelPlanProposal:
             outputs=outputs[:6] or ["answer"],
             capability_inputs=capability_inputs,
             missing_inputs=missing[:5],
+            unavailable_services=sorted(normalize_constraint_names(payload.get("unavailable_services"))),
+            unavailable_skills=sorted(normalize_constraint_names(payload.get("unavailable_skills"))),
             confidence=confidence,
             execution_mode=mode,
             provenance_mode=provenance,
@@ -223,6 +231,8 @@ class ModelPlanProposal:
                 capability: dict(value) for capability, value in self.capability_inputs.items()
             },
             "missing_inputs": list(self.missing_inputs),
+            "unavailable_services": list(self.unavailable_services),
+            "unavailable_skills": list(self.unavailable_skills),
             "confidence": self.confidence,
             "execution_mode": self.execution_mode,
             "provenance_mode": self.provenance_mode,
@@ -399,6 +409,13 @@ def _build_planner_system_prompt(
         "the value you would use, and keep planning the work — the turn will run on that value "
         "and declare it in the answer. Reserve a gap with no \"default\" for what nobody can "
         "guess and a wrong guess would waste real work: which paper, which file, which account. "
+        "If the user explicitly forbids a host service or a named skill this turn "
+        "(for example \"do not use VLM\" or \"don't run livefigure\"), list it in "
+        "unavailable_services or unavailable_skills. Do not invent a ban. That is new "
+        "authority, not a guessable default: skills that require a forbidden service "
+        "cannot run. Keep outputs that other skills or write_file can still pay, and "
+        "execute that work. Leave a forbidden-only output on the ledger so the host "
+        "can ask; do not invent a substitute producer. "
         "Use needs_input only when the request is too vague AND nothing in the turn context "
         "or recent activity could resolve it. When the request refers to your own prior work "
         "(in any language: recently/last time/that one/again/\"the figure you generated\"), do "
@@ -416,14 +433,19 @@ def _build_planner_system_prompt(
         "questions about OmniScientist itself (its architecture, storage, memory, commands, or design, "
         "answered from built-in documentation) are handled by the capable assistant turn: use "
         "react_fallback for them, not direct_answer or needs_input, whenever a target path is given or "
-        "discoverable in the working directory, or the answer should come from built-in docs. A local "
+        "discoverable in the working directory, or the answer should come from built-in docs. "
+        "Questions about recent git commits, a changelog, or what changed in this repository "
+        "are local history: use react_fallback so the assistant can run a bounded git log / "
+        "git show / git diff. Do not treat them as literature.search. A local "
         "file supplied as the input to a declared scientific capability is not filesystem management: "
         "select that capability directly. Treat an existing @-prefixed local file as one attachment, "
         "including spaces in its path, and bind the clean path without @ or trailing user instruction. "
         "If Active target or Recent activity identifies an earlier task and the user asks for its "
         "status, success/failure, cause, or artifact location, use react_fallback with the native "
         "capability in required_capabilities=[\"task.inspect\"]; do not launch the provider again "
-        "or answer from memory. "
+        "or answer from memory. A new produce request — a survey, a code review of current "
+        "changes, or an architecture comparison — is not task.inspect even when a similar "
+        "earlier task is listed. "
         "If the user instead asks about MANY prior tasks — a time window (\"what did we do in the "
         "last N days\"), a cross-project retrospective, or \"which ones did you not handle well\" — "
         "use react_fallback with required_capabilities=[\"task.review\"] (not task.inspect, which is "
@@ -444,12 +466,13 @@ def _build_planner_system_prompt(
         "do not compile a lone literature.search into a skill. If the user "
         "also wants a written survey, add synthesis.final so this turn keeps "
         "search_literature and write_file — the model writes the manuscript. "
-        "Choose artifact.figure for an ordinary lightweight flowchart, architecture diagram, or "
-        "system schematic whose output is DOT/SVG/PNG. Choose figure.editable.pptx only for one "
-        "editable scientific figure delivered as a single-slide PPTX. Choose slides.generate for "
-        "a complete multi-slide deck such as a group meeting, thesis defense, conference talk, or "
-        "report. Never substitute one of these three artifact capabilities for another. Put the "
-        "user's figure/deck instruction in the matching capability_inputs object. "
+        "Express a new figure, diagram, architecture, flowchart, or schematic as "
+        "artifact.figure (default implementation is SVG/PNG). Express a complete "
+        "multi-slide deck as slides.generate. Express a user-named single-slide "
+        "editable PPTX as figure.editable.pptx. Do not name a concrete provider. "
+        "Do not upgrade an ordinary figure to an editable PPTX because a VLM is "
+        "configured. Put the user's figure/deck instruction in the matching "
+        "capability_inputs object. "
         "Bind provider inputs using the exact field names and enum values in the "
         "available skill contracts below; do not invent host-side aliases. "
         "Use provider enum descriptions and x-omni metadata as selection hints, "
@@ -518,6 +541,8 @@ def _build_planner_system_prompt(
         "\"outputs\": string[], "
         "\"capability_inputs\": {\"capability.name\": object}, "
         "\"missing_inputs\": [{\"field\": string, \"ask\": string, \"default\": string, \"reason\": string}], "
+        "\"unavailable_services\": string[], "
+        "\"unavailable_skills\": string[], "
         "\"execution_mode\": \"react|background|foreground|ask|direct\", "
         "\"provenance_mode\": \"light|full\", "
         "\"rationale\": string"

@@ -80,6 +80,25 @@ def test_delivered_skill_answer_prefers_result_text() -> None:
     ) == "`paper-review` completed."
 
 
+def test_completed_skill_answer_names_a_degraded_execution() -> None:
+    from omni.agent.plan_runner_utils import settlement_status
+
+    drained = [
+        {
+            "status": "degraded",
+            "subtask_id": "abcdef0123456789",
+            "skill": "scientific-poster",
+            "error": "skill 'scientific-poster' timed out after 600s",
+            "result": {},
+        }
+    ]
+    assert settlement_status(drained) == "degraded"
+    text = completed_skill_answer(drained, skill="scientific-poster")
+    assert "degraded" in text
+    assert "abcdef01" in text
+    assert "/task retry abcdef01" in text
+
+
 def test_delivered_skill_answer_projects_source_ids_over_title_summary() -> None:
     drained = [
         {

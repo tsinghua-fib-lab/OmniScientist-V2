@@ -148,6 +148,7 @@ def build_engine_observation(
         "blocked",
         "rejected",
         "error",
+        "needs_input",
     }:
         status = "degraded"
     elif not status:

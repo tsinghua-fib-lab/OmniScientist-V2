@@ -683,7 +683,9 @@ async def test_cancelling_visual_stage_kills_mineru_and_writes_metadata(
     with pytest.raises(__import__("asyncio").CancelledError):
         await task
 
-    assert time.monotonic() - started < 1.0
+    # Windows 3.11 CI can spend just over 1s tearing down the process tree
+    # while still cancelling; the hang timeout is 10s, so stay well under that.
+    assert time.monotonic() - started < 5.0
     metadata_path = output / "run" / "mineru-run.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert metadata["run"]["status"] == "cancelled"

@@ -37,6 +37,7 @@ class TaskController:
             channel=channel,
             user_input=user_input,
             file_uris=file_uris,
+            require_session=True,
         )
         if on_task_ack is not None:
             ack_result = on_task_ack(
@@ -68,9 +69,14 @@ class TaskController:
             if kind == "needs_input"
             else "succeeded"
         )
+        if terminal_status == "succeeded":
+            from omni.agent.turn_execution import turn_degradation_warnings
+
+            if turn_degradation_warnings():
+                terminal_status = "degraded"
         message_status = (
             terminal_status
-            if terminal_status in {"cancelled", "interrupted"}
+            if terminal_status in {"cancelled", "interrupted", "degraded"}
             else "failed" if kind == "error"
             else "needs_input" if kind == "needs_input"
             else "succeeded"

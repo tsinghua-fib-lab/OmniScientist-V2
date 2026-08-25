@@ -260,7 +260,7 @@ def test_same_contract_then_docs_is_a_hunt() -> None:
     )
 
 
-def test_same_skill_via_different_query_is_a_hunt() -> None:
+def test_figure_fallback_card_is_not_a_hunt() -> None:
     assert (
         _contract_hunt_pressure(
             [
@@ -268,7 +268,30 @@ def test_same_skill_via_different_query_is_a_hunt() -> None:
                 _find_record("livefigure", "scientific-figure", query="architecture"),
             ]
         )
-        == 2
+        == 1
+    )
+
+
+def test_livefigure_then_scientific_figure_is_not_a_hunt() -> None:
+    assert (
+        _contract_hunt_pressure(
+            [_find_record("livefigure"), _find_record("scientific-figure")]
+        )
+        == 1
+    )
+
+
+def test_three_deliverable_cards_plus_empty_find_is_not_a_hunt() -> None:
+    assert (
+        _contract_hunt_pressure(
+            [
+                _find_record("livefigure", "scientific-figure", query="livefigure"),
+                _find_record("scientific-figure", "livefigure", query="scientific-figure"),
+                _find_record("research-pptx", query="research-pptx"),
+                _empty_find("write a rag survey paper"),
+            ]
+        )
+        == 1
     )
 
 
@@ -316,6 +339,26 @@ def test_empty_find_after_two_cards_is_not_a_hunt() -> None:
             ]
         )
         == 1
+    )
+
+
+def test_a_successful_consume_then_a_new_card_can_hunt() -> None:
+    """Hunt pressure is the window after the last consume, not the whole turn."""
+    assert (
+        _contract_hunt_pressure(
+            [
+                _find_record("livefigure"),
+                ToolInvocationRecord(
+                    name="run_skill",
+                    arguments={"skill_name": "livefigure"},
+                    result={"status": "succeeded"},
+                    status="succeeded",
+                ),
+                _find_record("research-pptx"),
+                _docs_record("pptx params"),
+            ]
+        )
+        == 2
     )
 
 
@@ -609,3 +652,151 @@ async def test_empty_finds_after_a_card_do_not_stop_the_loop() -> None:
     )
     assert result.terminated_reason == "done"
     assert "run_skill" in [record.name for record in result.tool_trace]
+
+
+@pytest.mark.asyncio
+async def test_overlapping_figure_cards_and_empty_find_can_still_run_skill() -> None:
+    """72590550: three cards including figure aliases, then an empty writing lookup."""
+
+    async def invoker(name: str, args: dict) -> dict:
+        if name == "find_skill":
+            query = str(args.get("query") or "")
+            if "pptx" in query or "slides" in query:
+                return _skill_card("research-pptx")
+            if "scientific" in query:
+                return _skill_card("scientific-figure", "livefigure")
+            if "livefigure" in query or "figure" in query:
+                return _skill_card("livefigure", "scientific-figure")
+            return {
+                "matches": [],
+                "total_skills": 12,
+                "unlisted_tools": [{"name": "write_file", "description": "write"}],
+            }
+        return {"status": "succeeded", "skill_name": args.get("skill_name")}
+
+    llm = ScriptedLLM(
+        [
+            ChatWithToolsResult(
+                tool_calls=[
+                    ToolCall("1", "find_skill", {"query": "livefigure"}),
+                    ToolCall("2", "find_skill", {"query": "scientific-figure"}),
+                    ToolCall("3", "find_skill", {"query": "research-pptx"}),
+                ]
+            ),
+            ChatWithToolsResult(
+                tool_calls=[ToolCall("4", "find_skill", {"query": "write rag survey paper"})]
+            ),
+            ChatWithToolsResult(
+                tool_calls=[
+                    ToolCall(
+                        "5",
+                        "run_skill",
+                        {"skill_name": "livefigure", "input": {"title": "RAG"}},
+                    )
+                ]
+            ),
+            ChatWithToolsResult(content="Figure started."),
+        ]
+    )
+    tools = [
+        ToolSpec(
+            "find_skill",
+            "lookup",
+            {"type": "object", "properties": {"query": {"type": "string"}}},
+        ),
+        ToolSpec(
+            "run_skill",
+            "run",
+            {"type": "object", "properties": {"skill_name": {"type": "string"}}},
+        ),
+        ToolSpec(
+            "write_file",
+            "write",
+            {"type": "object", "properties": {"path": {"type": "string"}}},
+        ),
+    ]
+    result = await ReActLoopAgent(
+        llm, invoker, max_iterations=8, no_progress_threshold=2
+    ).run(
+        system_prompt="s",
+        user_message="RAG 架构图、论文和 PPT",
+        tools=tools,
+    )
+    assert "run_skill" in [record.name for record in result.tool_trace]
+    assert result.terminated_reason == "done"
+    assert "no_progress" not in result.terminated_reason
+
+
+@pytest.mark.asyncio
+async def test_hunt_fuse_replays_missing_deliverable_with_tools_on() -> None:
+    class Feed:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def before_text_finish(self) -> str:
+            self.calls += 1
+            if self.calls > 1:
+                return ""
+            return (
+                "[Task research finding]\n"
+                "This task still owes artifact.slides on this task_id."
+            )
+
+    async def invoker(name: str, args: dict) -> dict:
+        if name == "find_skill":
+            return _skill_card("research-pptx")
+        return {"status": "succeeded", "skill_name": args.get("skill_name")}
+
+    llm = ScriptedLLM(
+        [
+            ChatWithToolsResult(
+                tool_calls=[ToolCall("1", "find_skill", {"query": "research-pptx"})]
+            ),
+            ChatWithToolsResult(
+                tool_calls=[ToolCall("2", "find_skill", {"query": "pptx parameters"})]
+            ),
+            ChatWithToolsResult(
+                tool_calls=[ToolCall("3", "find_skill", {"query": "pptx schema again"})]
+            ),
+            ChatWithToolsResult(
+                tool_calls=[
+                    ToolCall(
+                        "4",
+                        "run_skill",
+                        {"skill_name": "research-pptx", "input": {"topic": "RAG"}},
+                    )
+                ]
+            ),
+            ChatWithToolsResult(content="Deck submitted."),
+        ]
+    )
+    tools = [
+        ToolSpec(
+            "find_skill",
+            "lookup",
+            {"type": "object", "properties": {"query": {"type": "string"}}},
+        ),
+        ToolSpec(
+            "run_skill",
+            "run",
+            {"type": "object", "properties": {"skill_name": {"type": "string"}}},
+        ),
+    ]
+    result = await ReActLoopAgent(
+        llm,
+        invoker,
+        max_iterations=8,
+        no_progress_threshold=2,
+        fact_feed=Feed(),
+    ).run(
+        system_prompt="s",
+        user_message="请做一组会PPT",
+        tools=tools,
+    )
+    assert [record.name for record in result.tool_trace] == [
+        "find_skill",
+        "find_skill",
+        "find_skill",
+        "run_skill",
+    ]
+    assert result.terminated_reason == "done"

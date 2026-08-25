@@ -66,7 +66,7 @@ class ToolSurfaceBuilder:
         deferred_specs: list[ToolSpec] = []
         tools.extend(
             [
-                self._find_skill(deferred_specs),
+                self._find_skill(deferred_specs, ctx),
                 self._run_skill(ctx, wait_for_tasks=wait_for_tasks, on_tool_event=on_tool_event),
                 self._run_workflow(ctx, wait_for_tasks=wait_for_tasks, on_tool_event=on_tool_event),
             ]
@@ -92,11 +92,20 @@ class ToolSurfaceBuilder:
         deferred_specs.extend(t.spec for t in tools if t.spec.exposure != "direct")
         return tools
 
-    def _find_skill(self, deferred_specs: list[ToolSpec] | None = None) -> Tool:
+    def _find_skill(self, deferred_specs: list[ToolSpec] | None = None, ctx: Any = None) -> Tool:
         async def handler(args: dict[str, Any]) -> dict[str, Any]:
             query = str(args.get("query", "")).lower().strip()
             selectable = self.registry.list_selectable()
-            hits = [skill_contract_card(entry) for entry in rank_skill_matches(selectable, query)]
+            services = None
+            admit = getattr(self.registry, "admission_services", None)
+            if callable(admit):
+                services = admit(ctx=ctx)
+            hits = [
+                skill_contract_card(entry, services=services, ctx=ctx)
+                for entry in rank_skill_matches(
+                    selectable, query, services=services, ctx=ctx
+                )
+            ]
             result: dict[str, Any] = {"matches": hits, "total_skills": len(selectable)}
             if hits:
                 result["next_action"] = FIND_SKILL_NEXT_ACTION
@@ -121,9 +130,11 @@ class ToolSurfaceBuilder:
             ToolSpec(
                 "find_skill",
                 (
-                    "Search the installed skill catalog and return each match's input_schema plus a "
-                    "run_skill example. Also looks up parameters of tools listed with their schema "
-                    "omitted. After a skill contract is returned, call run_skill — do not keep searching."
+                    "Load one skill's routing instructions and input_schema. If a catalog "
+                    "description matches, query that exact name, follow the returned instructions, "
+                    "then call run_skill. Do not switch to a neighbour skill because memory "
+                    "mentions SVG/PNG or because you want to author a .dot first. Also looks up "
+                    "parameters of tools listed with their schema omitted."
                 ),
                 {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
             ),
@@ -310,7 +321,8 @@ class ToolSurfaceBuilder:
                 }
                 if task is not None and task.error:
                     extra["error"] = task.error
-                return project_skill_observation(body, extra=extra)
+                observed = project_skill_observation(body, extra=extra)
+                return observed
             result = await execute_skill(
                 entry,
                 params,

@@ -70,7 +70,7 @@
         capabilities_executed: [paper.fetch.arxiv, research.ideation, slides.generate]
 
 - id: sci_editable_single_slide_figure
-  title: "Scientist: editable single-slide scientific figure routes to LiveFigure"
+  title: "Scientist: unnamed editable PPTX does not start LiveFigure without VLM"
   persona: scientist
   channel: cli
   tags: [routing, capability_selection]
@@ -86,7 +86,8 @@
         execution_mode: background
         rationale: "the user explicitly requested one editable PPT scientific figure"
       expect:
-        skill_selected: livefigure
+        skills_executed_exclude: [livefigure, scientific-figure]
+        text_contains: ["artifact.pptx"]
 
 # L4 journey: the ReAct loop proposes a shell command; the human-in-the-loop
 # approval gate (P0) mediates it. Interactive owner approves once → the sensitive

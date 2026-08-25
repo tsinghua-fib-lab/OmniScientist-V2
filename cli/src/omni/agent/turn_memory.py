@@ -73,6 +73,8 @@ class TurnMemory:
             if row is not None and (row.external_key or "") == PERSONA_CONTROL_EXTERNAL_KEY:
                 return
         principal = await self._store.principal_for_session(session_id)
+        if principal is None:
+            return
         tool_names = sorted({n for n in result.tool_names()}) if result.tool_trace else []
         # What was asked, attributed to the task that answered it — not what the
         # answer claimed. Recall is by similarity, so an entry surfaces with no
@@ -113,6 +115,8 @@ class TurnMemory:
             return []
         async with lock:
             principal = await self._store.principal_for_session(session_id)
+            if principal is None:
+                return []
             messages = await self._store.extraction_history(session_id, limit=40)
 
             async def meter(system: str, user: str, output: str) -> None:
@@ -157,6 +161,7 @@ class TurnMemory:
                 user_input="session memory maintenance",
                 title="Session memory maintenance",
                 kind="maintenance",
+                require_session=True,
             )
             await self._tasks.record_plan(
                 maintenance.id,
@@ -281,10 +286,11 @@ class TurnMemory:
             async with global_memory_lock(self._paths) as held:
                 if held:
                     await self._memory.decay_and_dedup()
-                    await self._memory.rebuild_user_profile(
-                        principal=principal,
-                        on_llm_call=meter_profile if maintenance_task_id else None,
-                    )
+                    if principal:
+                        await self._memory.rebuild_user_profile(
+                            principal=principal,
+                            on_llm_call=meter_profile if maintenance_task_id else None,
+                        )
                     if principal == _PRINCIPAL_OWNER:
                         await self._memory.compact_memory_file(
                             on_llm_call=meter_file if maintenance_task_id else None,

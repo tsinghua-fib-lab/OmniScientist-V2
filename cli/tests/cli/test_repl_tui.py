@@ -95,6 +95,8 @@ def test_managed_tui_output_quarantines_diagnostics_and_routes_stdout(
     assert terminal_stdout.getvalue() == ""
     assert terminal_stderr.getvalue() == ""
     diagnostics = log_path.read_text(encoding="utf-8")
+    assert "component=cli" in diagnostics
+    assert " event=- " in diagnostics
     assert "raw status=401" in diagnostics
     assert "provider failed" in diagnostics
     assert "sk-1234567890abcdef" not in diagnostics

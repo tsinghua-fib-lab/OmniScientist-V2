@@ -575,6 +575,76 @@ async def _begin_task_delete_snapshot(
     return True
 
 
+async def stage_task_deletion(
+    session: AsyncSession,
+    task_ids: Sequence[str],
+    *,
+    force: bool = False,
+    dry_run: bool = False,
+) -> TaskClearOutcome:
+    """Validate and stage a complete Task-tree deletion in an existing transaction.
+
+    The caller owns the transaction and must reserve the SQLite writer before
+    calling this helper. No commit or global-index mutation happens here, which
+    lets a higher-level lifecycle operation delete Tasks, transcripts, and
+    Sessions as one workspace-local atomic unit.
+    """
+    outcome = TaskClearOutcome()
+    roots = _unique_task_ids(task_ids)
+    if not roots:
+        return outcome
+    rows = list((await session.execute(select(TaskORM))).scalars().all())
+    rows_by_id = {row.id: row for row in rows}
+    outcome.known_task_ids = list(rows_by_id)
+    active_by_task = await _active_executions_by_task(session)
+    outcome.missing_ids = [task_id for task_id in roots if task_id not in rows_by_id]
+    if outcome.missing_ids:
+        return outcome
+    closure = _task_descendant_closure(rows_by_id, roots)
+    ancestors = _task_ancestor_closure(rows_by_id, roots)
+    guarded_rows = [*closure, *ancestors]
+    has_barrier = _protect_task_rows(outcome, guarded_rows, force=force)
+    has_barrier = (
+        _protect_active_executions(
+            outcome,
+            [row.id for row in guarded_rows],
+            active_by_task,
+        )
+        or has_barrier
+    )
+    if has_barrier:
+        return outcome
+    outcome.deleted_ids = [row.id for row in closure]
+    delete_roots = _topmost_selected_task_ids(rows_by_id, outcome.deleted_ids)
+    unrooted = _unrooted_task_ids(
+        rows_by_id,
+        outcome.deleted_ids,
+        delete_roots,
+    )
+    if unrooted:
+        _retain_task_rows(
+            outcome,
+            [rows_by_id[task_id] for task_id in unrooted],
+            reason="invalid_task_tree",
+        )
+        outcome.deleted_ids = []
+        return outcome
+    outcome.deleted_tasks = [_delete_item(row) for row in closure]
+    for row in closure:
+        _add_status_count(outcome.deleted, row.status)
+    if dry_run:
+        return outcome
+    for batch in _task_id_batches(outcome.deleted_ids):
+        await session.execute(
+            update(ArtifactORM)
+            .where(ArtifactORM.task_id.in_(batch))
+            .values(task_id=None)
+        )
+    for root_id in delete_roots:
+        await session.delete(rows_by_id[root_id])
+    return outcome
+
+
 def _clip(value: Any, n: int = 600) -> str:
     text = str(value or "")
     return text if len(text) <= n else text[: n - 1] + "…"
@@ -874,6 +944,11 @@ async def _stage_task_events(
 class TaskRecorder:
     """Append-only event recorder for user-request tasks."""
 
+    # ``append_event`` returns ``None`` when a write was dropped (busy / seq
+    # contention). Tool start events consult this so a test double that returns
+    # ``None`` is not treated as a failed persist.
+    drops_unpersisted_events = True
+
     def __init__(
         self,
         db: Database,
@@ -935,6 +1010,10 @@ class TaskRecorder:
         except Exception:  # noqa: BLE001
             logger.debug("task index remove failed", exc_info=True)
 
+    async def deindex_deleted_tasks(self, task_ids: Sequence[str]) -> None:
+        """Remove committed Task deletions from the best-effort global index."""
+        await self._deindex(_unique_task_ids(task_ids))
+
     async def create_task(
         self,
         *,
@@ -956,6 +1035,7 @@ class TaskRecorder:
         file_uris: list[str] | None = None,
         interaction_mode: str = "",
         origin: str = "interactive",
+        require_session: bool = False,
     ) -> TaskORM:
         from omni.runtime.task_title import short_task_title
 
@@ -976,30 +1056,48 @@ class TaskRecorder:
             snapshot["channel"] = channel
         if external_key and not snapshot.get("external_key"):
             snapshot["external_key"] = external_key
-        row = TaskORM(
-            session_id=session_id,
-            parent_task_id=parent_task_id or None,
-            origin_workflow_run_id=origin_workflow_run_id,
-            origin_workflow_step_id=origin_workflow_step_id,
-            schedule_id=schedule_id or "",
-            retry_of_task_id=retry_of_task_id or "",
-            root_task_id=root_task_id or "",
-            attempt=max(1, int(attempt or 1)),
-            input_snapshot_json=snapshot,
-            kind=kind or "turn",
-            depth=max(0, int(depth)),
-            project=self._project,
-            channel=channel,
-            external_key=external_key,
-            status="running",
-            title=title,
-            user_input=user_input,
-            current_stage="user.message",
-        )
-        async with self._db.session() as s:
-            s.add(row)
-            await s.commit()
-            await s.refresh(row)
+        async def admit() -> TaskORM:
+            # A running Task is the durable lease that prevents Session
+            # deletion.  Acquire SQLite's writer reservation before checking
+            # the weak ``session_id`` reference and inserting that lease.  A
+            # concurrent delete therefore has only two valid outcomes: it
+            # commits first and this admission fails, or this Task commits
+            # first and deletion observes active work and refuses.
+            async with self._db.session() as s:
+                await s.execute(text("BEGIN IMMEDIATE"))
+                if (
+                    require_session
+                    and session_id
+                    and await s.get(SessionORM, session_id) is None
+                ):
+                    await s.rollback()
+                    raise LookupError(f"session not found: {session_id}")
+                admitted = TaskORM(
+                    session_id=session_id,
+                    parent_task_id=parent_task_id or None,
+                    origin_workflow_run_id=origin_workflow_run_id,
+                    origin_workflow_step_id=origin_workflow_step_id,
+                    schedule_id=schedule_id or "",
+                    retry_of_task_id=retry_of_task_id or "",
+                    root_task_id=root_task_id or "",
+                    attempt=max(1, int(attempt or 1)),
+                    input_snapshot_json=snapshot,
+                    kind=kind or "turn",
+                    depth=max(0, int(depth)),
+                    project=self._project,
+                    channel=channel,
+                    external_key=external_key,
+                    status="running",
+                    title=title,
+                    user_input=user_input,
+                    current_stage="user.message",
+                )
+                s.add(admitted)
+                await s.commit()
+                await s.refresh(admitted)
+                return admitted
+
+        row = await retry_while_busy(admit, attempts=5, max_backoff_seconds=0.15)
         await self.append_event(
             row.id,
             event_type="user.message",
@@ -1605,7 +1703,7 @@ class TaskRecorder:
                 summary=f"{kind} task {task_id[:8]} {status}",
             )
         await self._reindex(task_id)
-        logger.info("task.finished task=%s status=%s summary=%s", task_id[:8], status, _clip(summary or error, 180))
+        logger.info("task.finished task=%s status=%s", task_id[:8], status)
 
     async def _write_terminal_task(
         self,
@@ -1777,26 +1875,42 @@ class TaskRecorder:
         await self._reindex(task_id)
         return True
 
-    async def mark_running(self, task_id: str, *, summary: str = "") -> None:
+    async def mark_running(self, task_id: str, *, summary: str = "") -> bool:
         """Resume an awaiting/recovering task without creating a second task."""
         if not task_id:
-            return
-        async with self._db.session() as s:
-            task = await s.get(TaskORM, task_id)
-            if task is None:
-                return
-            previous_status = task.status
-            task.status = "running"
-            task.steering_status = (
-                "open"
-                if str(task.intent_type or "") in _STEERABLE_INTENTS
-                else "closed"
-            )
-            task.current_stage = "task.resumed"
-            task.finished_at = None
-            if summary:
-                task.summary = summary
-            await s.commit()
+            return False
+
+        async def admit_resume() -> str | None:
+            async with self._db.session() as s:
+                await s.execute(text("BEGIN IMMEDIATE"))
+                task = await s.get(TaskORM, task_id)
+                if task is None:
+                    await s.rollback()
+                    return None
+                if task.session_id and await s.get(SessionORM, task.session_id) is None:
+                    await s.rollback()
+                    return None
+                previous_status = task.status
+                task.status = "running"
+                task.steering_status = (
+                    "open"
+                    if str(task.intent_type or "") in _STEERABLE_INTENTS
+                    else "closed"
+                )
+                task.current_stage = "task.resumed"
+                task.finished_at = None
+                if summary:
+                    task.summary = summary
+                await s.commit()
+                return previous_status
+
+        previous_status = await retry_while_busy(
+            admit_resume,
+            attempts=5,
+            max_backoff_seconds=0.15,
+        )
+        if previous_status is None:
+            return False
         await self.append_event(
             task_id,
             event_type="task.resumed",
@@ -1806,6 +1920,7 @@ class TaskRecorder:
             summary=summary or f"task resumed from {previous_status}",
         )
         await self._reindex(task_id)
+        return True
 
     async def park_maintenance(self, task_id: str, *, summary: str = "") -> None:
         """Park a maintenance run as owed work rather than work in flight.
@@ -2554,6 +2669,24 @@ class TaskRecorder:
         components: list[Any] = [*workflows, *direct_executions, *direct_child_tasks]
         if any(component.status in _ACTIVE_EXECUTION_STATUSES for component in components):
             return
+        waiting = [component for component in components if component.status == "needs_input"]
+        if waiting:
+            summary = next(
+                (
+                    str(component.error or "").strip()
+                    for component in waiting
+                    if str(getattr(component, "error", "") or "").strip()
+                ),
+                "",
+            )
+            if not summary:
+                payload = getattr(waiting[0], "result_json", {}) or {}
+                if isinstance(payload, dict):
+                    summary = str(
+                        payload.get("error") or payload.get("summary") or payload.get("message") or ""
+                    ).strip()
+            await self.mark_needs_input(task_id, summary=summary or "needs_input")
+            return
         failed_results = [
             getattr(component, "result_json", {})
             for component in components
@@ -3228,65 +3361,21 @@ class TaskRecorder:
         rows and files survive, while every deleted Task id is removed from the
         machine-global index after the workspace transaction commits.
         """
-        outcome = TaskClearOutcome()
         roots = _unique_task_ids(task_ids)
         if not roots:
-            return outcome
+            return TaskClearOutcome()
+        outcome = TaskClearOutcome()
         async with self._db.session() as s:
             if not await _begin_task_delete_snapshot(s, outcome, dry_run=dry_run):
                 return outcome
-            rows = list((await s.execute(select(TaskORM))).scalars().all())
-            rows_by_id = {row.id: row for row in rows}
-            outcome.known_task_ids = list(rows_by_id)
-            active_by_task = await _active_executions_by_task(s)
-            outcome.missing_ids = [task_id for task_id in roots if task_id not in rows_by_id]
-            if outcome.missing_ids:
-                return outcome
-            closure = _task_descendant_closure(rows_by_id, roots)
-            ancestors = _task_ancestor_closure(
-                rows_by_id,
+            outcome = await stage_task_deletion(
+                s,
                 roots,
+                force=force,
+                dry_run=dry_run,
             )
-            guarded_rows = [*closure, *ancestors]
-            has_barrier = _protect_task_rows(outcome, guarded_rows, force=force)
-            has_barrier = (
-                _protect_active_executions(
-                    outcome,
-                    [row.id for row in guarded_rows],
-                    active_by_task,
-                )
-                or has_barrier
-            )
-            if has_barrier:
+            if dry_run or not outcome.deleted_ids:
                 return outcome
-            outcome.deleted_ids = [row.id for row in closure]
-            delete_roots = _topmost_selected_task_ids(rows_by_id, outcome.deleted_ids)
-            unrooted = _unrooted_task_ids(
-                rows_by_id,
-                outcome.deleted_ids,
-                delete_roots,
-            )
-            if unrooted:
-                _retain_task_rows(
-                    outcome,
-                    [rows_by_id[task_id] for task_id in unrooted],
-                    reason="invalid_task_tree",
-                )
-                outcome.deleted_ids = []
-                return outcome
-            outcome.deleted_tasks = [_delete_item(row) for row in closure]
-            for row in closure:
-                _add_status_count(outcome.deleted, row.status)
-            if dry_run:
-                return outcome
-            for batch in _task_id_batches(outcome.deleted_ids):
-                await s.execute(
-                    update(ArtifactORM)
-                    .where(ArtifactORM.task_id.in_(batch))
-                    .values(task_id=None)
-                )
-            for root_id in delete_roots:
-                await s.delete(rows_by_id[root_id])
             await s.commit()
         await self._deindex(outcome.deleted_ids)
         return outcome

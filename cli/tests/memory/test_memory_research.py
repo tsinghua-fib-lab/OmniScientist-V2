@@ -166,6 +166,25 @@ async def test_remember_grounding_and_verify_audit():
     assert len(report.memory_unsupported) == 1
 
 
+@pytest.mark.asyncio
+async def test_remember_and_recall_refuse_unresolved_principal():
+    mem, db, s = await _mem()
+    ctx = ExecContext(
+        settings=s,
+        paths=s.paths,
+        session_id="S",
+        db=db,
+        artifacts=ArtifactStore(s.paths, db),
+        llm=None,
+        principal="unresolved",
+    )
+    tools = {t.spec.name: t for t in build_recall_tools(ctx)}
+    written = await tools["remember"].handler({"text": "remember this finding please", "type": "finding"})
+    searched = await tools["memory_search"].handler({"query": "finding"})
+    assert "could not be resolved" in written["error"]
+    assert "could not be resolved" in searched["error"]
+
+
 # ── P2.4 thread/hypothesis resume ───────────────────────────────────────────
 
 

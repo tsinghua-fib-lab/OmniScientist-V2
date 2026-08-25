@@ -49,6 +49,13 @@ started in Web stream assistant text token by token. Work started in another CLI
 streams its durable progress into Web and loads the final reply when committed; provisional tokens
 are not copied between processes.
 
+`omni web` prints its loopback URL once. Ctrl+C then exits normally without an ASGI traceback or
+Uvicorn request log stream. Diagnostics are retained under `<OMNI_HOME>/logs/web-<project>.log`
+and rotate at 10 MiB, keeping 10 files total (`[observability] log_max_bytes` /
+`log_files`, or `OMNI_LOG_MAX_BYTES` / `OMNI_LOG_FILES`). Routine access logging
+is disabled. CLI and Home Service diagnostics live in the same directory and
+use the same record format.
+
 The first bare `omni` runs setup and converges the managed runtime and Home Service. Update later
 with the same product-level command regardless of the original package manager:
 
@@ -399,7 +406,7 @@ omni config set model.provider openai
 omni config set model.base_url https://api.deepseek.com/v1  # OpenAI/DeepSeek/Ollama/… (+/v1 if required)
 omni config set model.model    deepseek-chat
 omni config set model.api_key  sk-xxx             # stored in the active secrets.toml automatically
-omni config test                                  # live connectivity check
+omni config test                                  # main model + optional VLM / S2 / embeddings
 ```
 
 Prefer config files? Run `omni config path`, then edit the reported `config.toml`

@@ -18,17 +18,27 @@ from omni.cli.state import make_agent_from_settings
 from omni.config import load_settings
 from omni.config import trust as trustmod
 from omni.config.paths import OmniPaths, find_project_root, get_paths, user_home
-from omni.config.workspaces import iter_catalog_workspaces, list_workspaces
+from omni.config.workspaces import (
+    channel_anchor_project_dir,
+    iter_catalog_workspaces,
+    list_workspaces,
+)
 from omni.personas.roots import persona_state_root
 from omni.runtime.daemon import is_daemon_running
 from omni.web.host import control_store_reason
 from omni.web.protocol import RpcError
+from omni.web.workspace_visibility import (
+    canonical_project_dir,
+    hidden_project_dirs,
+    set_hidden_project_dirs,
+)
 
 WRITE_METHODS = frozenset(
     {
         "session.create",
         "session.rename",
         "session.delete",
+        "session.deleteMany",
         "turn.start",
         "turn.steer",
         "turn.cancel",
@@ -128,10 +138,32 @@ class WorkspaceHub:
     def selected_key(self) -> str | None:
         return self._selected
 
+    @property
+    def is_shutting_down(self) -> bool:
+        """Whether the Web process has entered its request-drain phase."""
+        return self.runs.is_shutting_down
+
+    def begin_shutdown(self) -> None:
+        """Detach request watchers without interrupting their underlying work."""
+        self.runs.begin_shutdown()
+
+    async def wait_for_shutdown(self, *, timeout: float | None = None) -> bool:
+        """Wait until the Web process starts draining HTTP requests."""
+        return await self.runs.wait_for_shutdown(timeout=timeout)
+
     def selected(self) -> OpenedWorkspace | None:
         if not self._selected:
             return None
         return self._opened.get(self._selected)
+
+    def live_session_identities(self) -> set[tuple[str, str]]:
+        """Project in-process Web runs onto durable workspace identities."""
+        out: set[tuple[str, str]] = set()
+        for workspace_key, session_id in self.runs.live_sessions():
+            rec = self._opened.get(workspace_key)
+            if rec is not None:
+                out.add((rec.store_key, session_id))
+        return out
 
     def _lock_for(self, key: str) -> asyncio.Lock:
         lock = self._locks.get(key)
@@ -140,7 +172,8 @@ class WorkspaceHub:
             self._locks[key] = lock
         return lock
 
-    def catalog(self) -> list[dict[str, Any]]:
+    def catalog(self, *, include_hidden: bool = False) -> list[dict[str, Any]]:
+        hidden = set() if include_hidden else hidden_project_dirs()
         seen: set[str] = set()
         out: list[dict[str, Any]] = []
         for rec in list_workspaces() + iter_catalog_workspaces():
@@ -148,6 +181,8 @@ class WorkspaceHub:
                 continue
             project_dir = str(rec.get("project_dir") or "")
             if not project_dir or project_dir in seen:
+                continue
+            if canonical_project_dir(project_dir) in hidden:
                 continue
             seen.add(project_dir)
             item = {
@@ -162,6 +197,62 @@ class WorkspaceHub:
             out.append(item)
         out.sort(key=lambda r: float(r.get("last_seen") or 0), reverse=True)
         return out
+
+    def hide_workspaces(self, project_dirs: list[str]) -> list[str]:
+        """Hide known, idle workspace rows without touching their data."""
+        requested = {
+            canonical_project_dir(value)
+            for value in project_dirs
+            if str(value).strip()
+        }
+        if not requested:
+            raise RpcError("invalid_params", "workspace.hideMany requires project_dirs")
+        known = {
+            canonical_project_dir(str(item.get("project_dir") or ""))
+            for item in self.catalog(include_hidden=True)
+            if item.get("project_dir")
+        }
+        unknown = sorted(requested - known)
+        if unknown:
+            raise RpcError("not_found", "unknown workspace", project_dirs=unknown)
+        selected = self.selected()
+        if selected is not None and canonical_project_dir(selected.store_key) in requested:
+            raise RpcError(
+                "busy",
+                "the selected workspace cannot be hidden",
+                project_dir=selected.store_key,
+            )
+        anchor = canonical_project_dir(channel_anchor_project_dir())
+        if anchor in requested:
+            raise RpcError(
+                "protected",
+                "the Home Service channel workspace cannot be hidden",
+                project_dir=anchor,
+            )
+        for project_dir in requested:
+            opened_key = self._by_store.get(project_dir)
+            if opened_key and self.runs.inflight_in_workspace(opened_key):
+                raise RpcError(
+                    "busy",
+                    "a workspace with a running Web turn cannot be hidden",
+                    project_dir=project_dir,
+                )
+        set_hidden_project_dirs(requested, hidden=True)
+        return sorted(requested)
+
+    def unhide_workspaces(self, project_dirs: list[str]) -> list[str]:
+        """Restore explicitly named workspace rows to the Web catalog."""
+        requested = sorted(
+            {
+                canonical_project_dir(value)
+                for value in project_dirs
+                if str(value).strip()
+            }
+        )
+        if not requested:
+            raise RpcError("invalid_params", "workspace.unhideMany requires project_dirs")
+        set_hidden_project_dirs(requested, hidden=False)
+        return requested
 
     async def open_path(self, path: str | Path, *, select: bool = True) -> OpenedWorkspace:
         target = Path(path).expanduser()
@@ -186,6 +277,7 @@ class WorkspaceHub:
             open_path=str(target),
         )
         await self._ensure_agent(rec)
+        set_hidden_project_dirs([rec.store_key], hidden=False, home=rec.paths.home)
         if select:
             self._remember(rec, selected=True)
         return rec
@@ -206,6 +298,7 @@ class WorkspaceHub:
             project=name,
         )
         await self._ensure_agent(rec, settings=settings)
+        set_hidden_project_dirs([rec.store_key], hidden=False, home=rec.paths.home)
         if select:
             self._remember(rec, selected=True)
         return rec
@@ -225,9 +318,14 @@ class WorkspaceHub:
             key = str(Path(project_dir).expanduser().resolve())
             existing = self._lookup_token(key)
             if existing is not None:
+                set_hidden_project_dirs(
+                    [existing.store_key],
+                    hidden=False,
+                    home=existing.paths.home,
+                )
                 self._remember(existing, selected=True)
                 return existing
-            for rec in self.catalog():
+            for rec in self.catalog(include_hidden=True):
                 if str(rec.get("project_dir") or "") == key:
                     root = rec.get("root")
                     if root:
@@ -344,6 +442,8 @@ class WorkspaceHub:
             return agent
 
     async def aclose(self) -> None:
+        self.begin_shutdown()
+
         async def _interrupt(handle: Any) -> None:
             task_id = handle.task_id
             if not task_id:

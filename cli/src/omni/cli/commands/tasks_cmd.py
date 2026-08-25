@@ -318,7 +318,7 @@ async def _resolve_task_artifacts(
 
 
 def _print_artifacts(rows: Sequence[tuple[str, str, str]], *, limit: int = 24) -> None:
-    """Render artifacts as a bold **title** plus its path and dim ``artifact://``."""
+    """Render artifacts as a bold **title** plus the filesystem path."""
     if not rows:
         return
     console.print(f"\n[{theme.STRONG} {theme.ACCENT}]artifacts[/]")
@@ -582,15 +582,42 @@ def _plan_settlement_summary(plan_json: dict[str, Any]) -> str:
     return "; ".join(bits) or "-"
 
 
+def _kind_from_display_path(path: str) -> str:
+    """Infer a store-like kind from the filesystem path the user can open.
+
+    ``_resolve_task_artifacts`` returns ``(title, path, uri)``. Using the title
+    as ``kind`` made remaining look unpaid after a paid P-01 pack: titles are
+    captions, and ``artifact://`` URIs have no suffix.
+    """
+    suffix = Path(path).suffix.lower().lstrip(".")
+    if suffix in {"png", "svg", "jpg", "jpeg", "webp", "gif"}:
+        return "figure"
+    if suffix in {"pptx", "ppt"}:
+        return "slides"
+    if suffix in {"md", "markdown", "docx", "doc", "tex", "html"}:
+        return "document"
+    if suffix == "pdf":
+        return "document"
+    return ""
+
+
 def _host_remaining_summary(plan_json: dict[str, Any], artifact_rows: Sequence[tuple[str, str, str]] | None) -> str:
     from omni.runtime.remaining import remaining_deliverables
 
     declared = plan_json.get("verification_plan") if isinstance(plan_json.get("verification_plan"), dict) else {}
     required = list(declared.get("required_outputs") or plan_json.get("outputs") or [])
     artifacts = []
-    for kind, title, target in artifact_rows or []:
+    for title, path, uri in artifact_rows or []:
+        disk = path or ""
         artifacts.append(
-            SimpleNamespace(kind=kind, title=title, path=target, rel_path=target, uri=target, mime="")
+            SimpleNamespace(
+                kind=_kind_from_display_path(disk),
+                title=title,
+                path=disk,
+                rel_path=disk,
+                uri=uri,
+                mime="",
+            )
         )
     remaining = remaining_deliverables([str(x) for x in required], artifacts)
     if not remaining:
@@ -2393,36 +2420,90 @@ _TERMINAL_TASK_STATUSES = frozenset(
 )
 
 
+async def _peek_watch_task(state: AppState, ident: str) -> TaskORM | None:
+    """Cheap status probe: workspace index + owning DB, no OmniAgent.
+
+    ``make_agent_for_task`` loads the skill registry and memory store. Codex
+    returns a finished process's exit immediately; a settled Omni task must
+    do the same instead of spending the first watch frame on agent setup.
+    """
+    from omni.runtime.task_index import resolve_task_workspace
+    from omni.storage.db import get_database
+
+    ident = (ident or "").strip()
+    if not ident:
+        return None
+    settings = state.settings()
+    try:
+        target = await resolve_task_workspace(settings, ident)
+    except Exception:  # noqa: BLE001 — routing is best-effort
+        target = None
+    chosen = target or settings
+    db = get_database(chosen.paths.project_db)
+    await db.init()
+    async with db.session() as session:
+        exact = await session.get(TaskORM, ident)
+        if exact is not None:
+            return exact
+        rows = list(
+            (
+                await session.execute(
+                    select(TaskORM)
+                    .where(TaskORM.id.startswith(ident, autoescape=True))
+                    .limit(2)
+                )
+            ).scalars().all()
+        )
+    return rows[0] if len(rows) == 1 else None
+
+
+def _print_watch_terminal(task: TaskORM) -> None:
+    info(f"Task {task.id} is {task.status}; nothing more to watch.")
+    kv_table(
+        "Task",
+        [
+            ("id", task.id),
+            ("status", task.status),
+            ("title", task.title or "-"),
+            ("project", task.project or "-"),
+        ],
+    )
+
+
 def _watch_single_task(state: AppState, task_id: str, *, interval: float, once: bool) -> None:
     """Follow one task's detail until it settles or the user presses q / Ctrl+C.
 
-    Resolves the owning workspace through the global task index (so a task from
-    another workspace still follows) and re-renders the same view as ``task show``
-    each tick. Auto-returns once the task reaches a terminal status.
+    A finished task prints its terminal status and returns immediately (Codex
+    ``watch`` on an exited process). Live tasks reuse one agent across ticks.
     """
+    peeked = run_async(_peek_watch_task(state, task_id))
+    if peeked is not None and peeked.status in _TERMINAL_TASK_STATUSES:
+        _print_watch_terminal(peeked)
+        return
 
-    async def _detail():  # noqa: ANN202 - local payload shuttle
-        agent, _ = await make_agent_for_task(state, task_id)
-        try:
-            payload = await task_detail_payload(agent, task_id)
-            if payload is None:
-                return None
-            task, _events, _workflows, steps, subtasks, _children = payload
-            rows = await _resolve_task_artifacts(
-                task_id=task.id,
-                subtasks=subtasks,
-                steps=steps,
-                db=agent.db,
-                paths=agent.paths,
-            )
-            return payload, rows
-        finally:
-            await agent.aclose()
+    async def _open():  # noqa: ANN202 - local payload shuttle
+        return await make_agent_for_task(state, task_id)
 
+    async def _detail(agent: Any):  # noqa: ANN202
+        payload = await task_detail_payload(agent, task_id)
+        if payload is None:
+            return None
+        task, _events, _workflows, steps, subtasks, _children = payload
+        rows = await _resolve_task_artifacts(
+            task_id=task.id,
+            subtasks=subtasks,
+            steps=steps,
+            db=agent.db,
+            paths=agent.paths,
+        )
+        return payload, rows
+
+    agent = None
     try:
+        agent, _ = run_async(_open())
         with WatchKeyListener() as keys:
             while True:
-                detail = run_async(_detail())
+                detail = run_async(_detail(agent))
                 if detail is None:
                     error(f"Task {task_id} was not found")
                     raise typer.Exit(1)
@@ -2445,6 +2526,9 @@ def _watch_single_task(state: AppState, task_id: str, *, interval: float, once: 
                     return
     except KeyboardInterrupt:
         info("Stopped watching.")
+    finally:
+        if agent is not None:
+            run_async(agent.aclose())
 
 
 @app.command("watch")

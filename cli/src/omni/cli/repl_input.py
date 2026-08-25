@@ -236,11 +236,12 @@ def build_repl_completer(
     merged completer keeps typing responsive because building the file index can
     shell out to ``git ls-files`` or walk a large tree.
 
-    ``output_base`` is where omni writes deliverables (``artifacts.output_dir``);
-    its per-kind subfolders stay mentionable even when gitignored.
+    ``output_base`` is where omni writes deliverables (``artifacts.output_dir``,
+    default ``outputs/``); that folder and leftover per-kind siblings stay
+    mentionable even when gitignored.
     """
     base = (root or Path.cwd()).resolve()
-    # ``artifacts.output_dir`` is conventionally relative (default ``"."``);
+    # ``artifacts.output_dir`` is conventionally relative (default ``outputs``);
     # anchor it to the picker root so indexed paths stay relative to that root.
     configured = Path(output_base) if output_base is not None else base
     anchored = configured if configured.is_absolute() else base / configured

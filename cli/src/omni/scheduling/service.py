@@ -166,15 +166,21 @@ class ScheduleService:
 
         The approved schedule must be created where it will fire and deliver its
         result (the IM anchor for an IM request), which is usually *not* the
-        workspace the approving CLI resolved to. Falls back to the local DB when
-        the origin is unknown (legacy rows) or unreadable.
+        workspace the approving CLI resolved to. ``origin_project_dir`` is the
+        durable store, never the user's checkout; a legacy workspace-root value
+        is re-keyed so ``<repo>/sessions.sqlite3`` is not created. Falls back
+        to the local DB when the origin is unknown (legacy rows) or unreadable.
         """
         if not origin_project_dir:
             return self._scheduler()
         try:
+            from omni.config.paths import resolve_project_dir
             from omni.storage.db import get_database
 
-            db = get_database(Path(origin_project_dir) / "sessions.sqlite3")
+            store = resolve_project_dir(origin_project_dir)
+            if store is None:
+                return self._scheduler()
+            db = get_database(store / "sessions.sqlite3")
             await db.init()
             return self._scheduler(db)
         except Exception:  # noqa: BLE001 - never dead-end approval on a bad path

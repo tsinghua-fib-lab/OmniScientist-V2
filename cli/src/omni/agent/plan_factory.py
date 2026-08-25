@@ -298,22 +298,12 @@ def build_named_native_tool_plan(text: str, *, tool: str, task_id: str) -> Inten
             confidence=0.95,
             outputs=["sources"],
         )
-    plan = build_assistant_plan(
+    return build_assistant_plan(
         text,
         task_id=task_id,
         rationale=f"user named native tool {tool}",
         confidence=0.9,
     )
-    blocked = sorted({*plan.tool_policy.blocked_tools, *RETRIEVE_ONLY_BLOCKED_TOOLS})
-    plan.tool_policy = ToolPolicy(
-        allowed_tools=plan.tool_policy.allowed_tools,
-        blocked_tools=blocked,
-        per_tool_limits=dict(plan.tool_policy.per_tool_limits),
-        max_tool_calls=plan.tool_policy.max_tool_calls,
-        max_iterations=plan.tool_policy.max_iterations,
-        final_reserve_enabled=plan.tool_policy.final_reserve_enabled,
-    )
-    return plan
 
 
 def carry_capability_inputs(plan: IntentPlan, proposal: object, capability: str) -> IntentPlan:

@@ -825,10 +825,14 @@ def _run_s2_search(
 # Step 1: search literature, extract concepts, and merge synonyms
 # ---------------------------------------------------------------------------
 
-MAX_TOTAL_PAPERS = 50
+# Keep the initial survey small enough to stay responsive: the funnel is
+# rate-limited per query and every retained paper costs one concept-extraction
+# LLM call, so both the query count and the per-query limit are the real levers.
+MAX_QUERIES = 3
+MAX_TOTAL_PAPERS = 24
 CONCEPT_EXTRACTION_CONCURRENCY = 10
 DEFAULT_N_IDEAS = 2
-DEFAULT_PAPER_LIMIT = 10
+DEFAULT_PAPER_LIMIT = 8
 
 
 def search_and_extract(
@@ -847,9 +851,9 @@ def search_and_extract(
         llm=llm,
     )
     if isinstance(result, list):
-        queries = [str(query) for query in result][:3]
+        queries = [str(query) for query in result][:MAX_QUERIES]
     elif isinstance(result, dict):
-        queries = result.get("queries", [research_question])[:3]
+        queries = result.get("queries", [research_question])[:MAX_QUERIES]
     else:
         queries = [research_question]
     if not queries:
@@ -1215,6 +1219,59 @@ def refine_idea(
 # ---------------------------------------------------------------------------
 # Complete pipeline
 # ---------------------------------------------------------------------------
+
+
+def format_reference(paper: dict[str, Any], index: int) -> str:
+    """Render one paper as a human-readable citation line.
+
+    A citation must remain identifiable even when the source is thin, so the
+    title always leads and a locator (DOI, then arXiv id, then URL) is appended
+    whenever one is available. Authors, year, and venue fill in when present.
+    """
+    if not isinstance(paper, dict):
+        return f"{index}. (invalid source record)"
+    title = str(paper.get("title") or "").strip() or "(untitled)"
+    meta_parts: list[str] = []
+    authors = paper.get("authors")
+    if isinstance(authors, list):
+        names = [str(name).strip() for name in authors if str(name).strip()]
+        if names:
+            meta_parts.append(names[0] + (" et al." if len(names) > 1 else ""))
+    year = paper.get("year")
+    if year not in (None, ""):
+        meta_parts.append(str(year))
+    venue = str(paper.get("venue") or "").strip()
+    if venue:
+        meta_parts.append(venue)
+
+    line = f"{index}. {title}"
+    if meta_parts:
+        line += f". {'. '.join(meta_parts)}"
+
+    doi = str(paper.get("doi") or "").strip()
+    arxiv_id = str(paper.get("arxiv_id") or "").strip()
+    url = str(paper.get("url") or "").strip()
+    if doi:
+        line += f". https://doi.org/{doi}"
+    elif arxiv_id:
+        line += f". arXiv:{arxiv_id} (https://arxiv.org/abs/{arxiv_id})"
+    elif url:
+        line += f". {url}"
+    return line.replace("..", ".")
+
+
+def build_reference_lines(papers: list[dict[str, Any]]) -> list[str]:
+    """Return Markdown lines for a ``## References`` section, or empty if none."""
+    entries = [
+        format_reference(paper, index)
+        for index, paper in enumerate(
+            [p for p in papers if isinstance(p, dict) and str(p.get("title") or "").strip()],
+            1,
+        )
+    ]
+    if not entries:
+        return []
+    return ["## References", "", *entries, ""]
 
 
 def _portable_provenance(papers: list[dict[str, Any]]) -> dict[str, Any]:

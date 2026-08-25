@@ -948,6 +948,20 @@ def build_shell_tools(ctx: ExecContext) -> list[Tool]:
                 reason="empty_command",
                 summary="Empty command",
             )
+        from omni.skills_runtime.control_store_guard import (
+            command_writes_frozen_control_store,
+            control_store_write_observation,
+        )
+
+        store_path = command_writes_frozen_control_store(command)
+        if store_path is not None:
+            observation = control_store_write_observation(store_path)
+            return _controlled_result(
+                observation,
+                command_status="blocked",
+                reason="control_store_write",
+                summary="Write to Omni control store denied",
+            )
         if channel_requires_sensitive_confirm(ctx.settings, ctx.channel):
             observation = (
                 "ERROR: shell commands from IM channels require local confirmation. "
@@ -1041,6 +1055,11 @@ def build_shell_tools(ctx: ExecContext) -> list[Tool]:
             observation += (
                 f"\n[registered {registered} artifact(s) from ${OMNI_OUTPUT_ENV}={output_dir}]"
             )
+        from omni.skills_runtime.exec_feedback import unexpanded_env_hint
+
+        hint = unexpanded_env_hint(text, env)
+        if hint:
+            observation += f"\n{hint}"
         succeeded = exit_code == 0
         return _command_result(
             observation,
@@ -1062,8 +1081,9 @@ def build_shell_tools(ctx: ExecContext) -> list[Tool]:
             ToolSpec("bash", (
                 "Run a shell command in the working directory, subject to sandbox policy. "
                 f"Write durable CSV/JSON/PNG/SVG (and other deliverables) to {output_dir} "
-                f"(${OMNI_OUTPUT_ENV}); that directory persists across bash calls, is "
-                "readable by read_file, and is registered as this task's artifacts. "
+                f"(${OMNI_OUTPUT_ENV}); that directory is staging. It persists across bash "
+                "calls and is readable by read_file. The host publishes harvestable files "
+                "into this task's outputs/<title>_<task8>/ folder. "
                 f"Scratch files may use {exec_tmp_dir(ctx)} ($TMPDIR). Host /tmp is not "
                 "an artifact sink. "
                 "For a recurring, non-destructive plain command family, optionally propose "

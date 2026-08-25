@@ -1,6 +1,6 @@
 ---
 name: scientific-figure
-description: Fallback Graphviz or matplotlib figure (DOT/SVG/PNG). Prefer livefigure for architecture, system, and workflow diagrams. Use this skill when VLM is unavailable, the user asked for DOT/SVG/PNG, or an existing graph must be rendered or revised via source_artifact_dot. Do not bash `dot`.
+description: Default drawing skill for architecture, system, and workflow diagrams (DOT/SVG/PNG). Also use when the user names Graphviz, leaves a .dot, or asks for SVG-only / PNG-only. Use livefigure only for an editable single-slide PPTX. Do not bash `dot`.
 license: Apache-2.0
 metadata:
   helixforge:
@@ -25,9 +25,12 @@ metadata:
       - artifact.figure
     default_for:
       - scientific figure
+      - architecture diagram
+      - system diagram
       - graphviz diagram
-      - SVG diagram
-      - PNG diagram
+      - DOT diagram
+      - 架构图
+      - 示意图
     delivery_mode: async_task
     kind: python_engine
     workflow:
@@ -146,15 +149,15 @@ metadata:
     trigger:
       phrases:
         - scientific figure
+        - architecture diagram
         - graphviz diagram
-        - SVG diagram
-        - PNG diagram
         - DOT diagram
-        - as SVG
-        - as PNG
         - as DOT
         - source_artifact_dot
-      when_to_use: "Fallback only. Prefer livefigure for architecture, system, and workflow diagrams. Use this skill for DOT/SVG/PNG, Graphviz revision via source_artifact_dot, or when livefigure cannot run because VLM is not configured."
+        - 架构图
+        - 示意图
+      when_to_use: "Default drawing skill for ordinary figures, architecture diagrams, and Graphviz DOT/SVG/PNG. Use livefigure only when the user asked for an editable single-slide PPTX."
+      when_not_to_use: "Editable single-slide PPTX (livefigure). Complete multi-slide decks (research-pptx). Do not invent a .dot file unless the user left one."
     notification:
       display_label: "Scientific figure"
       title_field: "title"
@@ -167,10 +170,17 @@ metadata:
 
 # scientific-figure
 
-Fallback provider for Graphviz or matplotlib figures (DOT/SVG/PNG). Prefer
-`livefigure` for architecture, system, and workflow diagrams. Use this skill
-when the owner has not configured a VLM, the user asked for DOT/SVG/PNG, or an
-existing graph must be rendered or revised with `source_artifact_dot`. A closed
+Default drawing skill (DOT/SVG/PNG) for unspecified architecture, flow, and
+system schematics. Also use it when the user names Graphviz, leaves a `.dot`,
+or asks for SVG-only / PNG-only. A configured VLM does not move this work to
+`livefigure`.
+
+When not to use: an editable single-slide PPTX (`livefigure`) or a complete
+multi-slide deck (`research-pptx`). Do not invent a `.dot` file and then look
+for a renderer.
+
+Use this skill when the user asked for a figure, DOT/SVG/PNG, left a `.dot` to
+render, or named Graphviz. A closed
 perceive/act/reflect (or other non-template) topology is synthesized as a weaker
 Graphviz schematic (`status=partial`); the engine does not stamp a linear
 placeholder or require the caller to author DOT.

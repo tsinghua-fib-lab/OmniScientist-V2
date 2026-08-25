@@ -131,7 +131,7 @@ function ArtifactRow({
   controlsId: string;
   triggerId: string;
 }) {
-  const fileName = displayFileName(artifact.path, artifact.uri);
+  const fileName = displayFileName(artifact.path || artifact.rel_path, artifact.uri);
   const title = artifact.title || artifact.kind || fileName;
   return (
     <button
@@ -174,7 +174,7 @@ function ArtifactInlineDetail({
   loading: boolean;
   error: string;
 }) {
-  const location = artifact.path || artifact.uri;
+  const location = artifact.path || artifact.rel_path || "";
   return (
     <section
       id={controlsId}

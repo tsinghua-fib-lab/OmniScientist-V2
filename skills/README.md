@@ -34,9 +34,9 @@ cross-tool convention and a valid MCP / function-calling tool name.
 | `openalex-search` | python_engine | Search OpenAlex (Omni also records returned sources in its workspace) |
 | `paper-review` | prompt_only | Produce a venue-aware author-facing pre-submission paper review |
 | `review-response` | prompt_only | Draft or audit point-by-point journal revision correspondence |
-| `scientific-figure` | python_engine | Fallback Graphviz/matplotlib figure (DOT/SVG/PNG) when VLM is unavailable or the user wants DOT |
+| `scientific-figure` | python_engine | Unspecified architecture / flow / schematic (DOT/SVG/PNG) |
 | `scientific-poster` | python_engine | Author, inspect, revise, preview, and approve evidence-grounded HTML scientific posters |
-| `livefigure` | python_engine | Preferred architecture/system/workflow figure as one editable PPTX (requires VLM) |
+| `livefigure` | python_engine | Editable single-slide PPTX figure (requires VLM; not the default "draw a figure") |
 | `research-ideation` | python_engine | Search literature and generate, critique, and refine structured research ideas |
 | `research-pptx` | python_engine | Generate a complete multi-slide scientific deck from papers, text, outlines, or topics |
 
@@ -49,8 +49,8 @@ a dynamic scan.
 
 | User intent | Capability | Provider | Output |
 |---|---|---|---|
-| Architecture, system, or workflow diagram (editable PPTX; needs VLM) | `figure.editable.pptx` | `livefigure` | Single-slide PPTX |
-| DOT/SVG/PNG figure, Graphviz revision, or no VLM | `artifact.figure` | `scientific-figure` | DOT/SVG/PNG |
+| Ordinary figure, architecture, or flowchart | `artifact.figure` | `scientific-figure` | DOT/SVG/PNG |
+| Editable single-slide PPTX (needs VLM) | `figure.editable.pptx` | `livefigure` | Single-slide PPTX |
 | Complete group-meeting, defense, seminar, or report deck | `slides.generate` | `research-pptx` | Multi-slide PPTX |
 | Complete scientific or conference poster | `poster.scientific` | `scientific-poster` | HTML poster + preview/approval artifacts |
 | Find and present papers on a topic | `literature.search` | `openalex-search` | Sources |
@@ -58,11 +58,12 @@ a dynamic scan.
 | Review a paper before submission | `review.paper` | `paper-review` | Venue-aligned Markdown review |
 | Respond to received reviewer comments | `review.response` | `review-response` | Response letter/revision package |
 
-`livefigure` is the preferred ReAct provider for architecture, system, and
-workflow diagrams. It requires `omni config vlm` and does not claim
-`artifact.figure`. `scientific-figure` is the Graphviz/PNG fallback when VLM is
-unavailable, the user asked for DOT/SVG/PNG, or an existing graph must be
-revised. `research-pptx` owns complete decks.
+`scientific-figure` is the default provider for an unspecified
+`artifact.figure` (architecture, system, workflow). A configured VLM does
+not change that default. `livefigure` runs only for `$livefigure` or
+`figure.editable.pptx` and requires `omni config vlm`. A successful
+livefigure PPTX can also pay `artifact.figure`. Host resolve does not parse
+format words. `research-pptx` owns complete multi-slide decks.
 
 ### LiveFigure VLM configuration
 

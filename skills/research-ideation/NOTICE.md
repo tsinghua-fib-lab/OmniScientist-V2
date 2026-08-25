@@ -12,6 +12,6 @@ may be governed by separate publisher, dataset, or service terms.
 The engine-backed implementation was contributed from
 `https://gitee.com/zgc-omni/omniscientistv2.git`, branch/path
 `zky/skills/research-ideation`, commit
-`b056c68a0ea22022998f68fc7cae1e7347463e79`. It was adapted for run-scoped model
+`1c067da398f9161045277f9350aecea25b3f4a95`. It was adapted for run-scoped model
 configuration, structured/redacted failures, Omni provenance, and portable
 Claude Code, Codex, and OpenClaw execution.

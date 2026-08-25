@@ -37,11 +37,19 @@ secrets.toml
 .agents/
 .codex/
 # Skill runs write deliverables and scratch into the launch directory, which is
-# this repo whenever omni is exercised from a checkout.
+# this repo whenever omni is exercised from a checkout. The canonical user-facing
+# folder is outputs/; older per-kind siblings stay ignored so leftovers do not
+# re-enter git. Walkthrough catalog launches use --out outputs_walkthrough so
+# validation PPTX/figures stay out of git status and out of real outputs/.
+out/
+outputs/
+outputs_walkthrough/
 artifacts/
 figures/
 reports/
 presentation/
+papers/
+presentations/
 /scripts/
 /references/
 /reviews/
@@ -50,6 +58,4 @@ presentation/
 .soulagent/
 role.md
 *.sqlite3.init.lock
-outputs/
-papers/
-presentations/
+.playwright-cli/

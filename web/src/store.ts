@@ -15,6 +15,7 @@ import {
   sessionBusy,
 } from "./turnState";
 import { dropLocalMessage, mergeTranscript } from "./transcript";
+import { sessionCatalogError } from "./sessionManagement";
 import type {
   ActivityItem,
   Artifact,
@@ -25,6 +26,9 @@ import type {
   Drawer,
   Mode,
   Session,
+  SessionScope,
+  SessionSort,
+  SessionStatusGroup,
   SessionFingerprint,
   SessionTimeline,
   TaskSummary,
@@ -37,10 +41,18 @@ import type {
 export type Snapshot = {
   workspace: Workspace | null;
   catalog: CatalogWorkspace[];
+  hiddenWorkspaces: CatalogWorkspace[];
   sessions: Session[];
+  sessionResults: Session[];
   sessionId: string | null;
   sessionOpenRevision: number;
   channelFilter: string;
+  sessionScope: SessionScope;
+  sessionSort: SessionSort;
+  sessionStatusFilter: SessionStatusGroup | "";
+  sessionNextCursor: string | null;
+  sessionListLoading: boolean;
+  sessionListError: string;
   messages: ChatMessage[];
   streamingText: string;
   activities: ActivityItem[];
@@ -97,10 +109,18 @@ let artifactSyncInFlight: { key: string; promise: Promise<void> } | null = null;
 let core = {
   workspace: null as Workspace | null,
   catalog: [] as CatalogWorkspace[],
+  hiddenWorkspaces: [] as CatalogWorkspace[],
   sessions: [] as Session[],
+  sessionResults: [] as Session[],
   sessionId: null as string | null,
   sessionOpenRevision: 0,
   channelFilter: "",
+  sessionScope: "workspace" as SessionScope,
+  sessionSort: "activity" as SessionSort,
+  sessionStatusFilter: "" as SessionStatusGroup | "",
+  sessionNextCursor: null as string | null,
+  sessionListLoading: false,
+  sessionListError: "",
   pickerOpen: false,
   picker: null as DirectoryListing | null,
   showHidden: false,
@@ -132,6 +152,27 @@ function workspaceKey(workspace: Workspace | null = core.workspace): string {
   return workspace.project_dir || workspace.open_path;
 }
 
+function usesSessionCatalogQuery(): boolean {
+  return (
+    core.sessionScope === "all" ||
+    core.sessionSort !== "activity" ||
+    Boolean(core.sessionStatusFilter)
+  );
+}
+
+function sessionCatalogScope(): string | undefined {
+  return core.sessionScope === "workspace" ? core.workspace?.project_dir : undefined;
+}
+
+function sessionCatalogRequestKey(): string {
+  return [
+    sessionCatalogScope() || "all",
+    core.channelFilter,
+    core.sessionStatusFilter,
+    core.sessionSort,
+  ].join("\u0000");
+}
+
 function keyOf(sessionId: string): string {
   return bucketKey(workspaceKey(), sessionId);
 }
@@ -152,10 +193,18 @@ function project(): Snapshot {
   return {
     workspace: core.workspace,
     catalog: core.catalog,
+    hiddenWorkspaces: core.hiddenWorkspaces,
     sessions: core.sessions,
+    sessionResults: usesSessionCatalogQuery() ? core.sessionResults : core.sessions,
     sessionId,
     sessionOpenRevision: core.sessionOpenRevision,
     channelFilter: core.channelFilter,
+    sessionScope: core.sessionScope,
+    sessionSort: core.sessionSort,
+    sessionStatusFilter: core.sessionStatusFilter,
+    sessionNextCursor: core.sessionNextCursor,
+    sessionListLoading: core.sessionListLoading,
+    sessionListError: core.sessionListError,
     messages: sessionId ? messagesBySession[keyOf(sessionId)] || [] : [],
     streamingText: turn?.partialText || "",
     activities: turn?.activities || [],
@@ -446,6 +495,10 @@ function resetWorkspaceState(workspace: Workspace, notice = ""): void {
     pickerOpen: false,
     sessionId: null,
     sessions: [],
+    sessionResults: core.sessionScope === "all" ? core.sessionResults : [],
+    sessionNextCursor: core.sessionScope === "all" ? core.sessionNextCursor : null,
+    sessionListLoading: false,
+    sessionListError: "",
     tasks: [],
     sessionTasks: [],
     sessionTurns: [],
@@ -616,15 +669,85 @@ export const actions = {
   },
   setChannelFilter(channelFilter: string) {
     emit({ channelFilter });
-    void actions.refreshSessions();
+    if (usesSessionCatalogQuery()) void actions.refreshSessionResults();
+    else void actions.refreshSessions();
+  },
+  async setSessionScope(sessionScope: SessionScope) {
+    if (sessionScope === core.sessionScope) return;
+    emit({
+      sessionScope,
+      sessionResults: [],
+      sessionNextCursor: null,
+      sessionListLoading: false,
+      sessionListError: "",
+    });
+    if (usesSessionCatalogQuery()) await actions.refreshSessionResults();
+  },
+  async setSessionSort(sessionSort: SessionSort) {
+    if (sessionSort === core.sessionSort) return;
+    emit({
+      sessionSort,
+      sessionResults: [],
+      sessionNextCursor: null,
+      sessionListLoading: false,
+      sessionListError: "",
+    });
+    if (usesSessionCatalogQuery()) await actions.refreshSessionResults();
+  },
+  async setSessionStatusFilter(sessionStatusFilter: SessionStatusGroup | "") {
+    if (sessionStatusFilter === core.sessionStatusFilter) return;
+    emit({
+      sessionStatusFilter,
+      sessionResults: [],
+      sessionNextCursor: null,
+      sessionListLoading: false,
+      sessionListError: "",
+    });
+    if (usesSessionCatalogQuery()) await actions.refreshSessionResults();
   },
   async refreshCatalog() {
     try {
       const data = await api.listWorkspaces();
       emit({
         catalog: (data.workspaces || []) as CatalogWorkspace[],
+        hiddenWorkspaces: (data.hidden_workspaces || []) as CatalogWorkspace[],
         error: "",
       });
+    } catch (err) {
+      emit({ error: err instanceof Error ? err.message : String(err) });
+    }
+  },
+  async hideWorkspaces(projectDirs: string[]) {
+    const ids = [...new Set(projectDirs.map((value) => value.trim()).filter(Boolean))];
+    if (!ids.length) return;
+    if (core.workspace && ids.includes(core.workspace.project_dir)) {
+      emit({ error: "当前工作区不能从侧栏移除，请先切换到其他工作区" });
+      return;
+    }
+    try {
+      const result = await api.hideWorkspaces(ids);
+      emit({
+        catalog: result.workspaces || [],
+        hiddenWorkspaces: result.hidden_workspaces || [],
+      });
+      if (core.sessionScope === "all") await actions.refreshSessionResults();
+      const count = result.project_dirs?.length || ids.length;
+      emit({ notice: `已从侧栏移除 ${count} 个工作区，源目录和 Omni 数据均已保留`, error: "" });
+    } catch (err) {
+      emit({ error: err instanceof Error ? err.message : String(err) });
+    }
+  },
+  async unhideWorkspaces(projectDirs: string[]) {
+    const ids = [...new Set(projectDirs.map((value) => value.trim()).filter(Boolean))];
+    if (!ids.length) return;
+    try {
+      const result = await api.unhideWorkspaces(ids);
+      emit({
+        catalog: result.workspaces || [],
+        hiddenWorkspaces: result.hidden_workspaces || [],
+      });
+      if (core.sessionScope === "all") await actions.refreshSessionResults();
+      emit({ notice: `已恢复 ${ids.length} 个工作区`, error: "" });
     } catch (err) {
       emit({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -705,6 +828,86 @@ export const actions = {
       return;
     }
     emit({ sessions: upsertSession(data.sessions || [], data.focus) });
+    if (usesSessionCatalogQuery()) await actions.refreshSessionResults();
+  },
+  async refreshSessionResults({ append = false }: { append?: boolean } = {}) {
+    if (core.sessionScope === "workspace" && !core.workspace) {
+      emit({
+        sessionResults: [],
+        sessionNextCursor: null,
+        sessionListLoading: false,
+        sessionListError: "",
+      });
+      return;
+    }
+    if (!usesSessionCatalogQuery()) {
+      emit({
+        sessionResults: [],
+        sessionNextCursor: null,
+        sessionListLoading: false,
+        sessionListError: "",
+      });
+      return;
+    }
+    const cursor = append ? core.sessionNextCursor || "" : "";
+    if (append && !cursor) return;
+    const query = sessionCatalogRequestKey();
+    const revisionScope = `session-catalog:${query}`;
+    const revision = append
+      ? requestGens.get(revisionScope) || 0
+      : nextGen(revisionScope);
+    emit({ sessionListLoading: true, sessionListError: "" });
+    try {
+      const data = await api.listAllSessions({
+        workspace: sessionCatalogScope(),
+        channel: core.channelFilter,
+        status: core.sessionStatusFilter ? [core.sessionStatusFilter] : [],
+        sort: core.sessionSort,
+        cursor,
+        limit: 50,
+      });
+      if (
+        !isGen(revisionScope, revision) ||
+        query !== sessionCatalogRequestKey() ||
+        (append && core.sessionNextCursor !== cursor)
+      ) {
+        return;
+      }
+      const incoming = data.sessions || [];
+      const sessions = append
+        ? [
+            ...core.sessionResults,
+            ...incoming.filter(
+              (row) =>
+                !core.sessionResults.some(
+                  (current) =>
+                    current.id === row.id && current.project_dir === row.project_dir,
+                ),
+            ),
+          ]
+        : incoming;
+      emit({
+        sessionResults: sessions,
+        sessionNextCursor: data.next_cursor || null,
+        sessionListLoading: false,
+        sessionListError: sessionCatalogError(data.errors),
+      });
+    } catch (err) {
+      if (
+        !isGen(revisionScope, revision) ||
+        query !== sessionCatalogRequestKey() ||
+        (append && core.sessionNextCursor !== cursor)
+      ) {
+        return;
+      }
+      emit({
+        sessionListLoading: false,
+        sessionListError: err instanceof Error ? err.message : String(err),
+      });
+    }
+  },
+  async loadMoreSessionResults() {
+    await actions.refreshSessionResults({ append: true });
   },
   async openSession(sessionId: string, { signalOpen = true }: { signalOpen?: boolean } = {}) {
     if (!core.workspace) return;
@@ -745,6 +948,19 @@ export const actions = {
         emit({ error: err instanceof Error ? err.message : String(err) });
       }
     }
+  },
+  async openSessionResult(session: Session) {
+    const owner = String(session.project_dir || "");
+    if (owner && owner !== core.workspace?.project_dir) {
+      const target = core.catalog.find((item) => item.project_dir === owner);
+      if (!target) {
+        emit({ error: `无法打开 ${session.workspace_label || "该工作区"}：工作区不在当前目录中` });
+        return;
+      }
+      await actions.selectCatalog(target);
+      if (core.workspace?.project_dir !== owner) return;
+    }
+    await actions.openSession(session.id);
   },
   async newSession() {
     if (!core.workspace) return;
@@ -794,30 +1010,47 @@ export const actions = {
     await actions.refreshSessions();
   },
   async deleteSession(sessionId: string) {
+    await actions.deleteSessions([sessionId]);
+  },
+  async deleteSessions(sessionIds: string[]) {
     if (!core.workspace) return;
+    const ids = [...new Set(sessionIds.map((value) => value.trim()).filter(Boolean))];
+    if (!ids.length) return;
+    const ownerWorkspace = workspaceKey();
     try {
-      await api.deleteSession(ws(), sessionId);
-      abortWatch(keyOf(sessionId));
-      delete messagesBySession[keyOf(sessionId)];
-      delete transcriptFingerprints[keyOf(sessionId)];
-      delete drafts[keyOf(sessionId)];
-      delete turns[keyOf(sessionId)];
-      const closingCurrent = core.sessionId === sessionId;
+      const result = await api.deleteSessions(ws(), ids);
+      const deleted = new Set(result.deleted_session_ids || ids);
+      for (const sessionId of deleted) {
+        const key = bucketKey(ownerWorkspace, sessionId);
+        abortWatch(key);
+        delete messagesBySession[key];
+        delete transcriptFingerprints[key];
+        delete drafts[key];
+        delete turns[key];
+      }
+      const closingCurrent = Boolean(core.sessionId && deleted.has(core.sessionId));
       if (closingCurrent) bumpInspectorRequests();
       emit({
         sessionId: closingCurrent ? null : core.sessionId,
+        sessions: core.sessions.filter((row) => !deleted.has(row.id)),
+        sessionResults: core.sessionResults.filter((row) => !deleted.has(row.id)),
         sessionTasks: closingCurrent ? [] : core.sessionTasks,
         sessionTurns: closingCurrent ? [] : core.sessionTurns,
         ...(closingCurrent ? inspectorScopeReset() : {}),
+        notice: `已删除 ${deleted.size} 个会话，保留 ${result.retained_artifact_count || 0} 个产物`,
         error: "",
       });
       await actions.refreshSessions();
-      if (closingCurrent) refreshOpenInspector();
+      if (closingCurrent) {
+        const fallback = core.sessions[0];
+        if (fallback) await actions.openSession(fallback.id);
+        else refreshOpenInspector();
+      }
     } catch (err) {
       const code = err instanceof ApiError ? err.code : "";
       const fallback =
         code === "busy"
-          ? "会话仍有正在运行的任务，请先取消或等它结束"
+          ? "所选会话中仍有正在运行的任务；未删除任何会话"
           : code === "untrusted"
             ? "此工作区只读，无法删除会话"
             : err instanceof Error

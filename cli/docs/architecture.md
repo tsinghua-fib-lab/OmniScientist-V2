@@ -854,8 +854,11 @@ closer (the same carve-out `_qa_figure_pair` already has for answer-plus-figure)
 the produce path on the critical path (`apply_patch` in the current workspace). Omni's produce
 path for a survey is retrieval plus native synthesis onto **this** `task_id`. Sibling-task
 files inform a footnote; they do not settle the contract. ReAct may still sequence richer
-turns (figure + draft, ideation, third-party skills). A first lookup-only batch is orientation
-and is steered; a second lookup-only batch while a manuscript is owed is the empty loop. An
+turns (figure + draft, ideation, third-party skills). A first ledger-lookup batch
+(`get_task` / `memory_search` / `open_artifact`) is orientation and is steered; a
+second while a manuscript is owed is the empty loop. `bash` / `read_file` /
+`git` of this workspace are not lookup. `task.inspect` compiles only when the
+user asked for a prior task's status or location. An
 empty literature funnel is not this-turn research: the host lifts `queries` / `n_kept` onto
 the `run_skill` observation (Codex `function_call_output`) and does not treat `n_kept=0` as
 evidence that the manuscript can be written.
@@ -884,10 +887,15 @@ Graphviz after the engine returns.
 
 ### Host figure fill
 
-When ReAct stops still owing `artifact.figure`, `turn_execution` calls `host_fill_figure`
-(`agent/figure_runner.py`) on *this* task only. A PNG already on the task skips the fill; a
-sibling-task file does not count. If the task owns an unrendered `.dot` (no sibling PNG/SVG), host
-fill passes it as `source_artifact_path` so the engine renders that graph.
+When ReAct stops still owing `artifact.figure` (or an editable PPTX debt),
+`turn_execution` calls `host_fill_figure` (`agent/figure_runner.py`) on *this*
+task only. Host facts only: the bound slot, an explicit `$skill` / selected
+skill, admission, and a `.dot` the caller already decided to pass. Default
+producer for `artifact.figure` is `scientific-figure` (SVG/PNG). `livefigure`
+runs for `$livefigure` or `figure.editable.pptx`. A configured VLM does not
+upgrade an ordinary figure to PPTX. The host does not parse Graphviz / SVG /
+"one slide" words. A leftover `.dot` is not injected on an unspecified
+figure. Named livefigure does not switch to Graphviz.
 
 Resume of a retryable terminal status can do the same via
 `task_recovery._fill_remaining_deliverables` when the leftover debts are only a figure and/or
@@ -1205,15 +1213,25 @@ prints the active *Tool working dir*.
 | `full` | allowed | allowed |
 
 Compute tools share one permission envelope with `write_file` (the turn working
-directory, the project store, and managed output roots). Codex `workspace-write`
-is the same shape — cwd + configured roots + persistent `/tmp`. Omni keeps a
-separate ArtifactStore, so `bash`, `run_compute`, and CLI skill processes also
-receive a durable `$OMNI_OUTPUT_DIR` (`<project>/artifacts/compute/<task_id>`)
-and a workspace-scoped `$TMPDIR`. Files written to `$OMNI_OUTPUT_DIR` are
-registered through `register_existing` and are what verification sees. Host
-`/tmp` stays writable for scratch but is not readable by `read_file` and is not
-an artifact sink. Linux bwrap bind-mounts the persistent exec tmp over `/tmp`
-instead of a fresh `--tmpfs`, so successive calls see the same scratch.
+directory and managed **user-facing** output roots). Codex `workspace-write`
+is cwd + configured roots + a host temp — never `$CODEX_HOME`. Omni does not
+grant `$OMNI_HOME` or the project store (`~/.omni/workspaces/...`) as a
+sandbox write root. `bash`, `run_compute`, CLI skill processes, and in-process
+engines that spawn children receive `$OMNI_OUTPUT_DIR` (a cache-side outbox)
+and a workspace-scoped `$TMPDIR`. Those directories are staging. Session
+context lists their absolute paths next to the working directory (Codex
+`<environment_context>` / `<cwd>`). A compute process can `from omni_io import
+output_path` — the host copies that helper into `$TMPDIR` and prepends it to
+`PYTHONPATH`, the same idea as Codex injecting `apply_patch` into the child
+environment. If a command fails with `FileNotFoundError` / `ENOENT` and the
+path still contains a literal `$VAR` that the process exported, the observation
+adds an `[unexpanded-env]` hint with the resolved path. The host does not
+rewrite the script. The host
+publishes harvestable files into `outputs/<title>_<task8>/` (or the configured
+`--out`) and registers that copy; `~/.omni/.../artifacts/promoted` is not a
+user-visible location. Host `/tmp` is not an artifact sink. Linux bwrap
+bind-mounts the persistent exec tmp over `/tmp` instead of a fresh `--tmpfs`,
+so successive calls see the same scratch.
 
 Mutating/executing calls (`bash`, `write_file`, `edit_file`, `run_compute`) still enter the
 **approval gate**, and destructive shell commands are classified `destructive` so a prompt names
@@ -1306,7 +1324,26 @@ daemon logs, so a tool chain visible in the terminal is also inspectable through
 The installed `omni` command does not start a resident agent by itself. CLI and REPL calls run in
 the foreground; IM channels and cross-window background task execution need either `omni serve`
 (foreground), `omni serve start` (background daemon), or `omni channel login <name> --start`.
-Background daemon stdout/stderr is written to `<OMNI_HOME>/logs/serve-<project>.log`.
+Background daemon diagnostics are written to `<OMNI_HOME>/logs/serve-<project>.log`.
+
+Process diagnostics use one UTF-8, single-line schema across CLI, Web, legacy serve, and Home
+Service: UTC timestamp, severity, component, logger, PID, event, and redacted message. Components
+keep component-scoped compatibility files (`omni-tui.log`, `web-<project>.log`,
+`serve-<project>.log`, and `home-service.log`) instead of one global all-process log. Files owned
+by an in-process handler rotate at 10 MiB and keep 10 files total
+(``observability.log_max_bytes`` / ``observability.log_files``, also
+``OMNI_LOG_MAX_BYTES`` / ``OMNI_LOG_FILES`` — kimi-code's size+count model).
+OS-supervisor crumbs go to ``home-service.supervisor.log`` so they do not share
+a writer with the rotating product log. Log files are mode `0600` on POSIX;
+Windows relies on the user's account ACL. Full prompts, model/tool payloads, credentials, and
+authorization headers do not belong in INFO logs—the durable Task event store remains the source
+for execution inspection.
+
+Foreground `omni web` shows only the startup URL and actionable product errors. Its Uvicorn access
+log is disabled; server/application errors still go to the Web log. Shutdown first closes Web SSE
+watchers, then performs bounded Task/agent/store cleanup, so Ctrl+C is a successful exit rather
+than an ASGI cancellation failure. Closing an external CLI/Home Service task watcher never cancels
+the externally owned task.
 
 The always-on **home service** (`omni serve`) is one OS-supervised process per `OMNI_HOME`. Its
 observed state lives in `<OMNI_HOME>/service/service.pid` and is three layers:
@@ -1378,7 +1415,13 @@ and cli-exec skills can participate in workflows.
 
 `find_skill` is the coordinator's parameter lookup (Codex stage-2 analogue). A hit returns a
 compact `input_schema` and a `run_skill` example, with an exact name ranked above a neighbour
-that merely mentions it. After that card is returned, further `docs_search` / `glob` /
+that merely mentions it. When the plan already owes a file slot (`artifact.figure`,
+`artifact.slides`, `artifact.poster`, editable PPTX), the host also injects that
+admitted skill's contract card into the turn — Codex injects `SKILL.md` on an
+explicit mention; Omni can do it earlier because settlement already named the
+slot. Admission and slot routing choose the producer; leftover `bash` /
+`run_compute` that writes the same kind of file is steered back to `run_skill`.
+After a card is returned, further `docs_search` / `glob` /
 `search_tasks` probes — or another `find_skill` that returns the same skill — count as
 no-progress (BUG-11). Docs-only retrieval with no `find_skill` card is how a product
 question reads bundled docs; it is not a hunt. A second `find_skill` for a disjoint skill

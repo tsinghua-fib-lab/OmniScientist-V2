@@ -141,3 +141,42 @@ async def test_failed_child_still_fails_when_the_manuscript_is_missing() -> None
     assert settled.detail["lost"] == ["live-1"]
     assert settled.detail["undelivered_outputs"] == ["draft.manuscript"]
     assert "superseded_failures" not in settled.detail
+
+
+def _pptx(**fields: object) -> SimpleNamespace:
+    payload = {
+        "kind": "slides",
+        "format": "pptx",
+        "path": "deck.pptx",
+        "mime": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "title": "deck",
+    }
+    payload.update(fields)
+    return SimpleNamespace(**payload)
+
+
+@pytest.mark.asyncio
+async def test_failed_livefigure_does_not_succeed_on_a_harvested_deck() -> None:
+    store = _Store(
+        _task(subtask_ids=["live-1"], outputs=["artifact.pptx"]),
+        events=[
+            _event(
+                "react.finished",
+                kind="text",
+                terminated_reason="done",
+                tool_names=["run_skill", "bash"],
+            )
+        ],
+        children=[
+            _child(
+                "live-1",
+                status="failed",
+                result={"status": "error", "error": "forbidden dunder"},
+            ),
+        ],
+        artifacts=[_pptx()],
+    )
+    settled = await settlement_for(store, "parent")
+    assert settled.status == "failed"
+    assert settled.detail["lost"] == ["live-1"]
+    assert settled.detail["undelivered_outputs"] == ["artifact.pptx"]

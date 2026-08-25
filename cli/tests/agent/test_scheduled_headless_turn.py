@@ -101,11 +101,12 @@ async def test_degraded_run_triggers_one_bounded_continuation_then_delivers_succ
         ])
         monkeypatch.setattr(agent._scheduled_goals, "_run_turn", scripted)
 
+        session_id = await agent.ensure_session(channel="cli")
         result = await agent.run_scheduled_goal(
             goal="fetch an abstract, draw a figure, and write a paper",
             task_id="",  # no pre-created owning task → the scripted turn stands in
             channel="cli",
-            session_id="s",
+            session_id=session_id,
             schedule_id="",  # skip observability binding
         )
         assert result is not None
@@ -192,11 +193,12 @@ async def test_scheduled_notification_preserves_artifacts_across_continuation(mo
         )
         monkeypatch.setattr(agent._scheduled_goals, "_run_turn", scripted)
 
+        session_id = await agent.ensure_session(channel="cli")
         await agent.run_scheduled_goal(
             goal="draw a figure and write a paper",
             task_id="",
             channel="cli",
-            session_id="s",
+            session_id=session_id,
             schedule_id="",
         )
 

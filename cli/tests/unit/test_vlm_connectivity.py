@@ -8,7 +8,12 @@ import httpx
 import pytest
 
 from omni.config.settings import VlmCfg
-from omni.core.vlm import VlmGateway, check_vlm_connectivity, validate_vlm_endpoint
+from omni.core.vlm import (
+    VlmGateway,
+    check_vlm_connectivity,
+    resolve_vlm_request_url,
+    validate_vlm_endpoint,
+)
 
 
 def _config(**overrides: object) -> VlmCfg:
@@ -34,6 +39,32 @@ def test_endpoint_policy_requires_https_except_for_loopback() -> None:
         validate_vlm_endpoint("http://vision.example/v1/chat/completions")
     with pytest.raises(ValueError, match="complete"):
         validate_vlm_endpoint("vision.example/v1/chat/completions")
+    assert validate_vlm_endpoint("https://zgc.apihy.com") is None
+    assert validate_vlm_endpoint("https://zgc.apihy.com/") is None
+    assert validate_vlm_endpoint("https://zgc.apihy.com/v1") is None
+
+
+def test_resolve_vlm_request_url_expands_base_urls_like_claude_code() -> None:
+    assert (
+        resolve_vlm_request_url("https://zgc.apihy.com")
+        == "https://zgc.apihy.com/v1/chat/completions"
+    )
+    assert (
+        resolve_vlm_request_url("https://zgc.apihy.com/")
+        == "https://zgc.apihy.com/v1/chat/completions"
+    )
+    assert (
+        resolve_vlm_request_url("https://zgc.apihy.com/v1")
+        == "https://zgc.apihy.com/v1/chat/completions"
+    )
+    assert (
+        resolve_vlm_request_url("https://vision.example/v1/chat/completions")
+        == "https://vision.example/v1/chat/completions"
+    )
+    assert (
+        resolve_vlm_request_url("https://vision.example/v1/chat/completions/")
+        == "https://vision.example/v1/chat/completions"
+    )
 
 
 @pytest.mark.asyncio
@@ -48,8 +79,25 @@ async def test_vlm_gateway_exposes_generation_without_raw_owner_config() -> None
 
     assert not hasattr(service, "config")
     assert await service.generate_text("make a figure") == "code"
+    assert str(requests[0].url) == "https://vision.example/v1/chat/completions"
     assert requests[0].headers["authorization"] == "Bearer vlm-secret-value"
     assert "vlm-secret-value" not in repr(service)
+
+
+@pytest.mark.asyncio
+async def test_vlm_gateway_expands_a_site_origin_to_chat_completions() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    service = VlmGateway(
+        _config(endpoint="https://zgc.apihy.com"),
+        transport=httpx.MockTransport(handler),
+    )
+    assert await service.generate_text("ping") == "ok"
+    assert str(requests[0].url) == "https://zgc.apihy.com/v1/chat/completions"
 
 
 @pytest.mark.asyncio
@@ -119,3 +167,35 @@ async def test_connectivity_probe_rejects_incomplete_or_unsupported_configuratio
     ok, detail = await check_vlm_connectivity(_config(protocol="unknown"))
     assert ok is False
     assert "protocol" in detail.lower()
+
+
+@pytest.mark.asyncio
+async def test_connectivity_probe_posts_origin_to_chat_completions() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    ok, detail = await check_vlm_connectivity(
+        _config(endpoint="https://zgc.apihy.com"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert ok is True
+    assert "verified" in detail.lower()
+    assert str(requests[0].url) == "https://zgc.apihy.com/v1/chat/completions"
+
+
+@pytest.mark.asyncio
+async def test_connectivity_probe_explains_non_json_html_body() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>not json</html>")
+
+    ok, detail = await check_vlm_connectivity(
+        _config(), transport=httpx.MockTransport(handler)
+    )
+
+    assert ok is False
+    assert "invalid JSON" in detail
+    assert "<html>" not in detail

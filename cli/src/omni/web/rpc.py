@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Any
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from omni.runtime.session_aggregate import list_sessions_all_workspaces
 from omni.web import host as hostmod
 from omni.web import projectors, turns
 from omni.web.channels import CHANNEL_METHODS, handle_channel
@@ -25,6 +27,7 @@ from omni.web.personas import (
 from omni.web.protocol import RpcError, biz_error, ok, params_of, read_json
 from omni.web.skills import SKILL_METHODS, handle_skill, writes_skills
 from omni.web.workspace import WorkspaceHub
+from omni.web.workspace_visibility import canonical_project_dir, hidden_project_dirs
 
 OPEN_METHODS = frozenset(
     {
@@ -32,11 +35,42 @@ OPEN_METHODS = frozenset(
         "workspace.list",
         "workspace.open",
         "workspace.select",
+        "workspace.hideMany",
+        "workspace.unhideMany",
+        "session.listAll",
         *CHANNEL_METHODS,
         *CONFIG_METHODS,
         *SKILL_METHODS,
     }
 )
+
+
+def _aggregate_session_dict(row: Any) -> dict[str, Any]:
+    """Adapt the read model to the Session shape already consumed by the SPA."""
+    data = asdict(row)
+    if "session_id" in data:
+        data["id"] = data.pop("session_id")
+    if "session_status" in data:
+        data["status"] = data.pop("session_status")
+    data["status"] = data.get("status") or "active"
+    data["display_title"] = data.get("display_title") or data.get("title") or "New session"
+    return data
+
+
+def _skipped_store_dict(item: Any) -> dict[str, Any]:
+    data = asdict(item)
+    if "reason" in data:
+        data["message"] = data.pop("reason")
+    return data
+
+
+def _hidden_workspaces(hub: WorkspaceHub) -> list[dict[str, Any]]:
+    hidden = hidden_project_dirs()
+    return [
+        item
+        for item in hub.catalog(include_hidden=True)
+        if canonical_project_dir(str(item.get("project_dir") or "")) in hidden
+    ]
 
 
 async def dispatch(request: Request, method: str = "") -> Response:
@@ -78,7 +112,13 @@ async def _open_method(
         return ok(**hostmod.list_directory(str(path) if path else None, show_hidden=show_hidden))
     if method == "workspace.list":
         selected = hub.selected()
-        return ok(workspaces=hub.catalog(), selected=selected.to_dict() if selected else None)
+        hidden_workspaces = _hidden_workspaces(hub)
+        return ok(
+            workspaces=hub.catalog(),
+            hidden_workspaces=hidden_workspaces,
+            selected=selected.to_dict() if selected else None,
+            hidden_count=len(hidden_workspaces),
+        )
     if method == "workspace.open":
         path = params.get("path")
         if not path:
@@ -92,6 +132,45 @@ async def _open_method(
             name=str(params["name"]) if params.get("name") else None,
         )
         return ok(workspace=rec.to_dict())
+    if method in {"workspace.hideMany", "workspace.unhideMany"}:
+        raw = params.get("project_dirs")
+        if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+            raise RpcError("invalid_params", f"{method} requires project_dirs")
+        changed = (
+            hub.hide_workspaces(raw)
+            if method == "workspace.hideMany"
+            else hub.unhide_workspaces(raw)
+        )
+        hidden_workspaces = _hidden_workspaces(hub)
+        return ok(
+            project_dirs=changed,
+            workspaces=hub.catalog(),
+            hidden_workspaces=hidden_workspaces,
+            hidden_count=len(hidden_workspaces),
+        )
+    if method == "session.listAll":
+        raw_status = params.get("status") or []
+        if isinstance(raw_status, str):
+            statuses = [raw_status]
+        elif isinstance(raw_status, list) and all(isinstance(item, str) for item in raw_status):
+            statuses = raw_status
+        else:
+            raise RpcError("invalid_params", "session.listAll status must be a list of strings")
+        page = await list_sessions_all_workspaces(
+            workspace=str(params.get("workspace") or "") or None,
+            channel=str(params.get("channel") or "") or None,
+            status=statuses,
+            sort=str(params.get("sort") or "activity"),
+            cursor=str(params.get("cursor") or "") or None,
+            limit=int(params.get("limit") or 50),
+            live_sessions=hub.live_session_identities(),
+            exclude_workspaces=hidden_project_dirs(),
+        )
+        return ok(
+            sessions=[_aggregate_session_dict(row) for row in page.rows],
+            next_cursor=page.next_cursor,
+            errors=[_skipped_store_dict(item) for item in page.skipped],
+        )
     if method in CHANNEL_METHODS or method in CONFIG_METHODS or method in SKILL_METHODS:
         refuse_if_home_drifted(request.app, method)
     if method in CHANNEL_METHODS:
@@ -199,6 +278,11 @@ async def _store_method(  # noqa: C901 — thin method switch
         return ok(
             **await projectors.delete_session(agent, session_id, hub=hub, rec=rec)
         )
+    if method == "session.deleteMany":
+        raw = params.get("session_ids")
+        if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+            raise RpcError("invalid_params", "session.deleteMany requires session_ids")
+        return ok(**await projectors.delete_sessions(agent, raw, hub=hub, rec=rec))
     if method == "task.list":
         return ok(
             tasks=await projectors.list_tasks(

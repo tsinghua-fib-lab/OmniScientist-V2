@@ -18,8 +18,8 @@ describe("displayFileName", () => {
     ).toBe("deck.pptx");
   });
 
-  it("falls back to the uri when no path is present", () => {
-    expect(displayFileName("", "artifact://9a18b")).toBe("artifact://9a18b");
+  it("does not surface an internal artifact:// handle as a filename", () => {
+    expect(displayFileName("", "artifact://9a18b")).toBe("");
   });
 });
 

@@ -48,6 +48,84 @@ def test_a_sync_skill_turn_gets_a_deliverables_table_and_completion_line() -> No
     assert "12.3s" in out
 
 
+def test_empty_canonical_still_harvests_this_turn_write_file() -> None:
+    turn = SimpleNamespace(
+        artifacts=[],
+        drained_results=[],
+        tool_trace=[
+            SimpleNamespace(
+                name="write_file",
+                status="succeeded",
+                result={
+                    "status": "ok",
+                    "artifacts": [
+                        {"title": "RAG survey", "path": "/tmp/rag_survey.md"},
+                    ],
+                },
+            )
+        ],
+        task_id="newwrite1",
+    )
+    out = _capture(turn, elapsed_s=12.0, verbosity="normal")
+    assert "Outputs" in out
+    assert "/tmp/rag_survey.md" in out
+
+
+def test_harvest_skips_internal_artifact_uris() -> None:
+    turn = SimpleNamespace(
+        artifacts=[],
+        drained_results=[],
+        tool_trace=[
+            SimpleNamespace(
+                name="write_file",
+                status="succeeded",
+                result={
+                    "status": "ok",
+                    "artifacts": [
+                        {
+                            "title": "latent-steering-related-work",
+                            "uri": "artifact://35c6de7a6a7c4f8d93dd2dbeeffbc1e5",
+                        }
+                    ],
+                },
+            )
+        ],
+        task_id="newwrite2",
+    )
+    out = _capture(turn, elapsed_s=12.0, verbosity="normal")
+    assert "artifact://" not in out
+    assert "35c6de7a6a7c4f8d93dd2dbeeffbc1e5" not in out
+
+
+def test_empty_canonical_artifacts_do_not_harvest_sibling_paths() -> None:
+    turn = SimpleNamespace(
+        artifacts=[],
+        drained_results=[],
+        tool_trace=[
+            SimpleNamespace(
+                name="search_corpus",
+                status="succeeded",
+                result={
+                    "status": "ok",
+                    "artifacts": [
+                        {
+                            "title": "old RAG paper",
+                            "path": "/Users/antonio/work/outputs/RAG-系统综述_2f141af4/RAG_survey_paper.md",
+                        }
+                    ],
+                },
+            )
+        ],
+        settlement_status="degraded",
+        task_id="72590550",
+    )
+    out = _capture(turn, elapsed_s=12.0, verbosity="normal")
+    assert "Outputs" not in out
+    assert "RAG_survey_paper.md" not in out
+    assert "3 artifact" not in out
+    assert "degraded" in out
+
+
 def test_canonical_turn_outputs_use_real_paths_and_hide_support_records() -> None:
     turn = SimpleNamespace(
         artifacts=[

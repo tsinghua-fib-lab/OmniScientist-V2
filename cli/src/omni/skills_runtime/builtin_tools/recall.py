@@ -28,7 +28,7 @@ from omni.memory.service import (
     open_global_store,
 )
 from omni.skills_runtime.context import ExecContext, Tool
-from omni.storage.artifacts import ArtifactStore
+from omni.storage.artifacts import ArtifactStore, recorded_artifact_path
 from omni.storage.db import get_database
 from omni.storage.models import ArtifactORM, SubtaskORM, TaskORM
 
@@ -310,7 +310,19 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
     )
     store = ctx.artifacts or ArtifactStore(ctx.paths, ctx.db)
 
+    def _refuse_unresolved(*, write: bool) -> dict[str, str] | None:
+        principal = str(getattr(ctx, "principal", "") or "").strip()
+        if principal and principal != "unresolved":
+            return None
+        action = "written" if write else "searched"
+        return {
+            "error": f"session identity could not be resolved; memory was not {action}"
+        }
+
     async def memory_search(args: dict) -> Any:
+        refused = _refuse_unresolved(write=False)
+        if refused is not None:
+            return refused
         query = str(args.get("query", "")).strip()
         limit = max(1, min(20, int(args.get("limit", 6) or 6)))
         # Bounded candidate set (recall_scoped) rather than a full-table scan:
@@ -334,6 +346,9 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
         }
 
     async def memory_get(args: dict) -> Any:
+        refused = _refuse_unresolved(write=False)
+        if refused is not None:
+            return refused
         mid = str(args.get("id", "")).strip()
         if not mid:
             return {"error": "id required"}
@@ -404,6 +419,9 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
         }
 
     async def remember(args: dict) -> Any:
+        refused = _refuse_unresolved(write=True)
+        if refused is not None:
+            return refused
         text = redact_secrets(str(args.get("text", "")).strip())
         if len(text) < 4:
             return {"error": "text required"}
@@ -557,17 +575,33 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
             row = by_id.get(artifact_id)
             if row is None:
                 continue
-            path = await task_store.resolve_path(row.uri or f"artifact://{row.id}")
+            resolved = await task_store.resolve_path(row.uri or f"artifact://{row.id}")
             artifacts.append(
                 {
                     "title": row.title or row.kind or "artifact",
                     "kind": row.kind or "file",
                     "uri": row.uri or f"artifact://{row.id}",
-                    "path": str(path) if path is not None else "",
+                    "path": (
+                        str(resolved)
+                        if resolved is not None
+                        else recorded_artifact_path(
+                            row, project_dir=task_store._paths.project_dir
+                        )
+                    ),
                 }
             )
         payload["artifacts"] = artifacts
         return payload
+
+    def _refuse_in_flight(run: TaskORM) -> dict[str, Any] | None:
+        current = str(getattr(ctx, "task_id", "") or "")
+        if current and run.id == current:
+            return {
+                "error": "cannot inspect the in-flight task",
+                "hint": "get_task is for a prior task_id; this turn is still running",
+                "task_id": run.id,
+            }
+        return None
 
     async def get_task(args: dict) -> Any:
         raw = str(args.get("task_id") or args.get("id") or args.get("ref") or "").strip()
@@ -577,6 +611,9 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
         async with ctx.db.session() as session:
             exact = await session.get(TaskORM, task_id)
             if exact is not None and exact.project == ctx.project:
+                refused = _refuse_in_flight(exact)
+                if refused is not None:
+                    return refused
                 return await _detail(exact, ctx.db, store, workspace=ctx.project)
             matches = list(
                 (
@@ -591,6 +628,9 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
                 ).scalars().all()
             )
         if len(matches) == 1:
+            refused = _refuse_in_flight(matches[0])
+            if refused is not None:
+                return refused
             return await _detail(matches[0], ctx.db, store, workspace=ctx.project)
         if len(matches) > 1:
             return {"error": "task id prefix is ambiguous", "task_id": task_id}
@@ -601,6 +641,9 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
         foreign = await _resolve_foreign_task(ctx, task_id)
         if foreign is not None:
             run, owner = foreign
+            refused = _refuse_in_flight(run)
+            if refused is not None:
+                return refused
             foreign_db = get_database(owner.paths.project_db)
             await foreign_db.init()
             foreign_store = ArtifactStore(owner.paths, foreign_db)
@@ -684,10 +727,11 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
             p = resolve_existing_path(raw) or Path(raw).expanduser()
             if not p.is_file():
                 return {"error": f"artifact not found: {ref}"}
-            if not fs.within_roots(p, fs.read_roots(ctx)):
-                return {"error": f"path is outside the accessible roots: {ref}"}
-            if fs.is_sensitive_target(p):
+            reason = fs.read_block_reason(p, ctx)
+            if reason == "sensitive" or fs.is_sensitive_target(p):
                 return {"error": f"sensitive file blocked by security policy: {p.name}"}
+            if reason:
+                return {"error": f"path is outside the accessible roots: {ref}"}
             path = p
         size = path.stat().st_size
         data = path.read_bytes()[: _MAX_OPEN_BYTES + 1]

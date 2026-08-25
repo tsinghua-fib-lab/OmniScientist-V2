@@ -540,3 +540,86 @@ async def test_drained_review_file_pays_the_named_debt() -> None:
     )
     assert honesty == []
     assert "still owes" not in (loop.content or "")
+
+
+@pytest.mark.asyncio
+async def test_failed_livefigure_is_not_paid_by_a_harvested_deck() -> None:
+    recorder = _Recorder()
+    plan = IntentPlan(
+        task_id="task-live",
+        user_message="$livefigure Make one editable PPTX slide.",
+        intent_type=IntentType.REACT_FALLBACK,
+        verification_plan=VerificationPlan(required_outputs=["artifact.pptx"]),
+    )
+    loop = AgentLoopResult(
+        kind="text",
+        content="Wrote a deck instead.",
+        tool_trace=[
+            ToolInvocationRecord(
+                name="run_skill",
+                arguments={"skill_name": "livefigure"},
+                result={
+                    "status": "error",
+                    "skill_name": "livefigure",
+                    "error": "Generated code contains a forbidden dunder attribute",
+                },
+            )
+        ],
+    )
+    drained = [
+        {
+            "skill": "livefigure",
+            "status": "failed",
+            "result": {
+                "artifacts": [
+                    {
+                        "title": "deck.pptx",
+                        "path": "/tmp/deck.pptx",
+                        "format": "pptx",
+                    }
+                ]
+            },
+        }
+    ]
+    honesty = await _completion(recorder)._honest_unpaid_files(
+        plan,
+        loop,
+        drained,
+        submitted=[],
+        task_id=plan.task_id,
+    )
+    assert any("artifact.pptx" in note for note in honesty)
+
+
+@pytest.mark.asyncio
+async def test_failed_paper_review_is_not_paid_by_write_file_markdown() -> None:
+    recorder = _Recorder()
+    plan = IntentPlan(
+        task_id="task-rev",
+        user_message="Review arXiv 1706.03762 as a NeurIPS reviewer.",
+        intent_type=IntentType.REACT_FALLBACK,
+        verification_plan=VerificationPlan(required_outputs=["review"]),
+    )
+    loop = AgentLoopResult(
+        kind="text",
+        content="Here is a Markdown review.",
+        tool_trace=[
+            ToolInvocationRecord(
+                name="run_skill",
+                arguments={"skill_name": "paper-review"},
+                result={
+                    "status": "error",
+                    "skill_name": "paper-review",
+                    "error": "Paper input does not exist: arXiv 1706.03762",
+                },
+            )
+        ],
+    )
+    honesty = await _completion(recorder)._honest_unpaid_files(
+        plan,
+        loop,
+        [],
+        submitted=[],
+        task_id=plan.task_id,
+    )
+    assert any("review" in note for note in honesty)

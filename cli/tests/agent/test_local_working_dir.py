@@ -217,6 +217,8 @@ def test_local_environment_block_present_with_local_tools_and_workdir():
     assert "required_outputs" in prompt
     assert "another task" in prompt.lower()
     assert "$OMNI_OUTPUT_DIR" in prompt
+    assert "os.environ" in prompt
+    assert "omni_io" in prompt
     assert "do not rewrite quotation marks" in prompt.lower()
 
 
@@ -256,6 +258,21 @@ def test_render_local_environment_empty_without_local_tools():
 def test_working_dir_absent_when_not_provided():
     prompt = build_system_prompt(role="R", tools=_local_tools(), project_name="proj")
     assert "Working directory:" not in prompt
+    assert "OMNI_OUTPUT_DIR):" not in prompt
+
+
+def test_session_context_lists_absolute_outbox_and_scratch():
+    prompt = build_system_prompt(
+        role="R",
+        tools=_local_tools(),
+        project_name="proj",
+        working_dir="/tmp/work",
+        output_dir="/tmp/outbox",
+        scratch_dir="/tmp/exec",
+    )
+    assert "Deliverable staging (OMNI_OUTPUT_DIR): /tmp/outbox" in prompt
+    assert "Scratch (TMPDIR): /tmp/exec" in prompt
+    assert "single-quoted heredoc" in prompt
 
 
 # ── planner + react policy: local ops reach the tool-capable turn ─────────────
@@ -272,6 +289,14 @@ def test_planner_prompt_routes_local_ops_to_react_fallback():
     assert "deleting files" in prompt or "shell command" in prompt
     assert "ledger deliverable" in prompt
     assert "write_file" in prompt
+    assert "git log" in prompt
+    assert "literature.search" in prompt
+
+
+def test_local_environment_changelog_is_git_first():
+    local = render_local_environment(_local_tools(), "/tmp/work")
+    assert "git log" in local
+    assert "repository-wide grep" in local
 
 
 def test_react_tool_policy_unblocks_sensitive_tools_when_approver_present():

@@ -3,9 +3,9 @@
 Exposes a MinIO-compatible-ish surface (``put_bytes`` / ``put_file`` /
 ``resolve_path`` / ``url_for``) so ported skill engines that return
 ``*_uri`` fields keep working. URIs use the ``artifact://<id>`` scheme; the
-bytes live under ``<project>/artifacts/<kind>/<slug>-<task8>-<art8>.<ext>``
-(or one trusted ``<collection>/<task-title>_<task8>/`` bundle per task). Legacy
-bare ``<id>.<ext>`` / ``<slug>-<art8>.<ext>`` names remain resolvable via the DB.
+bytes live under ``<outputs>/<task-title>_<task8>/<slug>-<task8>-<art8>.<ext>``
+when a user-facing root is set, else ``<project>/artifacts/<kind>/``. Legacy
+``reports/`` / ``figures/`` bundles remain resolvable via persisted scope metadata.
 """
 
 from __future__ import annotations
@@ -27,7 +27,29 @@ from omni.core.identifiers import short_id
 from omni.storage.db import Database
 from omni.storage.models import ArtifactORM, TaskORM, _uuid
 
+# Durable object id, never a user-facing path. Skills, host fill, IM upload, and
+# ``resolve_path`` keep this handle because the bytes can move (trusted
+# ``outputs/<title>_<task8>/``, leftover ``reports/`` / ``figures/``, or the
+# hidden store) while the SQLite row stays stable. Users find the file by the
+# filesystem path; CLI/web must not print this URI.
 _ARTIFACT_SCHEME = "artifact://"
+
+
+def recorded_artifact_path(row: ArtifactORM, *, project_dir: Path) -> str:
+    """Filesystem location stored for this row, even if the file is gone.
+
+    ``rel_path`` is project-relative when the copy lives in the durable store,
+    otherwise the absolute launch-directory path. ``artifact://`` is never a
+    location — callers that already resolved a live file should prefer that.
+    """
+    rel = str(getattr(row, "rel_path", "") or "").strip()
+    if not rel or rel.startswith(_ARTIFACT_SCHEME):
+        return ""
+    candidate = Path(rel)
+    if candidate.is_absolute():
+        return str(candidate)
+    return str(Path(project_dir) / rel)
+
 
 # On-disk filenames are ``<slug>-<task8>-<art8>.<ext>`` (or ``<slug>-<art8>.<ext>``
 # when no owning task is known): the slug makes the file human-readable in
@@ -84,9 +106,13 @@ def artifact_filename(
     return f"{stem}.{suffix}" if suffix else stem
 
 
-# Launch-directory deliverables are grouped into human-friendly subfolders by
-# kind (``figures/`` / ``reports/`` …), mirroring how Codex — or a person — lays
-# out a task's outputs. Unknown kinds fall back to the kind name itself.
+# One user-facing folder. Task bundles live directly under it
+# (``outputs/<title>_<task8>/``). Per-kind siblings (``reports/``, ``figures/``)
+# were the previous layout and remain resolvable via persisted scope metadata.
+USER_OUTPUT_DIRNAME = "outputs"
+
+# Legacy per-kind launch-directory names. Kept so @-mentions and gitignore still
+# see leftover folders from earlier layouts.
 _DELIVERABLE_SUBDIRS = {
     "figure": "figures",
     "report": "reports",
@@ -141,7 +167,11 @@ def deliverable_subdirs() -> tuple[str, ...]:
     """
     return tuple(
         dict.fromkeys(
-            [*_DELIVERABLE_SUBDIRS.values(), *_TASK_COLLECTIONS.values(), "outputs"]
+            [
+                USER_OUTPUT_DIRNAME,
+                *_DELIVERABLE_SUBDIRS.values(),
+                *_TASK_COLLECTIONS.values(),
+            ]
         )
     )
 
@@ -238,8 +268,8 @@ class ArtifactStore:
     def mirror_dir(self) -> Path | None:
         """The trusted launch/output directory deliverables are written into.
 
-        ``None`` for an untrusted run (durable store only). Revision guards
-        consult this to treat a ``.dot`` Omni wrote into ``<output>/figures/``
+        ``None`` when the caller opted out of a user-facing root. Revision
+        guards consult this to treat a ``.dot`` Omni wrote into ``outputs/``
         as a managed, re-renderable source — the same trust as the store.
         """
         return self._mirror_dir
@@ -265,14 +295,13 @@ class ArtifactStore:
         """The launch/output subdirectory for a user-facing deliverable, or ``None``.
 
         When the launch directory is trusted (``mirror_dir`` set) the canonical
-        bytes are written *directly* into ``<output_dir>/<kind>s/`` — a single
-        file, in a clean per-kind subfolder next to the user's work (Codex /
-        Claude-Code parity), not a durable-store copy plus a mirror. A *bundle*
-        kind (``figure``) co-locates its whole set there — the rendered image,
-        its ``.dot`` source, and ``*.provenance.json`` — forming a portable,
-        self-contained bundle; other kinds only surface user-facing deliverable
-        formats, so their loose intermediate sidecars stay in the durable store.
-        Untrusted runs always keep the durable store location.
+        bytes are written *directly* into that folder — by default ``outputs/``
+        next to the user's work — not a durable-store copy plus a mirror. A
+        *bundle* kind (``figure``) co-locates its whole set there; other kinds
+        only surface user-facing formats, so loose sidecars stay in the store.
+        Untrusted runs that still have a store-local ``outputs/`` root use it
+        the same way. ``artifact://<id>`` is the internal handle (SQLite id);
+        users find the file by this directory path.
         """
         if self._mirror_dir is None:
             return None
@@ -280,8 +309,7 @@ class ArtifactStore:
         is_bundle_kind = kind.lower() in _BUNDLE_KINDS
         if not is_bundle_kind and self._mirror_formats and normalized not in self._mirror_formats:
             return None
-        subdir = _DELIVERABLE_SUBDIRS.get(kind.lower(), kind.lower() or "files")
-        return self._mirror_dir / subdir
+        return self._mirror_dir
 
     def _dest_for(
         self, *, kind: str, title: str, art_id: str, ext: str, task_id: str = ""
@@ -370,13 +398,13 @@ class ArtifactStore:
                     return persisted
             if not create or self._mirror_dir is None:
                 return None
-            collection = _TASK_COLLECTIONS.get(kind.lower(), "outputs")
+            collection = USER_OUTPUT_DIRNAME
             title = task.title or task.user_input or "task-output"
         output_root = self._mirror_dir.expanduser().resolve()
         bundle_name = f"{slugify_filename(title) or 'task-output'}_{short_id(task_id)}"
         scope = _TaskOutputScope(
             output_root=output_root,
-            bundle_dir=(output_root / collection / bundle_name).resolve(),
+            bundle_dir=(output_root / bundle_name).resolve(),
             collection=collection,
             bundle_name=bundle_name,
         )
@@ -637,6 +665,39 @@ class ArtifactStore:
         except ValueError:
             return str(dest.resolve())
 
+    def _absolute_resolve_roots(self, row: ArtifactORM) -> list[Path]:
+        """Workspace-local roots an absolute ``rel_path`` may still resolve in.
+
+        Cross-workspace ``get_task`` builds a store without ``mirror_dir``. The
+        checkout that keyed this workspace (``workspace_root``) must still be
+        allowed, or leftover ``reports/`` / ``outputs/`` copies resolve to
+        nothing and the CLI falls through to an internal ``artifact://`` id.
+        """
+        roots: list[Path] = []
+        scope = self._scope_from_meta(row.meta)
+        if scope is not None:
+            roots.append(scope.output_root)
+        if self._mirror_dir is not None:
+            roots.append(self._mirror_dir)
+            if self._mirror_dir.name in {USER_OUTPUT_DIRNAME, "out"}:
+                roots.append(self._mirror_dir.parent)
+        if self._paths.workspace_root is not None:
+            roots.append(self._paths.workspace_root)
+        roots.append(self._paths.project_dir)
+        roots.append(self._paths.artifacts_dir)
+        out: list[Path] = []
+        seen: set[Path] = set()
+        for raw in roots:
+            try:
+                resolved = Path(raw).expanduser().resolve()
+            except (OSError, RuntimeError):
+                continue
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            out.append(resolved)
+        return out
+
     async def _find_by_path(self, rel_path_value: str, task_id: str) -> str | None:
         """Id of this task's artifact already recorded at that path, if any."""
         if not task_id:
@@ -715,23 +776,19 @@ class ArtifactStore:
             return None
         rel = row.rel_path or ""
         if Path(rel).is_absolute():
-            # An absolute ``rel_path`` only exists for a deliverable written into
-            # the trusted launch/output directory (single copy). It is resolvable
-            # ONLY when it still sits inside that configured output dir: a
-            # crafted/foreign absolute path — or one recorded by a session whose
-            # output dir has since changed — is refused, preserving the
-            # path-traversal guard. Surface only if the file still exists (the
-            # user may have moved or removed their own copy).
+            # An absolute ``rel_path`` is the single launch-directory copy.
+            # Allow the current ``outputs/`` root, a persisted task scope, the
+            # leftover per-kind siblings next to ``outputs/``, the checkout that
+            # keyed this workspace, and the project store. Foreign paths stay
+            # refused.
             candidate = Path(rel).resolve()
-            scope = self._scope_from_meta(row.meta)
-            trusted_root = scope.output_root if scope is not None else self._mirror_dir
-            if trusted_root is None:
-                return None
-            try:
-                candidate.relative_to(trusted_root.resolve())
-            except ValueError:
-                return None
-            return candidate if candidate.is_file() else None
+            for root in self._absolute_resolve_roots(row):
+                try:
+                    candidate.relative_to(root)
+                except ValueError:
+                    continue
+                return candidate if candidate.is_file() else None
+            return None
         project_root = self._paths.project_dir.resolve()
         full = (project_root / rel).resolve()
         try:

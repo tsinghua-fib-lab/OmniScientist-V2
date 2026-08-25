@@ -84,6 +84,7 @@ def project_skill_observation(
         "blocked",
         "rejected",
         "error",
+        "needs_input",
     }:
         payload["status"] = "degraded"
     elif not current:
@@ -97,6 +98,21 @@ def project_skill_observation(
     elif isinstance(result, dict) and result.get("warning"):
         payload.setdefault("warning", result["warning"])
     payload["result"] = result
+    if isinstance(result, dict):
+        inner_status = str(result.get("status") or "").strip().lower()
+        inner_outcome = result.get("outcome")
+        if isinstance(inner_outcome, dict):
+            inner_outcome = str(
+                inner_outcome.get("code") or inner_outcome.get("status") or ""
+            ).strip().lower()
+        else:
+            inner_outcome = str(inner_outcome or "").strip().lower()
+        if inner_status == "needs_input" or inner_outcome == "needs_input":
+            payload["status"] = "needs_input"
+            payload["outcome"] = "needs_input"
+            for key in ("error", "summary", "message", "error_info", "next_actions"):
+                if result.get(key) and not payload.get(key):
+                    payload[key] = result[key]
     from omni.runtime.engine_observation import attach_engine_observation
 
     return attach_engine_observation(payload, result, extra=extra)

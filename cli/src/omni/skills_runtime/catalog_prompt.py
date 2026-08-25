@@ -20,8 +20,9 @@ _APPROX_CHARS_PER_TOKEN = 4
 
 _HEADER = (
     "Available skills (name + description). If the user names a skill or the "
-    "task matches a description, call run_skill with that exact name. "
-    "find_skill only if you need that skill's input_schema."
+    "task matches a description, find_skill that exact name, follow the "
+    "returned routing instructions, then run_skill. Do not pick a neighbour "
+    "skill from memory or a file suffix."
 )
 _FOOTER = (
     "Built-in research tools (cite_source, record_claim, add_evidence, "

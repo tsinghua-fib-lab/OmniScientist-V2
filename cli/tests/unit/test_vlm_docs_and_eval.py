@@ -12,11 +12,7 @@ def test_eval_corpus_contains_livefigure_missing_configuration_journey():
     turn = scenario.turns[0]
 
     assert turn.drain is True
-    assert turn.expect["skill_selected"] == "livefigure"
     assert {"livefigure", "scientific-figure"} <= set(
         turn.expect["skills_executed_exclude"]
     )
-    assert turn.expect["action_required"] == {
-        "kind": "configure",
-        "command": "omni config vlm",
-    }
+    assert "artifact.pptx" in turn.expect["text_contains"]

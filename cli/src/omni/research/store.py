@@ -332,7 +332,33 @@ class ResearchStore:
             return row
 
     async def get_hypothesis(self, hyp_id: str) -> HypothesisORM | None:
-        return await self._get_by_id_or_prefix(HypothesisORM, hyp_id)
+        row, ambiguous = await self.resolve_hypothesis(hyp_id)
+        return None if ambiguous else row
+
+    async def resolve_hypothesis(
+        self, hyp_id: str
+    ) -> tuple[HypothesisORM | None, list[str]]:
+        """Return ``(row, [])`` or ``(None, colliding_ids)`` on a prefix clash."""
+        ident = (hyp_id or "").strip()
+        if not ident:
+            return None, []
+        async with self._db.session() as s:
+            exact = (
+                await s.execute(select(HypothesisORM).where(HypothesisORM.id == ident))
+            ).scalar_one_or_none()
+            if exact is not None:
+                return exact, []
+            rows = (
+                await s.execute(
+                    select(HypothesisORM).order_by(HypothesisORM.created_at.desc()).limit(500)
+                )
+            ).scalars().all()
+        hits = [row for row in rows if row.id.startswith(ident)]
+        if len(hits) == 1:
+            return hits[0], []
+        if len(hits) > 1:
+            return None, [row.id for row in hits]
+        return None, []
 
     async def list_hypotheses(
         self, *, limit: int = 50, status: str = "", session_id: str = ""
@@ -511,11 +537,15 @@ class ResearchStore:
     async def get_run(self, run_id: str) -> RunORM | None:
         return await self._get_by_id_or_prefix(RunORM, run_id)
 
-    async def list_runs(self, *, limit: int = 50, session_id: str = "") -> list[RunORM]:
+    async def list_runs(
+        self, *, limit: int = 50, session_id: str = "", hypothesis_id: str = ""
+    ) -> list[RunORM]:
         async with self._db.session() as s:
             q = select(RunORM).order_by(RunORM.created_at.desc())
             if session_id:
                 q = q.where(RunORM.session_id == session_id)
+            if hypothesis_id:
+                q = q.where(RunORM.hypothesis_id == hypothesis_id)
             rows = (await s.execute(q.limit(limit))).scalars().all()
         return list(rows)
 
@@ -571,12 +601,15 @@ class ResearchStore:
             ).scalar_one_or_none()
             if exact is not None:
                 return exact
-            rows = (
-                await s.execute(select(model).order_by(model.created_at.desc()).limit(500))
-            ).scalars().all()
-        for row in rows:
-            if row.id.startswith(ident):
-                return row
+            rows = list(
+                (
+                    await s.execute(
+                        select(model).where(model.id.startswith(ident)).limit(2)
+                    )
+                ).scalars().all()
+            )
+        if len(rows) == 1:
+            return rows[0]
         return None
 
 

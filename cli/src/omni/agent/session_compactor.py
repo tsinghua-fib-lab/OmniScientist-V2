@@ -98,6 +98,20 @@ class SessionCompactor:
             {"role": r.role, "content": r.content, "meta": dict(r.meta or {})}
             for r in older
         ]
+        covered = [r.id for r in older]
+        prior = await self._store.latest_compaction_bridge(session_id)
+        if prior is not None:
+            # Fold the live bridge into the next summary so rolling compact
+            # does not drop the first window after a second fold.
+            older_msgs = [
+                {
+                    "role": "user",
+                    "content": prior.content,
+                    "meta": dict(prior.meta or {}),
+                },
+                *older_msgs,
+            ]
+            covered.append(prior.id)
 
         async def meter_facts(system: str, user: str, output: str) -> None:
             await record_text_cost_event(
@@ -114,12 +128,13 @@ class SessionCompactor:
         # 1) flush durable facts BEFORE hiding the turns (never lose information).
         try:
             principal = await self._store.principal_for_session(session_id)
-            await self._memory.extract_session(
-                session_id,
-                older_msgs,
-                principal=principal,
-                on_llm_call=meter_facts if task_id else None,
-            )
+            if principal is not None:
+                await self._memory.extract_session(
+                    session_id,
+                    older_msgs,
+                    principal=principal,
+                    on_llm_call=meter_facts if task_id else None,
+                )
         except Exception:  # noqa: BLE001
             logger.debug("pre-compaction flush failed", exc_info=True)
         # 2) build the bridge summary.
@@ -142,6 +157,12 @@ class SessionCompactor:
             on_llm_call=meter if task_id else None,
         )
         bridge_prefix = "[Earlier conversation summary]\n"
+        if prior is not None:
+            prior_body = str(prior.content or "")
+            if prior_body.startswith(bridge_prefix):
+                prior_body = prior_body[len(bridge_prefix):].strip()
+            if prior_body:
+                summary = f"{prior_body}\n{summary}".strip() if summary else prior_body
         kept_prompt = [
             {"role": row.role, "content": row.content}
             for row in rows[-keep_last:]
@@ -151,7 +172,6 @@ class SessionCompactor:
         while summary and estimate_tokens(bridge_prefix + summary) > bridge_budget:
             summary = summary[: max(0, int(len(summary) * 0.8))].rstrip()
         bridge = bridge_prefix + summary if summary else ""
-        covered = [r.id for r in older]
         await self._store.write_compaction_bridge(session_id, bridge, covered)
         after_tokens = estimate_messages_tokens(await self._store.history(session_id))
         return {

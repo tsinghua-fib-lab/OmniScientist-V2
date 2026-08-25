@@ -43,13 +43,20 @@ def test_tag_filter_selects_subset():
 
 
 def test_routing_corpus_covers_exact_active_skill_manifest():
-    routed = {
-        str(turn.expect["skill_selected"])
-        for scenario in load_scenarios()
-        for turn in scenario.turns
-        if turn.expect.get("skill_selected")
-        and not str(turn.expect["skill_selected"]).startswith("!")
-    }
+    routed: set[str] = set()
+    for scenario in load_scenarios():
+        for turn in scenario.turns:
+            selected = turn.expect.get("skill_selected")
+            if selected and not str(selected).startswith("!"):
+                routed.add(str(selected))
+            # Unnamed figure.editable.pptx no longer binds livefigure without
+            # VLM; the corpus still names that provider on the exclude list.
+            for key in (
+                "skills_include",
+                "skills_executed_include",
+                "skills_executed_exclude",
+            ):
+                routed.update(str(name) for name in (turn.expect.get(key) or []))
 
     assert routed == set(active_skill_names(ROOT / "skills"))
 

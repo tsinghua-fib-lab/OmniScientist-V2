@@ -25,7 +25,7 @@ from omni.storage.models import SubtaskORM
 from omni.web import activity as activitymod
 from omni.web.attachments import bind_web_attachments
 from omni.web.protocol import RpcError, jsonable
-from omni.web.runs import RunHandle
+from omni.web.runs import SERVER_STOPPING_EVENT, RunHandle
 from omni.web.workspace import OpenedWorkspace, WorkspaceHub
 
 
@@ -201,6 +201,13 @@ def _terminal_bytes(handle: RunHandle) -> bytes:
     return _sse("done", {"session_id": handle.session_id, "task_id": handle.task_id})
 
 
+def _server_stopping_bytes(task_id: str) -> bytes:
+    return _sse(
+        SERVER_STOPPING_EVENT,
+        {"state": "stopping", "task_id": task_id},
+    )
+
+
 async def watch_task_sse(
     hub: WorkspaceHub,
     rec: OpenedWorkspace,
@@ -254,6 +261,9 @@ async def watch_task_sse(
                 },
             )
             while True:
+                if hub.is_shutting_down:
+                    yield _server_stopping_bytes(task_id)
+                    return
                 chunks, last = await _replay_chunks(agent, task_id, last)
                 for chunk in chunks:
                     yield chunk
@@ -280,12 +290,17 @@ async def watch_task_sse(
                         },
                     )
                     return
-                await asyncio.sleep(0.45)
+                if await hub.wait_for_shutdown(timeout=0.45):
+                    yield _server_stopping_bytes(task_id)
+                    return
         # Subscribe before yielding the accumulated snapshot. Token callbacks
         # can run while StreamingResponse hands that snapshot to the browser;
         # registering first closes the otherwise tiny subscribe gap.
         queue = handle.subscribe()
         try:
+            if hub.is_shutting_down:
+                yield _server_stopping_bytes(task_id)
+                return
             if handle.partial:
                 yield _sse("partial", {"text": handle.partial, "task_id": task_id})
             yield _sse(
@@ -315,6 +330,9 @@ async def watch_task_sse(
                     yield _terminal_bytes(handle)
                     return
                 name, data = item
+                if name == SERVER_STOPPING_EVENT:
+                    yield _server_stopping_bytes(task_id)
+                    return
                 if name == "error":
                     yield _sse_error(
                         str(data.get("code") or "error"),

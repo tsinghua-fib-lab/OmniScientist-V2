@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import inspect
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -23,6 +24,7 @@ from omni.core.tool_result import (
     tool_result_failure,
     tool_transport_status,
 )
+from omni.runtime.execution_policy import tool_is_mutating
 from omni.runtime.hooks import (
     HookDeniedError,
     HookManager,
@@ -410,11 +412,38 @@ class ToolGateway:
                         },
                     )
                 return rejected
+        call_id = uuid.uuid4().hex
         if emit_events:
-            await self.emit(
+            persisted = await self.emit(
                 "start",
-                {"name": name, "arguments": admitted_arguments},
+                {
+                    "name": name,
+                    "arguments": admitted_arguments,
+                    "call_id": call_id,
+                },
             )
+            if persisted is False and tool_is_mutating(name):
+                rejected = policy_violation(name, "start_event_not_persisted")
+                rejected.update(
+                    {
+                        "error": (
+                            "The tool call was not executed because its start "
+                            "event could not be recorded."
+                        ),
+                        "execution_started": False,
+                    }
+                )
+                await self.emit(
+                    "done",
+                    {
+                        "name": name,
+                        "arguments": admitted_arguments,
+                        "result": rejected,
+                        "call_id": call_id,
+                        **_terminal_event_fields(rejected),
+                    },
+                )
+                return rejected
 
         def validate_execution_arguments() -> Any:
             errors = list(
@@ -535,6 +564,7 @@ class ToolGateway:
                         "name": name,
                         "arguments": admitted_arguments,
                         "result": rejected,
+                        "call_id": call_id,
                         **_terminal_event_fields(rejected),
                     },
                 )
@@ -548,6 +578,7 @@ class ToolGateway:
                         "arguments": admitted_arguments,
                         "error": f"{type(exc).__name__}: {exc}",
                         "status": "failed",
+                        "call_id": call_id,
                     },
                 )
             raise
@@ -559,6 +590,7 @@ class ToolGateway:
                     "name": name,
                     "arguments": admitted_arguments,
                     "result": event_result,
+                    "call_id": call_id,
                     **_terminal_event_fields(result),
                 },
             )
@@ -592,7 +624,7 @@ class ToolGateway:
             subtask_id=str(self.origin.get("subtask_id") or ""),
         )
 
-    async def emit(self, phase: str, data: dict[str, Any]) -> None:
+    async def emit(self, phase: str, data: dict[str, Any]) -> bool:
         data = copy.deepcopy(data)
         if "result" in data:
             data = {**data, "result": tool_event_output(data["result"])}
@@ -616,9 +648,15 @@ class ToolGateway:
             if inspect.isawaitable(emitted):
                 await emitted
         if self.tasks is None:
-            return
+            return True
+
+        def _landed(row: Any) -> bool:
+            if row is not None:
+                return True
+            return not getattr(self.tasks, "drops_unpersisted_events", False)
+
         if phase == "notice" and str(data.get("kind") or "") == "context_rollover":
-            await self.tasks.append_event(
+            row = await self.tasks.append_event(
                 self.task_id,
                 event_type=f"{self.event_family}.context.compacted",
                 status="succeeded",
@@ -626,10 +664,10 @@ class ToolGateway:
                 output_json=copy.deepcopy(data),
                 summary=f"{self.event_family} context compacted; continuing same run",
             )
-            return
+            return _landed(row)
         if phase == "budget":
             status = str(data.get("status") or "warning")
-            await self.tasks.append_event(
+            row = await self.tasks.append_event(
                 self.task_id,
                 event_type=f"{self.event_family}.budget.{status}",
                 status="degraded",
@@ -637,9 +675,9 @@ class ToolGateway:
                 output_json=copy.deepcopy(data),
                 summary=f"{self.event_family} budget {status}: {data.get('reason') or 'unspecified'}",
             )
-            return
+            return _landed(row)
         if phase == "transcript":
-            await self.tasks.append_event(
+            row = await self.tasks.append_event(
                 self.task_id,
                 event_type=f"{self.event_family}.transcript.repaired",
                 status="succeeded",
@@ -649,38 +687,41 @@ class ToolGateway:
                 },
                 summary=f"{self.event_family} transcript repaired",
             )
-            return
+            return _landed(row)
         name = str(data.get("name") or "")
         if not name:
-            return
+            return True
+        call_id = str(data.get("call_id") or "")
+        input_json = copy.deepcopy(data.get("arguments") or {})
+        if call_id:
+            input_json["_call_id"] = call_id
         if phase == "start":
-            await self.tasks.append_event(
+            row = await self.tasks.append_event(
                 self.task_id,
                 event_type=f"{self.event_family}.tool.start",
                 status="running",
                 name=name,
                 tool_name=name,
                 **self.origin,
-                input_json=copy.deepcopy(data.get("arguments") or {}),
+                step_id=call_id or str(self.origin.get("step_id") or ""),
+                input_json=input_json,
                 summary=f"{self.event_family} tool {name} start",
             )
-            return
+            return _landed(row)
         if phase == "done":
             error = str(data.get("error") or "")
             result = copy.deepcopy(data.get("result"))
             status = str(data.get("status") or "succeeded")
             event_suffix = tool_event_suffix(status)
-            await self.tasks.append_event(
+            row = await self.tasks.append_event(
                 self.task_id,
                 event_type=f"{self.event_family}.tool.{event_suffix}",
                 status=status,
                 name=name,
                 tool_name=name,
                 **self.origin,
-                input_json={
-                    **copy.deepcopy(data.get("arguments") or {}),
-                    **({"_call_id": data.get("call_id")} if data.get("call_id") else {}),
-                },
+                step_id=call_id or str(self.origin.get("step_id") or ""),
+                input_json=input_json,
                 output_json=copy.deepcopy(result or {}),
                 error=error,
                 summary=_result_brief(result, error),
@@ -688,6 +729,8 @@ class ToolGateway:
                 lifecycle_status=str(data.get("lifecycle_status") or ""),
                 result_success=data.get("result_success"),
             )
+            return _landed(row)
+        return True
 
 
 __all__ = ["ToolGateway"]

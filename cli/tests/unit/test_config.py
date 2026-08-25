@@ -345,3 +345,31 @@ def test_a_declared_skill_budget_can_reach_the_workflow_envelope():
     assert settings.skills.max_python_seconds >= envelope
     assert settings.skills.max_prompt_seconds >= envelope
     assert settings.skills.max_cli_seconds >= envelope
+
+
+def test_observability_defaults_keep_ten_megabyte_files():
+    settings = load_settings()
+    assert settings.observability.log_level == "INFO"
+    assert settings.observability.log_max_bytes == 10 * 1024 * 1024
+    assert settings.observability.log_files == 10
+
+
+def test_observability_env_overrides_defaults(monkeypatch):
+    monkeypatch.setenv("OMNI_LOG_LEVEL", "debug")
+    monkeypatch.setenv("OMNI_LOG_MAX_BYTES", "2048")
+    monkeypatch.setenv("OMNI_LOG_FILES", "3")
+    settings = load_settings()
+    assert settings.observability.log_level == "debug"
+    assert settings.observability.log_max_bytes == 2048
+    assert settings.observability.log_files == 3
+
+
+def test_observability_toml_accepts_backup_count_alias():
+    paths = get_paths()
+    _write_toml(
+        paths.config_file,
+        {"observability": {"log_backup_count": 6, "log_max_bytes": 4096}},
+    )
+    settings = load_settings()
+    assert settings.observability.log_files == 6
+    assert settings.observability.log_max_bytes == 4096

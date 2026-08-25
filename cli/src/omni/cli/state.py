@@ -25,6 +25,8 @@ class AppState:
     # ``trusted`` after the first workspace-trust check.
     trust_flag: bool | None = None
     trusted: bool | None = None
+    # Observation-only brief from ``omni resume --thread``; not a settlement.
+    resume_thread_brief: str = ""
 
     def settings(self) -> OmniSettings:
         overrides = dict(self.overrides)

@@ -78,6 +78,27 @@ def test_builtin_hard_overrides_same_named_user_skill_on_disk(settings):
     assert scoped is not None and scoped.source == "user_omni"
 
 
+def test_resolve_capability_honors_configured_default_for():
+    settings = load_settings()
+    settings.skills.default_for = {"literature.search": "lit-user"}
+    reg = SkillRegistry(settings)
+    reg.register(_cap_skill("lit-builtin", "literature.search", source="builtin", priority=1))
+    reg.register(_cap_skill("lit-user", "literature.search", source="user_omni", priority=1))
+
+    selected, _ = reg.resolve_capability("literature.search")
+    assert selected is not None and selected.name == "lit-user"
+
+
+def test_configured_default_for_is_ignored_when_not_a_candidate():
+    settings = load_settings()
+    settings.skills.default_for = {"literature.search": "not-installed"}
+    reg = SkillRegistry(settings)
+    reg.register(_cap_skill("lit-builtin", "literature.search", source="builtin", priority=1))
+
+    selected, _ = reg.resolve_capability("literature.search")
+    assert selected is not None and selected.name == "lit-builtin"
+
+
 def test_resolve_capability_prefers_builtin_over_higher_priority_user():
     """Source rank dominates priority: built-in wins even when the user skill
     declares a much higher ``priority``."""

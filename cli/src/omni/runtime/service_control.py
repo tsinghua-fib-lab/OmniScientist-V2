@@ -26,6 +26,7 @@ from omni import __version__
 from omni.config import OmniSettings
 from omni.runtime import service_state
 from omni.runtime.dist_meta import DIST_NAME
+from omni.runtime.logging_config import prepare_log_file
 from omni.runtime.service_state import ServiceDesiredState, lifecycle_lock
 from omni.runtime.service_supervisors import (
     DefinitionStatus,
@@ -52,7 +53,13 @@ class _LaunchOutcome:
 
 
 def _log_path(settings: OmniSettings) -> Path:
+    """Process-owned rotating diagnostic file (kimi-code style)."""
     return settings.paths.logs_dir / "home-service.log"
+
+
+def _supervisor_log_path(settings: OmniSettings) -> Path:
+    """OS-supervisor crumb file: crash-before-Python only, not the product log."""
+    return settings.paths.logs_dir / "home-service.supervisor.log"
 
 
 def _service_env(settings: OmniSettings) -> dict[str, str]:
@@ -65,11 +72,17 @@ def _service_env(settings: OmniSettings) -> dict[str, str]:
     ``HOME`` is snapshotted at compose time so a delayed ensure thread that
     outlives a test monkeypatch cannot rewrite LaunchAgent paths under the
     real user home while still pointing ``OMNI_HOME`` at a throwaway tree.
+
+    The child writes the rotating ``home-service.log`` itself. The supervisor
+    redirect is a separate crumb file so the two writers never share a path.
     """
     import os
     from pathlib import Path
 
-    env = {"OMNI_HOME": str(settings.paths.home)}
+    env = {
+        "OMNI_HOME": str(settings.paths.home),
+        "OMNI_SERVICE_LOG_PATH": str(_log_path(settings)),
+    }
     if path := os.environ.get("PATH"):
         env["PATH"] = path
     home = os.environ.get("HOME") or str(Path.home())
@@ -86,7 +99,7 @@ def _spec(settings: OmniSettings, *, launcher: list[str] | None = None) -> Super
         paths=settings.paths,
         argv=argv,
         workdir=settings.paths.home,
-        log_path=_log_path(settings),
+        log_path=prepare_log_file(_supervisor_log_path(settings)),
         env=_service_env(settings),
     )
 
@@ -128,10 +141,11 @@ def _observation_summary(settings: OmniSettings) -> str:
 
 def _restore_diagnostics(settings: OmniSettings, prefix: str) -> str:
     parts = [prefix, _observation_summary(settings)]
-    log_path = _log_path(settings)
-    tail = _log_tail(log_path)
-    if tail:
-        parts.append(f"{log_path} last lines:\n{tail}")
+    for log_path in (_log_path(settings), _supervisor_log_path(settings)):
+        tail = _log_tail(log_path)
+        if tail:
+            parts.append(f"{log_path} last lines:\n{tail}")
+            break
     return "\n".join(parts)
 
 

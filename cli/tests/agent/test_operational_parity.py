@@ -21,6 +21,7 @@ from omni.config import load_settings
 from omni.memory.service import MemoryLayer
 from omni.runtime.notifications import TaskNotification
 from omni.runtime.presentation import ArtifactRef, TaskPresentation, TurnPresentation
+from omni.runtime.taskref import is_bare_task_id
 from tests.conftest import ScriptedLLM
 
 
@@ -176,7 +177,15 @@ async def test_bare_task_id_on_im_is_inspect_not_a_new_turn(channel: str) -> Non
         user_input="long research",
     )
     try:
-        shown = await handle_channel_command(agent, run.id[:8], session)
+        # An 8-char hex prefix with no digit is not a task id (taskref requires
+        # a digit). Paste the shortest prefix the host would accept, same as
+        # WeChat users pasting the ACK token.
+        ref = next(
+            run.id[:n]
+            for n in range(8, len(run.id) + 1)
+            if is_bare_task_id(run.id[:n])
+        )
+        shown = await handle_channel_command(agent, ref, session)
         assert shown is not None
         assert f"Task `{run.id[:8]}`" in shown.assistant_text
         unknown = await handle_channel_command(agent, "6978342b", session)

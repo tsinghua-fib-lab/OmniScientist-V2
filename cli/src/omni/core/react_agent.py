@@ -18,7 +18,7 @@ import inspect
 import json
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -37,7 +37,13 @@ from omni.core.llm.errors import classify_llm_exception
 from omni.core.llm.idle import IdleWatchdog, await_with_idle
 from omni.core.model_catalog import max_output_tokens_for
 from omni.core.run_context import RunContextWindow, evidence_checkpoint
-from omni.core.scientific_progress import LOOKUP_STEER, MIN_LOOKUP_STREAK, lookup_pressure
+from omni.core.scientific_progress import (
+    LOOKUP_STEER,
+    MIN_LOOKUP_STREAK,
+    bound_skill_steer,
+    leftover_skill_pressure,
+    lookup_pressure,
+)
 from omni.core.termination import OUTPUT_CAP_TRUNCATED, mark_truncated_output
 from omni.core.tool_result import (
     ToolResultEnvelope,
@@ -51,6 +57,7 @@ from omni.core.tool_result import (
 )
 from omni.core.tool_transcript import normalize_tool_transcript
 from omni.core.turn_clock import TurnClock, register_clock
+from omni.runtime.execution_policy import tool_is_mutating
 from omni.skills_runtime.admission import is_admission_action
 
 logger = logging.getLogger(__name__)
@@ -70,18 +77,44 @@ _MAX_UNEXECUTED_CALL_STREAK = 5
 # After find_skill has already returned a callable skill contract, further
 # catalog/docs/filesystem probes of *that same unanswered card* are the BUG-11
 # exploration loop. A second find_skill for a disjoint skill is setup for
-# another consume (figure then slides), not a hunt. Two hunt tools is the
-# floor so a single successful lookup can still be followed by run_skill.
+# another consume (figure then slides), not a hunt. livefigure and
+# scientific-figure are two candidates for the same figure debt — looking
+# up the fallback after the preferred card is setup, not a repeat. This
+# two-name set is a local exception (their capabilities do not overlap);
+# do not generalize it to string matching. A third figure skill joins by
+# a declared fallback on the skill, not another host alias. Two hunt
+# tools is the floor so a single successful lookup can still be followed by
+# run_skill.
 _CONTRACT_HUNT_TOOLS = frozenset(
     {"find_skill", "docs_search", "docs_read", "glob", "search_tasks", "list_dir"}
 )
 _CONTRACT_CONSUME_TOOLS = frozenset({"run_skill", "run_workflow"})
+_FIGURE_SKILL_ALIASES = frozenset({"livefigure", "scientific-figure"})
 _MIN_CONTRACT_HUNT_STREAK = 2
 CONTRACT_HUNT_STEER = (
     "A skill input_schema was already returned for that skill. "
     "Call run_skill with those fields now. Do not find_skill, docs_search, "
     "or glob the same contract again. Looking up a different skill for another "
     "owed deliverable is fine."
+)
+# Empty find_skill after a card usually means the model is looking for a
+# writing skill that is not in the catalog. Native write_file / the cards
+# already returned are the consume path; another lookup is not.
+CONTRACT_NATIVE_WRITE_STEER = (
+    "find_skill returned no catalog card. Writing is write_file; figures and "
+    "slides are run_skill with the input_schema already returned. Do not "
+    "find_skill again. The host will not write the file."
+)
+# Codex Stop-hook analog: one more tools-on turn naming the unpaid file.
+# Used only when a research feed reports debt; unit tests without a feed
+# still terminate after the first hunt steer.
+CONTRACT_HUNT_CONSUME = (
+    "Call run_skill or write_file for those deliverables now. "
+    "Do not find_skill again. The host will not write the file."
+)
+CONTRACT_HUNT_STOP = (
+    "Catalog lookup already returned a skill contract; further searching "
+    "stopped. This turn did not call run_skill or write_file."
 )
 
 # Bounded stops caused by spend rather than by the work being finished. They get
@@ -151,12 +184,13 @@ async def _emit_event(
     callback: Callable[[str, dict[str, Any]], Any] | None,
     phase: str,
     data: dict[str, Any],
-) -> None:
+) -> bool:
     if callback is None:
-        return
+        return True
     result = callback(phase, data)
     if inspect.isawaitable(result):
-        await result
+        result = await result
+    return result is not False
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -317,6 +351,7 @@ class ReActLoopAgent:
         parallel_tools: bool = True,
         require_opening_tool: bool = False,
         owes_scientific_outputs: bool = False,
+        bound_skills: Iterable[str] = (),
         fact_feed: Any | None = None,
     ) -> None:
         self._llm = llm_client
@@ -395,6 +430,9 @@ class ReActLoopAgent:
         # memory and task probes are lookup, not progress. Answer-only and
         # inspect/review turns leave this false so those tools remain the work.
         self._owes_scientific_outputs = owes_scientific_outputs
+        # File-producer skills already injected into this turn. Leftover bash
+        # that writes the same kind of file is steered back to run_skill.
+        self._bound_skills = frozenset(str(name) for name in bound_skills if name)
         # Host-owned task facts (snapshot / delta / deterministic debt). The
         # loop only injects observations; it never stages or picks tools.
         self._fact_feed = fact_feed
@@ -515,7 +553,10 @@ class ReActLoopAgent:
 
         iteration = 0
         lookup_steered = False
+        leftover_steered = False
         hunt_steered_for: frozenset[str] = frozenset()
+        native_write_steered = False
+        hunt_consume_replayed = False
         while self._max_iterations is None or iteration < self._max_iterations:
             iteration += 1
             if control.cancel_requested:
@@ -919,8 +960,30 @@ class ReActLoopAgent:
             admitted_indices = {index for index, _ in admitted}
             budget_rejected_indices = {index for index, _ in budget_rejected}
 
-            for tc in in_budget:
-                await _emit_event(on_tool_event, "start", {"name": tc.name, "arguments": tc.arguments})
+            runnable: list[tuple[int, ToolCall]] = []
+            for index, tc in admitted:
+                persisted = await _emit_event(
+                    on_tool_event,
+                    "start",
+                    {"name": tc.name, "arguments": tc.arguments, "call_id": tc.id},
+                )
+                if persisted is False and tool_is_mutating(tc.name):
+                    outcomes[index] = ToolInvocationRecord(
+                        name=tc.name,
+                        arguments=tc.arguments,
+                        call_id=tc.id,
+                        error=(
+                            "The tool call was not executed because its start "
+                            "event could not be recorded."
+                        ),
+                        status="rejected",
+                        error_code="tool_start_not_persisted",
+                        lifecycle_status="blocked",
+                        result_success=None,
+                    )
+                else:
+                    runnable.append((index, tc))
+            in_budget = [tc for _, tc in runnable]
 
             dispatch_cancelled = False
             try:
@@ -946,7 +1009,7 @@ class ReActLoopAgent:
                         )
                     )
 
-            for (index, _), record in zip(admitted, records, strict=True):
+            for (index, _), record in zip(runnable, records, strict=True):
                 outcomes[index] = record
 
             for index, tc in budget_rejected:
@@ -1123,23 +1186,48 @@ class ReActLoopAgent:
                 )
 
             hunt = _contract_hunt_pressure(trace)
-            if hunt >= max(_MIN_CONTRACT_HUNT_STREAK, self._no_progress_threshold):
-                active = _active_hunt_names(trace)
-                if active and not (active & hunt_steered_for):
-                    messages.append({"role": "user", "content": CONTRACT_HUNT_STEER})
-                    hunt_steered_for = active
-                else:
-                    return await self._terminate_or_synthesize(
-                        messages, trace, total_usage, iteration, budget.completed,
-                        user_message=user_message,
-                        reason="no_progress",
-                        salvage=(
-                            "A skill input contract was already returned; "
-                            "call run_skill instead of searching again."
-                        ),
-                        budget=budget,
-                        transcript_repairs=transcript_repairs,
+            empty_finds = _trailing_empty_find_count(trace)
+            unconsumed = _active_hunt_names(trace)
+            if empty_finds and unconsumed:
+                if not native_write_steered:
+                    messages.append(
+                        {"role": "user", "content": CONTRACT_NATIVE_WRITE_STEER}
                     )
+                    native_write_steered = True
+                elif empty_finds >= 2:
+                    replayed = await self._replay_hunt_consume(
+                        messages, hunt_consume_replayed
+                    )
+                    if replayed:
+                        hunt_consume_replayed = True
+                    else:
+                        return await self._terminate_or_synthesize(
+                            messages, trace, total_usage, iteration, budget.completed,
+                            user_message=user_message,
+                            reason="no_progress",
+                            salvage=CONTRACT_HUNT_STOP,
+                            budget=budget,
+                            transcript_repairs=transcript_repairs,
+                        )
+            elif hunt >= max(_MIN_CONTRACT_HUNT_STREAK, self._no_progress_threshold):
+                if unconsumed and not (unconsumed & hunt_steered_for):
+                    messages.append({"role": "user", "content": CONTRACT_HUNT_STEER})
+                    hunt_steered_for = unconsumed
+                else:
+                    replayed = await self._replay_hunt_consume(
+                        messages, hunt_consume_replayed
+                    )
+                    if replayed:
+                        hunt_consume_replayed = True
+                    else:
+                        return await self._terminate_or_synthesize(
+                            messages, trace, total_usage, iteration, budget.completed,
+                            user_message=user_message,
+                            reason="no_progress",
+                            salvage=CONTRACT_HUNT_STOP,
+                            budget=budget,
+                            transcript_repairs=transcript_repairs,
+                        )
 
             lookup = lookup_pressure(trace, owed=self._owes_scientific_outputs)
             if lookup > 0:
@@ -1152,12 +1240,19 @@ class ReActLoopAgent:
                         user_message=user_message,
                         reason="no_progress",
                         salvage=(
-                            "Lookup tools do not produce this turn's required outputs; "
-                            "do the scientific work instead."
+                            "Memory and task lookup do not produce this turn's "
+                            "required outputs; do the scientific work instead."
                         ),
                         budget=budget,
                         transcript_repairs=transcript_repairs,
                     )
+
+            leftover = leftover_skill_pressure(trace, bound_skills=self._bound_skills)
+            if leftover > 0 and not leftover_steered:
+                messages.append(
+                    {"role": "user", "content": bound_skill_steer(self._bound_skills)}
+                )
+                leftover_steered = True
 
             # A model whose calls keep being refused before they run — unknown
             # tools, unparseable arguments, a quota the host will not lift — is
@@ -1566,6 +1661,24 @@ class ReActLoopAgent:
         except Exception:  # noqa: BLE001 — facts must not abort the turn
             return ""
         return str(result or "").strip()
+
+    async def _replay_hunt_consume(
+        self, messages: list[dict[str, Any]], already: bool
+    ) -> bool:
+        """One tools-on re-entry when the research feed still names unpaid files.
+
+        Codex's Stop hook can block once and keep tools enabled. Without a feed
+        finding this returns False so the hunt fuse still terminates.
+        """
+        if already:
+            return False
+        finding = await self._fact_text("before_text_finish")
+        if not finding:
+            return False
+        messages.append(
+            {"role": "user", "content": finding + "\n" + CONTRACT_HUNT_CONSUME}
+        )
+        return True
 
     async def _emit_usage_progress(
         self,
@@ -1982,13 +2095,24 @@ def _active_hunt_contract(
 
 
 def _active_hunt_names(trace: list[ToolInvocationRecord]) -> frozenset[str]:
-    if any(
-        record.name in _CONTRACT_CONSUME_TOOLS and record.status == "succeeded"
-        for record in trace
-    ):
-        return frozenset()
     found = _active_hunt_contract(_hunt_window(trace))
     return found[0] if found else frozenset()
+
+
+def _same_figure_family(left: frozenset[str], right: frozenset[str]) -> bool:
+    return bool(left & _FIGURE_SKILL_ALIASES) and bool(right & _FIGURE_SKILL_ALIASES)
+
+
+def _trailing_empty_find_count(trace: list[ToolInvocationRecord]) -> int:
+    """Newest-first empty ``find_skill`` cards before the next real contract."""
+    count = 0
+    for record in _hunt_window(trace):
+        if record.name != "find_skill":
+            break
+        if _find_skill_contract_names(record.result):
+            break
+        count += 1
+    return count
 
 
 def _contract_hunt_pressure(trace: list[ToolInvocationRecord]) -> int:
@@ -1996,36 +2120,47 @@ def _contract_hunt_pressure(trace: list[ToolInvocationRecord]) -> int:
 
     Distinct queries look like progress to the signature-keyed stall detector.
     Once ``find_skill`` has handed back an ``input_schema``, further
-    ``docs_search`` / ``glob`` / a repeat lookup that returns the same skill
-    are the same loop: the next action is ``run_skill``. A disjoint second
-    card is preparing another consume, so it resets the streak. An empty
+    ``docs_search`` / ``glob`` / a repeat lookup that returns only already-seen
+    names are the same loop: the next action is ``run_skill``. A disjoint
+    second card is preparing another consume, so it resets the streak. A
+    livefigure card followed by scientific-figure (or a card that lists both)
+    is a second candidate for the same figure, not a repeat. An empty
     ``find_skill`` after a card is a miss, not another probe of that card.
     Docs-only retrieval (no contract in the trailing window) is how a product
     question reads ``architecture.md``; that is not a hunt.
     """
-    if any(
-        record.name in _CONTRACT_CONSUME_TOOLS and record.status == "succeeded"
-        for record in trace
-    ):
-        return 0
     window = _hunt_window(trace)
-    found = _active_hunt_contract(window)
-    if found is None:
+    has_card = any(
+        record.name == "find_skill" and _find_skill_contract_names(record.result)
+        for record in window
+    )
+    if not has_card:
         return 0
-    active, contract_idx = found
-    trailing = 0
-    for index, record in enumerate(window):
+    seen: set[str] = set()
+    pressure = 0
+    for record in reversed(window):
         if record.name == "find_skill":
             names = _find_skill_contract_names(record.result)
-            if names and names & active:
-                trailing += 1
+            if not names:
                 continue
-            if names:
-                break
+            if names <= seen:
+                pressure += 1
+                continue
+            seen_names = frozenset(seen)
+            if (
+                seen
+                and not (names & seen_names)
+                and not _same_figure_family(names, seen_names)
+            ):
+                pressure = 1
+                seen = set(names)
+                continue
+            pressure = max(pressure, 1)
+            seen |= names
             continue
-        if index < contract_idx:
-            trailing += 1
-    return trailing
+        if seen:
+            pressure += 1
+    return pressure
 
 
 def _find_skill_contract_names(result: Any) -> frozenset[str]:

@@ -100,7 +100,11 @@ def load_curated_memory(paths: OmniPaths, *, per_file: int = 1200, budget: int =
     add_text("Global memory digest (automatic)", "memory_summary.md",
              load_memory_summary(paths, budget=per_file))
     # Self-maintained persona note next: the distilled persona prose.
-    add("User profile (automatic)", user_profile_file(paths))
+    add_text(
+        "User profile (automatic)",
+        "profile.md",
+        load_user_profile(paths, budget=per_file),
+    )
     add("User memory and preferences", user_memory_file(paths))
     if not blocks:
         return ""
@@ -202,6 +206,8 @@ _PROFILE_FILE_HEADER = (
 
 def load_user_profile(paths: OmniPaths, *, budget: int = 1200) -> str:
     """Read the self-maintained profile body for prompt injection (or ``""``)."""
+    from omni.memory.profile_sanitize import strip_tool_capability_bans
+
     path = user_profile_file(paths)
     if not path.is_file():
         return ""
@@ -209,7 +215,7 @@ def load_user_profile(paths: OmniPaths, *, budget: int = 1200) -> str:
         text = path.read_text(encoding="utf-8", errors="replace").strip()
     except OSError:
         return ""
-    return text[:budget]
+    return strip_tool_capability_bans(text)[:budget]
 
 
 def write_user_profile(paths: OmniPaths, body: str) -> bool:
@@ -218,7 +224,9 @@ def write_user_profile(paths: OmniPaths, body: str) -> bool:
     ``body`` is the bullet list only; the human-facing header is prepended here
     so the file stays self-describing. Best-effort (never raises).
     """
-    body = (body or "").strip()
+    from omni.memory.profile_sanitize import strip_tool_capability_bans
+
+    body = strip_tool_capability_bans(body or "").strip()
     if not body:
         return False
     path = user_profile_file(paths)

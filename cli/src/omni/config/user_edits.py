@@ -10,8 +10,10 @@ import json
 import os
 import re
 import tomllib
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import tomli_w
 
@@ -47,6 +49,18 @@ SEMANTIC_SCHOLAR_RELOAD_NOTICE = (
     "New CLI/REPL tasks use this setting immediately. If the home service is "
     "running, apply it there with `omni serve restart`."
 )
+
+ConfigHealthStatus = Literal["passed", "failed", "skipped"]
+
+
+@dataclass(frozen=True)
+class ConfigHealthItem:
+    """One row of ``omni config test`` / ``/config test``."""
+
+    name: str
+    status: ConfigHealthStatus
+    detail: str
+    required: bool = False
 
 
 def resolve_key(key: str) -> str:
@@ -801,3 +815,119 @@ async def test_semantic_scholar_connectivity(settings: OmniSettings) -> tuple[bo
     if not results:
         return False, "Semantic Scholar responded but returned no result for the test query."
     return True, "Semantic Scholar credentials are working."
+
+
+def _vlm_is_configured(settings: OmniSettings) -> bool:
+    vlm = settings.vlm
+    return bool(
+        vlm.enabled
+        or str(vlm.model or "").strip()
+        or str(vlm.endpoint or "").strip()
+        or str(vlm.api_key or "").strip()
+    )
+
+
+def _embeddings_health(settings: OmniSettings) -> ConfigHealthItem:
+    memory = settings.memory
+    if not memory.embeddings_enabled:
+        return ConfigHealthItem(
+            name="embeddings",
+            status="skipped",
+            detail=(
+                "Embeddings are disabled (optional). Recall stays keyword-only. "
+                "Enable with `omni config embeddings --enable ...`."
+            ),
+        )
+    provider = str(memory.embedding_provider or "").strip() or "openai_compatible"
+    if provider == "specter2":
+        missing = [
+            name
+            for name, value in (
+                ("python", memory.embedding_specter2_python),
+                ("base_model", memory.embedding_specter2_base_model),
+                ("adapter", memory.embedding_specter2_adapter),
+            )
+            if not str(value or "").strip()
+        ]
+        model = memory.embedding_model or "allenai/specter2-proximity"
+    else:
+        missing = [] if str(memory.embedding_base_url or "").strip() else ["base_url"]
+        model = memory.embedding_model or "(unset)"
+    if missing:
+        return ConfigHealthItem(
+            name="embeddings",
+            status="failed",
+            detail=(
+                "Embeddings are enabled but incomplete; missing: "
+                + ", ".join(missing)
+                + ". Fix with `omni config embeddings --enable ...`."
+            ),
+        )
+    return ConfigHealthItem(
+        name="embeddings",
+        status="skipped",
+        detail=(
+            f"Embeddings are configured ({provider} / {model}); "
+            "`config test` does not live-probe embeddings."
+        ),
+    )
+
+
+async def collect_config_health(
+    settings: OmniSettings,
+    *,
+    on_start: Callable[[str], None] | None = None,
+) -> list[ConfigHealthItem]:
+    """Probe the main model and report optional VLM / S2 / embeddings."""
+    items: list[ConfigHealthItem] = []
+    if on_start is not None:
+        on_start(f"Testing {settings.model.provider} / {settings.model.model}...")
+    ok, detail = await test_model_connectivity(settings)
+    items.append(
+        ConfigHealthItem(name="model", status="passed" if ok else "failed", detail=detail, required=True)
+    )
+
+    if not _vlm_is_configured(settings):
+        items.append(
+            ConfigHealthItem(
+                name="vlm",
+                status="skipped",
+                detail=(
+                    "VLM is not configured (optional). Visual skills stay off. "
+                    "Set with `omni config vlm -u <ENDPOINT> -m <VISION_MODEL> -k <API_KEY>`."
+                ),
+            )
+        )
+    else:
+        vlm = settings.vlm
+        if on_start is not None:
+            on_start(f"Testing VLM {vlm.protocol} / {vlm.model or '(unset)'}...")
+        ok, detail = await test_vlm_connectivity(settings)
+        items.append(ConfigHealthItem(name="vlm", status="passed" if ok else "failed", detail=detail))
+
+    if not str(settings.research.semantic_scholar_api_key or "").strip():
+        items.append(
+            ConfigHealthItem(
+                name="semantic_scholar",
+                status="skipped",
+                detail=(
+                    "Semantic Scholar key is not configured (optional). "
+                    "Literature search uses public rate limits. "
+                    "Set with `omni config semantic-scholar -k <API_KEY>`."
+                ),
+            )
+        )
+    else:
+        if on_start is not None:
+            on_start("Testing Semantic Scholar credentials...")
+        ok, detail = await test_semantic_scholar_connectivity(settings)
+        items.append(
+            ConfigHealthItem(
+                name="semantic_scholar",
+                status="passed" if ok else "failed",
+                detail=detail,
+            )
+        )
+
+    items.append(_embeddings_health(settings))
+    return items

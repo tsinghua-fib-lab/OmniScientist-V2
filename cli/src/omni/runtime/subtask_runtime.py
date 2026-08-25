@@ -38,6 +38,7 @@ from omni.runtime.provider_authority import (
     workflow_subtask_authority_error,
 )
 from omni.runtime.skill_execution_store import SkillExecutionStore
+from omni.runtime.skill_timeout import skill_exception_status, timeout_failure_result
 from omni.runtime.subtask_completion import (
     complete_subtask,
     fail_subtask,
@@ -65,7 +66,7 @@ from omni.runtime.workflow_plan import WorkflowNeedsInput, _prepare_workflow_pla
 from omni.runtime.workflow_run_manager import WorkflowRunManager
 from omni.runtime.workflow_runtime import WorkflowExecutionError
 from omni.skills_runtime.context import SKILL_SOURCE_PARAM, ExecContext
-from omni.skills_runtime.executor import execute_skill
+from omni.skills_runtime.executor import SkillExecutionTimeout, execute_skill
 from omni.skills_runtime.registry import SkillRegistry
 from omni.storage.db import Database, retry_while_busy, sqlite_busy
 from omni.storage.models import (
@@ -80,7 +81,8 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "SubtaskRuntime", "WorkflowNeedsInput", "WorkflowExecutionError",
-    "is_transient_error", "_collect_artifacts", "_prepare_workflow_plan",
+    "is_transient_error", "skill_exception_status",
+    "_collect_artifacts", "_prepare_workflow_plan",
 ]
 
 CtxFactory = Callable[[str, str], ExecContext]  # (session_id, channel) -> ExecContext
@@ -95,6 +97,19 @@ async def _emit_event(callback: Any, phase: str, data: dict[str, Any]) -> None:
     result = callback(phase, data)
     if inspect.isawaitable(result):
         await result
+
+
+def _result_needs_input(result: Any) -> bool:
+    """True when a skill asked the user to supply input instead of failing."""
+    if not isinstance(result, dict):
+        return False
+    status = str(result.get("status") or "").strip().lower()
+    outcome = result.get("outcome")
+    if isinstance(outcome, dict):
+        outcome = str(outcome.get("code") or outcome.get("status") or "").strip().lower()
+    else:
+        outcome = str(outcome or "").strip().lower()
+    return status == "needs_input" or outcome == "needs_input"
 
 
 class SubtaskRuntime:
@@ -671,7 +686,13 @@ class SubtaskRuntime:
                 raise
             except Exception as exc:  # noqa: BLE001
                 err = f"{type(exc).__name__}: {exc}"
-                if retries < max_retries and is_transient_error(err):
+                # A declared budget/stall expiry is not a network blip. Do not
+                # auto-retry it just because the message contains "timed out".
+                if (
+                    not isinstance(exc, SkillExecutionTimeout)
+                    and retries < max_retries
+                    and is_transient_error(err)
+                ):
                     retries += 1
                     await record_auto_retry(
                         self._db, self._task_recorder, self._settings,
@@ -679,24 +700,76 @@ class SubtaskRuntime:
                         task_id=task_id, skill_name=skill_name, on_event=on_event,
                     )
                     continue
+                row = await self.get_subtask(subtask_id)
+                durable_status = skill_exception_status(
+                    exc,
+                    has_durable_output=bool(row and await self.subtask_has_artifacts(row)),
+                )
                 logger.exception("task %s skill %s failed", subtask_id, skill_name)
-                await self._fail(subtask_id, err, trace, notify_channel)
+                timeout_result = timeout_failure_result(
+                    status=durable_status, err=err, subtask_id=subtask_id, task_id=task_id,
+                )
+                await self._fail(
+                    subtask_id, err, trace, notify_channel,
+                    result=timeout_result, status=durable_status,
+                )
                 await _emit_event(
                     on_event,
                     "task_done",
                     _skill_execution_event(
-                        task_id, subtask_id, skill_name, status="failed", error=err
+                        task_id, subtask_id, skill_name,
+                        status=durable_status, error=err, result=timeout_result,
                     ),
                 )
                 if self._task_recorder is not None and task_id:
                     await self._task_recorder.append_event(
                         task_id,
-                        event_type="subtask.failed",
-                        status="failed",
+                        event_type=(
+                            "subtask.degraded"
+                            if durable_status == "degraded"
+                            else "subtask.failed"
+                        ),
+                        status=durable_status,
                         name=skill_name,
                         skill_name=skill_name,
                         **event_link,
                         error=err,
+                        output_json=timeout_result,
+                    )
+                    if refresh_parent:
+                        await self._task_recorder.refresh_from_executions(task_id)
+                return
+
+            if _result_needs_input(result):
+                # Codex ask-user: a missing file/identifier is a pause, not
+                # a failed retry or a silent succeeded fall-through.
+                result_error = _result_error_message(result) or "needs_input"
+                await self._fail(
+                    subtask_id,
+                    result_error,
+                    trace,
+                    notify_channel,
+                    result=result if isinstance(result, dict) else {"result": result},
+                    status="needs_input",
+                )
+                await _emit_event(
+                    on_event,
+                    "task_done",
+                    _skill_execution_event(
+                        task_id, subtask_id, skill_name,
+                        status="needs_input", error=result_error, result=result,
+                    ),
+                )
+                if self._task_recorder is not None and task_id:
+                    await self._task_recorder.append_event(
+                        task_id,
+                        event_type="subtask.needs_input",
+                        status="needs_input",
+                        name=skill_name,
+                        skill_name=skill_name,
+                        **event_link,
+                        output_json=result if isinstance(result, dict) else {"result": result},
+                        error=result_error,
                     )
                     if refresh_parent:
                         await self._task_recorder.refresh_from_executions(task_id)
@@ -936,7 +1009,7 @@ class SubtaskRuntime:
     async def _external_key(self, session_id: str) -> str:
         return await session_external_key(self._db, session_id)
 
-    async def _principal_for_session(self, session_id: str) -> str:
+    async def _principal_for_session(self, session_id: str) -> str | None:
         return await session_principal(self._db, self._settings, session_id)
 
     async def _write_back_result(

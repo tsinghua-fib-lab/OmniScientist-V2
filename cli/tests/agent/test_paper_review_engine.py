@@ -1871,3 +1871,46 @@ async def test_managed_report_path_honors_host_output_without_a_source_copy(
         explicit_output=True,
     )
     assert explicit == fallback
+
+
+def test_resolve_input_treats_arxiv_text_as_an_identifier() -> None:
+    module = _load_engine()
+    with pytest.raises(module._RemotePaperRef) as caught:
+        module._resolve_input("arXiv 1706.03762")
+    assert caught.value.kind == "arxiv"
+    assert caught.value.identifier == "1706.03762"
+
+
+def test_resolve_input_treats_doi_as_an_identifier() -> None:
+    module = _load_engine()
+    with pytest.raises(module._RemotePaperRef) as caught:
+        module._resolve_input("doi:10.5555/3295222.3295349")
+    assert caught.value.kind == "doi"
+    assert "10.5555" in caught.value.identifier
+
+
+def test_resolve_input_does_not_treat_a_filename_as_arxiv() -> None:
+    module = _load_engine()
+    with pytest.raises(module._MissingLocalPaper) as caught:
+        module._resolve_input("notes-1706.03762.pdf")
+    assert "notes-1706.03762.pdf" in str(caught.value)
+    assert "does not exist" not in str(caught.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_unfetchable_arxiv_id_is_needs_input_not_a_missing_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_engine()
+
+    async def no_pdf(_arxiv_id: str, _ctx: Any) -> Path | None:
+        return None
+
+    monkeypatch.setattr(module, "_materialize_arxiv_pdf", no_pdf)
+    engine = module.PaperReviewEngine()
+    engine.ctx = SimpleNamespace(llm=_ReviewLLM({}), settings=SimpleNamespace())
+    result = await engine.execute(input="Review arXiv 1706.03762 as a NeurIPS reviewer.")
+    assert result["status"] == "needs_input"
+    assert result["outcome"] == "needs_input"
+    assert "does not exist" not in str(result.get("error") or "").lower()
+    assert "1706.03762" in str(result.get("error") or "")

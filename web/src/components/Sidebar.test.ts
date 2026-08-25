@@ -1,6 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
+import type { Session } from "../types";
 import { Sidebar } from "./Sidebar";
 
 const snapshot = vi.hoisted(() => ({
@@ -11,7 +12,15 @@ const snapshot = vi.hoisted(() => ({
       project_dir: "/tmp/omniscientist_v2",
     },
   ],
+  hiddenWorkspaces: [
+    {
+      label: "hidden-lab",
+      root: "/tmp/hidden-lab",
+      project_dir: "/tmp/hidden-lab",
+    },
+  ],
   sessions: [],
+  sessionResults: [] as Session[],
   sessionId: null,
   workspace: {
     label: "omniscientist_v2",
@@ -20,18 +29,30 @@ const snapshot = vi.hoisted(() => ({
     writable: true,
   },
   channelFilter: "",
+  sessionScope: "workspace",
+  sessionSort: "activity",
+  sessionStatusFilter: "",
+  sessionListLoading: false,
+  sessionListError: "",
 }));
 
 vi.mock("../store", () => ({
   actions: {
     deleteSession: vi.fn(),
+    deleteSessions: vi.fn(),
+    hideWorkspaces: vi.fn(),
+    unhideWorkspaces: vi.fn(),
     newSession: vi.fn(),
     openPicker: vi.fn(),
     openSession: vi.fn(),
+    openSessionResult: vi.fn(),
     refreshCatalog: vi.fn(),
     renameSession: vi.fn(),
     selectCatalog: vi.fn(),
     setChannelFilter: vi.fn(),
+    setSessionScope: vi.fn(),
+    setSessionSort: vi.fn(),
+    setSessionStatusFilter: vi.fn(),
   },
   useAppState: () => snapshot,
 }));
@@ -75,5 +96,43 @@ describe("Sidebar", () => {
     expect(actionsRow).toContain("settings-launch");
     expect(contextRow).toContain("omniscientist_v2");
     expect(contextRow).toContain("trust-state writable");
+  });
+
+  it("exposes compact scope, sort, status, channel, and management controls", () => {
+    const html = renderToStaticMarkup(createElement(Sidebar));
+
+    expect(html).toContain('aria-label="会话范围"');
+    expect(html).toContain('aria-label="会话排序"');
+    expect(html).toContain('aria-label="会话状态"');
+    expect(html).toContain('aria-label="按渠道筛选会话"');
+    expect(html).toContain("当前工作区");
+    expect(html).toContain("全部工作区");
+    expect(html).toContain("最近完成");
+    expect(html).toContain("有问题");
+    expect(html).toContain("管理工作区");
+    expect(html).toContain("管理会话");
+    expect(html).toContain("已隐藏 1");
+  });
+
+  it("shows workspace identity and status for global session rows", () => {
+    snapshot.sessionScope = "all";
+    snapshot.sessionResults = [
+      {
+        id: "session-global",
+        title: "Cross-workspace review",
+        channel: "web",
+        status: "active",
+        status_group: "warning",
+        workspace_label: "paper-lab",
+        project_dir: "/tmp/paper-lab",
+      },
+    ];
+    const html = renderToStaticMarkup(createElement(Sidebar));
+    snapshot.sessionScope = "workspace";
+    snapshot.sessionResults = [];
+
+    expect(html).toContain("Cross-workspace review");
+    expect(html).toContain("paper-lab");
+    expect(html).toContain("有警告");
   });
 });

@@ -5,7 +5,6 @@ from __future__ import annotations
 import io
 import json
 import logging
-import logging.handlers
 import os
 import sys
 import threading
@@ -23,6 +22,12 @@ from omni.cli.repl_transcript import (
     TranscriptKind,
 )
 from omni.memory.sanitize import redact_secrets
+from omni.runtime.logging_config import (
+    attach_rotating_file_handler,
+    remove_logging_handler,
+    rolled_backup_count,
+    rotation_limits,
+)
 
 TRANSCRIPT_PROTOCOL_ENV = "OMNI_TRANSCRIPT_PROTOCOL"
 _WIRE_PREFIX = b"\x1eOMNI_EVENT "
@@ -120,28 +125,37 @@ def redraw_active_output() -> bool:
     return True
 
 
-class _RedactingFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        return redact_secrets(super().format(record))
-
-
 class _DiagnosticRecorder:
     """Thread-safe rotating diagnostic target that never writes to the TUI."""
 
-    def __init__(self, path: Path | None) -> None:
+    def __init__(
+        self,
+        path: Path | None,
+        *,
+        max_bytes: int | None = None,
+        backup_count: int | None = None,
+        files: int | None = None,
+    ) -> None:
         self.handler: logging.Handler = logging.NullHandler()
+        self._handler_logger: logging.Logger | None = None
         if path is not None:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            handler = logging.handlers.RotatingFileHandler(
-                path,
-                maxBytes=5 * 1024 * 1024,
-                backupCount=2,
-                encoding="utf-8",
+            owner = logging.Logger(
+                f"omni.tui.diagnostics.{id(self)}",
+                level=logging.INFO,
             )
-            handler.setFormatter(
-                _RedactingFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+            owner.propagate = False
+            size, resolved_files = rotation_limits(
+                max_bytes=max_bytes, files=files, backup_count=backup_count
             )
-            self.handler = handler
+            self.handler = attach_rotating_file_handler(
+                owner,
+                path=path,
+                component="cli",
+                level=logging.INFO,
+                max_bytes=size,
+                backup_count=rolled_backup_count(resolved_files),
+            )
+            self._handler_logger = owner
         self._lock = threading.RLock()
 
     def write(self, text: str) -> None:
@@ -165,6 +179,10 @@ class _DiagnosticRecorder:
         self.handler.flush()
 
     def close(self) -> None:
+        if self._handler_logger is not None:
+            remove_logging_handler(self._handler_logger, self.handler)
+            self._handler_logger = None
+            return
         self.handler.close()
 
 
@@ -256,12 +274,18 @@ def use_managed_output_sink(
     sink: OutputSink,
     *,
     diagnostic_log_path: str | os.PathLike[str] | None = None,
+    max_bytes: int | None = None,
+    backup_count: int | None = None,
+    files: int | None = None,
 ) -> Iterator[None]:
     """Give one TUI exclusive ownership of process output until it closes."""
     original_stdout = sys.stdout
     original_stderr = sys.stderr
     recorder = _DiagnosticRecorder(
-        Path(diagnostic_log_path) if diagnostic_log_path is not None else None
+        Path(diagnostic_log_path) if diagnostic_log_path is not None else None,
+        max_bytes=max_bytes,
+        backup_count=backup_count,
+        files=files,
     )
     stdout_proxy = RoutedTextIO(lambda: original_stdout)
     stderr_proxy = _DiagnosticTextIO(original_stderr, recorder)

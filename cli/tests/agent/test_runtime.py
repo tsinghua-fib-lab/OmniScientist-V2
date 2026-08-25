@@ -45,7 +45,7 @@ def test_persisted_task_result_message_hides_dot_sources():
     assert "/task attach task-123" in message
     assert "/task attach executio" not in message
     assert "/tmp/figure.png" in message
-    assert "artifact://png" in message
+    assert "artifact://png" not in message
     assert "DOT source" not in message
     assert "/tmp/figure.dot" not in message
     assert "artifact://dot" not in message

@@ -95,6 +95,34 @@ def test_bash_between_lookups_does_not_reset_the_streak() -> None:
     assert this_turn_research_evidence(trace) is False
 
 
+def test_workspace_read_and_git_do_not_add_lookup_pressure() -> None:
+    trace = [
+        ToolInvocationRecord(name="bash", arguments={"command": "git status"}, status="succeeded"),
+        ToolInvocationRecord(name="bash", arguments={"command": "git diff"}, status="succeeded"),
+        ToolInvocationRecord(name="read_file", arguments={"path": "cli/src/omni/core/scientific_progress.py"}, status="succeeded"),
+        ToolInvocationRecord(name="read_file", arguments={"path": "cli/src/omni/runtime/remaining.py"}, status="succeeded"),
+        ToolInvocationRecord(name="list_dir", arguments={"path": "codex-rs/memories"}, status="succeeded"),
+    ]
+    assert lookup_pressure(trace, owed=True) == 0
+    assert this_turn_research_evidence(trace) is False
+
+
+def test_trailing_bash_after_a_produce_is_not_lookup() -> None:
+    trace = [
+        ToolInvocationRecord(
+            name="write_file",
+            arguments={"path": "draft.md", "contents": "x"},
+            status="succeeded",
+        ),
+        ToolInvocationRecord(name="bash", arguments={"command": "ls"}, status="succeeded"),
+        ToolInvocationRecord(
+            name="bash", arguments={"command": "python -c 'print(1)'"}, status="succeeded"
+        ),
+    ]
+    assert lookup_pressure(trace, owed=True) == 0
+    assert this_turn_research_evidence(trace) is True
+
+
 def test_drained_skill_counts_as_this_turn_research() -> None:
     assert this_turn_research_evidence([], [{"subtask_id": "s1", "result": {"status": "ok"}}])
 
@@ -122,7 +150,7 @@ def test_empty_funnel_is_not_this_turn_research() -> None:
             ToolInvocationRecord(name="memory_search", arguments={"query": "b"}, status="succeeded"),
         ],
         owed=True,
-    ) == 1
+    ) == 2
 
 
 # ── ReAct loop ───────────────────────────────────────────────────────────────
@@ -153,6 +181,31 @@ async def test_distinct_memory_queries_are_no_progress_when_a_draft_is_owed() ->
 
 
 @pytest.mark.asyncio
+async def test_workspace_bash_is_not_no_progress_when_a_file_is_owed() -> None:
+    llm = ScriptedLLM(
+        [
+            ChatWithToolsResult(
+                tool_calls=[ToolCall("1", "bash", {"command": "git status"})]
+            ),
+            ChatWithToolsResult(
+                tool_calls=[ToolCall("2", "bash", {"command": "git diff"})]
+            ),
+            ChatWithToolsResult(content="I will write the paper after reading the diff."),
+        ]
+    )
+    result = await ReActLoopAgent(
+        llm,
+        _ok_invoker,
+        max_iterations=8,
+        no_progress_threshold=2,
+        owes_scientific_outputs=True,
+    ).run(system_prompt="s", user_message=SURVEY, tools=_lookup_tools())
+
+    assert [record.name for record in result.tool_trace] == ["bash", "bash"]
+    assert result.terminated_reason == "done"
+    assert "write the paper" in (result.content or "")
+
+
 @pytest.mark.asyncio
 async def test_opening_parallel_lookups_are_steered_not_stopped() -> None:
     llm = ScriptedLLM(

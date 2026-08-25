@@ -7,6 +7,7 @@ import pytest
 from omni.config import load_settings
 from omni.research.store import ResearchStore, source_dedup_key
 from omni.storage.db import get_database
+from omni.storage.models import ClaimORM, HypothesisORM, RunORM, SourceORM
 
 
 async def _store() -> ResearchStore:
@@ -71,6 +72,55 @@ async def test_hypothesis_claim_evidence_graph():
     assert counts["claims"] == 1
     assert counts["sources"] == 1
     assert counts["evidence"] == 1
+
+
+@pytest.mark.asyncio
+async def test_hypothesis_prefix_clash_is_ambiguous():
+    store = await _store()
+    async with store._db.session() as session:
+        session.add(HypothesisORM(id="aa11111111111111111111111111111111", statement="one"))
+        session.add(HypothesisORM(id="aa22222222222222222222222222222222", statement="two"))
+        await session.commit()
+    row, ids = await store.resolve_hypothesis("aa")
+    assert row is None
+    assert set(ids) == {
+        "aa11111111111111111111111111111111",
+        "aa22222222222222222222222222222222",
+    }
+    assert await store.get_hypothesis("aa") is None
+    exact, empty = await store.resolve_hypothesis("aa11111111111111111111111111111111")
+    assert exact is not None and exact.statement == "one"
+    assert empty == []
+
+
+@pytest.mark.asyncio
+async def test_source_claim_run_prefix_clash_is_ambiguous():
+    store = await _store()
+    async with store._db.session() as session:
+        session.add(SourceORM(id="bb11111111111111111111111111111111", title="one"))
+        session.add(SourceORM(id="bb22222222222222222222222222222222", title="two"))
+        session.add(ClaimORM(id="cc11111111111111111111111111111111", text="one"))
+        session.add(ClaimORM(id="cc22222222222222222222222222222222", text="two"))
+        session.add(RunORM(id="dd11111111111111111111111111111111", title="one"))
+        session.add(RunORM(id="dd22222222222222222222222222222222", title="two"))
+        await session.commit()
+    assert await store.get_source("bb") is None
+    assert (await store.get_source("bb11111111111111111111111111111111")).title == "one"
+    assert await store.get_claim("cc") is None
+    assert (await store.get_claim("cc11111111111111111111111111111111")).text == "one"
+    assert await store.get_run("dd") is None
+    assert (await store.get_run("dd11111111111111111111111111111111")).title == "one"
+
+
+@pytest.mark.asyncio
+async def test_list_runs_filters_by_hypothesis():
+    store = await _store()
+    hyp = await store.add_hypothesis("h")
+    other = await store.add_hypothesis("other")
+    await store.add_run(title="a", hypothesis_id=hyp.id)
+    await store.add_run(title="b", hypothesis_id=other.id)
+    rows = await store.list_runs(hypothesis_id=hyp.id)
+    assert [row.title for row in rows] == ["a"]
 
 
 @pytest.mark.asyncio

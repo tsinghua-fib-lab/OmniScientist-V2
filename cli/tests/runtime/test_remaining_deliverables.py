@@ -12,7 +12,10 @@ from omni.agent.intent_plan import IntentType
 from omni.agent.model_planner import ModelPlanProposal
 from omni.agent.planner import IntentPlanner
 from omni.config import load_settings
+from omni.core.react_agent import ToolInvocationRecord
 from omni.runtime.remaining import (
+    failed_canonical_file_debts,
+    incoming_plan_is_retrieve_only,
     remaining_contract_files,
     remaining_deliverables,
     remaining_figure,
@@ -69,6 +72,95 @@ def test_dot_sidecar_does_not_count_as_the_figure() -> None:
     remaining = remaining_deliverables(["artifact.figure"], [dot])
     assert remaining == ["artifact.figure"]
     assert remaining_figure(remaining) == ["artifact.figure"]
+
+
+def test_markdown_report_does_not_pay_a_paper_review_debt() -> None:
+    report = SimpleNamespace(
+        kind="document",
+        title="review",
+        rel_path="outputs/review.md",
+        mime="text/markdown",
+        uri="artifact://md",
+    )
+    assert remaining_deliverables(["review"], [report]) == ["review"]
+
+
+def test_kind_review_pays_the_paper_review_debt() -> None:
+    review = SimpleNamespace(
+        kind="review",
+        title="NeurIPS review",
+        rel_path="outputs/review.md",
+        mime="text/markdown",
+        uri="artifact://review",
+    )
+    assert remaining_deliverables(["review"], [review]) == []
+
+
+def test_harvested_deck_does_not_pay_editable_figure() -> None:
+    deck = SimpleNamespace(
+        kind="slides",
+        title="deck",
+        rel_path="outputs/deck.pptx",
+        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        uri="artifact://deck",
+    )
+    assert remaining_deliverables(["artifact.pptx"], [deck]) == ["artifact.pptx"]
+    assert remaining_deliverables(["artifact.slides"], [deck]) == []
+
+
+def test_figure_kind_pptx_pays_editable_figure() -> None:
+    slide = SimpleNamespace(
+        kind="figure",
+        title="RAG architecture PPTX",
+        rel_path="outputs/rag.pptx",
+        format="pptx",
+        uri="artifact://live",
+    )
+    assert remaining_deliverables(["artifact.pptx"], [slide]) == []
+    assert remaining_deliverables(["artifact.figure"], [slide]) == []
+
+
+def test_harvested_deck_does_not_pay_format_neutral_figure() -> None:
+    deck = SimpleNamespace(
+        kind="slides",
+        title="deck",
+        rel_path="outputs/deck.pptx",
+        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        uri="artifact://deck",
+    )
+    assert remaining_deliverables(["artifact.figure"], [deck]) == ["artifact.figure"]
+
+
+def test_leftover_editable_titled_pptx_does_not_pay_figure() -> None:
+    leftover = SimpleNamespace(
+        kind="document",
+        title="editable figure",
+        rel_path="outputs/editable.pptx",
+        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        uri="artifact://edit",
+    )
+    assert remaining_deliverables(["artifact.figure"], [leftover]) == ["artifact.figure"]
+
+
+def test_livefigure_named_pptx_pays_format_neutral_figure() -> None:
+    slide = SimpleNamespace(
+        kind="file",
+        title="livefigure output",
+        rel_path="outputs/livefigure.pptx",
+        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        uri="artifact://lf",
+    )
+    assert remaining_deliverables(["artifact.figure"], [slide]) == []
+
+
+def test_failed_livefigure_keeps_editable_figure_debt() -> None:
+    record = ToolInvocationRecord(
+        name="run_skill",
+        arguments={"skill_name": "livefigure"},
+        result={"status": "error", "skill_name": "livefigure", "error": "dunder"},
+        status="succeeded",
+    )
+    assert failed_canonical_file_debts([record], []) == ["artifact.figure", "artifact.pptx"]
 
 
 def test_markdown_report_satisfies_manuscript() -> None:
@@ -229,6 +321,66 @@ def test_answer_only_proposal_still_binds_named_capabilities() -> None:
     assert not plan.tool_policy.allows("bash")
 
 
+def test_analysis_report_wording_binds_a_manuscript() -> None:
+    from omni.runtime.remaining import infer_analysis_report_outputs
+
+    prompt = (
+        "请仔细分析你的存储、记忆系统架构，对标codex 的源码"
+        "（源码目录 /Users/antonio/work/sourcecode ）实现"
+    )
+    assert infer_analysis_report_outputs(prompt) == ["draft.manuscript"]
+    assert infer_analysis_report_outputs("请仔细分析这段代码为什么报错") == []
+    assert infer_analysis_report_outputs("写一篇综述") == []
+    assert infer_analysis_report_outputs("请做一组会PPT对标一下") == []
+    assert infer_analysis_report_outputs(
+        "仔细review 今天 push 到master 上的代码，实现是对标了 codex 源码设计的。不做代码改动"
+    ) == []
+    assert infer_analysis_report_outputs(
+        "对当前未提交代再做一次整体的review，分析做了什么，"
+        "对标 codex、kimi-code 是否是最佳实践了，会引入什么新的问题？"
+    ) == []
+    assert infer_analysis_report_outputs(
+        "再整体review 最新的这4天的整个提交，分析功能，优化点，解决的问题，看是否有什么不合理的地方。"
+    ) == []
+
+
+def test_prior_task_status_is_not_a_new_produce_request() -> None:
+    from omni.runtime.remaining import (
+        utterance_asks_prior_task_status,
+        utterance_asks_written_survey,
+    )
+
+    assert utterance_asks_prior_task_status("刚才的审稿成功了吗？结果在哪里？")
+    assert utterance_asks_prior_task_status("这个任务的产物是什么")
+    assert not utterance_asks_prior_task_status(
+        "帮我调研如何利用隐空间干预的方式提升LLM的Agentic能力"
+    )
+    assert not utterance_asks_prior_task_status(
+        "对当前未提交代再做一次整体的review，分析做了什么，对标 codex、kimi-code"
+    )
+    assert utterance_asks_written_survey(
+        "帮我调研如何利用隐空间干预的方式提升LLM的Agentic能力"
+    )
+    assert not utterance_asks_written_survey(
+        "对当前未提交代再做一次整体的review，分析做了什么，对标 codex"
+    )
+
+
+def test_analysis_report_bind_unblocks_write_file() -> None:
+    from omni.agent.plan_factory import build_assistant_plan
+    from omni.runtime.remaining import bind_contract_outputs
+
+    plan = build_assistant_plan(
+        "请仔细分析你的存储、记忆系统架构，对标codex 的源码实现",
+        task_id="analysis-bind",
+        rationale="readonly analysis",
+    )
+    bound = bind_contract_outputs(plan)
+    assert "draft.manuscript" in bound.outputs
+    assert "draft.manuscript" in bound.verification_plan.required_outputs
+    assert bound.tool_policy.allows("write_file")
+
+
 def test_figure_and_paper_wording_binds_the_contract_without_capabilities() -> None:
     from omni.runtime.remaining import infer_figure_and_paper_outputs, infer_slide_outputs
 
@@ -252,6 +404,38 @@ def test_figure_and_paper_wording_binds_the_contract_without_capabilities() -> N
     ) == ["artifact.figure", "draft.manuscript"]
 
 
+def test_retrieve_window_binds_produce_debts_without_write() -> None:
+    from omni.agent.plan_factory import build_named_native_tool_plan
+    from omni.runtime.remaining import bind_contract_outputs
+
+    plan = build_named_native_tool_plan(
+        "调用 search_literature 再写一篇综述、画架构图、做一组会PPT。",
+        tool="search_literature",
+        task_id="x8-bind",
+    )
+    assert incoming_plan_is_retrieve_only(plan)
+    bound = bind_contract_outputs(plan)
+    assert not incoming_plan_is_retrieve_only(bound)
+    assert not bound.tool_policy.allows("write_file")
+    assert "artifact.figure" in bound.outputs
+    assert "artifact.slides" in bound.verification_plan.required_outputs
+
+
+def test_source_id_only_scope_skips_produce_inference() -> None:
+    from omni.agent.plan_factory import build_named_native_tool_plan
+    from omni.runtime.remaining import bind_contract_outputs
+
+    plan = build_named_native_tool_plan(
+        "调用 search_literature 再写一篇综述，只列出 source_id。",
+        tool="search_literature",
+        task_id="x8-ids",
+    )
+    bound = bind_contract_outputs(plan)
+    assert incoming_plan_is_retrieve_only(bound)
+    assert "artifact.figure" not in bound.outputs
+    assert not bound.tool_policy.allows("write_file")
+
+
 def test_skip_completed_skills_note_names_the_figure_and_the_paper_debt() -> None:
     from omni.runtime.remaining import skip_completed_skills_note
 
@@ -273,13 +457,41 @@ def test_host_remaining_summary_reports_missing_manuscript() -> None:
         "outputs": ["artifact.figure", "draft.manuscript"],
         "verification_plan": {"required_outputs": ["artifact.figure", "draft.manuscript"]},
     }
-    missing = _host_remaining_summary(plan, [("figure", "RAG architecture", "figures/rag.png")])
+    # Production tuples are (title, path, uri), not (kind, title, target).
+    missing = _host_remaining_summary(
+        plan,
+        [("RAG architecture", "figures/rag.png", "artifact://fig")],
+    )
     assert missing == "missing draft.manuscript"
     filled = _host_remaining_summary(
         plan,
         [
-            ("figure", "RAG architecture", "figures/rag.png"),
-            ("report", "Survey", "reports/survey.md"),
+            ("RAG architecture", "figures/rag.png", "artifact://fig"),
+            ("Survey", "reports/survey.md", "artifact://md"),
+        ],
+    )
+    assert filled == "all named deliverables present"
+
+
+def test_p01_host_remaining_clears_when_display_paths_pay_debts() -> None:
+    """P-01: figure + manuscript + slides on disk clear remaining in task show."""
+    from omni.cli.commands.tasks_cmd import _host_remaining_summary
+
+    plan = {
+        "outputs": ["artifact.figure", "draft.manuscript", "artifact.slides"],
+        "verification_plan": {
+            "required_outputs": ["artifact.figure", "draft.manuscript", "artifact.slides"],
+        },
+    }
+    assert _host_remaining_summary(plan, []) == (
+        "missing artifact.figure, draft.manuscript, artifact.slides"
+    )
+    filled = _host_remaining_summary(
+        plan,
+        [
+            ("RAG architecture", "/tmp/out/RAG.png", "artifact://fig"),
+            ("RAG survey", "/tmp/out/RAG系统综述.md", "artifact://md"),
+            ("RAG slides", "/tmp/out/deck.pptx", "artifact://pptx"),
         ],
     )
     assert filled == "all named deliverables present"

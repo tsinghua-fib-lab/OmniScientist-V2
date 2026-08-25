@@ -103,6 +103,10 @@ class ExecContext:
     # message*. ``schedule_task`` will not let an ungrounded host goal
     # (typically Active target) replace an open draft or the model's goal.
     deferred_goal: str = ""
+    # This-turn owner bans copied from the plan. Admission treats them as
+    # route facts so a configured service the user forbade still cannot start.
+    unavailable_services: frozenset[str] = field(default_factory=frozenset)
+    unavailable_skills: frozenset[str] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
         """Bind the host artifact store to this live execution context."""
@@ -140,6 +144,20 @@ class ExecContext:
         # ownership off whichever context it holds) to the derived context.
         derived.__post_init__()
         return derived
+
+    @property
+    def output_dir(self) -> Path:
+        """Host-owned outbox (``$OMNI_OUTPUT_DIR``). Staging, not the user path."""
+        from omni.skills_runtime.exec_io import durable_output_dir
+
+        return durable_output_dir(self)
+
+    @property
+    def scratch_dir(self) -> Path:
+        """Host-owned scratch (``$TMPDIR``). Sandbox-writable, outside ``$OMNI_HOME``."""
+        from omni.skills_runtime.exec_io import exec_tmp_dir
+
+        return exec_tmp_dir(self)
 
     def os_sandbox_prefix(self) -> tuple[str, ...]:
         """OS-level write-confinement argv prefix for subprocesses a skill spawns.

@@ -136,7 +136,7 @@ def test_project_config_cannot_self_trust_or_redirect_output(tmp_path):
     )
     s = load_settings(project="proj", trusted=True)
     assert s.trust.allow == []            # trust.* stripped from project layer
-    assert s.artifacts.output_dir == "."   # artifacts.output_dir stripped
+    assert s.artifacts.output_dir == "outputs"   # artifacts.output_dir stripped
 
 
 # ── gate decision (resolve_workspace_trust) ────────────────────────────────

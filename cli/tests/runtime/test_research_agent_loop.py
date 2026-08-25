@@ -62,6 +62,62 @@ def test_full_writing_debt_requires_claims() -> None:
     assert "empty_sources_for_writing" not in keys
 
 
+@pytest.mark.asyncio
+async def test_unmatched_tools_pair_by_call_id() -> None:
+    from omni.runtime.research_state import _unmatched_tool_starts
+
+    events = [
+        SimpleNamespace(
+            event_type="react.tool.start",
+            name="write_file",
+            tool_name="write_file",
+            step_id="c1",
+            input_json={"_call_id": "c1"},
+        ),
+        SimpleNamespace(
+            event_type="react.tool.start",
+            name="write_file",
+            tool_name="write_file",
+            step_id="c2",
+            input_json={"_call_id": "c2"},
+        ),
+        SimpleNamespace(
+            event_type="react.tool.done",
+            name="write_file",
+            tool_name="write_file",
+            step_id="c1",
+            input_json={"_call_id": "c1"},
+        ),
+    ]
+    tasks = SimpleNamespace(list_events=AsyncMock(return_value=events))
+    unmatched = await _unmatched_tool_starts(tasks, "task-1")
+    assert unmatched == ["write_file"]
+
+
+@pytest.mark.asyncio
+async def test_rejected_tool_is_not_unmatched() -> None:
+    from omni.runtime.research_state import _unmatched_tool_starts
+
+    events = [
+        SimpleNamespace(
+            event_type="react.tool.start",
+            name="list_dir",
+            tool_name="list_dir",
+            step_id="c2",
+            input_json={"_call_id": "c2", "path": "/Users/x/sourcecode"},
+        ),
+        SimpleNamespace(
+            event_type="react.tool.rejected",
+            name="list_dir",
+            tool_name="list_dir",
+            step_id="c2",
+            input_json={"_call_id": "c2"},
+        ),
+    ]
+    tasks = SimpleNamespace(list_events=AsyncMock(return_value=events))
+    assert await _unmatched_tool_starts(tasks, "task-1") == []
+
+
 def test_unmatched_tool_is_a_debt() -> None:
     state = TaskResearchState(
         task_id="task-1",

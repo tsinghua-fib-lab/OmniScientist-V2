@@ -19,7 +19,11 @@ from typing import Any
 from omni.agent.artifact_revision_router import ArtifactRevisionRouter
 from omni.agent.artifact_targets import ArtifactTargetResolver
 from omni.agent.capabilities import CAPABILITY_ARTIFACT_REVISE, CAPABILITY_TASK_INSPECT
-from omni.agent.conversation_store import ConversationStore, SessionDeleteOutcome
+from omni.agent.conversation_store import (
+    ConversationStore,
+    SessionDeleteOutcome,
+    SessionResolution,
+)
 from omni.agent.cost import react_usage_limits, record_cost_event
 from omni.agent.intent_plan import IntentPlan, IntentType
 from omni.agent.interaction_lifecycle import (
@@ -28,7 +32,7 @@ from omni.agent.interaction_lifecycle import (
     react_tool_policy,
     unblock_produce_tools,
 )
-from omni.agent.persona_stoma import load_base_role, load_turn_persona_overlay
+from omni.agent.persona_stoma import load_base_role
 from omni.agent.plan_executor import PlanExecutor
 from omni.agent.plan_fallthrough import (
     history_with_failed_attempt,
@@ -36,17 +40,13 @@ from omni.agent.plan_fallthrough import (
     policy_after_failed_route,
 )
 from omni.agent.plan_pipeline import PlanPipeline
-from omni.agent.plan_recovery import (
-    ACTION_NEEDS_INPUT,
-    react_context_block,
-)
+from omni.agent.plan_recovery import ACTION_NEEDS_INPUT
 from omni.agent.plan_revision import (
     ExecutionAuthority,
     create_execution_authority,
 )
 from omni.agent.plan_runner_utils import (
     approval_tools_for_plan,
-    assumption_block,
     emit_tool_event,
     loop_result_event,
     needs_input_text,
@@ -59,16 +59,23 @@ from omni.agent.reviewer import review_and_correct
 from omni.agent.schedule_goal import goal_grounded_in_message
 from omni.agent.scheduled_goal_runner import ScheduledGoalRunner
 from omni.agent.session_compactor import _COMPACT_THRESHOLD, SessionCompactor
+from omni.agent.session_lifecycle import SessionBatchDeleteOutcome, SessionLifecycleService
 from omni.agent.task_controller import TaskController
 from omni.agent.tool_surface import ToolSurfaceBuilder
 from omni.agent.turn_context import ContextSnapshot, TurnContextAssembler
-from omni.agent.turn_execution import TurnCompletion, TurnExecution, TurnResult
+from omni.agent.turn_execution import (
+    TurnCompletion,
+    TurnExecution,
+    TurnResult,
+    begin_turn_degradation,
+    note_turn_degradation,
+)
 from omni.agent.turn_memory import TurnMemory
+from omni.agent.turn_prompt import assemble_react_system_prompt
 from omni.channels.security import is_im_channel
 from omni.config.settings import (
     OmniSettings,
     microcompact_token_budget,
-    resolve_max_input_tokens,
     resolve_max_output_tokens,
     session_compact_token_budget,
 )
@@ -85,7 +92,6 @@ from omni.core.execution_control import ExecutionControl
 from omni.core.llm import LLMClient, create_llm_client
 from omni.core.observation import observation_spill_path
 from omni.core.react_agent import AgentLoopResult, ReActLoopAgent
-from omni.core.system_prompt import build_system_prompt
 from omni.core.timefmt import local_time_context
 from omni.core.tool_policy import (
     filter_tools_for_policy,
@@ -93,7 +99,7 @@ from omni.core.tool_policy import (
     policy_max_tool_calls,
 )
 from omni.core.vlm import VlmGateway
-from omni.memory.compiler import MemoryCompiler
+from omni.memory.compiler import CompiledMemoryContext, MemoryCompiler
 from omni.memory.files import load_curated_memory
 from omni.memory.notebook import read_recent
 from omni.memory.service import MemoryService, open_global_store
@@ -124,20 +130,32 @@ logger = logging.getLogger(__name__)
 
 
 def _artifact_mirror_dir(settings: OmniSettings) -> Path | None:
-    """Resolve where trusted-directory deliverables are mirrored, or ``None``.
+    """Resolve the single user-facing output folder.
 
-    ``settings.artifacts.mirror_outputs`` is the effective (trust-gated) switch
-    set in ``load_settings``. A relative ``output_dir`` resolves against the
-    directory omni was launched in (the process CWD), so "." means "put the
-    generated files in the folder where I ran omni".
+    Trusted launches write into ``artifacts.output_dir`` (default ``outputs/``
+    next to cwd). Untrusted / named home projects still get one findable folder
+    at ``<project_dir>/outputs`` rather than scattering into ``artifacts/<kind>``.
+    ``artifact://`` is not a directory — it is the SQLite id used to resolve
+    these files after they move.
     """
+    from omni.storage.artifacts import USER_OUTPUT_DIRNAME
+
     cfg = getattr(settings, "artifacts", None)
-    if cfg is None or not cfg.mirror_outputs:
+    if cfg is not None and cfg.mirror_outputs:
+        base = Path((cfg.output_dir or USER_OUTPUT_DIRNAME).strip()).expanduser()
+        if not base.is_absolute():
+            base = Path.cwd() / base
+        return base.resolve()
+    paths = getattr(settings, "paths", None)
+    if paths is None:
         return None
-    base = Path((cfg.output_dir or ".").strip()).expanduser()
-    if not base.is_absolute():
-        base = Path.cwd() / base
-    return base.resolve()
+    return (paths.project_dir / USER_OUTPUT_DIRNAME).resolve()
+
+
+def _bound_skill_names(plan: IntentPlan, registry: SkillRegistry, ctx: ExecContext) -> frozenset[str]:
+    from omni.agent.bound_skills import bound_skill_names, resolve_bound_skills
+
+    return bound_skill_names(resolve_bound_skills(plan, registry, ctx=ctx))
 
 
 def _react_on_token(plan: IntentPlan, on_token: Any) -> Any:
@@ -149,6 +167,9 @@ def _react_on_token(plan: IntentPlan, on_token: Any) -> Any:
 
 # Owner / CLI identity for memory isolation (see MemoryService.PRINCIPAL_OWNER).
 _PRINCIPAL_OWNER = "local"
+_PRINCIPAL_UNRESOLVED = "unresolved"
+_TRANSCRIPT_DEGRADED = "transcript write failed; this turn may not resume"
+_PRINCIPAL_DEGRADED = "session identity could not be resolved; memory was not injected"
 
 
 class OmniAgent:
@@ -184,6 +205,12 @@ class OmniAgent:
             project=self.paths.project_name,
             index=self._task_index,
             classify_conversational=settings.tasks.classify_conversational,
+        )
+        self.session_lifecycle = SessionLifecycleService(
+            self.db,
+            tasks=self.tasks,
+            conversations=self.conversations,
+            control_db=get_database(self.paths.control_db),
         )
         self.compactor = SessionCompactor(
             store=self.conversations,
@@ -268,6 +295,8 @@ class OmniAgent:
         # traverse ToolGateway, approval, hooks, and resource serialization.
         self._external_tools: list[Tool] = []
         self._external_tools_authoritative = False
+        # Cross-session hypothesis brief. Observation only; never a contract.
+        self.pending_thread_brief: str = ""
 
     @classmethod
     async def create(cls, settings: OmniSettings, *, notifier: Notifier | None = None) -> OmniAgent:
@@ -329,7 +358,7 @@ class OmniAgent:
     def _principal_of(self, channel: str, external_key: str) -> str:
         return self.conversations.principal_of(channel, external_key)
 
-    async def _principal_for_session(self, session_id: str) -> str:
+    async def _principal_for_session(self, session_id: str) -> str | None:
         return await self.conversations.principal_for_session(session_id)
 
     async def _recent_rows(self, session_id: str) -> list[ConversationMessageORM]:
@@ -361,12 +390,19 @@ class OmniAgent:
         """Flush durable facts, then fold older turns into one compaction summary."""
         return await self.compactor.compact(session_id, keep_last=keep_last, task_id=task_id)
 
-    async def _persist_message(self, session_id: str, role: str, content: str, **meta: Any) -> None:
-        await self.conversations.persist_message(session_id, role, content, **meta)
+    async def _persist_message(self, session_id: str, role: str, content: str, **meta: Any) -> bool:
+        wrote = await self.conversations.persist_message(session_id, role, content, **meta)
+        if not wrote:
+            note_turn_degradation(_TRANSCRIPT_DEGRADED)
+        return wrote
 
     async def list_sessions(self, *, limit: int = 30) -> list[tuple[SessionORM, int]]:
         """Sessions in this workspace, newest first, with message counts."""
         return await self.conversations.list_sessions(limit=limit)
+
+    async def resolve_session(self, session_id: str) -> SessionResolution:
+        """Resolve a session by exact id or unique prefix (within this workspace)."""
+        return await self.conversations.resolve_session(session_id)
 
     async def get_session(self, session_id: str) -> SessionORM | None:
         """Resolve a session by exact id or unique prefix (within this workspace)."""
@@ -397,59 +433,27 @@ class OmniAgent:
 
         A session is the transcript. Each turn is a Task keyed by
         ``tasks.session_id`` (a weak string, not an FK). Throwing the thread
-        away also removes those turns via :meth:`TaskRecorder.delete_tasks`
-        with ``force=True`` so completed / needs-input history does not linger
-        as orphans. Running or recovering work still blocks. Artifact *files*
-        survive, the same as ``/task rm``.
+        away also removes those turns through the atomic Session lifecycle so
+        completed / needs-input history does not linger as orphans. Running or
+        recovering work still blocks. Artifact *files* survive, the same as
+        ``/task rm``.
         """
-        row = await self.conversations.get_session(session_id)
-        if row is None:
-            return SessionDeleteOutcome(
-                session_id=session_id,
-                deleted=False,
-                code="not_found",
-                message=f"session not found: {session_id}",
-            )
-        sid = row.id
-        tasks = await self.tasks.list_tasks_for_session(sid)
-        deleted_ids: tuple[str, ...] = ()
-        if tasks:
-            outcome = await self.tasks.delete_tasks(
-                [task.id for task in tasks], force=True
-            )
-            if outcome.concurrent_write:
-                return SessionDeleteOutcome(
-                    session_id=sid,
-                    deleted=False,
-                    code="concurrent_write",
-                    message="session deletion could not reserve the workspace; retry after it settles",
-                )
-            if outcome.blocked_tasks or outcome.blocked_executions:
-                return SessionDeleteOutcome(
-                    session_id=sid,
-                    deleted=False,
-                    code="busy",
-                    message="session has active work; cancel or wait before deleting",
-                )
-            if outcome.missing_ids or outcome.protected_tasks:
-                return SessionDeleteOutcome(
-                    session_id=sid,
-                    deleted=False,
-                    code="busy",
-                    message="session tasks could not be deleted; nothing was removed",
-                )
-            deleted_ids = tuple(outcome.deleted_ids)
-        if not await self.conversations.delete_session(sid):
-            return SessionDeleteOutcome(
-                session_id=sid,
-                deleted=False,
-                deleted_task_ids=deleted_ids,
-                code="not_found",
-                message=f"session not found: {sid}",
-            )
+        outcome = await self.delete_sessions([session_id])
+        resolved = outcome.deleted_session_ids[0] if outcome.deleted_session_ids else session_id
         return SessionDeleteOutcome(
-            session_id=sid, deleted=True, deleted_task_ids=deleted_ids
+            session_id=resolved,
+            deleted=outcome.deleted,
+            deleted_task_ids=outcome.deleted_task_ids,
+            code=outcome.code,
+            message=outcome.message,
         )
+
+    async def delete_sessions(
+        self,
+        session_ids: list[str] | tuple[str, ...],
+    ) -> SessionBatchDeleteOutcome:
+        """Atomically delete several Sessions within this workspace."""
+        return await self.session_lifecycle.delete_many(session_ids)
 
     # ── exec context + tools ──
     def _make_ctx(
@@ -521,7 +525,7 @@ class OmniAgent:
                 channel=channel,
                 session_id=session_id,
                 principal=principal,
-                project_dir=str(self.paths.workspace_root or ""),
+                project_dir=str(self.paths.project_dir),
             )
         return ctx
 
@@ -859,13 +863,16 @@ class OmniAgent:
             channel,
             file_uris,
             task_id=plan.task_id,
-            principal=principal,
+            principal=principal or _PRINCIPAL_UNRESOLVED,
             execution_control=execution_control,
             origin=origin,
             user_message=user_message,
             deferred_goal=self._plan_deferred_goal(plan),
             receipt_time=receipt_time,
         )
+        from omni.skills_runtime.admission import apply_turn_constraints
+
+        apply_turn_constraints(ctx, plan)
         ctx.execution_authority = execution_authority
         if plan.intent_type == IntentType.MEMORY_UPDATE:
             policy_tools = []
@@ -916,6 +923,7 @@ class OmniAgent:
         from omni.runtime.cancel_persist import persist_scope
 
         async with persist_scope(self.db):
+            begin_turn_degradation()
             return await TurnExecution(
                 self.tasks, self.task_controller, self._persist_message
             ).run(
@@ -978,6 +986,8 @@ class OmniAgent:
             task_id, channel, workspace_auto=workspace_auto
         )
         principal = await self._principal_for_session(session_id)
+        if principal is None:
+            note_turn_degradation(_PRINCIPAL_DEGRADED)
         react_events = ToolGateway(
             task_id=task_id,
             tools=[],
@@ -987,7 +997,6 @@ class OmniAgent:
             hooks=self.hooks,
         )
         emit_tool_event = react_events.emit
-
         if not existing_task_id or is_continue_request(user_message):
             await self._persist_message(session_id, "user", user_message)
             if not existing_task_id:
@@ -1002,15 +1011,23 @@ class OmniAgent:
             channel=channel,
             user_message=user_message,
         )
-        planning_memory = await MemoryCompiler(self.memory).compile_for_planning(
-            query=user_message,
-            session_id=session_id,
-            token_budget=320,
-            principal=principal,
+        planning_memory = (
+            CompiledMemoryContext()
+            if principal is None
+            else await MemoryCompiler(self.memory).compile_for_planning(
+                query=user_message,
+                session_id=session_id,
+                token_budget=320,
+                principal=principal,
+            )
         )
         # Cross-session, principal-scoped continuity, computed once and reused by
         # the planner and the ReAct turn so references to prior work resolve.
-        recent_activity = await self._recent_activity_block(principal=principal)
+        recent_activity = (
+            ""
+            if principal is None
+            else await self._recent_activity_block(principal=principal)
+        )
         context_summary = "\n\n".join(
             part for part in (turn_context.to_planner_summary(), planning_memory.text) if part
         )
@@ -1245,13 +1262,16 @@ class OmniAgent:
             channel,
             file_uris,
             task_id=task_id,
-            principal=principal,
+            principal=principal or _PRINCIPAL_UNRESOLVED,
             execution_control=execution_control,
             origin=origin,
             user_message=user_message,
             deferred_goal=self._plan_deferred_goal(plan),
             receipt_time=receipt_time,
         )
+        from omni.skills_runtime.admission import apply_turn_constraints
+
+        apply_turn_constraints(ctx, plan)
         # Turn-scoped async multi-agent control plane (Codex ``AgentControl``
         # analog). Present only when async delegation is enabled; the async
         # spawn/wait/list/interrupt tools read it from ``ctx`` and it is joined or
@@ -1293,18 +1313,16 @@ class OmniAgent:
         tool_specs = react_gateway.tool_specs
         invoker = react_gateway.react_invoker()
 
-        compiled_memory = await MemoryCompiler(self.memory).compile_for_turn(
-            plan,
-            query=user_message,
-            session_id=session_id,
-            token_budget=700,
-            principal=principal,
-        )
-        memory_block = compiled_memory.text
-        skill_catalog = (
-            self.registry.react_skill_catalog(context_window_tokens=resolve_max_input_tokens(self.settings))
-            if plan.context_policy.include_skill_catalog and self.registry.list_all()
-            else ""
+        compiled_memory = (
+            CompiledMemoryContext()
+            if principal is None
+            else await MemoryCompiler(self.memory).compile_for_turn(
+                plan,
+                query=user_message,
+                session_id=session_id,
+                token_budget=700,
+                principal=principal,
+            )
         )
         fact_feed = LiveTaskResearchFeed(
             tasks=self.tasks,
@@ -1315,27 +1333,17 @@ class OmniAgent:
             resumed=bool(existing_task_id),
         )
         research_brief = await fact_feed.opening_snapshot()
-        domain_pack_brief = self._domain_pack_brief() if plan.context_policy.include_research_brief else ""
-        referenced = await self._referenced_task_context(user_message) if plan.context_policy.include_referenced_tasks else ""
-        turn_context_block = context_summary if plan.context_policy.include_referenced_tasks else ""
-        recent_activity_block = recent_activity if plan.context_policy.include_recent_activity else ""
-        recovery_block = react_context_block(recovery_react_notes)
-        assumptions = assumption_block(plan.missing_inputs)
-        clarification_block = await self._open_clarifications_block(ctx)
-        persona_overlay = load_turn_persona_overlay(self.paths, channel=ctx.channel)
-        system = build_system_prompt(
-            role=self._role, tools=tool_specs, persona_overlay=persona_overlay,
-            memory_block="\n\n".join(
-                x for x in (
-                    clarification_block, recovery_block, assumptions, turn_context_block, referenced,
-                    research_brief, domain_pack_brief, memory_block, skill_catalog,
-                ) if x
-            ),
-            project_memory=load_curated_memory(self.paths),
-            recent_activity=recent_activity_block,
-            project_name=self.paths.project_name,
-            notebook_summary=read_recent(self.paths.notebook, max_chars=800),
-            working_dir=ctx.working_dir,
+        system = await assemble_react_system_prompt(
+            self,
+            ctx=ctx,
+            plan=plan,
+            tool_specs=tool_specs,
+            memory_block=compiled_memory.text,
+            research_brief=research_brief,
+            recovery_react_notes=recovery_react_notes,
+            context_summary=context_summary,
+            recent_activity=recent_activity,
+            user_message=user_message,
         )
         history = history_with_failed_attempt(await self._history(session_id), direct_result)
 
@@ -1364,6 +1372,7 @@ class OmniAgent:
             shared_tool_budget=turn_tool_budget,
             require_opening_tool=plan.tool_policy.require_opening_tool,
             owes_scientific_outputs=plan_owes_scientific_outputs(plan),
+            bound_skills=_bound_skill_names(plan, self.registry, ctx),
             fact_feed=fact_feed,
             **react_usage_limits(self.settings, self.llm),
         )
@@ -1530,13 +1539,22 @@ class OmniAgent:
         blocks: dict[str, str] = {}
         if include_injected:
             principal = await self._principal_for_session(session_id)
-            recall = await self.memory.recall(
-                "", session_id=session_id, limit=8, principal=principal
+            recall = (
+                []
+                if principal is None
+                else await self.memory.recall(
+                    "", session_id=session_id, limit=8, principal=principal
+                )
+            )
+            recent = (
+                ""
+                if principal is None
+                else await self._recent_activity_block(principal=principal)
             )
             blocks = {
                 "project_memory": load_curated_memory(self.paths),
                 "recalled_memory": self.memory.build_recall_block(recall),
-                "recent_activity": await self._recent_activity_block(principal=principal),
+                "recent_activity": recent,
                 "research_brief": await self._research_brief(),
                 "notebook": read_recent(self.paths.notebook, max_chars=800),
             }

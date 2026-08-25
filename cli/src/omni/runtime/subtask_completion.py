@@ -21,7 +21,6 @@ from omni.runtime.task_results import (
 from omni.storage.db import Database
 from omni.storage.models import (
     ArtifactORM,
-    ConversationMessageORM,
     SessionORM,
     SubtaskORM,
     _utcnow,
@@ -29,7 +28,14 @@ from omni.storage.models import (
 
 logger = logging.getLogger(__name__)
 ExternalKey = Callable[[str], Awaitable[str]]
-PrincipalForSession = Callable[[str], Awaitable[str]]
+PrincipalForSession = Callable[[str], Awaitable[str | None]]
+
+
+def _usable_principal(principal: str | None) -> str | None:
+    text = str(principal or "").strip()
+    if not text or text == "unresolved":
+        return None
+    return text
 
 
 async def session_external_key(db: Database, session_id: str) -> str:
@@ -45,15 +51,28 @@ async def session_principal(
     db: Database,
     settings: Any,
     session_id: str,
-) -> str:
-    """Resolve the memory principal that owns a background completion."""
+) -> str | None:
+    """Resolve the memory principal that owns a background completion.
+
+    An empty id is the local CLI identity (no channel row to isolate). A
+    lookup exception or a missing row returns ``None`` so callers skip
+    memory, transcript, and focus write-back rather than guessing owner.
+    """
     identity = settings.memory.channel_identity
     if not session_id:
         return principal_of("cli", "", channel_identity=identity)
-    async with db.session() as session:
-        row = await session.get(SessionORM, session_id)
+    try:
+        async with db.session() as session:
+            row = await session.get(SessionORM, session_id)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "session.principal.lookup_failed session=%s",
+            session_id[:8],
+            exc_info=True,
+        )
+        return None
     if row is None:
-        return principal_of("cli", "", channel_identity=identity)
+        return None
     return principal_of(
         row.channel,
         row.external_key,
@@ -96,16 +115,17 @@ async def complete_subtask(
     summary = _result_summary(result)
     if memory is not None:
         try:
-            principal = await principal_for_session(session_id)
-            await memory.record(
-                layer=MemoryLayer.TASK,
-                scope="task",
-                scope_id=subtask_id,
-                summary=f"[{entry.name}] {summary}",
-                memory_type="task_result",
-                importance=0.6,
-                principal=principal,
-            )
+            principal = _usable_principal(await principal_for_session(session_id))
+            if principal is not None:
+                await memory.record(
+                    layer=MemoryLayer.TASK,
+                    scope="task",
+                    scope_id=subtask_id,
+                    summary=f"[{entry.name}] {summary}",
+                    memory_type="task_result",
+                    importance=0.6,
+                    principal=principal,
+                )
         except Exception:  # noqa: BLE001
             pass
     await write_back_result(
@@ -185,53 +205,57 @@ async def write_back_result(
                 await session.commit()
         except Exception:  # noqa: BLE001
             logger.debug("artifact attribution backfill failed", exc_info=True)
+    try:
+        principal = _usable_principal(await principal_for_session(session_id))
+    except Exception:  # noqa: BLE001
+        principal = None
     if persist_message:
-        content = task_result_message(
-            subtask_id,
-            skill_name,
-            summary,
-            artifacts,
-            task_id=task_id,
-        )
-        try:
-            async with db.session() as session:
-                session.add(
-                    ConversationMessageORM(
-                        session_id=session_id,
-                        role="assistant",
-                        content=content,
-                        content_type="task_result",
-                        name=skill_name,
-                        meta={
-                            "kind": "task_result",
-                            "task_id": task_id,
-                            "object_kind": "skill_execution",
-                            "object_id": subtask_id,
-                            "subtask_id": subtask_id,
-                            "skill": skill_name,
-                            "status": "succeeded",
-                            "artifacts": uris,
-                        },
-                    )
+        if principal is None:
+            logger.warning(
+                "task result write-back skipped: unresolved principal session=%s",
+                session_id[:8],
+            )
+        else:
+            content = task_result_message(
+                subtask_id,
+                skill_name,
+                summary,
+                artifacts,
+                task_id=task_id,
+            )
+            try:
+                from omni.agent.conversation_store import ConversationStore
+
+                store = ConversationStore(
+                    db,
+                    project_name=str(
+                        getattr(getattr(settings, "paths", None), "project_name", "")
+                        or "default"
+                    ),
+                    channel_identity=str(settings.memory.channel_identity),
                 )
-                row = (
-                    await session.execute(
-                        select(SessionORM).where(
-                            SessionORM.id == session_id
-                        )
-                    )
-                ).scalar_one_or_none()
-                if row is not None:
-                    row.updated_at = _utcnow()
-                await session.commit()
-        except Exception:  # noqa: BLE001
-            logger.debug("task result write-back failed", exc_info=True)
-    if memory is not None and artifacts:
+                await store.persist_message(
+                    session_id,
+                    "assistant",
+                    content,
+                    content_type="task_result",
+                    name=skill_name,
+                    kind="task_result",
+                    task_id=task_id,
+                    object_kind="skill_execution",
+                    object_id=subtask_id,
+                    subtask_id=subtask_id,
+                    skill=skill_name,
+                    status="succeeded",
+                    artifacts=uris,
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("task result write-back failed", exc_info=True)
+    if memory is not None and artifacts and principal is not None:
         labels = ", ".join(
             item.get("label") or "artifact" for item in artifacts[:6]
         )
         try:
-            principal = await principal_for_session(session_id)
             await memory.record(
                 layer=MemoryLayer.ARTIFACT,
                 scope="task",
@@ -245,6 +269,8 @@ async def write_back_result(
             )
         except Exception:  # noqa: BLE001
             pass
+    if principal is None:
+        return
     try:
         await SessionFocusService(db, settings.paths).record_skill_execution_result(
             session_id=session_id,

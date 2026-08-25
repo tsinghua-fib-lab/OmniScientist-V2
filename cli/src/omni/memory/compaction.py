@@ -223,8 +223,36 @@ async def summarize_messages(
     return redact_secrets(_heuristic_summary(convo))[:max_chars]
 
 
+def _flatten_user_asks(convo: list[dict[str, Any]]) -> list[str]:
+    """Lift nested compaction-bridge bullets so a second fold keeps them."""
+    asks: list[str] = []
+    for message in convo:
+        if message.get("role") != "user":
+            continue
+        text = str(message.get("content") or "").strip()
+        if not text:
+            continue
+        if text.startswith("[Earlier conversation summary]"):
+            nested: list[str] = []
+            in_requests = False
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped == "User requests:":
+                    in_requests = True
+                    continue
+                if in_requests and stripped.startswith("- "):
+                    nested.append(stripped[2:].strip())
+                    continue
+                if in_requests and stripped:
+                    in_requests = False
+            asks.extend(nested or [text])
+            continue
+        asks.append(text)
+    return asks
+
+
 def _heuristic_summary(convo: list[dict[str, Any]]) -> str:
-    user_asks = [str(m["content"]).strip() for m in convo if m.get("role") == "user"]
+    user_asks = _flatten_user_asks(convo)
     last_asst = next(
         (str(m["content"]) for m in reversed(convo) if m.get("role") == "assistant"), ""
     )

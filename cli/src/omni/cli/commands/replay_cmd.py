@@ -20,17 +20,17 @@ def replay_command(
     async def _run():
         agent = await make_agent(state)
         try:
-            sess = await agent.get_session(session)
-            if sess is None:
-                return None, []
-            msgs = await agent.session_messages(sess.id)
-            return sess, msgs
+            resolution = await agent.resolve_session(session)
+            if resolution.status != "ok" or resolution.row is None:
+                return None, [], resolution.error_message(session)
+            msgs = await agent.session_messages(resolution.row.id)
+            return resolution.row, msgs, ""
         finally:
             await agent.aclose()
 
-    sess, msgs = run_async(_run())
+    sess, msgs, message = run_async(_run())
     if sess is None:
-        error(f"Session {session} was not found.")
+        error(message or f"Session {session} was not found.")
         raise typer.Exit(1)
     title = sess.title or "(untitled)"
     info(f"Session {sess.id[:8]} · {sess.channel} · {title} · {len(msgs)} messages")

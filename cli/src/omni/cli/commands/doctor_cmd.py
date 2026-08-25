@@ -276,7 +276,7 @@ def doctor(ctx: typer.Context) -> None:
         if not missing and not invalid:
             detail = (
                 f"{vlm.model} @ {vlm.endpoint} ({vlm.protocol}; key set; "
-                "verify with `omni config vlm --test`)"
+                "verify with `omni config test` or `omni config vlm --test`)"
             )
         else:
             detail = invalid or "missing " + ", ".join(missing) + "; run `omni config vlm`"

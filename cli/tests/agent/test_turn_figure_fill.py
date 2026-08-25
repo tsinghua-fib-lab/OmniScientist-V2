@@ -1,7 +1,8 @@
-"""Host figure fill runs scientific-figure when this task still owes a figure.
+"""Host figure fill runs the admitted figure provider when this task still owes a figure.
 
 Sibling-task PNGs are not in ``list_by_task(this_id)``, so they cannot skip the
-fill. A figure already owned by this task_id must not be regenerated.
+fill. A figure already owned by this task_id must not be regenerated. A
+model-invented ``.dot`` is not passed unless scientific-figure was explicit.
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ def _completion(*, artifacts: Any, runtime: Any, registry: Any = None) -> TurnCo
 
 
 @pytest.mark.asyncio
-async def test_owed_figure_without_authored_dot_is_not_invented() -> None:
+async def test_owed_figure_without_authored_dot_uses_resolved_skill() -> None:
     runtime = SimpleNamespace(
         enqueue=AsyncMock(return_value="sub-figure-1"),
         process=AsyncMock(),
@@ -73,9 +74,11 @@ async def test_owed_figure_without_authored_dot_is_not_invented() -> None:
         _plan(), result, drained, task_id=_plan().task_id, session_id="s1"
     )
 
-    runtime.enqueue.assert_not_called()
-    assert notes == []
-    assert drained == []
+    runtime.enqueue.assert_awaited_once()
+    assert runtime.enqueue.await_args.args[0] == "scientific-figure"
+    assert "source_artifact_path" not in runtime.enqueue.await_args.args[1]
+    assert notes
+    assert drained
 
 
 @pytest.mark.asyncio
@@ -127,7 +130,7 @@ async def test_other_task_files_are_not_in_this_task_inventory() -> None:
         session_id="s1",
     )
 
-    runtime.enqueue.assert_not_called()
+    runtime.enqueue.assert_awaited()
 
 
 def test_unrendered_authored_dot_skips_skill_sidecar_and_keeps_custom() -> None:
@@ -143,7 +146,7 @@ def test_unrendered_authored_dot_skips_skill_sidecar_and_keeps_custom() -> None:
 
 
 @pytest.mark.asyncio
-async def test_host_fill_passes_unrendered_dot_to_the_figure_skill() -> None:
+async def test_host_fill_does_not_pass_model_invented_dot_for_unspecified_figure() -> None:
     runtime = SimpleNamespace(
         enqueue=AsyncMock(return_value="sub-authored"),
         process=AsyncMock(),
@@ -174,4 +177,4 @@ async def test_host_fill_passes_unrendered_dot_to_the_figure_skill() -> None:
     runtime.enqueue.assert_awaited_once()
     assert runtime.enqueue.await_args.kwargs["task_id"] == _plan().task_id
     params = runtime.enqueue.await_args.args[1]
-    assert params["source_artifact_path"] == "figures/agent-loop-engineering-architecture.dot"
+    assert "source_artifact_path" not in params

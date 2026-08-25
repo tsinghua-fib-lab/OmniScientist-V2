@@ -57,6 +57,23 @@ async def test_search_and_get_task_return_typed_linked_outputs() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_task_refuses_the_in_flight_task() -> None:
+    agent = await OmniAgent.create(load_settings())
+    run = await _historical_run(agent)
+    session_id = await agent.ensure_session(channel="cli")
+    ctx = agent._make_ctx(session_id, "cli", None, task_id=run.id, principal="local")
+    tools = {tool.spec.name: tool for tool in build_recall_tools(ctx)}
+    try:
+        detail = await tools["get_task"].handler({"task_id": f"task:{run.id}"})
+        prefix = await tools["get_task"].handler({"task_id": run.id[:8]})
+    finally:
+        await agent.aclose()
+
+    assert detail["error"] == "cannot inspect the in-flight task"
+    assert prefix["error"] == "cannot inspect the in-flight task"
+
+
+@pytest.mark.asyncio
 async def test_human_title_followup_converges_after_search_and_get() -> None:
     agent = await OmniAgent.create(load_settings())
     run = await _historical_run(agent)
@@ -250,7 +267,8 @@ async def test_task_inspect_projects_degraded_status_instead_of_model_claim() ->
     assert "已经成功完成" not in turn.text
     assert streamed == []
     assert str(artifact.path) in turn.text
-    assert artifact.uri in turn.text
+    # User surfaces show the filesystem path, not the internal artifact:// handle.
+    assert artifact.uri not in turn.text
 
 
 @pytest.mark.asyncio

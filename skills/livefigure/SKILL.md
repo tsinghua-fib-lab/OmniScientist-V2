@@ -1,6 +1,6 @@
 ---
 name: livefigure
-description: Prefer this skill for architecture, system, and workflow diagrams as one editable PPTX. Requires owner VLM (`omni config vlm`). Fall back to scientific-figure only if VLM is unavailable or the user wants DOT/SVG/PNG. Do not use for complete multi-slide decks (research-pptx).
+description: One editable single-slide PPTX figure. Use when the user names livefigure or asks for an editable PowerPoint figure. Requires owner VLM (`omni config vlm`). Ordinary architecture / system diagrams are scientific-figure (SVG/PNG). Do not use for complete multi-slide decks (research-pptx).
 license: Apache-2.0
 metadata:
   helixforge:
@@ -11,7 +11,7 @@ metadata:
     role: task
     research_contract: portable_provenance_v1
     status: stable
-    priority: 110
+    priority: 60
     delivery_mode: async_task
     kind: python_engine
     execution:
@@ -22,14 +22,18 @@ metadata:
       dependency_setup_command: 'uv pip install "./cli[livefigure]" --python .venv'
       dependency_error_code: runtime_dependency_missing
     capabilities:
+      - artifact.figure
+      - figure.architecture
       - figure.editable.pptx
       - artifact.pptx
       - figure.livefigure
       - figure.editable
     default_for:
-      - architecture diagram
-      - system diagram
+      - editable PPTX figure
+      - one-slide editable figure
+      - LiveFigure
     deliverables:
+      - artifact.figure
       - artifact.pptx
     engine:
       module: engine
@@ -76,14 +80,11 @@ metadata:
     trigger:
       phrases:
         - LiveFigure
-        - architecture diagram
-        - system diagram
-        - workflow schematic
-        - flowchart
         - single editable PPTX
         - editable PPTX scientific figure
         - one-slide editable scientific figure
-      when_to_use: "Prefer livefigure for architecture, system, workflow, and schematic figures. Requires configured VLM (`omni config vlm`). Use scientific-figure only as fallback for Graphviz DOT/SVG/PNG, topology revision via source_artifact_dot, or when VLM is not configured. Use research-pptx for a complete or multi-slide deck."
+      when_to_use: "Use for a user-named livefigure or an editable single-slide PPTX. Requires configured VLM (`omni config vlm`). Ordinary figures and architecture diagrams are scientific-figure."
+      when_not_to_use: "Ordinary figure, architecture, flowchart, or schematic (scientific-figure). Multi-slide decks (research-pptx). If this skill is named and VLM is missing, stop — do not switch to Graphviz."
     notification:
       display_label: "LiveFigure PPTX"
       title_field: "title"
@@ -95,11 +96,18 @@ metadata:
 
 # LiveFigure
 
-Prefer this skill over `scientific-figure` for architecture, system, workflow,
-and schematic figures. The deliverable is one editable single-slide PPTX.
-`scientific-figure` is the fallback when the owner has not configured a VLM,
-or when the user asked for Graphviz DOT/SVG/PNG. Use `research-pptx` for a
-complete multi-slide deck. This skill does not claim `artifact.figure`.
+Editable single-slide PPTX figure. Use this skill when the user names
+`livefigure` or asks for an editable PowerPoint / one-slide PPTX figure.
+
+The deliverable is one editable single-slide PPTX. A configured owner VLM is
+required (`omni config vlm`). A successful PPTX can pay `artifact.figure`, but
+this is not the default drawing skill — ordinary architecture and system
+diagrams are `scientific-figure` (SVG/PNG). Pass natural-language input only.
+
+When not to use: a complete multi-slide deck (`research-pptx`), or an ordinary
+figure / Graphviz / SVG-only / PNG-only request (`scientific-figure`). If the
+user named this skill and VLM is missing, stop and configure VLM; do not
+silently switch to Graphviz.
 
 Generate one editable PPTX figure from a research requirement. The default
 one-pass workflow asks an OpenAI-compatible multimodal model for constrained
@@ -136,6 +144,16 @@ directory. LiveFigure never downloads a remote reference.
 The result contains the editable PPTX, the generated Python source, the input
 record, and (when requested) the reference image. Do not claim PNG preview or
 post-generation visual evaluation.
+
+## Recovery
+
+- There is no `livefigure/sandbox_runner.py`. Do not invent skill-source paths
+  after a failure.
+- Do not bash-write a leftover PPTX under `$OMNI_OUTPUT_DIR` as a substitute
+  for this skill. Ask for `omni config vlm` when this skill was named.
+- Under Omni the generated-code cwd is host scratch (`$TMPDIR`), not
+  `~/.omni/.../artifacts`. The user-visible file is the path `put_file`
+  returns under `outputs/<title>_<task8>/`.
 
 ## External agent portability
 

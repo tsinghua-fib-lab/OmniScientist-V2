@@ -17,7 +17,7 @@ from sqlalchemy import select
 from omni.agent.orchestrator import OmniAgent
 from omni.config import load_settings
 from omni.memory.service import MemoryLayer
-from omni.storage.models import MemoryEntryORM, SubtaskORM
+from omni.storage.models import ConversationMessageORM, MemoryEntryORM, SubtaskORM
 
 
 async def _make_agent():
@@ -112,3 +112,68 @@ async def test_owner_cannot_recall_peer_task_artifact_memory():
         assert "demo-skill" not in labels(owner_hits), "owner must NOT see the peer's artifact memory (leak)"
     finally:
         await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_write_back_skips_when_session_is_gone():
+    agent = await _make_agent()
+    try:
+        await agent.runtime._write_back_result(  # noqa: SLF001
+            "missing-session-id",
+            "sub-gone",
+            "demo-skill",
+            "produced a figure",
+            {"summary": "produced a figure", "artifacts": [{"uri": "artifact://gone", "label": "figure"}]},
+        )
+        async with agent.runtime._db.session() as session:
+            messages = list(
+                (
+                    await session.execute(
+                        select(ConversationMessageORM).where(
+                            ConversationMessageORM.session_id == "missing-session-id"
+                        )
+                    )
+                ).scalars().all()
+            )
+            memories = list(
+                (
+                    await session.execute(
+                        select(MemoryEntryORM).where(MemoryEntryORM.scope_id == "sub-gone")
+                    )
+                ).scalars().all()
+            )
+        assert messages == []
+        assert memories == []
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_memory_update_skips_unresolved_principal():
+    from omni.agent.intent_plan import IntentPlan, IntentType
+    from omni.agent.plan_executor import PlanExecutor
+
+    recorded: list[dict] = []
+
+    class Mem:
+        async def record(self, **kwargs):  # noqa: ANN003
+            recorded.append(kwargs)
+            return "mid"
+
+    class Tasks:
+        async def append_event(self, *_args: object, **_kwargs: object) -> object:
+            return object()
+
+    executor = PlanExecutor(runtime=None, tasks=Tasks(), registry=None, memory=Mem())
+    plan = IntentPlan(
+        task_id="t",
+        user_message="remember this",
+        intent_type=IntentType.MEMORY_UPDATE,
+        capability_inputs={"memory.update": {"content": "I prefer APA citations"}},
+    )
+    result = await executor._memory_update(  # noqa: SLF001
+        plan, ctx=SimpleNamespace(principal="unresolved", task_id="t")
+    )
+    assert recorded == []
+    assert result.kind == "error"
+    assert result.terminated_reason == "unresolved_principal"

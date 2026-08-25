@@ -26,8 +26,8 @@ async def build_thread_brief(store: ResearchStore, hyp_id: str) -> str | None:
     hyp = await store.get_hypothesis(hyp_id)
     if hyp is None:
         return None
-    claims = [c for c in await store.list_claims(limit=500) if c.hypothesis_id == hyp.id]
-    runs = [r for r in await store.list_runs(limit=200) if r.hypothesis_id == hyp.id]
+    claims = await store.list_claims(limit=500, hypothesis_id=hyp.id)
+    runs = await store.list_runs(limit=200, hypothesis_id=hyp.id)
     sessions = sorted(
         {c.session_id for c in claims if c.session_id}
         | {r.session_id for r in runs if r.session_id}
@@ -57,8 +57,8 @@ async def latest_thread_session(store: ResearchStore, hyp_id: str) -> str | None
     hyp = await store.get_hypothesis(hyp_id)
     if hyp is None:
         return None
-    claims = [c for c in await store.list_claims(limit=500) if c.hypothesis_id == hyp.id]
-    runs = [r for r in await store.list_runs(limit=200) if r.hypothesis_id == hyp.id]
+    claims = await store.list_claims(limit=500, hypothesis_id=hyp.id)
+    runs = await store.list_runs(limit=200, hypothesis_id=hyp.id)
     items: list[tuple[datetime, str]] = []
     for c in claims:
         if c.session_id:

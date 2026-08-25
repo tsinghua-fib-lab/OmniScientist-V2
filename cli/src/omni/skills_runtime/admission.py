@@ -5,17 +5,26 @@ an observation. Codex treats failed tools the same way: feed the result back
 and keep looping. Conversational ``action_required`` values that ask the user
 to confirm something (``action: confirm_*``) stay a suspend.
 
+Turn-level user constraints (a forbidden host service or named skill) are the
+same kind of fact: the skill cannot start *this turn*, even when the host
+service is configured. Callers decide whether an empty consume path for a
+bound deliverable ends the turn.
+
 Preflight still refuses to start work that cannot run. Callers decide whether
 that refusal ends the turn; this module only names the fact.
 """
 
 from __future__ import annotations
 
+import re
 import shutil
 import sys
+from dataclasses import dataclass
 from typing import Any
 
 from omni.skills_runtime.manifest import SkillEntry, SkillKind
+
+_CONSTRAINT_TOKEN = re.compile(r"^[a-z][a-z0-9._-]*$")
 
 # ``python``/``python3`` are satisfied by the interpreter already running omni,
 # so a declared interpreter requirement never blocks on PATH-name quirks.
@@ -23,6 +32,9 @@ _INTERPRETER_ALIASES = frozenset({"python", "python3"})
 
 _SERVICE_LABELS = {
     "vlm": "vision model (VLM)",
+}
+_SERVICE_SETUP = {
+    "vlm": "omni config vlm",
 }
 
 # Map a declared service name to the object on the exec context that reports
@@ -88,17 +100,126 @@ def host_services_from_ctx(ctx: Any) -> dict[str, Any]:
     return services
 
 
+@dataclass(frozen=True, slots=True)
+class TurnConstraints:
+    """Services and skills the owner ruled out for this turn only."""
+
+    unavailable_services: frozenset[str] = frozenset()
+    unavailable_skills: frozenset[str] = frozenset()
+
+    def __bool__(self) -> bool:
+        return bool(self.unavailable_services or self.unavailable_skills)
+
+
+def normalize_constraint_token(value: Any) -> str:
+    token = str(value or "").strip().casefold().replace(" ", "-")
+    if not token or len(token) > 64 or not _CONSTRAINT_TOKEN.fullmatch(token):
+        return ""
+    return token
+
+
+def normalize_constraint_names(values: Any) -> frozenset[str]:
+    names: list[str] = []
+    if isinstance(values, (list, tuple, set, frozenset)):
+        items = values
+    elif values:
+        items = [values]
+    else:
+        items = []
+    for item in items:
+        token = normalize_constraint_token(item)
+        if token and token not in names:
+            names.append(token)
+    return frozenset(names)
+
+
+def turn_constraints_from(obj: Any) -> TurnConstraints:
+    """Read turn constraints from a plan, proposal, or exec context."""
+    if isinstance(obj, TurnConstraints):
+        return obj
+    if obj is None:
+        return TurnConstraints()
+    return TurnConstraints(
+        unavailable_services=normalize_constraint_names(
+            getattr(obj, "unavailable_services", None)
+        ),
+        unavailable_skills=normalize_constraint_names(
+            getattr(obj, "unavailable_skills", None)
+        ),
+    )
+
+
+def apply_turn_constraints(ctx: Any, source: Any) -> None:
+    """Copy plan/proposal constraints onto the live exec context."""
+    constraints = turn_constraints_from(source)
+    ctx.unavailable_services = constraints.unavailable_services
+    ctx.unavailable_skills = constraints.unavailable_skills
+
+
+def constraint_admission(
+    entry: SkillEntry,
+    constraints: TurnConstraints | None,
+) -> dict[str, Any] | None:
+    """Reject when this turn forbids the skill or a service it requires."""
+    banned = constraints or TurnConstraints()
+    skill = normalize_constraint_token(entry.name)
+    if skill and skill in banned.unavailable_skills:
+        return _admission_payload(
+            entry,
+            summary=f"{entry.name} cannot run: the user ruled it out this turn.",
+            error=(
+                f"{entry.name} is unavailable this turn because the user "
+                f"forbade that skill. Do not retry {entry.name}."
+            ),
+            action={"kind": "configure", "skill": entry.name},
+            command="",
+            code="skill_unavailable_this_turn",
+        )
+    for service in entry.requires_services:
+        name = normalize_constraint_token(service)
+        if name and name in banned.unavailable_services:
+            label = service_label(service)
+            setup = _SERVICE_SETUP.get(name, "")
+            error = f"{label} is unavailable this turn because the user forbade it."
+            if setup:
+                error += (
+                    f" Run `{setup}` with a different provider, or drop the "
+                    "deliverable that requires it."
+                )
+            error += f" Do not retry {entry.name}."
+            return _admission_payload(
+                entry,
+                summary=f"{entry.name} cannot run: {label} is unavailable this turn.",
+                error=error,
+                action={
+                    "kind": "configure",
+                    "service": name,
+                    "command": setup,
+                },
+                command=setup,
+                code=f"{name}_unavailable_this_turn",
+            )
+    return None
+
+
 def skill_admission_rejection(
     entry: SkillEntry,
     *,
     services: dict[str, Any] | None = None,
     ctx: Any | None = None,
+    constraints: TurnConstraints | None = None,
 ) -> dict[str, Any] | None:
     """First host-known reason this skill cannot start, or ``None``.
 
     Binary gates apply to ``cli_exec`` only (same as the executor). Module and
-    service gates apply to every kind.
+    service gates apply to every kind. Turn constraints, when present, win
+    before host-service probes so a configured service the user forbade is
+    still unavailable.
     """
+    banned = constraints if constraints is not None else turn_constraints_from(ctx)
+    unmet_constraint = constraint_admission(entry, banned)
+    if unmet_constraint is not None:
+        return unmet_constraint
     if entry.kind == SkillKind.CLI_EXEC:
         unmet_binary = binary_admission(entry)
         if unmet_binary is not None:

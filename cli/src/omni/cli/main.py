@@ -124,6 +124,7 @@ from omni.core.execution_control import CancellationEscalator
 from omni.core.file_mentions import resolve_turn_attachments
 from omni.runtime import update_check
 from omni.runtime.daemon import daemon_info, is_daemon_running
+from omni.runtime.logging_config import rotation_limits
 from omni.runtime.memory_maintenance import spawn_maintenance_drain
 from omni.runtime.presentation import turn_presentation_from_result
 
@@ -668,7 +669,11 @@ def main(
     ui: str = typer.Option(None, "--ui", help="Interactive UI: auto, tui (inline dock), or classic."),
     cont: bool = typer.Option(False, "--continue", "-c", help="Continue the latest workspace session."),
     trust: bool = typer.Option(None, "--trust/--no-trust", help="Trust (or refuse) the current directory without prompting."),
-    out: str = typer.Option(None, "--out", help="Directory for generated files (default: the launch directory)."),
+    out: str = typer.Option(
+        None,
+        "--out",
+        help="Directory for generated files (default: outputs/ next to the launch directory).",
+    ),
     debug: bool = typer.Option(False, "--debug", help="Reveal the L4 diagnostic layer (raw args/results, protocol labels, internals)."),
     version: bool = typer.Option(None, "--version", "-V", callback=_version_callback, is_eager=True),
 ) -> None:
@@ -758,8 +763,8 @@ def why_cmd(
 
 async def _latest_session_id(agent, session: str = "") -> str:  # noqa: ANN001
     if session:
-        row = await agent.get_session(session)
-        return row.id if row is not None else ""
+        resolution = await agent.resolve_session(session)
+        return resolution.row.id if resolution.status == "ok" and resolution.row is not None else ""
     rows = await agent.list_sessions(limit=1)
     return rows[0][0].id if rows else ""
 
@@ -2015,22 +2020,28 @@ async def _repl_async(state: AppState, *, resume_session_id: str | None = None) 
         session_id = resume_session_id
     else:
         session_id = await agent.ensure_session(channel="cli", reuse_latest=False)
+    if state.resume_thread_brief:
+        agent.pending_thread_brief = state.resume_thread_brief
     input_guard = _TerminalInputGuard()
     # One catalog (command names + subcommands + options) drives completion on both
     # interactive surfaces, so the menu, the dispatcher, and /help stay in sync.
     commands: CommandCatalog = build_command_catalog(app)
-    # Where omni writes deliverables. Its per-kind subfolders (``figures/`` …)
-    # stay mentionable even when the repository gitignores them, which projects
-    # routinely do precisely because those files are generated.
-    output_base = Path(str(getattr(s.artifacts, "output_dir", ".") or ".")).expanduser()
+    # Where omni writes deliverables. ``outputs/`` and leftover per-kind
+    # siblings stay mentionable even when the repository gitignores them.
+    output_base = Path(
+        str(getattr(s.artifacts, "output_dir", "outputs") or "outputs")
+    ).expanduser()
     # xterm modifyOtherKeys readiness — not a Kitty CSI-u probe. Footer and
     # placeholder advertise Shift+Enter only when this report says they work.
     shift_enter_ready = inspect_terminal().shift_enter_ready
     tui: ReplTui | None = None
     if resolve_ui_mode(str(getattr(s.display, "ui_mode", "auto") or "auto")) == "tui":
+        log_max_bytes, log_files = rotation_limits(s)
         candidate = ReplTui(
             commands=commands,
             diagnostic_log_path=agent.paths.logs_dir / "omni-tui.log",
+            diagnostic_max_bytes=log_max_bytes,
+            diagnostic_files=log_files,
             output_base=output_base,
             shift_enter_ready=shift_enter_ready,
         )
@@ -2856,6 +2867,7 @@ async def _repl_command(
             before = await agent.context_snapshot(session_id, include_injected=False)
             info("Queueing durable memory and starting a clean context...")
             await agent.enqueue_session_maintenance(session_id)
+            _clear_thread_brief(agent, state)
             session_id = await agent.ensure_session(channel="cli", reuse_latest=False)
             if not clear_active_output():
                 console.clear()
@@ -2866,6 +2878,7 @@ async def _repl_command(
             info("Previous history, tasks, artifacts, research records, and durable memory remain available.")
     elif cmd == "/new":
         await agent.enqueue_session_maintenance(session_id)
+        _clear_thread_brief(agent, state)
         session_id = await agent.ensure_session(channel="cli", reuse_latest=False)
         info("Started a new session.")
     elif cmd == "/resume":
@@ -3147,6 +3160,7 @@ async def _repl_resume(
     except ValueError:
         warn("Could not parse /resume arguments; check quotation marks.")
         return session_id
+    keep_thread_brief = False
     if tokens and tokens[0] in {"help", "--help", "-h"}:
         await _run_repl_external_command(state, "/resume help")
         return session_id
@@ -3156,12 +3170,22 @@ async def _repl_resume(
             return session_id
         from omni.cli.commands.resume_cmd import _thread_resume
 
-        brief, thread_session = await _thread_resume(state, tokens[1])
+        brief, thread_session, ambiguous = await _thread_resume(state, tokens[1])
+        if ambiguous:
+            shown = ", ".join(item[:8] for item in ambiguous[:6])
+            extra = f" +{len(ambiguous) - 6}" if len(ambiguous) > 6 else ""
+            warn(
+                f"Research thread prefix {tokens[1]} is ambiguous ({shown}{extra}). "
+                "Pass a longer id."
+            )
+            return session_id
         if brief is None:
             warn(f"Research thread (hypothesis) {tokens[1]} was not found.")
             return session_id
         console.print(brief)
         console.rule(style="cyan")
+        _bind_thread_brief(agent, state, brief)
+        keep_thread_brief = True
         if thread_session is None:
             await agent.enqueue_session_maintenance(session_id)
             session_id = await agent.ensure_session(channel="cli", reuse_latest=False)
@@ -3172,6 +3196,8 @@ async def _repl_resume(
         await _run_repl_external_command(state, "/resume " + arg)
         return session_id
 
+    if not keep_thread_brief:
+        _clear_thread_brief(agent, state)
     rows = await agent.list_sessions(limit=30)
     if not rows:
         info("This workspace has no previous sessions.")
@@ -3215,12 +3241,27 @@ async def _repl_resume(
             return session_id
         sid = rows[idx - 1][0].id
     else:
-        sess = await agent.get_session(target)
-        if sess is None:
-            warn(f"Session {target} was not found.")
+        resolution = await agent.resolve_session(target)
+        if resolution.status != "ok" or resolution.row is None:
+            warn(resolution.error_message(target))
             return session_id
-        sid = sess.id
+        sid = resolution.row.id
     return await _bind_resumed_session(agent, sid)
+
+
+def _clear_thread_brief(agent, state: AppState) -> None:  # noqa: ANN001
+    """Drop a previously injected hypothesis brief from this REPL."""
+    agent.pending_thread_brief = ""
+    state.resume_thread_brief = ""
+
+
+def _bind_thread_brief(agent, state: AppState, brief: str) -> None:  # noqa: ANN001
+    text = (
+        "[Research thread — observation only; prior claims do not settle "
+        "this task.]\n" + brief
+    )
+    agent.pending_thread_brief = text
+    state.resume_thread_brief = text
 
 
 async def _bind_resumed_session(agent, session_id: str) -> str:  # noqa: ANN001

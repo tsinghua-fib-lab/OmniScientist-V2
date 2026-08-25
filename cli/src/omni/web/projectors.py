@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ from omni.storage.models import (
     MESSAGE_ORDER_DESC,
     ArtifactORM,
     ConversationMessageORM,
+    SessionORM,
     SubtaskORM,
     TaskEventORM,
     TaskORM,
@@ -200,12 +202,19 @@ async def get_session(
     hub: WorkspaceHub | None = None,
     rec: OpenedWorkspace | None = None,
 ) -> dict[str, Any]:
-    row = await agent.get_session(session_id)
-    if row is None:
-        raise RpcError("not_found", f"session not found: {session_id}")
+    row = await _resolved_session_row(agent, session_id)
     data = session_dict(row)
     await _enrich_sessions(agent, [data], hub=hub, rec=rec)
     return data
+
+
+async def _resolved_session_row(agent: OmniAgent, session_id: str) -> SessionORM:
+    resolution = await agent.resolve_session(session_id)
+    if resolution.status == "ambiguous":
+        raise RpcError("ambiguous", resolution.error_message(session_id))
+    if resolution.row is None:
+        raise RpcError("not_found", f"session not found: {session_id}")
+    return resolution.row
 
 
 async def rename_session(agent: OmniAgent, session_id: str, title: str) -> dict[str, Any]:
@@ -225,25 +234,45 @@ async def delete_session(
     rec: OpenedWorkspace | None = None,
 ) -> dict[str, Any]:
     """Delete a session after refusing a live web turn on that thread."""
-    row = await agent.get_session(session_id)
-    if row is None:
-        raise RpcError("not_found", f"session not found: {session_id}")
-    if hub is not None and rec is not None:
-        live = hub.runs.by_session(rec.key, row.id)
-        if live is not None and not live.done:
-            raise RpcError(
-                "busy",
-                "session has a running turn",
-                session_id=row.id,
-                task_id=live.task_id,
-                client_run_id=live.client_run_id,
-            )
-    outcome = await agent.delete_session(row.id)
-    if not outcome.deleted:
-        raise RpcError(outcome.code or "error", outcome.message, session_id=outcome.session_id)
+    result = await delete_sessions(agent, [session_id], hub=hub, rec=rec)
     return {
-        "session_id": outcome.session_id,
+        "session_id": result["deleted_session_ids"][0],
+        "deleted_task_ids": result["deleted_task_ids"],
+    }
+
+
+async def delete_sessions(
+    agent: OmniAgent,
+    session_ids: list[str],
+    *,
+    hub: WorkspaceHub | None = None,
+    rec: OpenedWorkspace | None = None,
+) -> dict[str, Any]:
+    """Atomically delete several sessions after one all-member preflight."""
+    refs = list(dict.fromkeys(value.strip() for value in session_ids if value.strip()))
+    if not refs:
+        raise RpcError("invalid_params", "session.deleteMany requires session_ids")
+    if hub is not None and rec is not None:
+        async with hub.runs.guard_session_deletion(rec.key, refs):
+            outcome = await agent.delete_sessions(refs)
+    else:
+        outcome = await agent.delete_sessions(refs)
+    if not outcome.deleted:
+        extra: dict[str, Any] = {
+            "session_ids": list(outcome.requested_session_ids),
+            "missing_session_ids": list(outcome.missing_session_ids),
+            "ambiguous_session_ids": list(outcome.ambiguous_session_ids),
+            "blocked_tasks": list(outcome.blocked_tasks),
+            "blocked_executions": list(outcome.blocked_executions),
+        }
+        blocked_dependencies = getattr(outcome, "blocked_dependencies", ())
+        if blocked_dependencies:
+            extra["blocked_dependencies"] = [asdict(item) for item in blocked_dependencies]
+        raise RpcError(outcome.code or "error", outcome.message, **extra)
+    return {
+        "deleted_session_ids": list(outcome.deleted_session_ids),
         "deleted_task_ids": list(outcome.deleted_task_ids),
+        "retained_artifact_count": outcome.retained_artifact_count,
     }
 
 
@@ -639,9 +668,7 @@ async def session_timeline(
 
 
 async def session_messages(agent: OmniAgent, session_id: str) -> list[dict[str, Any]]:
-    row = await agent.get_session(session_id)
-    if row is None:
-        raise RpcError("not_found", f"session not found: {session_id}")
+    row = await _resolved_session_row(agent, session_id)
     msgs = await agent.session_messages(row.id)
     return [message_dict(m) for m in msgs]
 

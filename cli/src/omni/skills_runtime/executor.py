@@ -40,8 +40,10 @@ from omni.runtime.hooks import execution_policy_active, execution_policy_covers
 from omni.runtime.tool_gateway import ToolGateway
 from omni.skills_runtime.admission import (
     binary_admission,
+    constraint_admission,
     module_admission,
     service_admission_from_ctx,
+    turn_constraints_from,
 )
 from omni.skills_runtime.context import ExecContext
 from omni.skills_runtime.manifest import SkillEntry, SkillKind
@@ -432,7 +434,15 @@ def _mark_loaded_skill_modules(
 
 
 class SkillExecutionTimeout(SkillExecutionError):
-    pass
+    """A skill or its enclosing workflow envelope ran out of wall clock.
+
+    ``kind`` is ``workflow_envelope`` when the parent budget expired first,
+    ``stall`` when the skill went quiet, and ``skill_budget`` otherwise.
+    """
+
+    def __init__(self, message: str = "", *, kind: str = "skill_budget") -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 def _make_skill_handler(skill, ctx):  # noqa: ANN001, ANN201
@@ -661,17 +671,20 @@ class SkillBudget:
     seconds: float
     remedy: str
     stall_seconds: float = 0.0
+    bound: str = "skill_budget"
 
     def timeout_error(self, name: str) -> SkillExecutionTimeout:
         return SkillExecutionTimeout(
-            f"skill '{name}' timed out after {self.seconds:g}s — {self.remedy}"
+            f"skill '{name}' timed out after {self.seconds:g}s — {self.remedy}",
+            kind=self.bound,
         )
 
     def stall_error(self, name: str) -> SkillExecutionTimeout:
         return SkillExecutionTimeout(
             f"skill '{name}' reported no progress for {self.stall_seconds:g}s — the run "
             f"is stuck rather than slow. Raise `execution.stall_seconds` in its SKILL.md "
-            f"if the skill is simply quiet for that long."
+            f"if the skill is simply quiet for that long.",
+            kind="stall",
         )
 
 
@@ -689,7 +702,9 @@ def _skill_budget(
             entry.name, declared, knob, capped,
         )
     seconds = _remaining_timeout(ctx, capped)
+    bound = "skill_budget"
     if seconds < capped:
+        bound = "workflow_envelope"
         remedy = (
             "the surrounding workflow envelope ran out first, so the skill never had "
             "its full budget. Give the workflow more room with "
@@ -712,7 +727,7 @@ def _skill_budget(
             "takes longer."
         )
     stall = _float_policy((entry.execution or {}).get("stall_seconds"), 0.0)
-    return SkillBudget(seconds, remedy, min(stall, seconds) if stall > 0 else 0.0)
+    return SkillBudget(seconds, remedy, min(stall, seconds) if stall > 0 else 0.0, bound)
 
 
 class _SkillStalled(Exception):
@@ -776,14 +791,20 @@ def _remaining_timeout(ctx: Any, requested: float) -> float:
     if clock is not None:
         remaining = clock.remaining()
         if remaining <= 0:
-            raise SkillExecutionTimeout("workflow execution envelope timed out")
+            raise SkillExecutionTimeout(
+                "workflow execution envelope timed out",
+                kind="workflow_envelope",
+            )
         return min(requested, remaining)
     deadline = float(getattr(ctx, "execution_deadline", 0.0) or 0.0)
     if deadline <= 0:
         return requested
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        raise SkillExecutionTimeout("workflow execution envelope timed out")
+        raise SkillExecutionTimeout(
+            "workflow execution envelope timed out",
+            kind="workflow_envelope",
+        )
     return min(requested, remaining)
 
 
@@ -1072,6 +1093,9 @@ async def execute_skill(
     # declared-but-missing binary is a structural admission failure. python_engine
     # skills run in-process and own their degradation (e.g. research-pptx returns a
     # ``node_unavailable`` domain outcome), so we never preempt them here.
+    unmet_constraint = constraint_admission(entry, turn_constraints_from(ctx))
+    if unmet_constraint is not None:
+        return unmet_constraint
     if entry.kind == SkillKind.CLI_EXEC:
         unmet_binary = _missing_binary_action(entry)
         if unmet_binary is not None:

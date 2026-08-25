@@ -752,5 +752,80 @@ async def test_react_records_gateway_policy_rejection_as_closed_tool_result():
     assert "react.tool.rejected" in {event["event_type"] for event in runs.events}
 
 
+@pytest.mark.asyncio
+async def test_emit_start_persists_call_id():
+    runs = _RunEvents()
+    gateway = ToolGateway(
+        task_id="run-1",
+        tools=[],
+        tasks=runs,
+        event_family="react",
+    )
+    landed = await gateway.emit(
+        "start",
+        {"name": "write_file", "arguments": {"path": "x"}, "call_id": "abc"},
+    )
+    assert landed is True
+    assert runs.events[0]["step_id"] == "abc"
+    assert runs.events[0]["input_json"]["_call_id"] == "abc"
+
+
+@pytest.mark.asyncio
+async def test_mutating_tool_does_not_run_when_start_is_not_persisted():
+    ran = {"n": 0}
+
+    async def handler(_args: dict) -> dict:
+        ran["n"] += 1
+        return {"ok": True}
+
+    class DropStart:
+        drops_unpersisted_events = True
+
+        async def append_event(self, task_id: str, **kwargs):  # noqa: ANN003
+            return None
+
+    gateway = ToolGateway(
+        task_id="run-drop",
+        tools=[Tool(ToolSpec(name="write_file", description="w"), handler)],
+        tasks=DropStart(),
+        event_family="react",
+    )
+    result = await gateway.invoke_operation(
+        "write_file",
+        {"path": "x.md", "content": "hi"},
+        invoke=lambda: handler({"path": "x.md", "content": "hi"}),
+    )
+    assert ran["n"] == 0
+    assert result.get("execution_started") is False
+    assert result.get("reason") == "start_event_not_persisted"
+
+
+@pytest.mark.asyncio
+async def test_react_skips_mutating_tool_when_start_event_is_dropped():
+    ran = {"n": 0}
+
+    async def invoker(_name: str, _args: dict) -> dict:
+        ran["n"] += 1
+        return {"ok": True}
+
+    async def drop_start(_phase: str, _data: dict) -> bool:
+        return False
+
+    llm = ScriptedLLM([
+        ChatWithToolsResult(tool_calls=[ToolCall("c1", "write_file", {"path": "x"})]),
+        ChatWithToolsResult(content="could not write"),
+    ])
+    react = ReActLoopAgent(llm, invoker, max_iterations=2)
+    result = await react.run(
+        system_prompt="sys",
+        user_message="write",
+        tools=[ToolSpec(name="write_file", description="w")],
+        on_tool_event=drop_start,
+    )
+    assert ran["n"] == 0
+    assert result.tool_trace[0].status == "rejected"
+    assert result.tool_trace[0].error_code == "tool_start_not_persisted"
+
+
 async def _return(value):  # noqa: ANN001, ANN201
     return value

@@ -71,6 +71,23 @@ def test_snapshot_skips_empty_light_answer_tasks() -> None:
     assert state.snapshot_text() == ""
 
 
+def test_snapshot_projects_recommended_next_actions() -> None:
+    state = TaskResearchState(
+        task_id="task-aaaa",
+        sources=[TaskRef("source", "src-1", title="ITI")],
+        latest_observation={
+            "summary": "literature n_kept=0",
+            "limitations": ["literature funnel kept 0 sources"],
+            "metrics": {"n_kept": 0},
+            "recommended_next_actions": ["retry retrieval with a different query"],
+        },
+    )
+    text = state.snapshot_text()
+    assert "suggested next: retry retrieval with a different query" in text
+    assert "Stop or ask the user is a legal next move" in text
+    assert "do not expand tools or debts" in text
+
+
 def test_snapshot_is_task_scoped_and_hash_stable() -> None:
     state = TaskResearchState(
         task_id="task-aaaa",
