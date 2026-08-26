@@ -18,6 +18,24 @@ from omni.web.workspace import close_workspace_hub
 
 uvicorn = pytest.importorskip("uvicorn")
 
+# SQLAlchemy aiosqlite teardown from an earlier test can GC a pending
+# ``_terminate_graceful_close`` task during this file's SSE shutdown. That
+# asyncio ERROR is not a web-server crash.
+_FOREIGN_ERROR_LOGGERS = ("asyncio", "sqlalchemy")
+
+
+def _assert_no_web_shutdown_errors(caplog: pytest.LogCaptureFixture) -> None:
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "Cancel 1 running task(s)" not in messages
+    assert "Exception in ASGI application" not in messages
+    errors = [
+        f"{record.name}: {record.getMessage()}"
+        for record in caplog.records
+        if record.levelno >= logging.ERROR
+        and not record.name.startswith(_FOREIGN_ERROR_LOGGERS)
+    ]
+    assert errors == []
+
 
 def test_empty_stdin_chunk_is_a_normal_stop() -> None:
     server = SimpleNamespace(should_exit=False)
@@ -79,6 +97,7 @@ async def test_shutdown_runs_application_hook_before_uvicorn_drains_requests(
 async def test_live_sse_finishes_before_uvicorn_forces_request_cancellation(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.clear()
     stop_stream = asyncio.Event()
 
     async def app(scope, receive, send):  # noqa: ANN001
@@ -151,10 +170,7 @@ async def test_live_sse_finishes_before_uvicorn_forces_request_cancellation(
             await asyncio.wait_for(serving, timeout=2)
         listener.close()
 
-    messages = "\n".join(record.getMessage() for record in caplog.records)
-    assert "Cancel 1 running task(s)" not in messages
-    assert "Exception in ASGI application" not in messages
-    assert not any(record.levelno >= logging.ERROR for record in caplog.records)
+    _assert_no_web_shutdown_errors(caplog)
 
 
 @pytest.mark.asyncio
@@ -162,6 +178,7 @@ async def test_stuck_sse_force_cancel_is_not_an_asgi_crash(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     quiet_uvicorn_console()
+    caplog.clear()
     caplog.set_level(logging.INFO)
 
     async def app(scope, receive, send):  # noqa: ANN001
@@ -233,10 +250,7 @@ async def test_stuck_sse_force_cancel_is_not_an_asgi_crash(
             await asyncio.wait_for(serving, timeout=2)
         listener.close()
 
-    messages = "\n".join(record.getMessage() for record in caplog.records)
-    assert "Cancel 1 running task(s)" not in messages
-    assert "Exception in ASGI application" not in messages
-    assert not any(record.levelno >= logging.ERROR for record in caplog.records)
+    _assert_no_web_shutdown_errors(caplog)
 
 
 @pytest.mark.asyncio
