@@ -9,6 +9,8 @@ from omni.skills_runtime.discovery import active_skill_names
 
 ROOT = Path(__file__).resolve().parents[3]
 ACTIVE_SKILLS = active_skill_names(ROOT / "skills")
+
+
 def _is_public_research(module: str) -> bool:
     """Skill engines may import the public ``omni.research`` runtime package."""
     return module == "omni.research" or module.startswith("omni.research.")
