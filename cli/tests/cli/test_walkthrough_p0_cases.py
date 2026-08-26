@@ -7,6 +7,7 @@ happy-path bodies (A-LF-01, A-REV-01 visual) stay on a configured home.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -336,8 +337,11 @@ def test_a_out_04_help_gitignore_and_catalog_do_not_use_out_dot() -> None:
     assert "--out outputs_walkthrough" in catalog
     assert ' --out ."' not in catalog
     assert "outputs_walkthrough/" in gitignore
-    help_text = CliRunner().invoke(app, ["--help"]).stdout
-    assert "--out" in help_text
+    help_text = CliRunner().invoke(app, ["--help"], env={"COLUMNS": "200"}).stdout
+    # Narrow CI terminals wrap Rich cells, so "--out" can split across lines.
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", help_text)
+    collapsed = "".join(plain.split())
+    assert "--out" in collapsed
     assert "outputs/" in help_text
     assert "default: the launch directory" not in help_text
 

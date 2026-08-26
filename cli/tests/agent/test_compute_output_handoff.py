@@ -190,8 +190,11 @@ async def test_bash_output_dir_persists_registers_and_is_readable(tmp_path: Path
     read_scratch = await tools["read_file"].handler({"path": str(scratch / "note.txt")})
     assert "scratch" in _obs(read_scratch)
     read_host_tmp = await tools["read_file"].handler({"path": "/tmp/omni-not-a-deliverable.csv"})
-    assert "denied" in _obs(read_host_tmp).lower()
-    assert OMNI_OUTPUT_ENV in _obs(read_host_tmp)
+    # Codex-style: a missing path is not-found, not a sandbox "denied".
+    # Host /tmp is readable when the file exists; this path does not.
+    host_obs = _obs(read_host_tmp).lower()
+    assert "does not exist" in host_obs
+    assert "denied" not in host_obs
 
     rows = await ctx.artifacts.list_by_task(ctx.task_id)
     names = {Path(row.rel_path).name for row in rows if row.rel_path}

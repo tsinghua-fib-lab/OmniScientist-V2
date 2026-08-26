@@ -250,7 +250,8 @@ async def test_task_inspect_projects_degraded_status_instead_of_model_claim() ->
     assert "已经成功完成" not in turn.text
     assert streamed == []
     assert str(artifact.path) in turn.text
-    assert artifact.uri in turn.text
+    # User surfaces show the filesystem path, not the internal artifact:// handle.
+    assert artifact.uri not in turn.text
 
 
 @pytest.mark.asyncio

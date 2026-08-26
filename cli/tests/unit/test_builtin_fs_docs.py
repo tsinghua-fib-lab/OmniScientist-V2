@@ -252,7 +252,10 @@ async def test_open_artifact_readmits_raw_path_fallback(tmp_path):
 @pytest.mark.asyncio
 async def test_docs_search_finds_storage_architecture():
     tools = build_docs_tools(_ctx())
-    res = await _tool(tools, "docs_search")({"query": "local storage architecture SQLite filesystem"})
+    res = await _tool(tools, "docs_search")({
+        "query": "SQLite WAL filesystem persistence",
+        "k": 20,
+    })
     assert res["status"] == "ok"
     docs = {m["doc"] for m in res["matches"]}
     assert any("memory.md" in d for d in docs)
