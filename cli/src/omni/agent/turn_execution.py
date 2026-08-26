@@ -5,20 +5,26 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy.exc import OperationalError
 
-from omni.agent.capabilities import CAPABILITY_TASK_INSPECT, CAPABILITY_TASK_REVIEW
+from omni.agent.capabilities import (
+    CAPABILITY_TASK_INSPECT,
+    CAPABILITY_TASK_REVIEW,
+    contract_outputs,
+)
 from omni.agent.intent_plan import IntentPlan
 from omni.agent.plan_result import PlanExecutionResult
 from omni.agent.plan_runner_utils import last_tool_step, loop_result_event, plan_summary
 from omni.core.execution_control import ExecutionCancelled, ExecutionControl
 from omni.core.react_agent import AgentLoopResult, ToolInvocationRecord
-from omni.runtime.presentation import ArtifactRef, artifact_refs, presentable_artifacts
+from omni.runtime.presentation import ArtifactRef, artifact_refs
 from omni.runtime.remaining import (
+    failed_canonical_file_debts,
     remaining_contract_files,
     remaining_deliverables,
     remaining_figure,
@@ -52,6 +58,44 @@ class TurnResult:
     # separate prevents the CLI, channels, and task renderer from each inventing
     # another "Saved outputs" section from tool traces.
     artifacts: list[ArtifactRef] = field(default_factory=list)
+
+
+_TURN_DEGRADATION: ContextVar[list[str] | None] = ContextVar(
+    "omni_turn_degradation", default=None
+)
+
+
+def begin_turn_degradation() -> None:
+    """Reset turn-local degradation notes for this asyncio task."""
+    _TURN_DEGRADATION.set([])
+
+
+def note_turn_degradation(warning: str) -> None:
+    """Record a host-owned degradation that must reach ``finish_turn``."""
+    text = str(warning or "").strip()
+    if not text:
+        return
+    current = _TURN_DEGRADATION.get()
+    if current is None:
+        current = []
+        _TURN_DEGRADATION.set(current)
+    if text not in current:
+        current.append(text)
+
+
+def turn_degradation_warnings() -> list[str]:
+    """Copy of this turn's degradation notes (empty outside a turn)."""
+    return list(_TURN_DEGRADATION.get() or [])
+
+
+def apply_turn_degradation(result: TurnResult) -> TurnResult:
+    """Seal turn-local host warnings onto the user-facing result."""
+    extra = turn_degradation_warnings()
+    if extra:
+        result.degraded_warnings = list(
+            dict.fromkeys([*result.degraded_warnings, *extra])
+        )
+    return result
 
 
 async def artifact_output_refs(store: Any, rows: list[Any]) -> list[ArtifactRef]:
@@ -450,26 +494,28 @@ def _format_task_inspection(payload: dict[str, Any]) -> str:
         lines.append("\nResult artifacts:")
         for item in artifacts[:6]:
             title = str(item.get("title") or item.get("kind") or "artifact")
-            path = str(item.get("path") or "")
-            uri = str(item.get("uri") or "")
-            location = f"`{path}`" if path else f"`{uri}`"
-            suffix = f" ({uri})" if path and uri else ""
-            lines.append(f"- {title}: {location}{suffix}")
+            location = _user_visible_artifact_location(item)
+            if location:
+                lines.append(f"- {title}: `{location}`")
+            else:
+                lines.append(f"- {title}: saved (path unavailable)")
         remaining = len(artifacts) - 6
         if remaining > 0:
             lines.append(
                 f"- {remaining} additional visual-evidence or diagnostic artifact(s)."
             )
     else:
-        refs = [str(value) for value in payload.get("artifact_refs") or [] if value]
-        if refs:
-            lines.append("\nArtifact references:")
-            for ref in refs[:6]:
-                uri = ref.replace("artifact:", "artifact://", 1)
-                lines.append(f"- `{uri}`")
-        else:
-            lines.append("\nNo result artifact was recorded.")
+        lines.append("\nNo result artifact was recorded.")
     return "\n".join(lines)
+
+
+def _user_visible_artifact_location(item: dict[str, Any]) -> str:
+    """Filesystem path a person can open. Never an ``artifact://`` handle."""
+    for key in ("path", "file", "display_path"):
+        raw = str(item.get(key) or "").strip()
+        if raw and not raw.startswith("artifact://"):
+            return raw
+    return ""
 
 
 def _task_artifact_rank(item: dict[str, Any]) -> tuple[int, str]:
@@ -905,6 +951,10 @@ class TurnCompletion:
         required = list(plan.verification_plan.required_outputs) or list(plan.outputs)
         inventory = _task_contract_inventory(rows, drained)
         unpaid = remaining_contract_files(remaining_deliverables(required, inventory))
+        failed = failed_canonical_file_debts(result.tool_trace, drained)
+        owed = contract_outputs([str(name) for name in required if name])
+        extra = [name for name in failed if name in owed] if owed else list(failed)
+        unpaid = list(dict.fromkeys([*unpaid, *extra]))
         slide_debt = remaining_slides(unpaid)
         if slide_debt and submitted:
             unpaid = [name for name in unpaid if name not in slide_debt]
@@ -1152,30 +1202,12 @@ class TurnCompletion:
 
     async def _contract_output_artifacts(
         self,
-        plan: IntentPlan,
+        _plan: IntentPlan,
         artifacts: list[ArtifactRef],
         drained: list[dict[str, Any]],
     ) -> list[ArtifactRef]:
-        """This turn's files, plus twin contract files this turn still owes."""
-        merged = _merge_drained_artifacts(artifacts, drained)
-        twin_id = str(getattr(plan, "twin_task_id", "") or "")
-        if not twin_id or self._artifacts is None:
-            return merged
-        required = list(plan.verification_plan.required_outputs) or list(plan.outputs)
-        if not remaining_deliverables(required, merged):
-            return merged
-        try:
-            twin_refs = await artifact_output_refs(
-                self._artifacts, await self._artifacts.list_by_task(twin_id)
-            )
-        except Exception:  # noqa: BLE001 — twin files are a delivery safety net
-            return merged
-        for ref in presentable_artifacts(twin_refs):
-            before = remaining_deliverables(required, merged)
-            after = remaining_deliverables(required, [*merged, ref])
-            if after != before:
-                merged.append(ref)
-        return merged
+        """This task_id's files only. A twin is a footnote, not a deliverable."""
+        return _merge_drained_artifacts(artifacts, drained)
 
     async def _host_retrieve_survey(
         self,
@@ -1393,7 +1425,7 @@ class TurnExecution:
 
                 # wait_for() can cancel this wrapper; the checkpoint must land.
                 await run_uncancelled(settle_returned, serialize=False)
-            return result
+            return apply_turn_degradation(result)
         except ExecutionCancelled:
             result = await self._stopped_result(
                 acknowledged["task_id"],
@@ -1402,7 +1434,7 @@ class TurnExecution:
                 reason="cancelled",
             )
             result._delivered_control_ids = control.delivered_control_ids  # type: ignore[attr-defined]
-            return result
+            return apply_turn_degradation(result)
         except asyncio.CancelledError:
             # Serve stop / update restart cancels the asyncio task with no
             # durable cancel row. That is process death, not a user /stop.
@@ -1414,7 +1446,7 @@ class TurnExecution:
                 reason=reason,
             )
             result._delivered_control_ids = control.delivered_control_ids  # type: ignore[attr-defined]
-            return result
+            return apply_turn_degradation(result)
         except BaseException as exc:
             exc._delivered_control_ids = control.delivered_control_ids  # type: ignore[attr-defined]
             raise
@@ -1563,4 +1595,12 @@ def _react_evidence(
     return bag
 
 
-__all__ = ["TurnCompletion", "TurnExecution", "TurnResult"]
+__all__ = [
+    "TurnCompletion",
+    "TurnExecution",
+    "TurnResult",
+    "apply_turn_degradation",
+    "begin_turn_degradation",
+    "note_turn_degradation",
+    "turn_degradation_warnings",
+]

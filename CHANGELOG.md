@@ -6,6 +6,34 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) and semanti
 
 ### Changed
 
+- Walkthrough catalog launches use ``--out outputs_walkthrough`` (gitignored)
+  instead of ``--out .``, so validation deliverables do not appear as
+  untracked ``<title>_<task8>/`` folders next to ``cli/``. Product default
+  remains ``outputs/``. ``omni --out`` help names that default.
+
+- File tools share bash's Codex WorkspaceWrite *read* envelope: any
+  path except sensitive files and frozen Omni control stores. Writes stay
+  jailed. A bare absolute directory in the user message is a turn read
+  root (same consent as ``@``), so ``list_dir(/other/repo)`` works
+  instead of a bash crawl. ``grep`` of the filesystem root is refused.
+  Distilled ``profile.md`` can no longer ban named tools
+  (``write_file`` / ``bash`` / …). A 对标 / 仔细分析+源码 request binds
+  ``draft.manuscript`` so settlement cannot succeed on a finding-ack.
+
+- Process logs for CLI, ``omni serve``, and ``omni web`` share one
+  single-line schema and rotate at 10 MiB, keeping 10 files total
+  (``[observability] log_max_bytes`` / ``log_files``, or ``OMNI_LOG_*``).
+  That matches kimi-code's size-based ``files`` count and Codex's
+  component files under the home log dir. Foreground ``omni web`` stays
+  on the terminal URL line; diagnostics go to
+  ``~/.omni/logs/web-<project>.log``.
+
+- New ``write_file`` / ``edit_file`` paths under leftover
+  ``reports/`` / ``figures/`` / ``outputs/<other-task>/`` are rewritten
+  into this task's ``outputs/<title>_<task8>/`` bundle (the 67f26c86
+  layout). An existing leftover file is still edited in place. Source-tree
+  directories (``src/``, ``docs/``) stay explicit.
+
 - Generated files now land in one user-facing folder:
   ``outputs/<title>_<task8>/``. Task-bundle and filename rules are unchanged
   (``<title>_<task8>/`` and ``<slug>-<task8>-<art8>.ext``). Leftover
@@ -13,14 +41,98 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) and semanti
   are gitignored. ``artifact://<id>`` stays an internal SQLite handle for
   skills and ``resolve_path``; CLI and the Artifacts panel show the filesystem
   path (or nothing) instead of that URI.
+- ``/config test`` and ``omni config test`` now live-probe the main model
+  and a configured VLM / Semantic Scholar key, and name optional
+  embeddings / VLM / S2 when they are unset. A VLM site origin or ``/v1``
+  base URL is expanded to ``chat/completions`` (Claude Code
+  ``ANTHROPIC_BASE_URL`` style); a complete path is left unchanged.
 
 ### Fixed
+
+- A failed ``livefigure`` / ``paper-review`` no longer lets a
+  ``write_file`` Markdown or harvested deck settle the parent Task as
+  ``succeeded``. ``review`` is paid only by ``kind=review``; ``artifact.pptx``
+  is the editable figure, not any ``.pptx``.
+- ``$OMNI_OUTPUT_DIR`` harvest skips ``.venv`` / ``site-packages`` /
+  LICENSE and only promotes scientific suffixes, so a bash fallback cannot
+  register thousands of junk artifacts.
+- ``paper-review`` treats ``arXiv 1706.03762`` as an identifier (fetches
+  the PDF, or ``needs_input`` if it cannot). A DOI asks for a local file
+  instead of ``Paper input does not exist: …``.
+
+- ``react.tool.rejected`` now pairs a tool start. A known policy deny
+  no longer replays ``unknown_outcome`` and steals the finish turn
+  (afb9228d / 27803406).
+
+- ``omni web`` Ctrl+C no longer dumps uvicorn's
+  ``timeout graceful shutdown exceeded`` / ``Exception in ASGI application``
+  traceback. Leftover SSE is cancelled as a normal stop.
+
+- Task inspection no longer prints ``artifact://<id>`` under
+  ``Result artifacts:``. The line is the filesystem path (the stored
+  ``reports/`` / ``outputs/`` location when the file is gone). Cross-workspace
+  ``get_task`` now resolves those checkout copies without a launch
+  ``mirror_dir``.
+
+- A stacked figure + manuscript + slides turn no longer dies after
+  ``find_skill`` returns livefigure, scientific-figure, and research-pptx.
+  Those cards (and an empty follow-up looking for a writing skill) are
+  setup, not a hunt. The host steers to ``run_skill`` / ``write_file`` with
+  tools still on. A real same-contract hunt still steers once; if a research
+  feed still names unpaid files, one Codex-style tools-on replay runs before
+  the fuse stops. The wrap-up no longer tells the model to call a tool after
+  tools are disabled.
+- Outputs list this ``task_id`` only. An identical twin stays a footnote
+  (``/task show <id>``); its files are not shown as this turn's artifacts
+  and do not hide an honest unpaid settlement.
+
+- Schedule origin paths use the durable ``project_dir`` (``~/.omni/workspaces/…``)
+  or an in-place ``<repo>/.omni``), not ``workspace_root``. Approving a
+  proposal no longer creates ``sessions.sqlite3`` in the checkout. A legacy
+  workspace-root value is re-keyed through ``get_paths``.
 
 - ``research-pptx`` no longer treats a bare filename in ``topic`` as a
   cwd-required ``markdown_uri``. Mentions bind only when the file already
   exists as ``artifact://``, an absolute path, or a task outputs/reports
   deliverable. An explicit missing ``markdown_uri`` still fails with a
   retryable not-found error.
+
+- Naming ``search_literature`` freezes that tool and keeps ``write_file``
+  / ``run_skill`` closed for the retrieve window. Same-sentence figure /
+  slides / manuscript names stay as unpaid debts. Only an explicit
+  source-id-only scope stays retrieve-only. A bare mention
+  (``explain search_literature …, do not run it``) is not a tool call.
+
+- A skill that hits its own ``execution.max_seconds`` or ``stall_seconds``
+  settles ``degraded`` when a durable artifact already exists, otherwise
+  ``failed`` so a sealed single-skill turn can fall through. A workflow
+  envelope expiry is ``failed`` even if a wrapper result exists. The
+  message is not treated as a transient auto-retry.
+
+- Contract-hunt pressure is the window after the last successful
+  ``run_skill`` / ``run_workflow``. A later disjoint card can still hunt.
+  ``recommended_next_actions`` are projected as observations; stop or
+  ask is legal. ``resume --thread`` injects the typed brief and refuses
+  an ambiguous hypothesis prefix. ``/new`` and a non-thread ``/resume``
+  clear that brief. ``skills.default_for`` is consulted for the same
+  capability slot only.
+
+- Session lookup is exact-or-unique: a colliding prefix no longer
+  resumes the newest match. A database error resolving a session
+  principal does not fall back to owner memory or cache that guess.
+  A dropped transcript write still finishes the turn, but marks it
+  degraded. Named native tools are hard-routed only in protocol form
+  (``name,`` / ``name(`` / ``name query=``), not ``调用`` / ``do not call``.
+- Transcript and principal failures are turn-local and reach
+  ``finish_turn`` as task ``degraded`` (one agent can run several
+  inflight turns). A second compaction folds the live bridge so the
+  first window is not dropped. Background memory / transcript / focus
+  write-back skips an unresolved principal and goes through
+  ``persist_message``. Mutating tools do not run if their start event
+  cannot be recorded; unmatched starts pair by ``call_id``. A
+  retrieve-only turn with zero hits does not fall back to model prose.
+  Source / claim / run lookup is exact-or-unique; thread briefs filter
+  claims and runs in SQL.
 
 ## [2.0.0rc6] - 2026-08-25
 

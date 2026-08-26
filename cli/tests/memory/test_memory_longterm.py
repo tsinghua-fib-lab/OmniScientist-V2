@@ -172,7 +172,7 @@ async def test_compact_session_folds_history_and_flushes():
 
     agent = await OmniAgent.create(load_settings())
     try:
-        sid = "compact-sess"
+        sid = await agent.ensure_session(channel="cli", title="compact-sess")
         for i in range(20):
             await agent._persist_message(sid, "user", f"问题 {i}：请继续推进研究第 {i} 步")
             await agent._persist_message(sid, "assistant", f"回答 {i}：已完成第 {i} 步")
@@ -210,6 +210,43 @@ async def test_compact_session_folds_history_and_flushes():
 
 
 @pytest.mark.asyncio
+async def test_rolling_compaction_keeps_prior_bridge_markers(monkeypatch):
+    from omni.agent import OmniAgent
+
+    async def echo_summary(_llm, _settings, messages, **_kwargs):
+        text = " ".join(str(item.get("content") or "") for item in messages)
+        kept = [token for token in ("MARKERA", "MARKERB") if token in text]
+        return " ".join(kept)
+
+    monkeypatch.setattr("omni.memory.compaction.summarize_messages", echo_summary)
+    settings = load_settings(overrides={"model": {"provider": "mock"}})
+    agent = await OmniAgent.create(settings)
+    try:
+        sid = await agent.ensure_session(channel="cli", title="rolling-compact")
+        for i in range(6):
+            await agent._persist_message(sid, "user", f"setup {i}")
+            await agent._persist_message(sid, "assistant", f"ack {i}")
+        await agent.conversations.write_compaction_bridge(
+            sid,
+            "[Earlier conversation summary]\nKept fact MARKERA about the survey.",
+            [],
+        )
+        await agent._persist_message(sid, "user", "MARKERB please add the figure")
+        await agent._persist_message(sid, "assistant", "ack B")
+        for i in range(6):
+            await agent._persist_message(sid, "user", f"later step {i}")
+            await agent._persist_message(sid, "assistant", f"later done {i}")
+        stats = await agent.compact_session(sid, keep_last=4)
+        assert stats["compacted"] > 0
+        hist = await agent._history(sid, limit=12)
+        bridge = hist[0]["content"]
+        assert "MARKERA" in bridge
+        assert "MARKERB" in bridge
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
 async def test_maybe_compact_does_not_trigger_on_message_count_alone():
     """Codex-aligned: many small turns stay intact while the window has room."""
     from omni.agent import OmniAgent
@@ -217,7 +254,7 @@ async def test_maybe_compact_does_not_trigger_on_message_count_alone():
 
     agent = await OmniAgent.create(load_settings())
     try:
-        sid = "auto-sess"
+        sid = await agent.ensure_session(channel="cli", title="auto-sess")
         n = _COMPACT_THRESHOLD + 4
         for i in range(n):
             await agent._persist_message(sid, "user", f"msg {i} " + "x" * 20)
@@ -298,7 +335,7 @@ async def test_maybe_compact_token_budget_triggers_on_huge_turn():
     settings.memory.autocompact_pct = 0.5  # budget ≈ 1000 tokens
     agent = await OmniAgent.create(settings)
     try:
-        sid = "huge-sess"
+        sid = await agent.ensure_session(channel="cli", title="huge-sess")
         # 12 turns, each ~400 CJK tokens → ~4800 tokens ≫ 1000 budget, but only
         # 12 messages (< count threshold), so this exercises the token trigger.
         for _ in range(6):

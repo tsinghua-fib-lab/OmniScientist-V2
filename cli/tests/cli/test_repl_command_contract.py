@@ -299,6 +299,48 @@ async def test_repl_clear_starts_clean_context_without_deleting_history(monkeypa
             "Keep this answer",
         ]
         assert await agent._history(result.session_id) == []
+        assert agent.pending_thread_brief == ""
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_repl_resume_without_thread_clears_a_pending_brief(capsys):
+    import omni.cli.main as main
+    from omni.agent import OmniAgent
+    from omni.config import load_settings
+
+    agent = await OmniAgent.create(load_settings())
+    state = AppState()
+    agent.pending_thread_brief = "[Research thread] leftover"
+    state.resume_thread_brief = "[Research thread] leftover"
+    target = await agent.ensure_session(channel="cli", reuse_latest=False, title="keep")
+    other = await agent.ensure_session(channel="cli", reuse_latest=False, title="other")
+    try:
+        bound = await main._repl_resume(agent, state, target, other)
+        assert bound == target
+        assert agent.pending_thread_brief == ""
+        assert state.resume_thread_brief == ""
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_repl_new_clears_a_pending_thread_brief():
+    import omni.cli.main as main
+    from omni.agent import OmniAgent
+    from omni.config import load_settings
+
+    agent = await OmniAgent.create(load_settings())
+    state = AppState()
+    agent.pending_thread_brief = "[Research thread] leftover"
+    state.resume_thread_brief = "[Research thread] leftover"
+    old_session = await agent.ensure_session(channel="cli", reuse_latest=False)
+    try:
+        result = await main._repl_command(agent, state, "/new", old_session)
+        assert result.session_id != old_session
+        assert agent.pending_thread_brief == ""
+        assert state.resume_thread_brief == ""
     finally:
         await agent.aclose()
 

@@ -29,14 +29,14 @@ async def _list_sessions(state: AppState, limit: int):
         await agent.aclose()
 
 
-async def _resolve(state: AppState, session: str) -> str | None:
+async def _resolve(state: AppState, session: str) -> tuple[str | None, str]:
     agent = await make_agent(state)
     try:
-        sess = await agent.get_session(session)
-        if sess is None:
-            return None
-        await agent.touch_session(sess.id)
-        return sess.id
+        resolution = await agent.resolve_session(session)
+        if resolution.status != "ok" or resolution.row is None:
+            return None, resolution.error_message(session)
+        await agent.touch_session(resolution.row.id)
+        return resolution.row.id, ""
     finally:
         await agent.aclose()
 
@@ -82,7 +82,10 @@ def _pick(state: AppState) -> str | None:
             return rows[idx - 1][0].id
         warn("Selection is out of range.")
         return None
-    return run_async(_resolve(state, raw))
+    sid, message = run_async(_resolve(state, raw))
+    if sid is None and message:
+        warn(message)
+    return sid
 
 
 def render_resume_usage_help() -> None:
@@ -113,17 +116,24 @@ def help_cmd() -> None:
     render_resume_usage_help()
 
 
-async def _thread_resume(state: AppState, hyp: str) -> tuple[str | None, str | None]:
-    """Return (thread_brief, latest_session_id) for a hypothesis thread."""
+async def _thread_resume(
+    state: AppState, hyp: str
+) -> tuple[str | None, str | None, list[str]]:
+    """Return (thread_brief, latest_session_id, ambiguous_ids)."""
     from omni.research.store import ResearchStore
     from omni.research.threads import build_thread_brief, latest_thread_session
 
     agent = await make_agent(state)
     try:
         store = ResearchStore(agent.db)
-        brief = await build_thread_brief(store, hyp)
-        sid = await latest_thread_session(store, hyp) if brief else None
-        return brief, sid
+        row, ambiguous = await store.resolve_hypothesis(hyp)
+        if ambiguous:
+            return None, None, ambiguous
+        if row is None:
+            return None, None, []
+        brief = await build_thread_brief(store, row.id)
+        sid = await latest_thread_session(store, row.id) if brief else None
+        return brief, sid, []
     finally:
         await agent.aclose()
 
@@ -143,18 +153,31 @@ def resume(
         raise typer.Exit()
 
     if thread:
-        brief, sid = run_async(_thread_resume(state, thread))
+        brief, sid, ambiguous = run_async(_thread_resume(state, thread))
+        if ambiguous:
+            shown = ", ".join(item[:8] for item in ambiguous[:6])
+            extra = f" +{len(ambiguous) - 6}" if len(ambiguous) > 6 else ""
+            error(
+                f"Research thread prefix {thread} is ambiguous ({shown}{extra}). "
+                "Pass a longer id."
+            )
+            raise typer.Exit(1)
         if brief is None:
             error(f"Research thread (hypothesis) {thread} was not found.")
             raise typer.Exit(1)
         console.print(brief)
         console.rule(style="cyan")
+        state.resume_thread_brief = (
+            "[Research thread — observation only; prior claims do not settle "
+            "this task.]\n" + brief
+        )
         if sid is None:
             info("This research thread has no associated session; starting a new one.")
             from omni.cli.main import _repl
             _repl(state)
             raise typer.Exit()
-        sid = run_async(_resolve(state, sid)) or sid
+        resolved, _message = run_async(_resolve(state, sid))
+        sid = resolved or sid
         from omni.cli.main import _repl
         _repl(state, resume_session_id=sid)
         raise typer.Exit()
@@ -165,9 +188,9 @@ def resume(
             info("This workspace has no previous sessions.")
             raise typer.Exit()
     elif session:
-        sid = run_async(_resolve(state, session))
+        sid, message = run_async(_resolve(state, session))
         if sid is None:
-            error(f"Session {session} was not found.")
+            error(message or f"Session {session} was not found.")
             raise typer.Exit(1)
     else:
         sid = _pick(state)

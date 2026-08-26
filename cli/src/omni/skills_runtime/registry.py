@@ -530,7 +530,13 @@ class SkillRegistry:
         best_tier = min(candidate.tier for candidate in candidates)
         eligible = [candidate for candidate in candidates if candidate.tier == best_tier]
         eligible.sort(key=lambda candidate: candidate.sort_key, reverse=True)
+        preferred = str(self.configured_default_for().get(capability) or "").strip()
         selected = eligible[0]
+        if preferred:
+            for candidate in eligible:
+                if candidate.entry.name == preferred:
+                    selected = candidate
+                    break
 
         for candidate in sorted(candidates, key=lambda item: (item.tier, item.sort_key), reverse=True):
             if candidate.entry.name == selected.entry.name:

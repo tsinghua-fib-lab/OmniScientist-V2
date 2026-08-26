@@ -364,3 +364,21 @@ async def test_created_summary_is_honest_about_runner_and_autonomy():
         assert result.runner_ready in (False, None)
     finally:
         await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_origin_scheduler_does_not_create_sqlite_in_the_checkout(omni_home, tmp_path):
+    """A legacy origin that stored workspace_root must not grow <repo>/sessions.sqlite3."""
+    checkout = tmp_path / "repo"
+    (checkout / ".git").mkdir(parents=True)
+    leaked = checkout / "sessions.sqlite3"
+
+    agent = await OmniAgent.create(load_settings(cwd=checkout))
+    try:
+        service = await _service(agent)
+        await service._origin_scheduler(str(checkout))
+        assert not leaked.exists()
+        assert agent.paths.project_dir != checkout
+        assert (agent.paths.project_dir / "sessions.sqlite3").is_file()
+    finally:
+        await agent.aclose()

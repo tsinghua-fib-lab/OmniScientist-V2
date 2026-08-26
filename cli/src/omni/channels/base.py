@@ -96,12 +96,11 @@ class Channel(ABC):
 
     async def notify(self, note: TaskNotification) -> None:
         logger.info(
-            "[%s] %s %s %s: %s",
+            "[%s] notification %s %s status=%s",
             self.name,
             note.object_kind,
             note.reference_id,
             note.status,
-            note.summary,
         )
 
     async def handle_inbound(
@@ -239,7 +238,12 @@ class Channel(ABC):
             logger.exception("failed to persist terminal turn failure task=%s", task_id[:8])
 
     async def send_turn(self, external_key: str, presentation: TurnPresentation | TaskPresentation):  # noqa: ANN201
-        logger.info("[%s] would send to %s: %s", self.name, external_key, presentation.to_plain_text()[:160])
+        logger.info(
+            "[%s] outbound presentation recipient=%s kind=%s",
+            self.name,
+            external_key,
+            type(presentation).__name__,
+        )
 
     async def _located_artifacts(self, note: TaskNotification) -> TaskNotification:
         """Give the notification's artifacts the files they name.

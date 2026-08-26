@@ -212,6 +212,31 @@ async def test_bash_output_dir_persists_registers_and_is_readable(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_bash_output_dir_does_not_harvest_a_venv(tmp_path: Path) -> None:
+    ctx = await _named_project_ctx(tmp_path, task_id="d" * 32, os_sandbox="off")
+    bash = build_shell_tools(ctx)[0].handler
+    from omni.skills_runtime.builtin_tools.shell import posix_shell_executable
+
+    if posix_shell_executable() is None:
+        pytest.skip("bash tool needs a POSIX shell for $OMNI_OUTPUT_DIR expansion")
+    result = await bash(
+        {
+            "command": (
+                'mkdir -p "$OMNI_OUTPUT_DIR/.venv/lib/site-packages/pkg" && '
+                'printf "MIT\\n" > "$OMNI_OUTPUT_DIR/LICENSE" && '
+                'printf "x=1\\n" > "$OMNI_OUTPUT_DIR/.venv/lib/site-packages/pkg/mod.py" && '
+                'printf "a,1\\n" > "$OMNI_OUTPUT_DIR/results.csv" && '
+                'echo WROTE'
+            )
+        }
+    )
+    assert "WROTE" in _obs(result)
+    rows = await ctx.artifacts.list_by_task(ctx.task_id)
+    names = {Path(row.rel_path).name for row in rows if row.rel_path}
+    assert names == {"results.csv"}
+
+
+@pytest.mark.asyncio
 async def test_im_bash_stays_blocked(tmp_path: Path) -> None:
     ctx = await _named_project_ctx(tmp_path, task_id="b" * 32, os_sandbox="off")
     ctx.channel = "wechat"

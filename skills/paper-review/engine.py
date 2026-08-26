@@ -232,6 +232,14 @@ class PaperReviewEngine:
         ).strip()
         try:
             source_path, supplied_text = _resolve_input(raw_input)
+        except _RemotePaperRef as exc:
+            if exc.kind == "arxiv":
+                source_path = await _materialize_arxiv_pdf(exc.identifier, ctx)
+                if source_path is None:
+                    return _source_needs_input(exc)
+                supplied_text = ""
+            else:
+                return _source_needs_input(exc)
         except ValueError as exc:
             return _input_error(str(exc))
 
@@ -3267,6 +3275,116 @@ _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:[\\/]")
 # What ``urlparse`` returns for a bare path: no scheme, no netloc, so the
 # branches below fall through to reading the value as a filesystem path.
 _NOT_A_URL = urlparse("")
+_ARXIV_NEW_ID = re.compile(r"(\d{4}\.\d{4,5})(v\d+)?")
+_ARXIV_OLD_ID = re.compile(
+    r"([a-z\-]+(?:\.[A-Z]{2})?/\d{7})(v\d+)?", re.IGNORECASE
+)
+_ARXIV_BARE_NEW = re.compile(r"(\d{4}\.\d{4,5})(v\d+)?$", re.IGNORECASE)
+_ARXIV_BARE_OLD = re.compile(
+    r"([a-z\-]+(?:\.[A-Z]{2})?/\d{7})(v\d+)?$", re.IGNORECASE
+)
+_DOI_RE = re.compile(r"\b(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)", re.IGNORECASE)
+
+
+class _RemotePaperRef(ValueError):
+    """The supplied input is an identifier, not a missing local path."""
+
+    def __init__(self, kind: str, identifier: str) -> None:
+        self.kind = kind
+        self.identifier = identifier
+        if kind == "arxiv":
+            message = (
+                f"arXiv {identifier} is a paper identifier, not a local path. "
+                "paper-review will fetch the PDF, or ask you to run "
+                f"`$arxiv-fetch {identifier}` and attach the file."
+            )
+        else:
+            message = (
+                f"DOI {identifier} is a paper identifier, not a local path. "
+                "Attach a local PDF or pass an arXiv id; paper-review does not "
+                "fetch DOI landing pages."
+            )
+        super().__init__(message)
+
+
+def _arxiv_id_from_text(value: str) -> str:
+    """Return a structured arXiv id when that is the input, not a filename."""
+    text = str(value or "").strip()
+    if not text or _WINDOWS_DRIVE.match(text):
+        return ""
+    lowered = text.lower()
+    if re.search(r"\barxiv\b", lowered) or "arxiv.org" in lowered:
+        match = _ARXIV_NEW_ID.search(text) or _ARXIV_OLD_ID.search(text)
+        return match.group(1) if match else ""
+    token = text.split()[0]
+    if token.lower().startswith("arxiv:"):
+        token = token[6:]
+    token = token.removesuffix(".pdf").removesuffix(".PDF")
+    match = _ARXIV_BARE_NEW.fullmatch(token) or _ARXIV_BARE_OLD.fullmatch(token)
+    return match.group(1) if match else ""
+
+
+def _doi_from_text(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    lowered = text.lower()
+    if "doi.org/" in lowered or re.search(r"\bdoi\b", lowered):
+        match = _DOI_RE.search(text)
+        return match.group(1) if match else ""
+    match = re.fullmatch(r"10\.\d{4,9}/[-._;()/:A-Za-z0-9]+", text, flags=re.IGNORECASE)
+    return match.group(0) if match else ""
+
+
+def _raise_if_identifier(value: str) -> None:
+    arxiv_id = _arxiv_id_from_text(value)
+    if arxiv_id:
+        raise _RemotePaperRef("arxiv", arxiv_id)
+    doi = _doi_from_text(value)
+    if doi:
+        raise _RemotePaperRef("doi", doi)
+
+
+async def _materialize_arxiv_pdf(arxiv_id: str, ctx: Any) -> Path | None:
+    """Fetch an arXiv PDF into the task workspace. Offline-safe: returns None."""
+    try:
+        from omni.research.arxiv import fetch_by_id
+    except Exception:  # noqa: BLE001 - portable hosts may lack the helper
+        return None
+    meta = await fetch_by_id(arxiv_id)
+    if str(meta.get("status") or "") != "ok":
+        return None
+    pdf_url = str(meta.get("pdf_url") or "").strip() or (
+        f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+    )
+    dest_dir = _identifier_source_dir(ctx)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"{arxiv_id.replace('/', '_')}.pdf"
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            response = await client.get(
+                pdf_url,
+                headers={"User-Agent": "OmniScientist-paper-review/1.0"},
+            )
+        if response.status_code >= 400 or not response.content:
+            return None
+        dest.write_bytes(response.content)
+    except Exception:  # noqa: BLE001 - fall through to needs_input
+        return None
+    return dest if dest.is_file() and dest.stat().st_size > 0 else None
+
+
+def _identifier_source_dir(ctx: Any) -> Path:
+    paths = getattr(ctx, "paths", None) if ctx is not None else None
+    artifacts_dir = getattr(paths, "artifacts_dir", None)
+    if artifacts_dir is not None:
+        return Path(artifacts_dir) / "paper-review-sources"
+    working = getattr(ctx, "working_dir", None) if ctx is not None else None
+    if working is not None:
+        return Path(working) / "paper-review-sources"
+    return Path.cwd() / "paper-review-sources"
 
 
 def _resolve_input(value: str) -> tuple[Path | None, str]:
@@ -3279,8 +3397,10 @@ def _resolve_input(value: str) -> tuple[Path | None, str]:
     # separator is required, so a genuine one-letter scheme stays a URL.
     parsed = _NOT_A_URL if _WINDOWS_DRIVE.match(value.strip()) else urlparse(value)
     if parsed.scheme in {"http", "https"} or parsed.netloc:
+        _raise_if_identifier(value)
         raise ValueError(
-            "Omni paper-review currently requires a local PDF/text file or extracted text; remote URLs are not fetched."
+            "Omni paper-review currently requires a local PDF/text file, extracted "
+            "text, or an arXiv id; generic remote URLs are not fetched."
         )
     if parsed.scheme == "file":
         path = unquote(parsed.path)
@@ -3289,6 +3409,7 @@ def _resolve_input(value: str) -> tuple[Path | None, str]:
             path = path[1:]
         candidate = Path(path).expanduser().resolve()
     elif parsed.scheme:
+        _raise_if_identifier(value)
         raise ValueError(f"Unsupported paper input scheme: {parsed.scheme}")
     else:
         if "\n" in value:
@@ -3303,6 +3424,7 @@ def _resolve_input(value: str) -> tuple[Path | None, str]:
         elif len(value) >= 200:
             return None, value
         else:
+            _raise_if_identifier(value)
             raise ValueError(f"Paper input does not exist: {candidate}")
     return _validated_paper_path(candidate), ""
 
@@ -3501,7 +3623,7 @@ async def _store_markdown_artifact(
             try:
                 stored = await register(
                     path,
-                    kind="report",
+                    kind="review",
                     title=title,
                     mime="text/markdown",
                 )
@@ -3509,6 +3631,7 @@ async def _store_markdown_artifact(
                     return {
                         "title": title,
                         "format": "md",
+                        "kind": "review",
                         "uri": str(stored.uri),
                         "path": str(stored.path),
                         "mime": str(stored.mime),
@@ -3518,7 +3641,7 @@ async def _store_markdown_artifact(
         try:
             stored = await artifacts.put_file(
                 path,
-                kind="report",
+                kind="review",
                 title=title,
                 mime="text/markdown",
                 session_id=getattr(ctx, "session_id", ""),
@@ -3529,6 +3652,7 @@ async def _store_markdown_artifact(
             return {
                 "title": title,
                 "format": "md",
+                "kind": "review",
                 "uri": str(stored.uri),
                 "path": str(stored.path),
                 "mime": str(stored.mime),
@@ -3537,6 +3661,7 @@ async def _store_markdown_artifact(
             return {
                 "title": title,
                 "format": "md",
+                "kind": "review",
                 "uri": "",
                 "path": str(path),
                 "mime": "text/markdown",
@@ -3544,6 +3669,7 @@ async def _store_markdown_artifact(
     return {
         "title": title,
         "format": "md",
+        "kind": "review",
         "uri": "",
         "path": str(path),
         "mime": "text/markdown",
@@ -4364,6 +4490,36 @@ def _input_error(message: str) -> dict[str, Any]:
             "code": "invalid_input",
             "category": "input",
             "retryable": False,
+        },
+    }
+
+
+def _source_needs_input(ref: _RemotePaperRef) -> dict[str, Any]:
+    """Stop the turn so a Markdown fallback cannot settle as a visual review."""
+    if ref.kind == "arxiv":
+        next_actions = [
+            f"$arxiv-fetch {ref.identifier}",
+            "Attach the local PDF and retry paper-review.",
+        ]
+        code = "source_unavailable"
+    else:
+        next_actions = [
+            "Attach a local PDF, or pass an arXiv id such as 1706.03762.",
+        ]
+        code = "missing_input"
+    message = str(ref)
+    return {
+        "status": "needs_input",
+        "outcome": "needs_input",
+        "summary": message,
+        "error": message,
+        "recoverable": True,
+        "blocking": True,
+        "next_actions": next_actions,
+        "error_info": {
+            "code": code,
+            "category": "input",
+            "retryable": True,
         },
     }
 

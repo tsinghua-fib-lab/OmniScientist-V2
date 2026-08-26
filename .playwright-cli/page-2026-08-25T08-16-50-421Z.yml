@@ -1,1 +1,0 @@
-- generic [active] [ref=e1]: "omni web UI is not available. A packaged install should already include it. From a git checkout run: ./cli/scripts/build_web_ui.sh Then reload this page. The JSON API at /api is already running."

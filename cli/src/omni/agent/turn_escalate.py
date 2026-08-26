@@ -42,6 +42,7 @@ async def maybe_escalate_run(
         parent_task_id=task_id,
         kind="escalated",
         depth=(int(getattr(parent, "depth", 0) or 0) + 1) if parent is not None else 1,
+        require_session=True,
     )
     if parent is not None:
         await tasks.inherit_research_ledger(child.id, parent)

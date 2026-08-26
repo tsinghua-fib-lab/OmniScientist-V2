@@ -139,11 +139,11 @@ export function VlmFields({
         />
         {copy.enable}
       </label>
-      <Field label={copy.baseUrl}>
+      <Field label={copy.baseUrl} hint={copy.vlmEndpointHint}>
         <input
           className="settings-input"
           value={draft.endpoint}
-          placeholder="https://host/v1/chat/completions"
+          placeholder="https://host  or  https://host/v1"
           onChange={(event) => onChange({ ...draft, endpoint: event.target.value })}
         />
       </Field>

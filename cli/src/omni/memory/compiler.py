@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from omni.agent.intent_plan import IntentPlan, IntentType
+from omni.memory.profile_sanitize import is_tool_capability_ban, strip_tool_capability_bans
 from omni.memory.service import MemoryLayer, MemoryService, ScoredMemory
 
 if TYPE_CHECKING:
@@ -144,6 +145,10 @@ def _render(memories: Sequence[ScoredMemory], *, role: str, budget_chars: int) -
         summary = " ".join(str(entry.summary or "").split())
         if not summary:
             continue
+        if is_tool_capability_ban(summary) or entry.memory_type == "user_profile":
+            summary = " ".join(strip_tool_capability_bans(summary).split())
+            if not summary:
+                continue
         scope = entry.scope
         if scope == "task" and entry.scope_id:
             scope = f"task {str(entry.scope_id)[:8]}"

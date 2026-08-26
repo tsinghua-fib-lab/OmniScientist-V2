@@ -181,6 +181,7 @@ class ScheduledGoalRunner:
                 title=("continue: " + goal)[:80],
                 kind="turn",
                 schedule_id=schedule_id,
+                require_session=True,
             )
             if grant:
                 await agent.tasks.grant_tools(

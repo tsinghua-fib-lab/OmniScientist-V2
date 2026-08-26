@@ -1,8 +1,11 @@
 """Filesystem tools: read_file, write_file, edit_file, grep, glob, list_dir.
 
-Reads are confined to the project dir + current working dir subtree; writes
-are confined to the project dir + ``security.fs_write_allow`` roots. This is
-a pragmatic guard for a single-user local tool, not a hard sandbox.
+Reads follow Codex WorkspaceWrite: any path except sensitive files and
+frozen Omni control stores. Writes stay confined to the project dir +
+``security.fs_write_allow`` roots + the host outbox. User-named absolute
+directories in this turn's message are extra read roots (same consent as
+``@``), so a sibling repo the user pointed at is a ``list_dir``, not a
+bash crawl. This is a pragmatic single-user guard, not a hard sandbox.
 
 Two invariants make observations *actionable* (so the ReAct loop can course-
 correct instead of dead-ending):
@@ -28,8 +31,9 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from omni.agent.capabilities import contract_write_target
-from omni.config.paths import OmniPaths
+from omni.config.paths import OmniPaths, sits_in_any_control_store
 from omni.core.file_mentions import strip_mention_marker
+from omni.core.named_paths import iter_named_absolute_paths
 from omni.core.path_lookup import (
     missing_path_message,
     path_exists,
@@ -138,6 +142,25 @@ _DOCUMENT_TYPES: dict[str, tuple[str, str]] = {
     ".json": ("data", "application/json"),
     ".svg": ("figure", "image/svg+xml"),
     ".png": ("figure", "image/png"),
+    ".jpg": ("figure", "image/jpeg"),
+    ".jpeg": ("figure", "image/jpeg"),
+    ".webp": ("figure", "image/webp"),
+    ".gif": ("figure", "image/gif"),
+    ".pptx": (
+        "slides",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ),
+    ".ppt": ("slides", "application/vnd.ms-powerpoint"),
+    ".pdf": ("document", "application/pdf"),
+    ".docx": (
+        "document",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ),
+    ".doc": ("document", "application/msword"),
+    ".py": ("code", "text/x-python"),
+    ".dot": ("data", "text/vnd.graphviz"),
+    ".gv": ("data", "text/vnd.graphviz"),
+    ".ipynb": ("document", "application/x-ipynb+json"),
 }
 
 
@@ -195,9 +218,14 @@ async def resolve_write_target(ctx: ExecContext, raw: str) -> Path:
     same-named stray in the working directory so one pre-fix ``draft.section``
     cannot keep capturing later turns.
 
-    Anything carrying a directory component is the model being explicit and is
-    honoured as given. For a bare name, an existing file wins over a new location
-    so an append or a rewrite continues the document it is extending:
+    A path under a leftover deliverable root (``reports/``, ``figures/``,
+    ``outputs/<other-task>/``, …) is not a source-tree edit. A file that
+    already exists there is a continuation; a *new* file is rewritten into
+    this task's ``outputs/<title>_<task8>/`` bundle so every result lives
+    in one Codex-style folder. Other directory paths (``src/``, ``docs/``,
+    ``drafts/``) stay explicit. For a bare name, an existing file wins over
+    a new location so an append or a rewrite continues the document it is
+    extending:
 
     * already in this task's output bundle — the deliverable we are still writing;
     * already in the workspace ``artifacts/`` dir — a document we generated before
@@ -218,6 +246,9 @@ async def resolve_write_target(ctx: ExecContext, raw: str) -> Path:
     gate treat a bare filename as in-workspace without repeating this lookup.
     """
     candidate = Path(raw).expanduser()
+    relocated = await _rewrite_legacy_deliverable_target(ctx, candidate)
+    if relocated is not None:
+        return relocated
     if candidate.parent != Path("."):
         return candidate
     rewritten = await _rewrite_contract_write_target(ctx, candidate.name)
@@ -241,6 +272,80 @@ async def resolve_write_target(ctx: ExecContext, raw: str) -> Path:
     if store is not None and getattr(ctx, "task_id", ""):
         return await store.task_output_path(candidate.name, kind=kind)
     return generated
+
+
+def _as_given_write_path(ctx: ExecContext, candidate: Path) -> Path:
+    """Resolve a write path against the turn directory without creating it."""
+    raw = candidate.expanduser()
+    if raw.is_absolute():
+        return raw
+    base = ctx.working_dir or ctx.paths.project_dir
+    return base / raw
+
+
+def _legacy_deliverable_root_name(ctx: ExecContext, path: Path) -> str | None:
+    """Return ``reports`` / ``outputs`` / … when ``path`` sits under that root."""
+    from omni.storage.artifacts import deliverable_subdirs
+
+    names = {"out", *deliverable_subdirs()}
+    parts = path.expanduser().parts
+    if parts and parts[0] in names:
+        return parts[0]
+    if not path.expanduser().is_absolute():
+        return None
+    bases: list[Path] = []
+    for raw in (
+        ctx.working_dir,
+        getattr(ctx.paths, "workspace_root", None),
+        ctx.paths.project_dir,
+    ):
+        if raw is None:
+            continue
+        try:
+            bases.append(Path(raw).expanduser().resolve())
+        except (OSError, RuntimeError):
+            continue
+    try:
+        resolved = path.expanduser().resolve()
+    except (OSError, RuntimeError):
+        return None
+    for base in bases:
+        try:
+            rel = resolved.relative_to(base)
+        except ValueError:
+            continue
+        if rel.parts and rel.parts[0] in names:
+            return rel.parts[0]
+    return None
+
+
+async def _rewrite_legacy_deliverable_target(
+    ctx: ExecContext, candidate: Path
+) -> Path | None:
+    """Send new reports/figures/outputs writes into this task's bundle."""
+    store = getattr(ctx, "artifacts", None)
+    task_id = str(getattr(ctx, "task_id", "") or "")
+    if store is None or not task_id:
+        return None
+    if _legacy_deliverable_root_name(ctx, candidate) is None:
+        return None
+    located = _as_given_write_path(ctx, candidate)
+    if located.is_file():
+        return located
+    kind, _mime = document_kind_for(located)
+    existing_bundle = await store.existing_task_output_path(
+        located.name, kind=kind
+    )
+    if existing_bundle is not None:
+        try:
+            located.resolve().relative_to(existing_bundle.parent.resolve())
+            return located
+        except ValueError:
+            pass
+    rewritten = await _rewrite_contract_write_target(ctx, located.name)
+    if rewritten is not None:
+        return rewritten
+    return await store.task_output_path(located.name, kind=kind)
 
 
 async def _rewrite_contract_write_target(ctx: ExecContext, basename: str) -> Path | None:
@@ -276,14 +381,10 @@ async def _task_write_stem(ctx: ExecContext) -> str:
 def _granted_paths(ctx: ExecContext) -> set[Path]:
     """Files the user explicitly attached this turn (``@`` mentions).
 
-    The read roots exist to stop the *model* from wandering the filesystem; they
-    are not a veto over the owner. When the user writes ``@/abs/path/paper.md``
-    that is consent to read that exact file, so it is admitted even from outside
-    the roots — otherwise the feature silently fails whenever omni is launched
-    from a different directory than the document.
-
-    Consent widens *which paths*, never *which kinds*: sensitivity is still
-    enforced by the caller, so ``@~/.ssh/id_rsa`` stays refused.
+    Also admits absolute paths typed in the user message (no ``@``). That is
+    the same owner consent: a ``源码目录 /Users/…/sourcecode`` clause must
+    be listable from another workspace. Sensitivity is still enforced by the
+    caller, so ``@~/.ssh/id_rsa`` stays refused.
     """
     granted: set[Path] = set()
     for uri in getattr(ctx, "file_uris", None) or []:
@@ -295,7 +396,65 @@ def _granted_paths(ctx: ExecContext) -> set[Path]:
             granted.add(Path(raw).expanduser().resolve())
         except (OSError, RuntimeError):
             continue
+    resolver = getattr(ctx, "resolver_context", None)
+    message = str(getattr(resolver, "user_message", "") or "")
+    granted.update(iter_named_absolute_paths(message))
     return granted
+
+
+def _store_read_exemptions(ctx: ExecContext) -> list[Path]:
+    """Control-store paths a turn may still read (this workspace's outputs)."""
+    return _read_roots(ctx)
+
+
+def read_block_reason(path: Path, ctx: ExecContext, *, extra_roots: Sequence[Path] = ()) -> str:
+    """Why a read is refused, or ``\"\"`` when the Codex-style envelope admits it.
+
+    Sensitive files are hidden. Frozen Omni control stores stay closed except
+    for this turn's output / spill / project exemptions. Everything else is
+    readable so ``list_dir`` and ``bash`` share one envelope.
+    """
+    if _is_sensitive_target(path):
+        return "sensitive"
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError):
+        return "unresolved"
+    exemptions = list(_store_read_exemptions(ctx)) + [Path(root) for root in extra_roots]
+    homes: list[Path] = []
+    home = getattr(ctx.paths, "home", None)
+    if home is not None:
+        try:
+            homes.append(Path(home).resolve())
+        except (OSError, RuntimeError):
+            pass
+    in_store = sits_in_any_control_store(resolved) or (
+        homes and _within(resolved, homes)
+    )
+    if in_store and not _within(resolved, exemptions):
+        return "control"
+    return ""
+
+
+def read_is_admitted(path: Path, ctx: ExecContext, *, extra_roots: Sequence[Path] = ()) -> bool:
+    """Whether file tools may read *path* under the shared WorkspaceWrite envelope."""
+    return read_block_reason(path, ctx, extra_roots=extra_roots) == ""
+
+
+def _is_filesystem_root(path: Path) -> bool:
+    try:
+        resolved = path.resolve()
+    except (OSError, RuntimeError):
+        return False
+    return resolved.parent == resolved
+
+
+def _control_error(op: str, path: Path) -> str:
+    return (
+        f"ERROR: {op} denied in Omni control state: {path}. "
+        "Session stores, config, and secrets stay closed. Use list_dir on "
+        "the project or a path the user named."
+    )
 
 
 def _within(path: Path, roots: list[Path]) -> bool:
@@ -443,15 +602,20 @@ def build_fs_tools(ctx: ExecContext) -> list[Tool]:
     # its own; a mentioned *directory* becomes a root, because "review @corpus"
     # is meaningless if the files inside it stay unreadable.
     granted = _granted_paths(ctx)
-    admitted_roots = read_roots + [path for path in granted if path.is_dir()]
+    granted_dirs = [path for path in granted if path.is_dir()]
+
+    def _deny_read(op: str, path: Path) -> str:
+        reason = read_block_reason(path, ctx, extra_roots=granted_dirs)
+        if reason == "sensitive":
+            return f"ERROR: sensitive file hidden by security policy: {path.name}"
+        if reason == "control":
+            return _control_error(op, path)
+        if reason == "unresolved":
+            return f"ERROR: {op} denied because the path could not be resolved: {path}"
+        return _root_error(op, path, read_roots, ctx=ctx)
 
     def admitted(path: Path) -> bool:
-        if _within(path, admitted_roots):
-            return True
-        try:
-            return path.resolve() in granted
-        except (OSError, RuntimeError):
-            return False
+        return read_is_admitted(path, ctx, extra_roots=granted_dirs)
 
     async def read_file(args: dict) -> str:
         raw = strip_mention_marker(str(args.get("path", "")))
@@ -468,7 +632,7 @@ def build_fs_tools(ctx: ExecContext) -> list[Tool]:
             path = resolve_existing_path(raw) or Path(raw).expanduser()
             from_store = False
         if not from_store and not admitted(path):
-            return _root_error("read", path, read_roots, ctx=ctx)
+            return _deny_read("read", path)
         if _is_sensitive_target(path):
             return f"ERROR: sensitive file hidden by security policy: {path.name}"
         if path_is_dir(path):
@@ -501,7 +665,7 @@ def build_fs_tools(ctx: ExecContext) -> list[Tool]:
         raw = strip_mention_marker(str(args.get("path", default_base)))
         path = resolve_existing_path(raw) or Path(raw).expanduser()
         if not admitted(path):
-            return _root_error("list", path, read_roots, ctx=ctx)
+            return _deny_read("list", path)
         if not path_exists(path):
             return missing_path_message(
                 path, next_step=f"Accessible roots: {_roots_hint(read_roots)}."
@@ -577,8 +741,13 @@ def build_fs_tools(ctx: ExecContext) -> list[Tool]:
     async def grep(args: dict) -> str:
         pattern = str(args.get("pattern", ""))
         base = Path(str(args.get("path", default_base))).expanduser()
-        if not _within(base, read_roots):
-            return _root_error("search", base, read_roots, ctx=ctx)
+        if _is_filesystem_root(base):
+            return (
+                "ERROR: search of the filesystem root is refused. "
+                "Name a directory (the project, or a path the user typed)."
+            )
+        if not admitted(base):
+            return _deny_read("search", base)
         hits: list[str] = []
         for root, dirs, files in os.walk(base):
             dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
@@ -610,7 +779,7 @@ def build_fs_tools(ctx: ExecContext) -> list[Tool]:
 
     tools = [
         Tool(
-            ToolSpec("read_file", f"Read a local file under the project/current-directory roots (default {default_base}) or any file the user attached with @; artifact:// URIs resolve through the artifact store. Use the exact path or URI from a previous tool result — do not rewrite quotation marks. Sensitive files are hidden. PDFs are extracted as markdown. Directories return a listing. Use offset/limit to page through a long file.", {
+            ToolSpec("read_file", f"Read a local file (default {default_base}), a path the user named, or any @ attachment; artifact:// URIs resolve through the artifact store. Use the exact path or URI from a previous tool result — do not rewrite quotation marks. Sensitive files and Omni control stores are hidden. PDFs are extracted as markdown. Directories return a listing. Use offset/limit to page through a long file. Prefer this over bash for a single file.", {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
@@ -622,7 +791,7 @@ def build_fs_tools(ctx: ExecContext) -> list[Tool]:
             read_file,
         ),
         Tool(
-            ToolSpec("list_dir", f"List a directory under the project/current-directory roots (default {default_base}).", {
+            ToolSpec("list_dir", f"List a directory (default {default_base}). The user's named source trees and @ directories are included. Sensitive files and Omni control stores stay hidden. Prefer this over bash ls.", {
                 "type": "object",
                 "properties": {"path": {"type": "string"}},
             }),
@@ -641,11 +810,15 @@ def build_fs_tools(ctx: ExecContext) -> list[Tool]:
                     "path": {
                         "type": "string",
                         "description": (
-                            "A human filename (Survey.md). A bare name lands in "
-                            "this task's outputs bundle (outputs/<title>_<task8>/). "
-                            "Do not use plan output tokens such as draft.section "
-                            "or draft.manuscript as the path — those are ledger "
-                            "names. Give a directory to write somewhere specific."
+                            "A human filename (Survey.md). New deliverables land "
+                            "in this task's outputs bundle "
+                            "(outputs/<title>_<task8>/), including paths that "
+                            "start with reports/, figures/, or another outputs/ "
+                            "folder. Existing leftover files stay editable in "
+                            "place. Do not use plan output tokens such as "
+                            "draft.section or draft.manuscript as the path — "
+                            "those are ledger names. Give a source-tree "
+                            "directory (src/, docs/) to edit a repository file."
                         ),
                     },
                     "contents": {"type": "string"},
@@ -674,7 +847,7 @@ def build_fs_tools(ctx: ExecContext) -> list[Tool]:
             edit_file,
         ),
         Tool(
-            ToolSpec("grep", f"Search file contents by substring under an accessible root (default {default_base}); skips sensitive and noisy directories.", {
+            ToolSpec("grep", f"Search file contents by substring (default {default_base}). Name a directory — the filesystem root is refused. Skips sensitive and noisy directories.", {
                 "type": "object",
                 "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}},
                 "required": ["pattern"],

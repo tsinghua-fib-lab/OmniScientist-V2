@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from omni.config.paths import OmniPaths, get_paths
 from omni.core.model_catalog import max_input_tokens_for, max_output_tokens_for
@@ -843,8 +843,28 @@ class ArtifactsCfg(BaseModel):
 
 
 class ObservabilityCfg(BaseModel):
+    """Process-log knobs shared by CLI, ``omni serve``, and ``omni web``.
+
+    In-process handlers write one rotating file under ``<OMNI_HOME>/logs``.
+    ``log_files`` is kimi-code's total retained files (live + rolled copies).
+    ``log_backup_count`` is accepted as an alias for the same total.
+    """
+
     log_level: str = "INFO"
+    log_max_bytes: int = 10 * 1024 * 1024
+    log_files: int = 10
     telemetry: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_backup_count_alias(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        if "log_files" not in data and "log_backup_count" in data:
+            data = {**data, "log_files": data["log_backup_count"]}
+        if "log_backup_count" in data:
+            data = {key: value for key, value in data.items() if key != "log_backup_count"}
+        return data
 
 
 class UpdateCfg(BaseModel):
@@ -980,6 +1000,25 @@ def _env_layer() -> dict[str, Any]:
         layer["research"] = research
     if (v := pick("OMNI_UI", "OMNI_UI_MODE")):
         layer["display"] = {"ui_mode": v}
+    observability: dict[str, Any] = {}
+    if (v := pick("OMNI_LOG_LEVEL")):
+        observability["log_level"] = v
+    if (v := pick("OMNI_LOG_MAX_BYTES")):
+        try:
+            size = int(v)
+        except ValueError:
+            size = 0
+        if size > 0:
+            observability["log_max_bytes"] = size
+    if (v := pick("OMNI_LOG_FILES")):
+        try:
+            files = int(v)
+        except ValueError:
+            files = 0
+        if files > 0:
+            observability["log_files"] = files
+    if observability:
+        layer["observability"] = observability
     return layer
 
 

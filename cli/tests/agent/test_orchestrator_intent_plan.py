@@ -253,8 +253,8 @@ async def test_unresolved_planner_capability_recovers_to_bash_and_approval() -> 
         pytest.fail("a known-safe Git read should auto-approve")
 
     agent.approver = unexpected_prompt
-    session_id = "repeat-code-review"
     try:
+        session_id = await agent.ensure_session(channel="cli")
         await agent._persist_message(  # noqa: SLF001 - seed the incident's history
             session_id,
             "assistant",

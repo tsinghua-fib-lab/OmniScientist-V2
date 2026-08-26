@@ -311,6 +311,27 @@ def test_config_vlm_rejects_insecure_endpoint_and_unknown_protocol_atomically() 
     assert load_settings().vlm.endpoint == ""
 
 
+def test_config_vlm_accepts_a_site_origin_base_url() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "config",
+            "vlm",
+            "-u",
+            "https://zgc.apihy.com",
+            "-m",
+            "gpt-image-2",
+            "-k",
+            "vlm-secret",
+        ],
+    )
+    assert result.exit_code == 0
+    settings = load_settings()
+    assert settings.vlm.enabled is True
+    assert settings.vlm.endpoint == "https://zgc.apihy.com"
+    assert settings.vlm.model == "gpt-image-2"
+
+
 def test_config_vlm_test_checks_saved_effective_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -341,6 +362,57 @@ def test_config_vlm_test_checks_saved_effective_configuration(
     assert result.exit_code == 0
     assert "verified" in result.stdout.lower()
     assert seen and seen[0].model == "vision-model"
+
+
+def test_config_test_explains_unconfigured_optional_services(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omni.config import user_edits
+
+    async def fake_model(settings):  # noqa: ANN001
+        return True, "mock/omni-mock is available; response: pong"
+
+    monkeypatch.setattr(user_edits, "test_model_connectivity", fake_model)
+    result = runner.invoke(app, ["config", "test"])
+    output = result.stdout + result.stderr
+    assert result.exit_code == 0
+    assert "pong" in output
+    assert "VLM is not configured" in output
+    assert "Semantic Scholar key is not configured" in output
+    assert "Embeddings are disabled" in output
+
+
+def test_config_test_live_probes_configured_vlm(monkeypatch: pytest.MonkeyPatch) -> None:
+    from omni.config import user_edits
+
+    paths = get_paths()
+    _write_toml(
+        paths.config_file,
+        {
+            "vlm": {
+                "enabled": True,
+                "model": "vision-model",
+                "endpoint": "https://vision.example/v1/chat/completions",
+                "protocol": "openai_compatible_chat",
+            }
+        },
+    )
+    _write_toml(paths.secrets_file, {"vlm": {"api_key": "vlm-secret"}})
+
+    async def fake_model(settings):  # noqa: ANN001
+        return True, "mock/omni-mock is available; response: pong"
+
+    async def fake_vlm(settings):  # noqa: ANN001
+        assert settings.vlm.model == "vision-model"
+        return True, "VLM multimodal configuration verified: the model accepted an image probe."
+
+    monkeypatch.setattr(user_edits, "test_model_connectivity", fake_model)
+    monkeypatch.setattr(user_edits, "test_vlm_connectivity", fake_vlm)
+    result = runner.invoke(app, ["config", "test"])
+    output = result.stdout + result.stderr
+    assert result.exit_code == 0
+    assert "image probe" in output
+    assert "Semantic Scholar key is not configured" in output
 
 
 def test_doctor_reports_optional_vlm_once_with_actionable_setup_command() -> None:

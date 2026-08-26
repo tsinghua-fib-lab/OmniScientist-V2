@@ -707,3 +707,50 @@ def get_paths(project: str | None = None, cwd: Path | None = None) -> OmniPaths:
         project_dir=home / "workspaces" / workspace_key(base), workspace_root=base,
         invocation_cwd=invocation_cwd,
     )
+
+
+def is_durable_project_dir(path: Path, home: Path | None = None) -> bool:
+    """True when *path* is a store directory, not a user's checkout.
+
+    Stores live under ``<home>/workspaces`` / ``<home>/projects``, or as an
+    in-place ``<repo>/.omni`` marker. A VCS root that happens to contain a
+    leaked ``sessions.sqlite3`` is not a store — that is the Codex rule:
+    runtime state stays in the home (or the hidden marker), never the
+    workspace root.
+    """
+    try:
+        resolved = path.expanduser().resolve()
+    except OSError:
+        return False
+    store = (home or user_home()).resolve()
+    if resolved.name == _PROJECT_MARKER:
+        return resolved.is_dir() and not is_control_store_path(resolved, store)
+    for bucket in (store / "workspaces", store / "projects"):
+        try:
+            resolved.relative_to(bucket.resolve())
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def resolve_project_dir(origin: Path | str | None) -> Path | None:
+    """Map a stored origin path back to the durable ``project_dir``.
+
+    Callers that persist ``origin_project_dir`` must write the store path.
+    A legacy value that is a workspace root (the user's repo) is re-keyed
+    through :func:`get_paths` so ``<repo>/sessions.sqlite3`` is never opened
+    or created.
+    """
+    raw = str(origin or "").strip()
+    if not raw:
+        return None
+    try:
+        path = Path(raw).expanduser().resolve()
+    except OSError:
+        return None
+    if is_durable_project_dir(path):
+        return path
+    if not path.is_dir():
+        return None
+    return get_paths(cwd=path).project_dir

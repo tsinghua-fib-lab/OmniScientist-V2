@@ -393,10 +393,14 @@ class InteractionLifecycle:
             # Other callers (scheduled/recovery resumes) still get a real
             # transition when their persisted task is not already active.
             if existing.status != "running":
-                await self._tasks.mark_running(
+                resumed = await self._tasks.mark_running(
                     task_id,
                     summary="approved plan execution started",
                 )
+                if not resumed:
+                    raise LookupError(
+                        f"task or owning session no longer exists: {task_id}"
+                    )
             # Resumes (plan approval, /task attach, recovery) still surface the
             # owning task id to the caller so the live display keeps it visible —
             # a resumed turn must never look "id-less". Headless callers pass a

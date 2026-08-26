@@ -22,8 +22,12 @@ omni -P skill-verify skills examples
 > to exercise the approval loop.
 >
 > Numbered user-facing prompts (including stacked 3–8 capability utterances,
-> long-horizon campaigns, `task all`, `memory link`/`graph`, and in-process
-> REPL inspect) live in the [User Walkthrough Catalog](user-walkthrough-cases.md).
+> survey packs, one-shot `--at` schedules, third-party skill add/trust/invoke,
+> long-horizon campaigns, one-task-many-executions, execution-level degrade,
+> `task all`, `memory link`/`graph`, and in-process REPL inspect) live in the
+> [User Walkthrough Catalog](user-walkthrough-cases.md). That catalog is the
+> source of truth for later user-perspective walkthroughs, their output
+> formats, and the coverage inventory of user-facing CLI groups (not every leaf action).
 
 ## Core Validation Loop
 

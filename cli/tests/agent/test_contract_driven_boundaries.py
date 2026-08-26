@@ -137,6 +137,7 @@ def test_orchestrator_delegates_run_and_tool_lifecycle() -> None:
     assert "self.interaction.gate_plan_execution(" in orchestrator
     assert "self.turn_completion.complete_plan(" in orchestrator
     assert "self.turn_completion.complete_react(" in orchestrator
+    assert "assemble_react_system_prompt(" in orchestrator
     assert "async def gate_plan_execution" in interaction_lifecycle
     assert "class TaskController" in task_controller
     assert "def finish_turn" in task_controller
@@ -357,10 +358,35 @@ def test_undeclared_skill_metadata_has_no_contract_or_role_privilege() -> None:
 # Code skill text: model-facing instructions that may name a user's file
 # (``综述.md``). They are not Omni's control plane. English stays enforced on
 # skill engines, tests, and the rest of ``skills/``.
+#
+# A few runtime modules quote the user's words so the host can match them
+# (Codex keeps apply_patch / exec availability in config, and matches the
+# user's phrasing in-product). Those tokens are model I/O, not docs.
+# Dated walkthrough result notes are operator transcripts, not the public
+# English control plane.
 _VENDORED_PERSONA_SKILLS = (
     ROOT.parent / "skills" / "soulagent",
     ROOT.parent / "skills" / "scientist-kg-distiller",
 )
+_USER_LANGUAGE_MATCHERS = frozenset(
+    {
+        "cli/src/omni/core/named_paths.py",
+        "cli/src/omni/memory/profile_sanitize.py",
+        "cli/src/omni/runtime/remaining.py",
+        "cli/src/omni/skills_runtime/builtin_tools/fs.py",
+    }
+)
+
+
+def _english_only_exempt(path: Path) -> bool:
+    if path.name == "SKILL.md":
+        return True
+    if path.name.startswith("user-walkthrough-results-"):
+        return True
+    relative = str(path.relative_to(ROOT.parent))
+    if relative in _USER_LANGUAGE_MATCHERS:
+        return True
+    return any(root in path.parents for root in _VENDORED_PERSONA_SKILLS)
 
 
 def test_production_control_plane_and_public_docs_are_english_only() -> None:
@@ -378,12 +404,10 @@ def test_production_control_plane_and_public_docs_are_english_only() -> None:
             for path in root.rglob("*")
             if path.is_file() and path.suffix.lower() in {".py", ".md", ".toml"}
         )
-    exempt = _VENDORED_PERSONA_SKILLS
     violations = [
         str(path.relative_to(ROOT.parent))
         for path in files
-        if not any(root in path.parents for root in exempt)
-        and path.name != "SKILL.md"
+        if not _english_only_exempt(path)
         and han.search(path.read_text(encoding="utf-8"))
     ]
 

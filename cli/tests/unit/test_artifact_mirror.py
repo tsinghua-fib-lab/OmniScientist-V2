@@ -15,7 +15,8 @@ import json
 import pytest
 
 from omni.config import load_settings
-from omni.storage.artifacts import ArtifactStore
+from omni.config.paths import OmniPaths
+from omni.storage.artifacts import ArtifactStore, recorded_artifact_path
 from omni.storage.db import get_database
 from omni.storage.models import ArtifactORM, TaskORM
 
@@ -167,6 +168,66 @@ async def test_legacy_reports_absolute_path_still_resolves(tmp_path):
         row.meta = meta
         await session.commit()
     assert await store.resolve_path(art.uri) == leftover.resolve()
+
+
+@pytest.mark.asyncio
+async def test_resolve_path_uses_workspace_root_without_mirror_dir(tmp_path):
+    """Foreign get_task builds a store with no launch outputs/ root.
+
+    Leftover reports/ copies still live under the checkout that keyed the
+    workspace. That checkout must be an allowed resolve root, or inspection
+    has no filesystem path and used to print artifact://<id>.
+    """
+    checkout = tmp_path / "repo"
+    leftover = (
+        checkout / "reports" / "Survey-how-latent-space" / "latent-steering-related-work.md"
+    )
+    leftover.parent.mkdir(parents=True)
+    leftover.write_text("# survey\n")
+    store_dir = tmp_path / "store"
+    paths = OmniPaths(
+        home=tmp_path / "home",
+        project_name="foreign",
+        project_dir=store_dir,
+        workspace_root=checkout,
+    )
+    paths.ensure_dirs()
+    db = get_database(paths.project_db)
+    await db.init()
+    store = ArtifactStore(paths, db)
+    art = await store.put_bytes(b"# survey\n", kind="report", title="Survey", ext="md")
+    async with store._db.session() as session:
+        row = await session.get(ArtifactORM, art.id)
+        assert row is not None
+        row.rel_path = str(leftover.resolve())
+        await session.commit()
+    assert await store.resolve_path(art.uri) == leftover.resolve()
+
+
+def test_recorded_artifact_path_keeps_absolute_launch_copy(tmp_path):
+    row = ArtifactORM(
+        id="art1",
+        kind="report",
+        title="note",
+        uri="artifact://art1",
+        rel_path=str(tmp_path / "reports" / "note.md"),
+    )
+    assert recorded_artifact_path(row, project_dir=tmp_path / "store") == str(
+        tmp_path / "reports" / "note.md"
+    )
+
+
+def test_recorded_artifact_path_joins_store_relative(tmp_path):
+    row = ArtifactORM(
+        id="art1",
+        kind="report",
+        title="note",
+        uri="artifact://art1",
+        rel_path="artifacts/report/note.md",
+    )
+    assert recorded_artifact_path(row, project_dir=tmp_path) == str(
+        tmp_path / "artifacts" / "report" / "note.md"
+    )
 
 
 @pytest.mark.asyncio

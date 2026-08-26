@@ -292,7 +292,7 @@ async def test_host_fill_slides_falls_back_to_absolute_path(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_twin_contract_files_fill_the_owed_deck_gap(tmp_path: Any) -> None:
+async def test_twin_contract_files_are_not_this_turn_outputs(tmp_path: Any) -> None:
 
     twin_id = "d6179941" + "1" * 24
     deck_path = tmp_path / "old.pptx"
@@ -321,7 +321,7 @@ async def test_twin_contract_files_fill_the_owed_deck_gap(tmp_path: Any) -> None
 
     completion = _completion(artifacts=Store(), runtime=SimpleNamespace())
     merged = await completion._contract_output_artifacts(_plan(twin=twin_id), [this_md], [])
-    assert [item.uri for item in merged] == ["artifact://md-new", "artifact://pptx-twin"]
+    assert [item.uri for item in merged] == ["artifact://md-new"]
 
 
 @pytest.mark.asyncio

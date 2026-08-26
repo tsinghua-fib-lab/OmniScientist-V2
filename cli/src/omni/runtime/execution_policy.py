@@ -201,4 +201,19 @@ def _release_process_lock(lock_file: IO[bytes]) -> None:
         lock_file.close()
 
 
-__all__ = ["ToolResourceLockPool", "resources_for_tool", "skill_requires_approval"]
+def tool_is_mutating(tool_name: str) -> bool:
+    """True when a start event must land before this tool may run."""
+    name = str(tool_name or "").strip()
+    return (
+        name in _FILESYSTEM_MUTATIONS
+        or name in _EXECUTION_TOOLS
+        or name in _STORE_MUTATIONS
+    )
+
+
+__all__ = [
+    "ToolResourceLockPool",
+    "resources_for_tool",
+    "skill_requires_approval",
+    "tool_is_mutating",
+]

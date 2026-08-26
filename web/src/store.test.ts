@@ -11,6 +11,10 @@ const mocked = vi.hoisted(() => ({
   getSession: vi.fn(),
   sessionMessages: vi.fn(),
   workspaceInbox: vi.fn(),
+  listAllSessions: vi.fn(),
+  deleteSessions: vi.fn(),
+  hideWorkspaces: vi.fn(),
+  unhideWorkspaces: vi.fn(),
   sessionTimeline: vi.fn(),
   listTasks: vi.fn(),
   getTask: vi.fn(),
@@ -48,6 +52,10 @@ vi.mock("./api", () => {
       getSession: mocked.getSession,
       sessionMessages: mocked.sessionMessages,
       workspaceInbox: mocked.workspaceInbox,
+      listAllSessions: mocked.listAllSessions,
+      deleteSessions: mocked.deleteSessions,
+      hideWorkspaces: mocked.hideWorkspaces,
+      unhideWorkspaces: mocked.unhideWorkspaces,
       sessionTimeline: mocked.sessionTimeline,
       listTasks: mocked.listTasks,
       getTask: mocked.getTask,
@@ -173,6 +181,14 @@ describe("session Task marker read model", () => {
         listed.sessions.find((row: { id: string }) => row.id === sessionId) || null;
       return { sessions: listed.sessions, focus };
     });
+    mocked.listAllSessions.mockResolvedValue({ sessions: [], next_cursor: null, errors: [] });
+    mocked.deleteSessions.mockResolvedValue({
+      deleted_session_ids: [],
+      deleted_task_ids: [],
+      retained_artifact_count: 0,
+    });
+    mocked.hideWorkspaces.mockResolvedValue({ project_dirs: [], workspaces: [] });
+    mocked.unhideWorkspaces.mockResolvedValue({ project_dirs: [], workspaces: [] });
     mocked.sessionTimeline.mockImplementation(async (path: string, sessionId: string) => {
       const messages = await mocked.sessionMessages(path, sessionId);
       const tasks = await mocked.listTasks(path, sessionId, 200).catch(() => ({ tasks: [] }));
@@ -1343,5 +1359,217 @@ describe("inspector workspace vs session scope", () => {
     await vi.waitFor(() =>
       expect(mocked.listTasks).toHaveBeenCalledWith(workspace.open_path, "", 200),
     );
+  });
+
+  it("loads globally sorted and filtered sessions through the Home-level catalog RPC", async () => {
+    const globalSession = {
+      ...session,
+      id: "session-global",
+      project_dir: "/tmp/other",
+      workspace_label: "other",
+      status_group: "warning",
+    };
+    mocked.listAllSessions.mockResolvedValue({
+      sessions: [globalSession],
+      next_cursor: "next-page",
+      errors: [],
+    });
+    const store = await import("./store");
+    await store.actions.openWorkspace(workspace.open_path);
+
+    await store.actions.setSessionScope("all");
+    await store.actions.setSessionSort("completed");
+    await store.actions.setSessionStatusFilter("warning");
+
+    expect(mocked.listAllSessions).toHaveBeenLastCalledWith({
+      workspace: undefined,
+      channel: "",
+      status: ["warning"],
+      sort: "completed",
+      cursor: "",
+      limit: 50,
+    });
+    expect(readSnapshot(store).sessionResults).toEqual([globalSession]);
+    expect(readSnapshot(store).sessionNextCursor).toBe("next-page");
+  });
+
+  it("ignores an in-flight append after a fresh first-page request starts", async () => {
+    const first = { ...session, id: "session-first", project_dir: "/tmp/other" };
+    const stale = { ...session, id: "session-stale", project_dir: "/tmp/other" };
+    const refreshed = { ...session, id: "session-refreshed", project_dir: "/tmp/other" };
+    mocked.listAllSessions.mockResolvedValueOnce({
+      sessions: [first],
+      next_cursor: "cursor-a",
+      errors: [],
+    });
+    const store = await import("./store");
+    await store.actions.openWorkspace(workspace.open_path);
+    await store.actions.setSessionScope("all");
+
+    const staleAppend = deferred<{
+      sessions: typeof stale[];
+      next_cursor: string | null;
+      errors: never[];
+    }>();
+    const freshPage = deferred<{
+      sessions: typeof refreshed[];
+      next_cursor: string | null;
+      errors: never[];
+    }>();
+    mocked.listAllSessions
+      .mockReturnValueOnce(staleAppend.promise)
+      .mockReturnValueOnce(freshPage.promise);
+
+    const appendPromise = store.actions.loadMoreSessionResults();
+    const refreshPromise = store.actions.refreshSessionResults();
+    freshPage.resolve({ sessions: [refreshed], next_cursor: "cursor-fresh", errors: [] });
+    await refreshPromise;
+    staleAppend.resolve({ sessions: [stale], next_cursor: "cursor-stale", errors: [] });
+    await appendPromise;
+
+    expect(readSnapshot(store).sessionResults).toEqual([refreshed]);
+    expect(readSnapshot(store).sessionNextCursor).toBe("cursor-fresh");
+  });
+
+  it("does not let an older append failure replace the current page state", async () => {
+    const first = { ...session, id: "session-first", project_dir: "/tmp/other" };
+    const latest = { ...session, id: "session-latest", project_dir: "/tmp/other" };
+    mocked.listAllSessions.mockResolvedValueOnce({
+      sessions: [first],
+      next_cursor: "cursor-a",
+      errors: [],
+    });
+    const store = await import("./store");
+    await store.actions.openWorkspace(workspace.open_path);
+    await store.actions.setSessionScope("all");
+
+    const olderAppend = deferred<{
+      sessions: typeof latest[];
+      next_cursor: string | null;
+      errors: never[];
+    }>();
+    const newerAppend = deferred<{
+      sessions: typeof latest[];
+      next_cursor: string | null;
+      errors: Array<{ message: string }>;
+    }>();
+    mocked.listAllSessions
+      .mockReturnValueOnce(olderAppend.promise)
+      .mockReturnValueOnce(newerAppend.promise);
+
+    const olderPromise = store.actions.loadMoreSessionResults();
+    const newerPromise = store.actions.loadMoreSessionResults();
+    newerAppend.resolve({
+      sessions: [latest],
+      next_cursor: "cursor-b",
+      errors: [{ message: "current catalog warning" }],
+    });
+    await newerPromise;
+    olderAppend.reject(new Error("stale append failed"));
+    await olderPromise;
+
+    expect(readSnapshot(store).sessionResults).toEqual([first, latest]);
+    expect(readSnapshot(store).sessionNextCursor).toBe("cursor-b");
+    expect(readSnapshot(store).sessionListError).toBe("current catalog warning");
+  });
+
+  it("deletes a same-workspace session batch and opens the newest surviving session", async () => {
+    const survivor = { ...session, id: "session-b", title: "Survivor" };
+    mocked.listSessions.mockResolvedValue({ sessions: [session, survivor] });
+    mocked.deleteSessions.mockResolvedValue({
+      deleted_session_ids: [session.id],
+      deleted_task_ids: ["task-a"],
+      retained_artifact_count: 2,
+    });
+    const store = await import("./store");
+    await store.actions.openWorkspace(workspace.open_path);
+    await store.actions.openSession(session.id);
+    mocked.listSessions.mockResolvedValue({ sessions: [survivor] });
+    mocked.getSession.mockResolvedValue({ session: survivor });
+
+    await store.actions.deleteSessions([session.id]);
+
+    expect(mocked.deleteSessions).toHaveBeenCalledWith(workspace.open_path, [session.id]);
+    expect(readSnapshot(store).sessionId).toBe(survivor.id);
+    expect(readSnapshot(store).notice).toContain("保留 2 个产物");
+  });
+
+  it("hides several catalog workspaces without changing the selected workspace", async () => {
+    const other = {
+      name: "other",
+      root: "/tmp/other",
+      project_dir: "/tmp/other",
+      kind: "path",
+      label: "other",
+      last_seen: 1,
+    };
+    mocked.listWorkspaces
+      .mockResolvedValueOnce({ workspaces: [other] })
+      .mockResolvedValueOnce({ workspaces: [] });
+    mocked.hideWorkspaces.mockResolvedValue({
+      project_dirs: [other.project_dir],
+      workspaces: [],
+    });
+    const store = await import("./store");
+    await store.actions.refreshCatalog();
+
+    await store.actions.hideWorkspaces([other.project_dir]);
+
+    expect(mocked.hideWorkspaces).toHaveBeenCalledWith([other.project_dir]);
+    expect(readSnapshot(store).catalog).toEqual([]);
+  });
+
+  it("keeps hidden workspaces in the snapshot so the sidebar can restore them", async () => {
+    const hidden = {
+      name: "hidden",
+      root: "/tmp/hidden",
+      project_dir: "/tmp/hidden",
+      kind: "path",
+      label: "hidden",
+      last_seen: 1,
+    };
+    mocked.listWorkspaces.mockResolvedValue({
+      workspaces: [],
+      hidden_workspaces: [hidden],
+      hidden_count: 1,
+    });
+    const store = await import("./store");
+
+    await store.actions.refreshCatalog();
+
+    expect(readSnapshot(store).hiddenWorkspaces).toEqual([hidden]);
+  });
+
+  it("never asks the backend to hide the selected workspace", async () => {
+    const store = await import("./store");
+    await store.actions.openWorkspace(workspace.open_path);
+
+    await store.actions.hideWorkspaces([workspace.project_dir]);
+
+    expect(mocked.hideWorkspaces).not.toHaveBeenCalled();
+    expect(readSnapshot(store).error).toContain("当前工作区不能");
+  });
+
+  it("restores hidden workspaces from the visibility RPC response", async () => {
+    const hidden = {
+      name: "hidden",
+      root: "/tmp/hidden",
+      project_dir: "/tmp/hidden",
+      kind: "path",
+      label: "hidden",
+      last_seen: 1,
+    };
+    mocked.unhideWorkspaces.mockResolvedValue({
+      project_dirs: [hidden.project_dir],
+      workspaces: [hidden],
+      hidden_workspaces: [],
+      hidden_count: 0,
+    });
+    const store = await import("./store");
+
+    await store.actions.unhideWorkspaces([hidden.project_dir]);
+
+    expect(readSnapshot(store).catalog).toEqual([hidden]);
+    expect(readSnapshot(store).hiddenWorkspaces).toEqual([]);
   });
 });

@@ -368,39 +368,26 @@ def _artifact_format(target: str) -> str:
     return suffix.upper() if suffix else ""
 
 
-def _turn_deliverables(turn: Any) -> list[dict[str, str]]:
-    """Every distinct user-facing output, preferring the canonical task inventory."""
+_PRODUCE_TRACE_TOOLS = frozenset({"write_file", "edit_file", "run_skill", "run_workflow"})
+
+
+def _format_turn_artifact(artifact: Any) -> dict[str, str]:
+    return {
+        "label": str(getattr(artifact, "title", "") or "artifact"),
+        "format": str(getattr(artifact, "display_format", "") or "").upper(),
+        "target": str(getattr(artifact, "path", "") or "saved (path unavailable)"),
+    }
+
+
+def _harvest_trace_artifacts(roots: list[dict[str, Any]]) -> list[dict[str, str]]:
     from omni.runtime.task_results import _collect_artifacts, is_dot_artifact
-
-    canonical = [
-        artifact
-        for artifact in (getattr(turn, "artifacts", []) or [])
-        if getattr(artifact, "is_primary", True)
-        and not is_dot_artifact(artifact)
-    ]
-    if canonical:
-        return [
-            {
-                "label": str(getattr(artifact, "title", "") or "artifact"),
-                "format": str(getattr(artifact, "display_format", "") or "").upper(),
-                "target": str(getattr(artifact, "path", "") or "saved (path unavailable)"),
-            }
-            for artifact in canonical
-        ]
-
-    roots: list[dict[str, Any]] = []
-    for record in getattr(turn, "tool_trace", []) or []:
-        result = getattr(record, "result", None)
-        if isinstance(result, dict):
-            roots.append(result)
-    roots.extend(d for d in (getattr(turn, "drained_results", []) or []) if isinstance(d, dict))
 
     seen: set[str] = set()
     out: list[dict[str, str]] = []
     for root in roots:
         for art in _collect_artifacts(root):
-            target = str(art.get("path") or art.get("uri") or "")
-            if not target or target in seen:
+            target = str(art.get("path") or "").strip()
+            if not target or target.startswith("artifact://") or target in seen:
                 continue
             if is_dot_artifact({"path": art.get("path", ""), "uri": art.get("uri", "")}):
                 continue
@@ -413,6 +400,46 @@ def _turn_deliverables(turn: Any) -> list[dict[str, str]]:
                 }
             )
     return out
+
+
+def _turn_deliverables(turn: Any) -> list[dict[str, str]]:
+    """Every distinct user-facing output, preferring the canonical task inventory.
+
+    An empty ``artifacts`` list means this ``task_id`` paid nothing. Harvest
+    then only from this-turn produce tools (``write_file`` / ``run_skill``),
+    never from lookup dumps that can name a sibling RAG run. Callers that
+    never set ``artifacts`` still harvest the whole tool trace.
+    """
+    from omni.runtime.task_results import is_dot_artifact
+
+    if hasattr(turn, "artifacts"):
+        canonical = [
+            _format_turn_artifact(artifact)
+            for artifact in (getattr(turn, "artifacts", []) or [])
+            if getattr(artifact, "is_primary", True)
+            and not is_dot_artifact(artifact)
+        ]
+        if canonical:
+            return canonical
+        roots: list[dict[str, Any]] = []
+        for record in getattr(turn, "tool_trace", []) or []:
+            if getattr(record, "name", "") not in _PRODUCE_TRACE_TOOLS:
+                continue
+            result = getattr(record, "result", None)
+            if isinstance(result, dict):
+                roots.append(result)
+        roots.extend(
+            d for d in (getattr(turn, "drained_results", []) or []) if isinstance(d, dict)
+        )
+        return _harvest_trace_artifacts(roots)
+
+    roots = []
+    for record in getattr(turn, "tool_trace", []) or []:
+        result = getattr(record, "result", None)
+        if isinstance(result, dict):
+            roots.append(result)
+    roots.extend(d for d in (getattr(turn, "drained_results", []) or []) if isinstance(d, dict))
+    return _harvest_trace_artifacts(roots)
 
 
 def _answer_changed_after_stream(

@@ -17,11 +17,17 @@ import type {
   Artifact,
   DirectoryListing,
   Session,
+  SessionDeleteManyResponse,
+  SessionListAllResponse,
+  SessionSort,
+  SessionStatusGroup,
   SessionTimeline,
   TaskSummary,
   TaskDetail,
   Workspace,
   WorkspaceInbox,
+  WorkspaceListResponse,
+  WorkspaceVisibilityResponse,
 } from "./types";
 
 export type RpcError = { code: string; message: string };
@@ -69,13 +75,19 @@ export const api = {
     });
   },
   listWorkspaces() {
-    return rpc<{ workspaces: unknown[]; selected: Workspace | null }>("workspace.list");
+    return rpc<WorkspaceListResponse>("workspace.list");
   },
   openWorkspace(path: string) {
     return rpc<{ workspace: Workspace }>("workspace.open", { path });
   },
   selectWorkspace(ref: { path?: string; project_dir?: string; name?: string }) {
     return rpc<{ workspace: Workspace }>("workspace.select", ref);
+  },
+  hideWorkspaces(projectDirs: string[]) {
+    return rpc<WorkspaceVisibilityResponse>("workspace.hideMany", { project_dirs: projectDirs });
+  },
+  unhideWorkspaces(projectDirs: string[]) {
+    return rpc<WorkspaceVisibilityResponse>("workspace.unhideMany", { project_dirs: projectDirs });
   },
   listSessions(workspace: string, channel = "") {
     return rpc<{ sessions: Session[] }>("session.list", { channel }, workspace);
@@ -102,6 +114,23 @@ export const api = {
     return rpc<{ session_id: string; deleted_task_ids: string[] }>(
       "session.delete",
       { session_id: sessionId },
+      workspace,
+    );
+  },
+  listAllSessions(params: {
+    workspace?: string;
+    channel?: string;
+    status?: SessionStatusGroup[];
+    sort?: SessionSort;
+    cursor?: string;
+    limit?: number;
+  }) {
+    return rpc<SessionListAllResponse>("session.listAll", params);
+  },
+  deleteSessions(workspace: string, sessionIds: string[]) {
+    return rpc<SessionDeleteManyResponse>(
+      "session.deleteMany",
+      { session_ids: sessionIds },
       workspace,
     );
   },

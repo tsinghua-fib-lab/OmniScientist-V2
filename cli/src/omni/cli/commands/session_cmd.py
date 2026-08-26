@@ -49,16 +49,16 @@ def show_cmd(ctx: typer.Context, session: str) -> None:
     async def _run():
         agent = await make_agent(state)
         try:
-            sess = await agent.get_session(session)
-            if sess is None:
-                return None, []
-            return sess, await agent.session_messages(sess.id)
+            resolution = await agent.resolve_session(session)
+            if resolution.status != "ok" or resolution.row is None:
+                return None, [], resolution.error_message(session)
+            return resolution.row, await agent.session_messages(resolution.row.id), ""
         finally:
             await agent.aclose()
 
-    sess, msgs = run_async(_run())
+    sess, msgs, message = run_async(_run())
     if sess is None:
-        error(f"Session {session} was not found.")
+        error(message or f"Session {session} was not found.")
         raise typer.Exit(1)
     info(f"Session {sess.id[:8]} · {sess.channel} · {(sess.title or 'untitled')} · {len(msgs)} messages")
     render_transcript(msgs)
@@ -77,17 +77,17 @@ def resume_cmd(
     async def _resolve():
         agent = await make_agent(state)
         try:
-            sess = await agent.get_session(session)
-            if sess is None:
-                return None
-            await agent.touch_session(sess.id)
-            return sess.id
+            resolution = await agent.resolve_session(session)
+            if resolution.status != "ok" or resolution.row is None:
+                return None, resolution.error_message(session)
+            await agent.touch_session(resolution.row.id)
+            return resolution.row.id, ""
         finally:
             await agent.aclose()
 
-    sid = run_async(_resolve())
+    sid, message = run_async(_resolve())
     if sid is None:
-        error(f"Session {session} was not found.")
+        error(message or f"Session {session} was not found.")
         raise typer.Exit(1)
 
     text = " ".join(prompt).strip() if prompt else ""

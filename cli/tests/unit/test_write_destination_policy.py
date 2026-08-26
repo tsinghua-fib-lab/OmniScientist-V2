@@ -261,6 +261,66 @@ async def test_an_explicit_path_is_left_alone(ctx) -> None:  # noqa: ANN001
     assert target.read_text(encoding="utf-8") == "# draft"
 
 
+async def _task_ctx(tmp_path: Path, *, title: str = "RAG 系统综述") -> ExecContext:
+    from omni.storage.artifacts import ArtifactStore
+    from omni.storage.db import get_database
+    from omni.storage.models import TaskORM
+
+    settings = load_settings()
+    paths = get_paths(project="writebundle")
+    paths.ensure_dirs()
+    db = get_database(paths.project_db)
+    await db.init()
+    task_id = "67f26c86eb3f4e43b7132b59e0c5fa9d"
+    async with db.session() as session:
+        if await session.get(TaskORM, task_id) is None:
+            session.add(
+                TaskORM(
+                    id=task_id,
+                    session_id="s1",
+                    project=paths.project_name,
+                    title=title,
+                )
+            )
+            await session.commit()
+    return ExecContext(
+        settings=settings,
+        paths=paths,
+        working_dir=tmp_path,
+        artifacts=ArtifactStore(paths, db, mirror_dir=tmp_path / "outputs"),
+        task_id=task_id,
+        session_id="s1",
+        db=db,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_reports_path_opens_this_task_outputs_bundle(tmp_path: Path) -> None:
+    ctx = await _task_ctx(tmp_path)
+    write = _tool(build_fs_tools(ctx), "write_file")
+
+    result = await write({"path": "reports/latent-steering-related-work.md", "contents": "# survey\n"})
+
+    landed = tmp_path / "outputs" / "RAG-系统综述_67f26c86" / "latent-steering-related-work.md"
+    assert landed.read_text(encoding="utf-8") == "# survey\n"
+    assert str(landed) in result
+    assert not (tmp_path / "reports").exists()
+
+
+@pytest.mark.asyncio
+async def test_an_existing_reports_file_is_still_edited_in_place(tmp_path: Path) -> None:
+    leftover = tmp_path / "reports" / "Survey-how-latent-space_8df6cf6b" / "note.md"
+    leftover.parent.mkdir(parents=True)
+    leftover.write_text("old\n", encoding="utf-8")
+    ctx = await _task_ctx(tmp_path)
+    write = _tool(build_fs_tools(ctx), "write_file")
+
+    await write({"path": str(leftover), "contents": "new\n"})
+
+    assert leftover.read_text(encoding="utf-8") == "new\n"
+    assert not (tmp_path / "outputs").exists() or not list((tmp_path / "outputs").rglob("*.md"))
+
+
 @pytest.mark.asyncio
 async def test_an_empty_path_is_reported_rather_than_written_somewhere(ctx) -> None:  # noqa: ANN001
     write = _tool(build_fs_tools(ctx), "write_file")

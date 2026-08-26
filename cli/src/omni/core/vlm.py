@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -131,7 +131,7 @@ class VlmGateway:
                 transport=self._transport,
             ) as client:
                 response = await client.post(
-                    self._config.endpoint,
+                    resolve_vlm_request_url(self._config.endpoint),
                     headers={
                         "Authorization": f"Bearer {self._config.api_key}",
                         "Content-Type": "application/json",
@@ -173,7 +173,7 @@ class VlmGateway:
             data = response.json()
         except ValueError:
             raise VlmServiceError(
-                "VLM endpoint returned invalid JSON.",
+                "VLM endpoint returned invalid JSON, not a chat-completions body.",
                 code="vlm_invalid_response",
                 category="generation",
                 retryable=True,
@@ -189,8 +189,28 @@ class VlmGateway:
         return text
 
 
+def resolve_vlm_request_url(endpoint: str) -> str:
+    """Expand a Claude-Code-style base URL into a chat-completions request URL.
+
+    A site origin (``https://host``) becomes ``https://host/v1/chat/completions``.
+    A versioned base (``https://host/v1``) appends ``/chat/completions``, matching
+    the main-model client. An already-complete ``.../chat/completions`` path is
+    left unchanged so existing saved URLs keep working.
+    """
+    parsed = urlsplit(str(endpoint or "").strip())
+    path = (parsed.path or "").rstrip("/")
+    lower = path.lower()
+    if lower.endswith("/chat/completions"):
+        new_path = path
+    elif not path:
+        new_path = "/v1/chat/completions"
+    else:
+        new_path = f"{path}/chat/completions"
+    return urlunsplit((parsed.scheme, parsed.netloc, new_path, parsed.query, ""))
+
+
 def validate_vlm_endpoint(endpoint: str) -> None:
-    """Require a complete HTTPS URL, allowing plain HTTP only on loopback."""
+    """Require an HTTPS (or loopback HTTP) base URL or chat-completions URL."""
     value = str(endpoint or "").strip()
     parsed = urlsplit(value)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
@@ -241,7 +261,7 @@ async def check_vlm_connectivity(
         )
     except VlmServiceError as exc:
         return False, exc.safe_message
-    return True, "VLM multimodal configuration verified."
+    return True, "VLM multimodal configuration verified: the model accepted an image probe."
 
 
 def _response_text(data: Any) -> str:
@@ -269,6 +289,7 @@ __all__ = [
     "VlmGateway",
     "VlmServiceError",
     "check_vlm_connectivity",
+    "resolve_vlm_request_url",
     "validate_vlm_endpoint",
     "validate_vlm_protocol",
 ]

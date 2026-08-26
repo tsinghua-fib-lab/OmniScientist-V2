@@ -24,6 +24,7 @@ from omni.runtime.daemon import (
     list_running_daemons,
     pid_alive,
 )
+from omni.runtime.logging_config import prepare_log_file
 
 app = typer.Typer(help="Run and manage the always-on home service (channels + schedules).")
 logger = logging.getLogger(__name__)
@@ -212,18 +213,20 @@ def start_daemon_process(state: AppState, *, channels: str = "", workers: int = 
             "the service will reconcile channel configuration automatically."
         )
 
-    paths.logs_dir.mkdir(parents=True, exist_ok=True)
-    log_path = paths.logs_dir / f"serve-{paths.project_name}.log"
+    log_path = prepare_log_file(paths.logs_dir / f"serve-{paths.project_name}.log")
     argv = _serve_child_argv(state, channels=channels, workers=workers)
-    with log_path.open("ab") as log:
-        subprocess.Popen(  # noqa: S603 - argv is constructed from trusted CLI state.
-            argv,
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            cwd=str(paths.workspace_root or os.getcwd()),
-            **_detached_popen_kwargs(),
-        )
+    child_env = os.environ.copy()
+    child_env.pop("OMNI_SERVICE_MANAGED_LOG_STREAM", None)
+    child_env["OMNI_SERVICE_LOG_PATH"] = str(log_path)
+    subprocess.Popen(  # noqa: S603 - argv is constructed from trusted CLI state.
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        cwd=str(paths.workspace_root or os.getcwd()),
+        env=child_env,
+        **_detached_popen_kwargs(),
+    )
 
     deadline = time.time() + 10
     while time.time() < deadline:
@@ -633,7 +636,6 @@ def _run_home_foreground(
             "service id does not match the active OMNI_HOME",
             param_hint="service launcher identity",
         )
-    logging.basicConfig(level=getattr(logging, settings.observability.log_level, logging.INFO))
     try:
         asyncio.run(
             run_home_service(

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import sqlite3
 import sys
@@ -37,6 +38,7 @@ from omni.config.paths import is_within_home
 from omni.config.workspaces import register_workspace
 from omni.runtime import service_state
 from omni.runtime.daemon import stop_legacy_daemons
+from omni.runtime.logging_config import configure_process_logging
 
 logger = logging.getLogger(__name__)
 
@@ -227,9 +229,6 @@ class HomeService:
         racing launch-ensure), this instance exits immediately instead of adding
         a second process that fights over the runtime pidfile and channel locks.
         """
-        logging.basicConfig(
-            level=getattr(logging, self.settings.observability.log_level, logging.INFO)
-        )
         self._singleton_fd = service_state.acquire_singleton(self.paths)
         if self._singleton_fd is None:
             holder = service_state.singleton_holder_pid(self.paths)
@@ -473,13 +472,33 @@ async def run_home_service(
     enable_channels: bool = True,
     channels_filter: str = "",
 ) -> None:
-    service = HomeService(
-        settings,
-        workers=workers,
-        enable_channels=enable_channels,
-        channels_filter=channels_filter,
+    managed_stream = os.environ.get("OMNI_SERVICE_MANAGED_LOG_STREAM") == "1"
+    explicit_log = os.environ.get("OMNI_SERVICE_LOG_PATH", "").strip()
+    process_logging = configure_process_logging(
+        component="serve",
+        level=settings.observability.log_level,
+        stream=sys.stderr if managed_stream else None,
+        path=(
+            None
+            if managed_stream
+            else (
+                Path(explicit_log)
+                if explicit_log
+                else settings.paths.logs_dir / f"serve-{settings.paths.project_name}.log"
+            )
+        ),
+        settings=settings,
     )
-    await service.run()
+    try:
+        service = HomeService(
+            settings,
+            workers=workers,
+            enable_channels=enable_channels,
+            channels_filter=channels_filter,
+        )
+        await service.run()
+    finally:
+        process_logging.close()
 
 
 __all__ = ["HomeService", "run_home_service"]

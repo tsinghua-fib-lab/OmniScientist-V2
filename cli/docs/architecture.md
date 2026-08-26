@@ -1306,7 +1306,26 @@ daemon logs, so a tool chain visible in the terminal is also inspectable through
 The installed `omni` command does not start a resident agent by itself. CLI and REPL calls run in
 the foreground; IM channels and cross-window background task execution need either `omni serve`
 (foreground), `omni serve start` (background daemon), or `omni channel login <name> --start`.
-Background daemon stdout/stderr is written to `<OMNI_HOME>/logs/serve-<project>.log`.
+Background daemon diagnostics are written to `<OMNI_HOME>/logs/serve-<project>.log`.
+
+Process diagnostics use one UTF-8, single-line schema across CLI, Web, legacy serve, and Home
+Service: UTC timestamp, severity, component, logger, PID, event, and redacted message. Components
+keep component-scoped compatibility files (`omni-tui.log`, `web-<project>.log`,
+`serve-<project>.log`, and `home-service.log`) instead of one global all-process log. Files owned
+by an in-process handler rotate at 10 MiB and keep 10 files total
+(``observability.log_max_bytes`` / ``observability.log_files``, also
+``OMNI_LOG_MAX_BYTES`` / ``OMNI_LOG_FILES`` — kimi-code's size+count model).
+OS-supervisor crumbs go to ``home-service.supervisor.log`` so they do not share
+a writer with the rotating product log. Log files are mode `0600` on POSIX;
+Windows relies on the user's account ACL. Full prompts, model/tool payloads, credentials, and
+authorization headers do not belong in INFO logs—the durable Task event store remains the source
+for execution inspection.
+
+Foreground `omni web` shows only the startup URL and actionable product errors. Its Uvicorn access
+log is disabled; server/application errors still go to the Web log. Shutdown first closes Web SSE
+watchers, then performs bounded Task/agent/store cleanup, so Ctrl+C is a successful exit rather
+than an ASGI cancellation failure. Closing an external CLI/Home Service task watcher never cancels
+the externally owned task.
 
 The always-on **home service** (`omni serve`) is one OS-supervised process per `OMNI_HOME`. Its
 observed state lives in `<OMNI_HOME>/service/service.pid` and is three layers:

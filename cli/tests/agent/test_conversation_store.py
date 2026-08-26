@@ -16,10 +16,10 @@ from sqlalchemy.exc import OperationalError
 from omni.agent.conversation_store import PERSONA_CONTROL_EXTERNAL_KEY, ConversationStore
 from omni.config import load_settings
 from omni.storage.db import get_database
-from omni.storage.models import ConversationMessageORM, _utcnow
+from omni.storage.models import ConversationMessageORM, SessionORM, _utcnow
 
 
-async def _store() -> ConversationStore:
+async def _store(*, channel_identity: str | None = None) -> ConversationStore:
     settings = load_settings()
     settings.paths.ensure_dirs()
     db = get_database(settings.paths.project_db)
@@ -27,7 +27,7 @@ async def _store() -> ConversationStore:
     return ConversationStore(
         db,
         project_name=settings.paths.project_name,
-        channel_identity=settings.memory.channel_identity,
+        channel_identity=channel_identity or settings.memory.channel_identity,
     )
 
 
@@ -79,6 +79,31 @@ async def test_principal_for_session_reads_row_on_cold_cache():
     cold = await store.principal_for_session(session_id)
 
     assert cold == warm == store.principal_of("feishu", "u42")
+
+
+@pytest.mark.asyncio
+async def test_principal_for_session_db_error_does_not_fallback_or_cache():
+    store = await _store(channel_identity="per_peer")
+    session_id = await store.ensure_session(channel="feishu", external_key="u42")
+    store._session_principal.clear()  # noqa: SLF001
+    expected = store.principal_of("feishu", "u42")
+    assert expected != "local"
+
+    @asynccontextmanager
+    async def boom():
+        raise RuntimeError("sqlite exploded")
+        yield  # pragma: no cover
+
+    store._db.session = boom
+    assert await store.principal_for_session(session_id) is None
+    assert session_id not in store._session_principal  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_principal_for_session_missing_row_is_not_owner():
+    store = await _store()
+    assert await store.principal_for_session("does-not-exist") is None
+    assert "does-not-exist" not in store._session_principal  # noqa: SLF001
 
 
 def test_normal_rows_excludes_compacted_and_bridge_rows():
@@ -140,14 +165,59 @@ async def test_persist_message_swallows_sqlite_busy():
         yield  # pragma: no cover
 
     store._db.session = always_busy
-    await store.persist_message(
+    wrote = await store.persist_message(
         session_id,
         "assistant",
         "Partial result: The user cancelled execution.",
         kind="partial",
         terminated_reason="cancelled",
     )
+    assert wrote is False
     assert attempts["n"] == 3
+
+
+@pytest.mark.asyncio
+async def test_dropped_transcript_is_noted_on_the_agent():
+    from omni.agent.orchestrator import OmniAgent
+    from omni.agent.turn_execution import begin_turn_degradation, turn_degradation_warnings
+    from omni.config import load_settings
+
+    agent = OmniAgent(load_settings())
+    begin_turn_degradation()
+
+    async def drop(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    agent.conversations.persist_message = drop  # type: ignore[method-assign]
+    assert await agent._persist_message("sid", "user", "hi") is False  # noqa: SLF001
+    assert any("transcript write failed" in item for item in turn_degradation_warnings())
+
+
+@pytest.mark.asyncio
+async def test_finish_turn_marks_degraded_when_transcript_failed():
+    from types import SimpleNamespace
+
+    from omni.agent.task_controller import TaskController
+    from omni.agent.turn_execution import begin_turn_degradation, note_turn_degradation
+
+    class FakeTasks:
+        def __init__(self) -> None:
+            self.settled: str | None = None
+
+        async def get_task(self, _task_id: str) -> SimpleNamespace:
+            return SimpleNamespace(started_at=None, created_at=None, status="running")
+
+        async def append_event(self, *_args: object, **_kwargs: object) -> object:
+            return object()
+
+        async def settle_task(self, _task_id: str, *, proposed_status: str, **_kwargs: object) -> None:
+            self.settled = proposed_status
+
+    tasks = FakeTasks()
+    begin_turn_degradation()
+    note_turn_degradation("transcript write failed; this turn may not resume")
+    await TaskController(tasks).finish_turn("t1", kind="text", text="ok")
+    assert tasks.settled == "degraded"
 
 
 @pytest.mark.asyncio
@@ -218,6 +288,25 @@ async def test_get_session_resolves_by_unique_prefix():
     resolved = await store.get_session(session_id[:8])
     assert resolved is not None
     assert resolved.id == session_id
+
+
+@pytest.mark.asyncio
+async def test_get_session_rejects_an_ambiguous_prefix():
+    store = await _store()
+    async with store._db.session() as session:  # noqa: SLF001
+        session.add_all(
+            [
+                SessionORM(id="shared-prefix-alpha", channel="web"),
+                SessionORM(id="shared-prefix-beta", channel="web"),
+            ]
+        )
+        await session.commit()
+
+    assert await store.get_session("shared-prefix") is None
+    resolution = await store.resolve_session("shared-prefix")
+    assert resolution.status == "ambiguous"
+    assert set(resolution.matches) == {"shared-prefix-alpha", "shared-prefix-beta"}
+    assert "ambiguous" in resolution.error_message("shared-prefix")
 
 
 @pytest.mark.asyncio

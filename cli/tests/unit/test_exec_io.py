@@ -5,7 +5,37 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from omni.skills_runtime.builtin_tools import shell
-from omni.skills_runtime.exec_io import compute_dir_key, durable_output_dir
+from omni.skills_runtime.exec_io import (
+    compute_dir_key,
+    durable_output_dir,
+    harvestable_output,
+)
+
+
+def test_harvestable_output_skips_venv_license_and_unknown_suffixes(
+    tmp_path,
+) -> None:
+    root = tmp_path / "outbox"
+    (root / ".venv" / "lib" / "site-packages" / "pkg").mkdir(parents=True)
+    license_file = root / "LICENSE"
+    license_file.write_text("MIT\n")
+    wheel = root / ".venv" / "lib" / "site-packages" / "pkg" / "mod.py"
+    wheel.write_text("x = 1\n")
+    notice = root / "NOTICE.txt"
+    notice.write_text("notice\n")
+    csv = root / "results.csv"
+    csv.write_text("a,1\n")
+    svg = root / "plot.svg"
+    svg.write_text("<svg/>\n")
+    pptx = root / "slide.pptx"
+    pptx.write_bytes(b"PK")
+
+    assert harvestable_output(license_file, root) is False
+    assert harvestable_output(wheel, root) is False
+    assert harvestable_output(notice, root) is False
+    assert harvestable_output(csv, root) is True
+    assert harvestable_output(svg, root) is True
+    assert harvestable_output(pptx, root) is True
 
 
 def test_compute_dir_key_replaces_windows_forbidden_characters() -> None:

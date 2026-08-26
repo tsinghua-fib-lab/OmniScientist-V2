@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import OperationalError
@@ -39,6 +39,29 @@ class SessionDeleteOutcome:
     deleted_task_ids: tuple[str, ...] = ()
     code: str = ""
     message: str = ""
+
+
+SessionResolutionStatus = Literal["ok", "not_found", "ambiguous"]
+
+
+@dataclass(frozen=True, slots=True)
+class SessionResolution:
+    """Exact-or-unique session lookup. Never pick the newest colliding prefix."""
+
+    status: SessionResolutionStatus
+    row: SessionORM | None = None
+    matches: tuple[str, ...] = ()
+
+    def error_message(self, ref: str) -> str:
+        if self.status == "ambiguous":
+            shown = ", ".join(item[:8] for item in self.matches[:6])
+            extra = f" +{len(self.matches) - 6}" if len(self.matches) > 6 else ""
+            return (
+                f"Session prefix {ref} is ambiguous ({shown}{extra}). "
+                "Pass a longer id."
+            )
+        return f"Session {ref} was not found."
+
 
 logger = logging.getLogger(__name__)
 
@@ -90,9 +113,14 @@ class ConversationStore:
         """``principal_of`` bound to this instance's ``memory.channel_identity``."""
         return _principal_of(channel, external_key, channel_identity=self._channel_identity)
 
-    async def principal_for_session(self, session_id: str) -> str:
-        """Resolve the memory principal for ``session_id`` (cached; reads the row
-        on a cold cache, e.g. after a daemon restart)."""
+    async def principal_for_session(self, session_id: str) -> str | None:
+        """Resolve the memory principal for ``session_id``.
+
+        A cache hit or a readable row returns the derived principal. An empty
+        id is the local CLI identity (no channel row to isolate). A lookup
+        exception or a missing row returns ``None`` and is never cached as
+        owner — callers must skip memory inject/record rather than guess.
+        """
         if not session_id:
             return _PRINCIPAL_OWNER
         cached = self._session_principal.get(session_id)
@@ -102,8 +130,15 @@ class ConversationStore:
             async with self._db.session() as s:
                 row = await s.get(SessionORM, session_id)
         except Exception:  # noqa: BLE001
-            row = None
-        principal = self.principal_of(row.channel, row.external_key) if row is not None else _PRINCIPAL_OWNER
+            logger.warning(
+                "conversation.principal.lookup_failed session=%s",
+                session_id[:8],
+                exc_info=True,
+            )
+            return None
+        if row is None:
+            return None
+        principal = self.principal_of(row.channel, row.external_key)
         self._session_principal[session_id] = principal
         return principal
 
@@ -171,28 +206,64 @@ class ConversationStore:
             if not (r.meta or {}).get("compacted") and (r.content_type or "") != "compaction"
         ]
 
-    async def persist_message(self, session_id: str, role: str, content: str, **meta: Any) -> None:
+    async def latest_compaction_bridge(
+        self, session_id: str
+    ) -> ConversationMessageORM | None:
+        """Newest non-hidden compaction row, or ``None`` if none is active."""
+        rows = await self.recent_rows(session_id)
+        comps = [
+            row
+            for row in rows
+            if (row.content_type or "") == "compaction"
+            and not (row.meta or {}).get("compacted")
+        ]
+        return comps[-1] if comps else None
+
+    async def persist_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        *,
+        content_type: str = "text",
+        name: str = "",
+        **meta: Any,
+    ) -> bool:
         """Write one transcript row. A locked store must not fail the turn.
 
         Cancel already drops advisory events when the aiosqlite worker still
         holds the file lock. The assistant row is the same class of write:
         three short retries, then drop — the turn result is already in memory.
+        Returns ``False`` when the row was not written so the host can mark
+        the turn degraded instead of silently succeeding.
         """
 
-        async def write() -> None:
+        async def write() -> bool:
             async with self._db.session() as s:
                 # Read the session before adding the message so a SELECT cannot
                 # autoflush a pending INSERT into a locked writer.
                 row = await s.get(SessionORM, session_id)
+                if row is None:
+                    logger.warning(
+                        "conversation.message.missing_session session=%s role=%s dropped",
+                        session_id[:8],
+                        role,
+                    )
+                    return False
                 s.add(ConversationMessageORM(
-                    session_id=session_id, role=role, content=content, meta=meta or {},
+                    session_id=session_id,
+                    role=role,
+                    content=content,
+                    content_type=content_type,
+                    name=name,
+                    meta=meta or {},
                 ))
-                if row is not None:
-                    row.updated_at = _utcnow()
+                row.updated_at = _utcnow()
                 await s.commit()
+                return True
 
         try:
-            await retry_while_busy(write, attempts=3)
+            return bool(await retry_while_busy(write, attempts=3))
         except OperationalError as exc:
             if not sqlite_busy(exc):
                 raise
@@ -201,6 +272,7 @@ class ConversationStore:
                 session_id[:8],
                 role,
             )
+            return False
 
     async def write_compaction_bridge(
         self, session_id: str, bridge: str, covered: list[str]
@@ -251,23 +323,36 @@ class ConversationStore:
             rows = (await s.execute(q)).all()
         return [(row[0], int(row[1] or 0)) for row in rows]
 
-    async def get_session(self, session_id: str) -> SessionORM | None:
+    async def resolve_session(self, session_id: str) -> SessionResolution:
         """Resolve a session by exact id or unique prefix (within this workspace)."""
+        ident = (session_id or "").strip()
+        if not ident:
+            return SessionResolution("not_found")
         async with self._db.session() as s:
             exact = (
-                await s.execute(select(SessionORM).where(SessionORM.id == session_id))
+                await s.execute(select(SessionORM).where(SessionORM.id == ident))
             ).scalar_one_or_none()
             if exact is not None:
-                return exact
+                return SessionResolution("ok", exact)
             rows = (
                 await s.execute(
                     select(SessionORM).order_by(SessionORM.updated_at.desc())
                 )
             ).scalars().all()
-        for row in rows:
-            if row.id.startswith(session_id):
-                return row
-        return None
+        hits = [row for row in rows if row.id.startswith(ident)]
+        if len(hits) == 1:
+            return SessionResolution("ok", hits[0])
+        if len(hits) > 1:
+            return SessionResolution("ambiguous", matches=tuple(row.id for row in hits))
+        return SessionResolution("not_found")
+
+    async def get_session(self, session_id: str) -> SessionORM | None:
+        """Resolve a session by exact id or unique prefix (within this workspace).
+
+        Ambiguous prefixes return ``None`` rather than the newest match.
+        """
+        resolution = await self.resolve_session(session_id)
+        return resolution.row if resolution.status == "ok" else None
 
     async def session_messages(self, session_id: str) -> list[ConversationMessageORM]:
         """All messages for a session in chronological order."""
@@ -357,3 +442,8 @@ class ConversationStore:
             await s.commit()
         self._session_principal.pop(sid, None)
         return True
+
+    def forget_deleted_sessions(self, session_ids: list[str] | tuple[str, ...]) -> None:
+        """Drop in-process principal cache entries after an external atomic delete."""
+        for session_id in session_ids:
+            self._session_principal.pop(session_id, None)

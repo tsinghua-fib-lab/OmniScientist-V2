@@ -180,8 +180,8 @@ class IntentPlan:
     # Presentation-only: a footnote for the user, never a model instruction and
     # never a degraded warning. Omitted from the hash when empty.
     user_notices: list[str] = field(default_factory=list)
-    # Presentation-only: the succeeded twin this turn is redoing. Delivery may
-    # attach that task's still-valid contract files; settlement does not.
+    # Presentation-only: the succeeded twin this turn is redoing. The
+    # footnote names that earlier task; this turn's Outputs stay this task_id.
     twin_task_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:

@@ -103,3 +103,81 @@ def test_lone_literature_search_proposal_does_not_select_a_skill() -> None:
     )
     assert projected.splitlines() == source_ids
     assert "truncated" not in projected
+    empty = apply_retrieve_only_projection(
+        plan,
+        source_ids=[],
+        model_text="I found several papers about RAG.",
+    )
+    assert "I found several" not in empty
+    assert "No matching sources" in empty
+
+
+def test_named_search_literature_keeps_produce_debts_without_opening_write() -> None:
+    """Named retrieve freezes the tool. Same-sentence produce stays as debt."""
+    from omni.agent.plan_runner_utils import is_retrieve_only_plan
+
+    text = (
+        "调用 search_literature，query='transformers', rows=8。"
+        "再写一篇综述、画架构图、做一组会PPT。"
+    )
+    plan = _planner().boundary_plan(text, task_id="x8-02")
+    assert plan is not None
+    assert not is_retrieve_only_plan(plan)
+    assert plan.tool_policy.allows("search_literature")
+    assert not plan.tool_policy.allows("write_file")
+    assert not plan.tool_policy.allows("run_skill")
+    assert not plan.tool_policy.allows("spawn_subagents")
+    assert "sources" in plan.verification_plan.required_outputs
+    assert "artifact.figure" in plan.outputs
+    assert "artifact.slides" in plan.verification_plan.required_outputs
+
+
+def test_named_search_literature_source_id_only_stays_retrieve_only() -> None:
+    from omni.agent.plan_runner_utils import is_retrieve_only_plan
+
+    text = (
+        "调用 search_literature，query='transformers', rows=8。"
+        "只列出 source_id。不要写综述、不要画图。"
+    )
+    plan = _planner().boundary_plan(text, task_id="x8-ids")
+    assert plan is not None
+    assert is_retrieve_only_plan(plan)
+    assert not plan.tool_policy.allows("write_file")
+    assert "artifact.figure" not in plan.outputs
+    assert "artifact.slides" not in plan.verification_plan.required_outputs
+
+
+def test_explaining_search_literature_is_not_an_explicit_tool_call() -> None:
+    text = "解释 search_literature 和 openalex-search 的区别，不要执行"
+    assert explicit_native_tool(text) == ""
+    registry = SkillRegistry(load_settings())
+    registry.build_index()
+    assert BoundaryRouter(registry).route(text) is None
+
+
+def test_negated_or_bare_call_prose_is_not_an_explicit_tool() -> None:
+    assert explicit_native_tool("不要调用 search_literature，只解释它") == ""
+    assert explicit_native_tool("do not call search_literature; explain it") == ""
+    assert explicit_native_tool("调用 search_literature 再写一篇综述") == ""
+    assert explicit_native_tool("search_literature, query='transformers'") == "search_literature"
+    assert explicit_native_tool("search_literature(query='transformers')") == "search_literature"
+
+
+def test_lone_literature_proposal_does_not_infer_manuscript_from_utterance() -> None:
+    from omni.agent.plan_runner_utils import is_retrieve_only_plan
+
+    plan = _planner().plan_from_proposal(
+        "检索 RAG 文献并写一篇综述，只列出 source_id。",
+        ModelPlanProposal(
+            intent_type="react_fallback",
+            required_capabilities=["literature.search"],
+            outputs=["sources"],
+            capability_inputs={"literature.search": {"query": "RAG"}},
+            confidence=0.9,
+            rationale="literature only",
+        ),
+        task_id="lone-lit-prose",
+    )
+    assert is_retrieve_only_plan(plan)
+    assert not plan.tool_policy.allows("write_file")
+    assert "draft.section" not in plan.outputs

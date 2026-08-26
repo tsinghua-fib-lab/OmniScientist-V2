@@ -11,7 +11,7 @@
 | [uninstall.md](uninstall.md) | Ownership-aware program, integration, service, credential, and data removal |
 | [cli-validation-guide.md](cli-validation-guide.md) | End-to-end CLI and REPL validation scenarios, including 1~7 workflow capability examples |
 | [agent-validation-guide.md](agent-validation-guide.md) | Agent, skill, workflow, research provenance, memory, storage, and compatibility validation |
-| [user-walkthrough-cases.md](user-walkthrough-cases.md) | User Walkthrough Catalog: specification table plus copy-pasteable user-facing cases (Agent, memory, stacked 3–8, long-horizon, and CLI/REPL including `task all`, `memory link`, and in-process REPL inspect) |
+| [user-walkthrough-cases.md](user-walkthrough-cases.md) | **Source of truth** for user-perspective walkthroughs and functional validation: named user prompts, coverage inventory (every CLI group and built-in skill), output-format families, survey packs, third-party skill add/trust/invoke, long-horizon, multi-execution, and CLI/REPL |
 | [testing-and-evaluation.md](testing-and-evaluation.md) | Pytest, `omni eval`, coverage, research-quality checks, and black-box harness |
 | [external-benchmarks.md](external-benchmarks.md) | Natural-language black-box reliability, AstaBench, BioMysteryBench, and scoring boundaries |
 | [agent-runtime-harness.md](agent-runtime-harness.md) | Runtime invariants, Plan/Review modes, hooks, steer, DAG recovery, isolation, quality eval, and domain packs |

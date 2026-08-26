@@ -1,2 +1,0 @@
-[      48ms] [ERROR] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ http://127.0.0.1:1099/:0
-[      61ms] [ERROR] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ http://127.0.0.1:1099/favicon.ico:0

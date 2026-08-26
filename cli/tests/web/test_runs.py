@@ -15,7 +15,7 @@ from omni.config import trust as trustmod
 from omni.storage.models import TaskEventORM, TaskORM
 from omni.web.app import create_app
 from omni.web.protocol import RpcError, utc_iso
-from omni.web.runs import RunHandle
+from omni.web.runs import SERVER_STOPPING_EVENT, RunHandle
 from omni.web.turns import watch_task_sse
 from omni.web.workspace import WorkspaceHub
 
@@ -112,6 +112,127 @@ async def test_shutdown_cancels_live_tasks(tmp_path: Path) -> None:
     handle.task = asyncio.create_task(asyncio.sleep(60))
     await hub.aclose()
     assert handle.task.done()
+
+
+@pytest.mark.asyncio
+async def test_begin_shutdown_is_idempotent_and_stops_new_admissions(
+    tmp_path: Path,
+) -> None:
+    work = tmp_path / "shutdown-admission"
+    work.mkdir()
+    trustmod.set_trusted(work)
+    hub = WorkspaceHub()
+    rec = await hub.open_path(work)
+    handle = await hub.runs.admit(rec, session_id="s1")
+    handle.task = asyncio.create_task(asyncio.sleep(60))
+    queue = handle.subscribe()
+    try:
+        hub.begin_shutdown()
+        hub.begin_shutdown()
+
+        item = await asyncio.wait_for(queue.get(), timeout=1)
+        assert item is not None
+        name, data = item
+        assert name == SERVER_STOPPING_EVENT
+        assert data["state"] == "stopping"
+        assert not handle.task.done(), "the request-drain phase must not cancel work"
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(queue.get(), timeout=0.01)
+
+        with pytest.raises(RpcError) as caught:
+            await hub.runs.admit(rec, session_id="s2")
+        assert caught.value.code == "shutting_down"
+    finally:
+        handle.unsubscribe(queue)
+        await hub.aclose()
+
+
+@pytest.mark.asyncio
+async def test_local_watch_reports_server_stopping_without_fake_done(
+    tmp_path: Path,
+) -> None:
+    work = tmp_path / "local-watch-shutdown"
+    work.mkdir()
+    trustmod.set_trusted(work)
+    hub = WorkspaceHub()
+    try:
+        rec = await hub.open_path(work)
+        agent = await hub.agent_for(rec)
+        session_id = await agent.ensure_session(channel="web", title="local")
+        task = await agent.tasks.create_task(
+            session_id=session_id,
+            channel="web",
+            user_input="stay alive while the watcher detaches",
+        )
+        handle = await hub.runs.admit(rec, session_id=session_id)
+        hub.runs.bind(handle, session_id=session_id, task_id=task.id)
+
+        response = await watch_task_sse(
+            hub,
+            rec,
+            agent,
+            task_id=task.id,
+            after_seq=1_000_000,
+        )
+        iterator = response.body_iterator.__aiter__()
+        first = await anext(iterator)
+        assert b'"state": "live"' in first
+
+        hub.begin_shutdown()
+        stopping = await asyncio.wait_for(anext(iterator), timeout=1)
+        assert b"event: server_stopping" in stopping
+        assert b'"state": "stopping"' in stopping
+        assert b"event: done" not in stopping
+        with pytest.raises(StopAsyncIteration):
+            await anext(iterator)
+        assert not handle.done
+    finally:
+        await hub.aclose()
+
+
+@pytest.mark.asyncio
+async def test_external_watch_detaches_on_shutdown_without_cancelling_task(
+    tmp_path: Path,
+) -> None:
+    work = tmp_path / "external-watch-shutdown"
+    work.mkdir()
+    trustmod.set_trusted(work)
+    hub = WorkspaceHub()
+    try:
+        rec = await hub.open_path(work)
+        agent = await hub.agent_for(rec)
+        session_id = await agent.ensure_session(channel="wechat", title="external")
+        task = await agent.tasks.create_task(
+            session_id=session_id,
+            channel="wechat",
+            user_input="owned outside this Web process",
+        )
+        original_status = str(task.status)
+
+        response = await watch_task_sse(
+            hub,
+            rec,
+            agent,
+            task_id=task.id,
+            after_seq=1_000_000,
+        )
+        iterator = response.body_iterator.__aiter__()
+        first = await anext(iterator)
+        assert b'"state": "external"' in first
+
+        hub.begin_shutdown()
+        stopping = await asyncio.wait_for(anext(iterator), timeout=1)
+        assert b"event: server_stopping" in stopping
+        assert b"event: done" not in stopping
+        with pytest.raises(StopAsyncIteration):
+            await anext(iterator)
+
+        refreshed = await agent.tasks.get_task(task.id)
+        assert refreshed is not None
+        assert str(refreshed.status) == original_status
+        await agent.tasks.finish_task(task.id, status="cancelled", summary="test cleanup")
+    finally:
+        await hub.aclose()
 
 
 def test_utc_iso_stamps_naive_as_z() -> None:

@@ -56,6 +56,41 @@ def test_get_paths_keys_by_vcs_root(tmp_path):
     assert p_sub.project_name == "repo"
 
 
+def test_resolve_project_dir_does_not_treat_a_leaked_workspace_root_as_the_store(tmp_path):
+    """A sqlite sitting in the checkout is leftover, not the durable store."""
+    from omni.config.paths import get_paths, is_durable_project_dir, resolve_project_dir
+
+    repo = tmp_path / "omniscientist_v2"
+    (repo / ".git").mkdir(parents=True)
+    leaked = repo / "sessions.sqlite3"
+    leaked.write_bytes(b"not-the-store")
+
+    assert is_durable_project_dir(repo) is False
+    store = resolve_project_dir(repo)
+    assert store == get_paths(cwd=repo).project_dir
+    assert store != repo.resolve()
+    assert "workspaces" in store.parts
+    assert leaked.read_bytes() == b"not-the-store"
+
+
+def test_resolve_project_dir_keeps_in_place_and_path_keyed_stores(tmp_path):
+    from omni.config.paths import get_paths, is_durable_project_dir, resolve_project_dir
+
+    repo = tmp_path / "adopted"
+    marker = repo / ".omni"
+    marker.mkdir(parents=True)
+    (repo / ".git").mkdir()
+    assert is_durable_project_dir(marker) is True
+    assert resolve_project_dir(marker) == marker.resolve()
+    assert resolve_project_dir(repo) == marker.resolve()
+
+    keyed = tmp_path / "hashed"
+    (keyed / ".git").mkdir(parents=True)
+    store = get_paths(cwd=keyed).project_dir
+    assert is_durable_project_dir(store) is True
+    assert resolve_project_dir(store) == store.resolve()
+
+
 def test_home_is_never_a_project(tmp_path):
     from omni.config.paths import find_project_root, get_paths
 

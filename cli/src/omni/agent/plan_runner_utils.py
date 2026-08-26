@@ -289,9 +289,10 @@ def declared_outputs(plan: IntentPlan) -> str:
 def settlement_status(drained: list[dict[str, Any]]) -> str:
     if not drained:
         return "not_applicable"
-    if all(item.get("status") == "succeeded" for item in drained):
+    statuses = [str(item.get("status") or "") for item in drained]
+    if statuses and all(status == "succeeded" for status in statuses):
         return "succeeded"
-    if any(item.get("status") == "succeeded" for item in drained):
+    if any(status in {"succeeded", "degraded", "partial", "warning"} for status in statuses):
         return "degraded"
     return "failed"
 
@@ -344,7 +345,12 @@ def apply_retrieve_only_projection(
     if not is_retrieve_only_plan(plan):
         return model_text
     projected = project_retrieve_answer(source_ids)
-    return projected or model_text
+    if projected:
+        return projected
+    return (
+        "No matching sources were found. "
+        "I did not invent identifiers or substitute a narrative summary."
+    )
 
 
 def delivered_skill_answer(drained: list[dict[str, Any]]) -> str:
@@ -379,6 +385,21 @@ def completed_skill_answer(
     body = delivered_skill_answer(drained)
     if body:
         return body
-    if drained and settlement_status(drained) != "failed":
+    status = settlement_status(drained)
+    if status == "degraded":
+        item = drained[0]
+        sid = str(item.get("subtask_id") or item.get("object_id") or "").strip()
+        err = str(item.get("error") or "").strip()
+        line = f"`{skill}` ended degraded"
+        if sid:
+            line += f" (execution `{sid[:8]}`)"
+        if err:
+            line += f": {err}"
+        if sid:
+            line += f" Retry with `/task retry {sid[:8]}` or inspect `/task show {sid[:8]}`."
+        else:
+            line += "."
+        return line
+    if drained and status != "failed":
         return f"`{skill}` completed."
     return ""

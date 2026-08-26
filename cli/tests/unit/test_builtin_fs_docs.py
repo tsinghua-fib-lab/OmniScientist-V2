@@ -126,9 +126,18 @@ async def test_read_file_denies_sensitive_and_actionable_root_error():
     assert "sensitive file hidden" in hidden
     assert "SECRET" not in hidden
 
-    outside = await read({"path": "/etc/hosts"})
-    assert outside.startswith("ERROR")
-    assert "accessible roots" in outside
+    hosts = Path("/etc/hosts")
+    if hosts.is_file():
+        outside = await read({"path": str(hosts)})
+        assert not outside.startswith("ERROR")
+        assert "accessible roots" not in outside
+
+    store_file = ctx.paths.home / "sessions.sqlite3"
+    store_file.parent.mkdir(parents=True, exist_ok=True)
+    store_file.write_text("store", encoding="utf-8")
+    locked = await read({"path": str(store_file)})
+    assert locked.startswith("ERROR")
+    assert "control" in locked.lower()
 
 
 @pytest.mark.asyncio
@@ -151,6 +160,10 @@ async def test_grep_and_glob_skip_sensitive_files():
     assert str(proj / ".env") not in glob_env
     glob_md = await _tool(tools, "glob")({"pattern": "*.md"})
     assert "doc.md" in glob_md
+
+    root_search = await _tool(tools, "grep")({"pattern": "x", "path": "/"})
+    assert root_search.startswith("ERROR")
+    assert "filesystem root" in root_search
 
 
 @pytest.mark.asyncio
@@ -209,11 +222,18 @@ async def test_open_artifact_readmits_raw_path_fallback(tmp_path):
 
         open_artifact = _tool(build_recall_tools(ctx), "open_artifact")
 
-        # A real file outside the roots → refused on every host OS.
+        # A real file outside the project is readable (shared WorkspaceWrite
+        # envelope). Control-store files stay closed.
         outside_path = tmp_path / "outside.txt"
         outside_path.write_text("not accessible", encoding="utf-8")
         outside = await open_artifact({"uri": str(outside_path)})
-        assert "outside the accessible roots" in outside.get("error", "")
+        assert outside.get("content") == "not accessible"
+
+        store_file = paths.home / "sessions.sqlite3"
+        store_file.write_text("store", encoding="utf-8")
+        locked = await open_artifact({"uri": str(store_file)})
+        assert "outside the accessible roots" in locked.get("error", "")
+        assert "store" not in str(locked.get("content") or "")
 
         # Sensitive file under a root → refused.
         sensitive = await open_artifact({"uri": str(proj / ".env")})
@@ -289,8 +309,10 @@ async def test_observation_spill_is_readable_and_jail_denial_is_blocked(tmp_path
     assert spilled.is_relative_to(project)
     assert (await read({"path": str(spilled)})).splitlines() == source_ids
 
-    denied = await read({"path": "/etc/hosts"})
-    assert "outside the accessible roots" in denied
+    store_file = ctx.paths.home / "sessions.sqlite3"
+    store_file.write_text("store", encoding="utf-8")
+    denied = await read({"path": str(store_file)})
+    assert denied.startswith("ERROR")
     wrapped = attach_tool_outcome(denied, fs_result_outcome(denied))
     assert tool_call_outcome(wrapped).lifecycle == "blocked"
     assert tool_call_outcome(wrapped).result_success is not True

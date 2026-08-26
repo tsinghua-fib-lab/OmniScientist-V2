@@ -37,6 +37,7 @@ from omni.storage.artifacts import ArtifactStore
 from omni.storage.db import get_database
 from omni.storage.models import (
     ConversationMessageORM,
+    SessionORM,
     SubtaskORM,
     TaskORM,
     WorkflowRunORM,
@@ -179,6 +180,7 @@ async def test_task_success_writes_back_to_session():
 async def test_write_back_attributes_artifacts_and_indexes_m5():
     rt, _db, _s, store, mem = await _runtime()
     async with _db.session() as ss:
+        ss.add(SessionORM(id="sess-a", channel="cli"))
         ss.add(SubtaskORM(id="task-a", skill_name="synthesis.final", status="succeeded"))
         await ss.commit()
     art = await store.put_bytes(b"# report\nbody", kind="report", title="rep", ext="md")

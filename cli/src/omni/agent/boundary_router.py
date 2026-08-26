@@ -2,9 +2,10 @@
 
 Natural-language intent belongs to the semantic planner. This module recognizes
 only explicit provider syntax whose meaning does not depend on the user's
-language: ``$name``, ``skill:name``, ``run_skill name``, ``use_skill name``, and
-``/skills run name``. Commands, identifiers, paths, and permissions are handled
-by their dedicated parsers.
+language: ``$name``, ``skill:name``, ``run_skill name``, ``use_skill name``,
+``/skills run name``, and a registered native tool written as
+``name(`` / ``name,`` / ``name query=``. Ordinary prose that names a tool is
+not a hard route.
 """
 
 from __future__ import annotations
@@ -43,8 +44,14 @@ _NATIVE_TOOL_NAMES = (
     "record_hypothesis",
     "citation_neighbors",
 )
-_NATIVE_TOOL_RE = re.compile(
-    r"(?:^|[^\w])(?P<name>" + "|".join(re.escape(n) for n in _NATIVE_TOOL_NAMES) + r")(?:[^\w]|$)"
+_NATIVE_TOOL_ALT = "|".join(re.escape(n) for n in _NATIVE_TOOL_NAMES)
+# Protocol forms only: ``name(`` / ``name, query=`` / ``name query=``.
+# A following ideographic comma without a keyword argument is prose.
+_NATIVE_TOOL_INVOKE_RE = re.compile(
+    r"(?:^|[^\w])(?P<called>"
+    + _NATIVE_TOOL_ALT
+    + r")(?:\s*\(|\s*[,，]\s*[A-Za-z_]\w*\s*=|\s+[A-Za-z_]\w*\s*=)",
+    re.IGNORECASE,
 )
 
 
@@ -93,8 +100,10 @@ def explicit_native_tool(text: str) -> str:
     Skill protocol (``$name`` / ``run_skill name``) is checked first by
     :meth:`BoundaryRouter.route`. This only matches catalog identifiers.
     """
-    match = _NATIVE_TOOL_RE.search(text or "")
-    return match.group("name") if match is not None else ""
+    match = _NATIVE_TOOL_INVOKE_RE.search(text or "")
+    if match is None:
+        return ""
+    return match.group("called") or ""
 
 
 def _explicit_skill_match(text: str) -> re.Match[str] | None:

@@ -95,6 +95,57 @@ _SURVEY_CLOSER_HINTS = (
     "literature review",
     "related work",
 )
+# Typed retrieve-only scope: the user asked for identifiers, not produce.
+_SOURCE_ID_ONLY_HINTS = (
+    "only list source_id",
+    "only source_id",
+    "source_id only",
+    "source_ids only",
+    "just source_id",
+    "just the source_id",
+    "\u53ea\u5217\u51fa source_id",
+    "\u53ea\u5217 source_id",
+    "\u53ea\u5217\u51fasource_id",
+)
+
+# Cross-repo / architecture comparison: host-owns a markdown report so chat
+# finding-acks cannot settle as succeeded (6a97d28f vs afb9228d).
+_ANALYSIS_REPORT_STRONG = (
+    "\u5bf9\u6807",
+    "\u5bf9\u7167",
+    "\u5206\u6790\u62a5\u544a",
+    "benchmark against",
+    "comparison report",
+    "compare against",
+    "versus the source",
+)
+_ANALYSIS_REPORT_SCOPE = (
+    "\u4ed4\u7ec6\u5206\u6790",
+    "\u67b6\u6784\u5206\u6790",
+    "analyze the",
+    "architecture analysis",
+)
+_ANALYSIS_REPORT_TARGET = (
+    "\u6e90\u7801",
+    "source code",
+    "sourcecode",
+    "\u5b9e\u73b0",
+    "implementation",
+)
+# A code-review ask can mention "对标 Codex" as a criterion without owing a report.
+_ANALYSIS_REPORT_NEGATIVE = (
+    "\u4ed4\u7ec6review",
+    "code review",
+    "review \u4eca\u5929",
+    "review today's",
+    "push \u5230",
+    "push to master",
+    "\u4e0d\u505a\u4ee3\u7801\u6539\u52a8",
+    "do not change code",
+    "only review",
+    "\u4ec5\u505a review",
+)
+
 # Asking about an earlier task's figure/paper is recall, not a new contract.
 _FIGURE_PAPER_NEGATIVE = (
     "\u524d\u9762\u95ee\u7684",
@@ -253,6 +304,41 @@ def skip_completed_skills_note(
     return "\n".join(lines)
 
 
+_RETRIEVE_ONLY_IGNORE = frozenset(
+    {"sources", "answer", "workflow", "literature.search"}
+)
+
+
+def utterance_asks_only_source_ids(text: str) -> bool:
+    """True when the user typed a retrieve-only identifier scope."""
+    raw = str(text or "")
+    folded = raw.casefold()
+    return any(hint in raw or hint in folded for hint in _SOURCE_ID_ONLY_HINTS)
+
+
+def incoming_plan_is_retrieve_only(plan: Any) -> bool:
+    """True when the incoming plan already contracted sources, not produce artifacts.
+
+    Named ``search_literature`` freezes the tool. Produce debts still bind
+    unless the utterance asked only for source ids.
+    """
+    verification = getattr(plan, "verification_plan", None)
+    required = [
+        str(item).strip()
+        for item in (getattr(verification, "required_outputs", None) or [])
+        if str(item).strip()
+    ]
+    if "sources" not in required:
+        return False
+    named = {
+        str(item).strip()
+        for item in (*(getattr(plan, "outputs", None) or []), *required)
+        if str(item).strip()
+    }
+    leftover = named - _RETRIEVE_ONLY_IGNORE
+    return not leftover
+
+
 def bind_contract_outputs(plan: Any, proposal: Any | None = None) -> Any:
     """Copy named scientific outputs onto verification so settlement can see them.
 
@@ -263,6 +349,11 @@ def bind_contract_outputs(plan: Any, proposal: Any | None = None) -> Any:
     even when ``required_capabilities`` / ``workflow_steps`` already named a
     figure and a paper. Those names are the contract; the ReAct floor is only
     the execution mode.
+
+    An incoming retrieve-only plan still infers figure / slides / manuscript
+    when the same sentence names them. ``grant_contract_write_tools`` will
+    not open write on a retrieve window (``run_skill`` blocked). Only an
+    explicit source-id-only scope skips that inference.
     """
     from omni.agent.intent_plan import VerificationPlan
 
@@ -274,8 +365,11 @@ def bind_contract_outputs(plan: Any, proposal: Any | None = None) -> Any:
             if isinstance(step, dict) and step.get("capability"):
                 caps.append(str(step["capability"]))
         names.extend(contract_outputs_from_capabilities(caps))
-    names.extend(infer_figure_and_paper_outputs(getattr(plan, "user_message", "") or ""))
-    names.extend(infer_slide_outputs(getattr(plan, "user_message", "") or ""))
+    message = getattr(plan, "user_message", "") or ""
+    if not utterance_asks_only_source_ids(message):
+        names.extend(infer_figure_and_paper_outputs(message))
+        names.extend(infer_slide_outputs(message))
+        names.extend(infer_analysis_report_outputs(message))
     names.extend(_outputs_from_selected_skills(plan))
     contract = contract_outputs(names)
     if not contract:
@@ -307,6 +401,8 @@ def grant_contract_write_tools(plan: Any) -> Any:
     policy = getattr(plan, "tool_policy", None)
     if policy is None:
         return plan
+    if "run_skill" in set(policy.blocked_tools or []):
+        return plan
     if policy.allowed_tools is not None and not policy.allowed_tools:
         return plan
     blocked = [
@@ -337,6 +433,33 @@ def infer_figure_and_paper_outputs(user_message: str) -> list[str]:
     if infer_slide_outputs(text) and not hard_paper:
         return ["artifact.figure"]
     return ["artifact.figure", "draft.manuscript"]
+
+
+def infer_analysis_report_outputs(user_message: str) -> list[str]:
+    """Bind a manuscript when the user asked for a source/architecture comparison.
+
+    ``outputs=["answer"]`` is not enough: a finding-ack then settles as
+    succeeded. A named ``draft.manuscript`` unblocks ``write_file`` and
+    leaves the file unpaid until it exists. Does not fire on a lone
+    "analyze this" chat, a survey, or a slide request.
+    """
+    text = str(user_message or "")
+    if not text:
+        return []
+    folded = text.casefold()
+    if infer_slide_outputs(text):
+        return []
+    if any(hint in text or hint in folded for hint in _FIGURE_PAPER_NEGATIVE):
+        return []
+    if any(hint in text or hint in folded for hint in _ANALYSIS_REPORT_NEGATIVE):
+        return []
+    if any(hint in text or hint in folded for hint in _ANALYSIS_REPORT_STRONG):
+        return ["draft.manuscript"]
+    scoped = any(hint in text or hint in folded for hint in _ANALYSIS_REPORT_SCOPE)
+    targeted = any(hint in text or hint in folded for hint in _ANALYSIS_REPORT_TARGET)
+    if scoped and targeted:
+        return ["draft.manuscript"]
+    return []
 
 
 def infer_slide_outputs(user_message: str) -> list[str]:
@@ -395,6 +518,102 @@ async def remaining_retry_context(tasks: Any, artifacts: Any, task_id: str) -> s
     )
 
 
+# Skills whose named file is not paid by a write_file / bash leftover.
+CANONICAL_FILE_PRODUCERS: dict[str, tuple[str, ...]] = {
+    "livefigure": ("artifact.pptx",),
+    "paper-review": ("review",),
+    "scientific-figure": ("artifact.figure",),
+    "research-pptx": ("artifact.slides",),
+    "research-poster": ("artifact.poster",),
+    "review-response": ("response_letter",),
+}
+_FAILED_PRODUCER_STATUSES = frozenset(
+    {
+        "failed",
+        "error",
+        "needs_input",
+        "blocked",
+        "cancelled",
+        "timed_out",
+        "rejected",
+    }
+)
+_OK_PRODUCER_STATUSES = frozenset(
+    {"succeeded", "ok", "partial", "degraded", "warning", "submitted"}
+)
+
+
+def failed_canonical_file_debts(
+    tool_trace: list[Any] | None,
+    drained: list[dict[str, Any]] | None,
+) -> list[str]:
+    """Named files still owed after the last attempt of a canonical producer failed.
+
+    A write_file Markdown or a harvested PPTX does not retire ``review`` /
+    ``artifact.pptx`` when ``paper-review`` / ``livefigure`` itself failed.
+    """
+    last: dict[str, str] = {}
+    for record in tool_trace or []:
+        skill = _producer_skill_name(record)
+        if skill not in CANONICAL_FILE_PRODUCERS:
+            continue
+        last[skill] = _producer_status(record)
+    for item in drained or []:
+        if not isinstance(item, dict):
+            continue
+        skill = str(item.get("skill") or item.get("skill_name") or "").strip()
+        if skill not in CANONICAL_FILE_PRODUCERS:
+            continue
+        last[skill] = str(item.get("status") or "")
+    unpaid: list[str] = []
+    for skill, status in last.items():
+        if not _producer_attempt_failed(status):
+            continue
+        for name in CANONICAL_FILE_PRODUCERS[skill]:
+            if name not in unpaid:
+                unpaid.append(name)
+    return unpaid
+
+
+def _producer_skill_name(record: Any) -> str:
+    arguments = getattr(record, "arguments", None)
+    result = getattr(record, "result", None)
+    if isinstance(result, dict):
+        for key in ("skill_name", "skill"):
+            value = str(result.get(key) or "").strip()
+            if value:
+                return value
+        nested = result.get("result")
+        if isinstance(nested, dict):
+            value = str(nested.get("skill_name") or nested.get("skill") or "").strip()
+            if value:
+                return value
+    if isinstance(arguments, dict):
+        return str(arguments.get("skill_name") or arguments.get("skill") or "").strip()
+    return ""
+
+
+def _producer_status(record: Any) -> str:
+    result = getattr(record, "result", None)
+    if isinstance(result, dict):
+        status = str(result.get("status") or "").strip()
+        if status:
+            return status
+        nested = result.get("result")
+        if isinstance(nested, dict):
+            nested_status = str(nested.get("status") or "").strip()
+            if nested_status:
+                return nested_status
+    return str(getattr(record, "status", "") or "")
+
+
+def _producer_attempt_failed(status: str) -> bool:
+    token = str(status or "").strip().lower()
+    if token in _FAILED_PRODUCER_STATUSES:
+        return True
+    return bool(token) and token not in _OK_PRODUCER_STATUSES
+
+
 def _outputs_satisfied_by(artifact: Any) -> set[str]:
     names: set[str] = set()
     kind = str(getattr(artifact, "kind", "") or "").lower()
@@ -408,12 +627,17 @@ def _outputs_satisfied_by(artifact: Any) -> set[str]:
         names.add("artifact")
     if _is_writing_artifact(artifact, kind=kind, suffix=suffix, mime=mime):
         names.update(WRITING_DELIVERABLES)
+        names.add("artifact")
+    if _pays_named_review(artifact, kind=kind, title=title):
         names.add("review")
         names.add("artifact")
     if is_slides:
-        names.add("artifact.pptx")
         names.add("artifact.slides")
         names.add("artifact")
+        if kind in _FIGURE_KINDS or (
+            not kind and ("livefigure" in title or "editable" in title)
+        ):
+            names.add("artifact.pptx")
     if "poster" in kind or "poster" in title or (
         suffix in _POSTER_SUFFIXES and "poster" in title
     ):
@@ -440,6 +664,8 @@ def _is_writing_artifact(
     debts are paid by a text document on this task, not only by
     ``kind=report`` / ``.md``. Figures, decks, and data files stay out.
     """
+    if kind == "review":
+        return False
     if kind in _FIGURE_KINDS or suffix in _FIGURE_SUFFIXES or mime in _FIGURE_MIMES:
         return False
     if suffix in _SLIDE_SUFFIXES or kind in {"slides", "pptx", "data"}:
@@ -476,6 +702,23 @@ def _path_is_utf8_text(artifact: Any) -> bool:
     return True
 
 
+def _pays_named_review(artifact: Any, *, kind: str, title: str) -> bool:
+    """``review`` is a paper-review deliverable, not every Markdown write.
+
+    Store rows from ``write_file`` are ``kind=document``. The skill stores
+    ``kind=review``. A drained ``ArtifactRef`` has no kind; only then does a
+    review-named title count, so settlement can see the file before the store
+    indexes it.
+    """
+    if kind == "review":
+        return True
+    if kind:
+        return False
+    path = _path_of(artifact)
+    name = Path(path).name.lower() if path else ""
+    return "review" in title or "review" in name
+
+
 def _is_sidecar(artifact: Any) -> bool:
     if is_dot_artifact(artifact):
         return True
@@ -509,10 +752,15 @@ def _path_of(artifact: Any) -> str:
 
 __all__ = [
     "bind_contract_outputs",
+    "incoming_plan_is_retrieve_only",
+    "utterance_asks_only_source_ids",
+    "infer_analysis_report_outputs",
     "infer_figure_and_paper_outputs",
     "infer_slide_outputs",
     "plan_owes_scientific_outputs",
     "grant_contract_write_tools",
+    "CANONICAL_FILE_PRODUCERS",
+    "failed_canonical_file_debts",
     "remaining_contract_files",
     "remaining_deliverables",
     "remaining_figure",

@@ -6,6 +6,8 @@ and REPL ``/web`` detach that same process and return so the prompt stays usable
 
 from __future__ import annotations
 
+import logging
+import os
 import subprocess
 import sys
 import time
@@ -16,6 +18,11 @@ import typer
 from omni.cli.render import data_table, error, info, success, warn
 from omni.cli.state import AppState
 from omni.runtime.daemon import pid_alive
+from omni.runtime.logging_config import (
+    configure_process_logging,
+    parse_log_level,
+    prepare_log_file,
+)
 from omni.runtime.web_service import (
     clear_pidfile,
     clear_pidfile_if_owner,
@@ -41,6 +48,9 @@ app = typer.Typer(help=app_help, invoke_without_command=True, no_args_is_help=Fa
 
 _READY_WAIT_S = 8.0
 _MANAGE = ("start", "stop", "status", "restart", "port", "help")
+_MANAGED_LOG_STREAM_ENV = "OMNI_WEB_MANAGED_LOG_STREAM"
+
+logger = logging.getLogger(__name__)
 
 
 def _web_ui_mismatch_warning(*, ui_version: str, package_version: str) -> str:
@@ -93,34 +103,67 @@ def _run_foreground(state: AppState, *, host: str, port: int) -> None:
         error(str(exc).rstrip())
         raise typer.Exit(2) from exc
 
-    from omni.web.app import create_app
-
-    paths = state.settings().paths
+    settings = state.settings()
+    paths = settings.paths
     existing = web_info(paths)
     if existing:
         error(f"omni web is already running: pid={existing['pid']} {existing['url']}")
         raise typer.Exit(1)
 
-    app_obj = create_app(trusted_hosts=(host,))
     url = ready_url(host, port)
+    log_path = paths.logs_dir / f"web-{paths.project_name}.log"
+    managed_stream = os.environ.get(_MANAGED_LOG_STREAM_ENV) == "1"
+    process_logging = configure_process_logging(
+        component="web",
+        level=settings.observability.log_level,
+        stream=sys.stderr if managed_stream else None,
+        path=None if managed_stream else log_path,
+        settings=settings,
+    )
 
     def _on_ready() -> None:
         ui = spa_version(web_dist_dir()) or "unversioned"
-        sys.stdout.write(f"omni web: {url}  UI {ui}\n")
-        sys.stdout.flush()
+        logger.info(
+            "web server ready at %s with UI %s",
+            url,
+            ui,
+            extra={"event": "server.ready"},
+        )
+        if not managed_stream:
+            sys.stdout.write(f"omni web: {url}  UI {ui}\n")
+            sys.stdout.flush()
         pkg = package_version()
         if ui not in {"", "unversioned"} and pkg and ui != pkg:
-            warn(_web_ui_mismatch_warning(ui_version=ui, package_version=pkg))
+            mismatch = _web_ui_mismatch_warning(ui_version=ui, package_version=pkg)
+            logger.warning(mismatch, extra={"event": "ui.version_mismatch"})
+            if not managed_stream:
+                warn(mismatch)
 
-    write_pidfile(paths, host=host, port=port)
     try:
-        run_web_server(app_obj, host=host, port=port, on_ready=_on_ready)
+        from omni.web.app import create_app
+
+        app_obj = create_app(trusted_hosts=(host,))
+        write_pidfile(paths, host=host, port=port)
+        run_web_server(
+            app_obj,
+            host=host,
+            port=port,
+            on_ready=_on_ready,
+            log_level=parse_log_level(settings.observability.log_level),
+        )
     except (KeyboardInterrupt, SystemExit):
         pass
+    except Exception as exc:
+        logger.exception(
+            "web server failed",
+            extra={"event": "server.failed"},
+        )
+        if not managed_stream:
+            error(f"omni web failed to start or run. See {log_path}")
+        raise typer.Exit(1) from exc
     finally:
         clear_pidfile_if_owner(paths)
-    sys.stdout.write("omni web: stopped\n")
-    sys.stdout.flush()
+        process_logging.close()
 
 
 def _detached_popen_kwargs() -> dict[str, object]:
@@ -177,17 +220,18 @@ def start_web_process(state: AppState, *, host: str, port: int) -> tuple[bool, s
     if existing:
         return True, f"omni web is already running: pid={existing['pid']} {existing['url']}"
 
-    paths.logs_dir.mkdir(parents=True, exist_ok=True)
-    log_path = paths.logs_dir / f"web-{paths.project_name}.log"
+    log_path = prepare_log_file(paths.logs_dir / f"web-{paths.project_name}.log")
     argv = _foreground_argv(state, host=host, port=port)
-    with log_path.open("ab") as log:
-        proc = subprocess.Popen(  # noqa: S603 - argv is constructed from trusted CLI state.
-            argv,
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            **_detached_popen_kwargs(),
-        )
+    child_env = os.environ.copy()
+    child_env.pop(_MANAGED_LOG_STREAM_ENV, None)
+    proc = subprocess.Popen(  # noqa: S603 - argv is constructed from trusted CLI state.
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=child_env,
+        **_detached_popen_kwargs(),
+    )
     deadline = time.time() + _READY_WAIT_S
     while time.time() < deadline:
         if proc.poll() is not None:

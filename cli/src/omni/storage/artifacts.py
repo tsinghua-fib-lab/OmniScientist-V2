@@ -34,6 +34,23 @@ from omni.storage.models import ArtifactORM, TaskORM, _uuid
 # filesystem path; CLI/web must not print this URI.
 _ARTIFACT_SCHEME = "artifact://"
 
+
+def recorded_artifact_path(row: ArtifactORM, *, project_dir: Path) -> str:
+    """Filesystem location stored for this row, even if the file is gone.
+
+    ``rel_path`` is project-relative when the copy lives in the durable store,
+    otherwise the absolute launch-directory path. ``artifact://`` is never a
+    location — callers that already resolved a live file should prefer that.
+    """
+    rel = str(getattr(row, "rel_path", "") or "").strip()
+    if not rel or rel.startswith(_ARTIFACT_SCHEME):
+        return ""
+    candidate = Path(rel)
+    if candidate.is_absolute():
+        return str(candidate)
+    return str(Path(project_dir) / rel)
+
+
 # On-disk filenames are ``<slug>-<task8>-<art8>.<ext>`` (or ``<slug>-<art8>.<ext>``
 # when no owning task is known): the slug makes the file human-readable in
 # listings and IM attachments, the task id ties every deliverable of one turn
@@ -649,7 +666,13 @@ class ArtifactStore:
             return str(dest.resolve())
 
     def _absolute_resolve_roots(self, row: ArtifactORM) -> list[Path]:
-        """Workspace-local roots an absolute ``rel_path`` may still resolve in."""
+        """Workspace-local roots an absolute ``rel_path`` may still resolve in.
+
+        Cross-workspace ``get_task`` builds a store without ``mirror_dir``. The
+        checkout that keyed this workspace (``workspace_root``) must still be
+        allowed, or leftover ``reports/`` / ``outputs/`` copies resolve to
+        nothing and the CLI falls through to an internal ``artifact://`` id.
+        """
         roots: list[Path] = []
         scope = self._scope_from_meta(row.meta)
         if scope is not None:
@@ -658,6 +681,8 @@ class ArtifactStore:
             roots.append(self._mirror_dir)
             if self._mirror_dir.name in {USER_OUTPUT_DIRNAME, "out"}:
                 roots.append(self._mirror_dir.parent)
+        if self._paths.workspace_root is not None:
+            roots.append(self._paths.workspace_root)
         roots.append(self._paths.project_dir)
         roots.append(self._paths.artifacts_dir)
         out: list[Path] = []
@@ -753,8 +778,9 @@ class ArtifactStore:
         if Path(rel).is_absolute():
             # An absolute ``rel_path`` is the single launch-directory copy.
             # Allow the current ``outputs/`` root, a persisted task scope, the
-            # leftover per-kind siblings next to ``outputs/``, and the project
-            # store. Foreign paths stay refused.
+            # leftover per-kind siblings next to ``outputs/``, the checkout that
+            # keyed this workspace, and the project store. Foreign paths stay
+            # refused.
             candidate = Path(rel).resolve()
             for root in self._absolute_resolve_roots(row):
                 try:

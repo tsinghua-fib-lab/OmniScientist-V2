@@ -399,6 +399,8 @@ class IntentPlanner:
             if explicit is not None:
                 return bind_contract_outputs(explicit)
         if decision.kind == "explicit_tool":
+            # Freeze the named tool. Produce debts may still bind; write stays
+            # closed while run_skill is blocked (the retrieve window).
             return bind_contract_outputs(
                 build_named_native_tool_plan(text, tool=decision.tool, task_id=task_id)
             )

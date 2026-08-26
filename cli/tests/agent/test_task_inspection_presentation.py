@@ -99,6 +99,58 @@ def test_format_task_inspection_truncates_a_very_long_summary() -> None:
     assert "\u2026" in text  # ellipsis marks the elision
 
 
+def test_format_task_inspection_shows_filesystem_path_not_uri() -> None:
+    text = _format_task_inspection(
+        {
+            "task_id": "abcd1234abcd1234",
+            "status": "succeeded",
+            "summary": "wrote the survey",
+            "artifacts": [
+                {
+                    "title": "latent-steering-related-work",
+                    "path": "/Users/me/repo/reports/Survey/latent-steering-related-work.md",
+                    "uri": "artifact://35c6de7a6a7c4f8d93dd2dbeeffbc1e5",
+                }
+            ],
+        }
+    )
+    assert "Result artifacts:" in text
+    assert "/Users/me/repo/reports/Survey/latent-steering-related-work.md" in text
+    assert "artifact://" not in text
+    assert "35c6de7a6a7c4f8d93dd2dbeeffbc1e5" not in text
+
+
+def test_format_task_inspection_omits_uri_when_path_is_missing() -> None:
+    text = _format_task_inspection(
+        {
+            "task_id": "abcd1234abcd1234",
+            "status": "succeeded",
+            "artifacts": [
+                {
+                    "title": "latent-steering-related-work",
+                    "path": "",
+                    "uri": "artifact://35c6de7a6a7c4f8d93dd2dbeeffbc1e5",
+                }
+            ],
+        }
+    )
+    assert "latent-steering-related-work" in text
+    assert "saved (path unavailable)" in text
+    assert "artifact://" not in text
+
+
+def test_format_task_inspection_does_not_print_artifact_refs() -> None:
+    text = _format_task_inspection(
+        {
+            "task_id": "abcd1234abcd1234",
+            "status": "succeeded",
+            "artifact_refs": ["artifact:35c6de7a6a7c4f8d93dd2dbeeffbc1e5"],
+        }
+    )
+    assert "artifact://" not in text
+    assert "35c6de7a6a7c4f8d93dd2dbeeffbc1e5" not in text
+
+
 # --- Layer 3: task.review keeps prose, host appends authoritative status ----
 
 

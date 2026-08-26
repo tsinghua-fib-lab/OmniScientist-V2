@@ -332,6 +332,98 @@ def _inside_project(path: Path, paths: Any) -> bool:
         return False
 
 
+# Bulk harvest of $OMNI_OUTPUT_DIR. A model that dumps a venv into the outbox
+# used to register thousands of site-packages files as task artifacts.
+_HARVEST_SKIP_DIR_NAMES = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        ".venv",
+        "venv",
+        "virtualenv",
+        "site-packages",
+        "dist-packages",
+        "node_modules",
+        "__pycache__",
+        ".tox",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".eggs",
+    }
+)
+_HARVEST_SKIP_DIR_SUFFIXES = (".dist-info", ".egg-info")
+_HARVEST_SKIP_FILENAMES = frozenset(
+    {
+        "license",
+        "license.txt",
+        "license.md",
+        "licence",
+        "licence.txt",
+        "notice",
+        "notice.txt",
+        "notice.md",
+        "copying",
+        "authors",
+        "authors.txt",
+        "pyvenv.cfg",
+        "pip-selfcheck.json",
+    }
+)
+_HARVEST_SUFFIXES = frozenset(
+    {
+        ".md",
+        ".markdown",
+        ".txt",
+        ".tex",
+        ".html",
+        ".csv",
+        ".json",
+        ".svg",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp",
+        ".gif",
+        ".pptx",
+        ".ppt",
+        ".pdf",
+        ".docx",
+        ".doc",
+        ".py",
+        ".dot",
+        ".gv",
+        ".ipynb",
+    }
+)
+
+
+def harvestable_output(path: Path, root: Path) -> bool:
+    """Whether a file under the outbox is a scientific deliverable, not junk.
+
+    ``register_output_dir`` used to ``rglob("*")`` and promote every regular
+    file. A bash fallback that created ``.venv`` then registered LICENSE,
+    ``site-packages``, and thousands of wheel files as the turn's artifacts.
+    """
+    try:
+        resolved = path.resolve()
+        resolved.relative_to(root.resolve())
+    except (OSError, ValueError):
+        return False
+    if not resolved.is_file() or resolved.name.startswith("."):
+        return False
+    if resolved.name.lower() in _HARVEST_SKIP_FILENAMES:
+        return False
+    for part in resolved.relative_to(root.resolve()).parts[:-1]:
+        lowered = part.lower()
+        if lowered in _HARVEST_SKIP_DIR_NAMES or lowered.endswith(
+            _HARVEST_SKIP_DIR_SUFFIXES
+        ):
+            return False
+    return resolved.suffix.lower() in _HARVEST_SUFFIXES
+
+
 def _promoted_store_path(ctx: Any, outbox: Path, src: Path) -> Path:
     """Stable host-owned copy of an outbox file, inside the project store."""
     rel = src.resolve().relative_to(outbox)
@@ -360,11 +452,7 @@ async def register_output_dir(ctx: Any, directory: Path | None = None) -> int:
         return 0
     count = 0
     for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.name.startswith("."):
-            continue
-        try:
-            path.resolve().relative_to(root)
-        except ValueError:
+        if not harvestable_output(path, root):
             continue
         kind, mime = document_kind_for(path)
         try:
@@ -404,6 +492,7 @@ __all__ = [
     "exec_namespace",
     "exec_tmp_dir",
     "extra_exec_roots",
+    "harvestable_output",
     "host_scratch_base",
     "input_write_roots",
     "kernel_write_roots",

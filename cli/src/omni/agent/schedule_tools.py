@@ -251,7 +251,7 @@ def _resolver_context(ctx: ExecContext) -> ResolverContext:
         channel=ctx.channel or "cli",
         session_id=ctx.session_id,
         principal=getattr(ctx, "principal", "local") or "local",
-        project_dir=str(getattr(ctx.paths, "workspace_root", "") or ""),
+        project_dir=str(getattr(ctx.paths, "project_dir", "") or ""),
     )
 
 
@@ -302,7 +302,7 @@ def build_schedule_tools(runtime: Any, ctx: ExecContext) -> list[Tool]:
                 session_id=ctx.session_id,
                 actor_principal=_decider(),
                 required_decider=_decider(),
-                origin_project_dir=str(getattr(ctx.paths, "workspace_root", "") or ""),
+                origin_project_dir=str(getattr(ctx.paths, "project_dir", "") or ""),
                 project=str(getattr(ctx.paths, "project_name", "default") or "default"),
                 payload={
                     "goal": str(args.get("goal") or ""),

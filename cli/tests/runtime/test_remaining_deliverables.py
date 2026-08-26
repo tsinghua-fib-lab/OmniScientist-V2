@@ -12,7 +12,10 @@ from omni.agent.intent_plan import IntentType
 from omni.agent.model_planner import ModelPlanProposal
 from omni.agent.planner import IntentPlanner
 from omni.config import load_settings
+from omni.core.react_agent import ToolInvocationRecord
 from omni.runtime.remaining import (
+    failed_canonical_file_debts,
+    incoming_plan_is_retrieve_only,
     remaining_contract_files,
     remaining_deliverables,
     remaining_figure,
@@ -69,6 +72,61 @@ def test_dot_sidecar_does_not_count_as_the_figure() -> None:
     remaining = remaining_deliverables(["artifact.figure"], [dot])
     assert remaining == ["artifact.figure"]
     assert remaining_figure(remaining) == ["artifact.figure"]
+
+
+def test_markdown_report_does_not_pay_a_paper_review_debt() -> None:
+    report = SimpleNamespace(
+        kind="document",
+        title="review",
+        rel_path="outputs/review.md",
+        mime="text/markdown",
+        uri="artifact://md",
+    )
+    assert remaining_deliverables(["review"], [report]) == ["review"]
+
+
+def test_kind_review_pays_the_paper_review_debt() -> None:
+    review = SimpleNamespace(
+        kind="review",
+        title="NeurIPS review",
+        rel_path="outputs/review.md",
+        mime="text/markdown",
+        uri="artifact://review",
+    )
+    assert remaining_deliverables(["review"], [review]) == []
+
+
+def test_harvested_deck_does_not_pay_editable_figure() -> None:
+    deck = SimpleNamespace(
+        kind="slides",
+        title="deck",
+        rel_path="outputs/deck.pptx",
+        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        uri="artifact://deck",
+    )
+    assert remaining_deliverables(["artifact.pptx"], [deck]) == ["artifact.pptx"]
+    assert remaining_deliverables(["artifact.slides"], [deck]) == []
+
+
+def test_figure_kind_pptx_pays_editable_figure() -> None:
+    slide = SimpleNamespace(
+        kind="figure",
+        title="RAG architecture PPTX",
+        rel_path="outputs/rag.pptx",
+        format="pptx",
+        uri="artifact://live",
+    )
+    assert remaining_deliverables(["artifact.pptx"], [slide]) == []
+
+
+def test_failed_livefigure_keeps_editable_figure_debt() -> None:
+    record = ToolInvocationRecord(
+        name="run_skill",
+        arguments={"skill_name": "livefigure"},
+        result={"status": "error", "skill_name": "livefigure", "error": "dunder"},
+        status="succeeded",
+    )
+    assert failed_canonical_file_debts([record], []) == ["artifact.pptx"]
 
 
 def test_markdown_report_satisfies_manuscript() -> None:
@@ -229,6 +287,37 @@ def test_answer_only_proposal_still_binds_named_capabilities() -> None:
     assert not plan.tool_policy.allows("bash")
 
 
+def test_analysis_report_wording_binds_a_manuscript() -> None:
+    from omni.runtime.remaining import infer_analysis_report_outputs
+
+    prompt = (
+        "请仔细分析你的存储、记忆系统架构，对标codex 的源码"
+        "（源码目录 /Users/antonio/work/sourcecode ）实现"
+    )
+    assert infer_analysis_report_outputs(prompt) == ["draft.manuscript"]
+    assert infer_analysis_report_outputs("请仔细分析这段代码为什么报错") == []
+    assert infer_analysis_report_outputs("写一篇综述") == []
+    assert infer_analysis_report_outputs("请做一组会PPT对标一下") == []
+    assert infer_analysis_report_outputs(
+        "仔细review 今天 push 到master 上的代码，实现是对标了 codex 源码设计的。不做代码改动"
+    ) == []
+
+
+def test_analysis_report_bind_unblocks_write_file() -> None:
+    from omni.agent.plan_factory import build_assistant_plan
+    from omni.runtime.remaining import bind_contract_outputs
+
+    plan = build_assistant_plan(
+        "请仔细分析你的存储、记忆系统架构，对标codex 的源码实现",
+        task_id="analysis-bind",
+        rationale="readonly analysis",
+    )
+    bound = bind_contract_outputs(plan)
+    assert "draft.manuscript" in bound.outputs
+    assert "draft.manuscript" in bound.verification_plan.required_outputs
+    assert bound.tool_policy.allows("write_file")
+
+
 def test_figure_and_paper_wording_binds_the_contract_without_capabilities() -> None:
     from omni.runtime.remaining import infer_figure_and_paper_outputs, infer_slide_outputs
 
@@ -250,6 +339,38 @@ def test_figure_and_paper_wording_binds_the_contract_without_capabilities() -> N
     assert infer_figure_and_paper_outputs(
         "为 RAG 系统综述准备材料，生成架构图，并输出一篇论文和一份PPT"
     ) == ["artifact.figure", "draft.manuscript"]
+
+
+def test_retrieve_window_binds_produce_debts_without_write() -> None:
+    from omni.agent.plan_factory import build_named_native_tool_plan
+    from omni.runtime.remaining import bind_contract_outputs
+
+    plan = build_named_native_tool_plan(
+        "调用 search_literature 再写一篇综述、画架构图、做一组会PPT。",
+        tool="search_literature",
+        task_id="x8-bind",
+    )
+    assert incoming_plan_is_retrieve_only(plan)
+    bound = bind_contract_outputs(plan)
+    assert not incoming_plan_is_retrieve_only(bound)
+    assert not bound.tool_policy.allows("write_file")
+    assert "artifact.figure" in bound.outputs
+    assert "artifact.slides" in bound.verification_plan.required_outputs
+
+
+def test_source_id_only_scope_skips_produce_inference() -> None:
+    from omni.agent.plan_factory import build_named_native_tool_plan
+    from omni.runtime.remaining import bind_contract_outputs
+
+    plan = build_named_native_tool_plan(
+        "调用 search_literature 再写一篇综述，只列出 source_id。",
+        tool="search_literature",
+        task_id="x8-ids",
+    )
+    bound = bind_contract_outputs(plan)
+    assert incoming_plan_is_retrieve_only(bound)
+    assert "artifact.figure" not in bound.outputs
+    assert not bound.tool_policy.allows("write_file")
 
 
 def test_skip_completed_skills_note_names_the_figure_and_the_paper_debt() -> None:

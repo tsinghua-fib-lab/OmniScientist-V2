@@ -549,6 +549,76 @@ button:disabled {
   line-height: 18px;
 }
 
+.section-manage,
+.danger-link,
+.load-more {
+  min-height: 26px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.section-manage:hover:not(:disabled),
+.section-manage.active,
+.load-more:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.section-manage:disabled,
+.danger-link:disabled,
+.load-more:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.session-filters {
+  display: grid;
+  flex: none;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 4px;
+  padding: 0 4px 5px;
+}
+
+.session-filters .select {
+  width: 100%;
+  max-width: none;
+  min-height: 27px;
+  padding-inline: 6px 18px;
+  font-size: 11px;
+}
+
+.selection-bar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 34px;
+  padding: 3px 6px;
+  border-top: 1px solid var(--border-soft);
+  color: var(--text-caption);
+  font-size: 11px;
+}
+
+.selection-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.danger-link {
+  color: var(--danger);
+  font-size: 11px;
+}
+
+.danger-link:hover:not(:disabled) {
+  background: var(--danger-soft);
+}
+
 .list {
   display: flex;
   flex: 1;
@@ -583,6 +653,24 @@ button:disabled {
 
 .item.active {
   background: var(--surface-active);
+}
+
+.selectable-item {
+  align-items: flex-start;
+  cursor: pointer;
+}
+
+.selectable-item > input[type="checkbox"] {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin: 3px 0 0;
+  accent-color: var(--accent);
+}
+
+.selectable-item.protected {
+  cursor: default;
+  opacity: 0.68;
 }
 
 .item-leading {
@@ -636,6 +724,11 @@ button:disabled {
   align-items: stretch;
   min-height: 70px;
   padding: 0;
+}
+
+.session-item.selectable-item {
+  min-height: 70px;
+  padding: 9px 10px;
 }
 
 .session-item.menu-open {
@@ -744,6 +837,66 @@ button:disabled {
 
 .session-sub {
   opacity: 0.85;
+}
+
+.session-status,
+.workspace-chip {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  min-width: 0;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--surface-subtle);
+  color: var(--text-tertiary);
+  font-size: 10px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.session-status.running {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.session-status.needs_attention,
+.session-status.warning {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.session-status.completed {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.session-status.error,
+.session-status.cancelled {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.workspace-chip {
+  max-width: 92px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-list-warning {
+  margin: 2px 4px 4px;
+  padding: 6px 8px;
+  border-radius: 7px;
+  background: var(--warning-soft);
+  color: var(--warning);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.load-more {
+  flex: none;
+  margin: 4px;
+  border: 1px solid var(--border-default);
 }
 
 .session-section .list {

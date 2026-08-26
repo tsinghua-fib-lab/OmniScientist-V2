@@ -24,6 +24,7 @@ from omni.config.user_edits import (
     apply_semantic_scholar_config,
     apply_vlm_config,
     coerce_value,
+    collect_config_health,
     get_dotted,
     is_mock_provider,
     is_sensitive,
@@ -33,7 +34,6 @@ from omni.config.user_edits import (
     redact_sensitive_values,
     resolve_key,
     set_dotted,
-    test_model_connectivity,
     test_semantic_scholar_connectivity,
     unset_config_value,
 )
@@ -69,7 +69,7 @@ def render_config_usage_help() -> None:
             ["semantic-scholar", "Configure literature-search credentials", spell_commands("/config semantic-scholar -k <API_KEY> --test")],
             ["embeddings", "Configure remote or local semantic embeddings", spell_commands("/config embeddings --enable -p specter2 --python <PYTHON> --base-model <DIR> --adapter <DIR>")],
             ["home [PATH]", "Show or change the Omni data directory; --reset restores ~/.omni", spell_commands("/config home /data/omni")],
-            ["test", "Test the active model configuration", spell_commands("/config test")],
+            ["test", "Test the main model and report VLM / Semantic Scholar / embeddings", spell_commands("/config test")],
             ["path", "Show user, secret, and project config paths", spell_commands("/config path")],
             ["unset <key>", "Remove a user or secret setting", spell_commands("/config unset model.api_key")],
         ],
@@ -121,12 +121,14 @@ def _render_vlm_config_guide() -> None:
     text.append("Configure an optional vision model for visual skills:\n", "bold")
     text.append("  ", "dim")
     text.append(
-        f"{spell_commands('/config vlm -u https://vision.example/v1/chat/completions -m <VISION_MODEL> -k <API_KEY>')}\n",
+        f"{spell_commands('/config vlm -u https://vision.example/v1 -m <VISION_MODEL> -k <API_KEY>')}\n",
         "cyan",
     )
     text.append(
-        "  Use HTTPS for remote services (HTTP is allowed only on loopback). "
-        "The API key is kept in secrets.toml. Add --test to verify multimodal support.",
+        "  A site origin or /v1 base URL is expanded to chat/completions, "
+        "same as Claude Code's ANTHROPIC_BASE_URL. HTTPS for remote services "
+        "(HTTP is allowed only on loopback). The API key is kept in secrets.toml. "
+        "Add --test, or run `/config test`.",
         "dim",
     )
     console.print(text)
@@ -710,7 +712,7 @@ def _is_mock_provider(provider: str) -> bool:
 
 @app.command("test")
 def test_cmd(ctx: typer.Context) -> None:
-    """Test the active model endpoint, token, and model."""
+    """Test the main model and report optional VLM / Semantic Scholar / embeddings."""
     _run_connectivity_test(ctx)
 
 
@@ -720,16 +722,22 @@ def _run_connectivity_test(ctx: typer.Context) -> bool:
     # ``settings()`` reads config files fresh each call, so the values written
     # above are already in effect — no daemon/restart needed.
     s = ctx.obj.settings()
-    info(f"Testing {s.model.provider} / {s.model.model}...")
-    ok, detail = run_async(test_model_connectivity(s))
-    (success if ok else error)(detail)
-    if not ok:
+    items = run_async(collect_config_health(s, on_start=info))
+    all_ok = True
+    for item in items:
+        if item.status == "passed":
+            success(item.detail)
+        elif item.status == "failed":
+            error(item.detail)
+            all_ok = False
+        else:
+            info(item.detail)
+    if not all_ok:
         info(
-            "Update the credential or endpoint with "
-            f"`{spell_commands('/model main ...')}`, then run "
+            "Fix the failed item, then run "
             f"`{spell_commands('/config test')}` again."
         )
-    return ok
+    return all_ok
 
 
 def _mark_model_unverified(settings) -> None:  # noqa: ANN001

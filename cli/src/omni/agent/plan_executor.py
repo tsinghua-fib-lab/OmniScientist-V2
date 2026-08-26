@@ -218,6 +218,22 @@ class PlanExecutor:
             )
         memory_id = ""
         if self._memory is not None and summary:
+            principal = str(getattr(ctx, "principal", "") or "").strip()
+            if principal in {"", "unresolved"}:
+                return PlanExecutionResult(
+                    handled=True,
+                    text=(
+                        "I could not record that memory because the session "
+                        "identity could not be resolved."
+                    ),
+                    kind="error",
+                    terminated_reason="unresolved_principal",
+                    plan_summary=plan_summary(plan),
+                    degraded_warnings=[
+                        "session identity could not be resolved; memory was not written"
+                    ],
+                    settlement_status="failed",
+                )
             memory_id = await self._memory.record(
                 layer=MemoryLayer.SEMANTIC,
                 scope="project",
@@ -227,6 +243,7 @@ class PlanExecutor:
                 tags=["user-confirmed"],
                 importance=0.75,
                 pinned=True,
+                principal=principal,
             )
         text = f"Remembered: {summary}" + (f"\nMemory id: `{memory_id[:8]}`" if memory_id else "")
         await self._tasks.append_event(

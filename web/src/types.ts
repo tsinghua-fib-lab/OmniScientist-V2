@@ -21,6 +21,28 @@ export type CatalogWorkspace = {
   last_seen: number;
 };
 
+export type WorkspaceListResponse = {
+  workspaces: CatalogWorkspace[];
+  hidden_workspaces?: CatalogWorkspace[];
+  hidden_count?: number;
+  selected?: Workspace | null;
+};
+
+export type WorkspaceVisibilityResponse = WorkspaceListResponse & {
+  project_dirs: string[];
+};
+
+export type SessionScope = "workspace" | "all";
+export type SessionSort = "activity" | "started" | "completed" | "created";
+export type SessionStatusGroup =
+  | "running"
+  | "needs_attention"
+  | "completed"
+  | "warning"
+  | "error"
+  | "cancelled"
+  | "empty";
+
 export type Session = {
   id: string;
   title: string;
@@ -39,6 +61,33 @@ export type Session = {
   last_message_id?: string;
   latest_event_seq?: number;
   worker?: string;
+  status_group?: SessionStatusGroup;
+  message_count?: number;
+  project_dir?: string;
+  workspace_root?: string | null;
+  workspace_kind?: string;
+  workspace_label?: string;
+  last_message_at?: string | null;
+  last_started_at?: string | null;
+  last_completed_at?: string | null;
+};
+
+export type SessionCatalogError = {
+  project_dir?: string;
+  workspace_label?: string;
+  message: string;
+};
+
+export type SessionListAllResponse = {
+  sessions: Session[];
+  next_cursor?: string | null;
+  errors?: SessionCatalogError[];
+};
+
+export type SessionDeleteManyResponse = {
+  deleted_session_ids: string[];
+  deleted_task_ids: string[];
+  retained_artifact_count: number;
 };
 
 export type ChatMessage = {

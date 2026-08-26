@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from omni.web.protocol import RpcError
 
 PARTIAL_LIMIT = 32_768
 QUEUE_SIZE = 256
+SERVER_STOPPING_EVENT = "server_stopping"
 
 
 def max_inflight_turns(rec: Any) -> int:
@@ -103,6 +105,48 @@ class RunManager:
         self._by_task: dict[tuple[str, str], str] = {}
         self._by_session: dict[tuple[str, str], str] = {}
         self._lock = asyncio.Lock()
+        self._closing = False
+        self._shutdown_event = asyncio.Event()
+
+    @property
+    def is_shutting_down(self) -> bool:
+        """Whether this Web process has stopped accepting new turns."""
+        return self._closing
+
+    def begin_shutdown(self) -> None:
+        """Stop admissions and detach live SSE watchers before ASGI drains.
+
+        This phase deliberately does not cancel a turn. Full shutdown owns the
+        interruption and await semantics; the early signal only lets streaming
+        HTTP requests finish cleanly so the server can enter its lifespan close.
+        """
+        if self._closing:
+            return
+        self._closing = True
+        self._shutdown_event.set()
+        for handle in self._by_run.values():
+            if not handle.done:
+                handle.publish(
+                    SERVER_STOPPING_EVENT,
+                    {
+                        "state": "stopping",
+                        "task_id": handle.task_id,
+                        "client_run_id": handle.client_run_id,
+                    },
+                )
+
+    async def wait_for_shutdown(self, *, timeout: float | None = None) -> bool:
+        """Wait for the early shutdown phase, returning false on timeout."""
+        if self._closing:
+            return True
+        try:
+            if timeout is None:
+                await self._shutdown_event.wait()
+            else:
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=timeout)
+        except TimeoutError:
+            return False
+        return True
 
     def get(self, client_run_id: str) -> RunHandle | None:
         return self._by_run.get(client_run_id)
@@ -126,12 +170,53 @@ class RunManager:
             and not handle.done
         }
 
+    def live_sessions(self) -> set[tuple[str, str]]:
+        """Return live ``(workspace cache key, session id)`` identities."""
+        return {
+            (handle.workspace_key, handle.session_id)
+            for handle in self._by_run.values()
+            if handle.session_id and not handle.done
+        }
+
     def inflight_in_workspace(self, workspace_key: str) -> int:
         return sum(
             1
             for handle in self._by_run.values()
             if handle.workspace_key == workspace_key and not handle.done
         )
+
+    @asynccontextmanager
+    async def guard_session_deletion(
+        self,
+        workspace_key: str,
+        session_refs: Sequence[str],
+    ) -> AsyncIterator[None]:
+        """Prevent Web turn admission while selected Sessions are deleted.
+
+        Prefix references are checked conservatively: if one could name a live
+        Session, deletion is refused. The durable lifecycle layer separately
+        rejects ambiguous prefixes before making any database change.
+        """
+        refs = tuple(dict.fromkeys(ref.strip() for ref in session_refs if ref.strip()))
+        async with self._lock:
+            for handle in self._by_run.values():
+                if (
+                    handle.workspace_key == workspace_key
+                    and handle.session_id
+                    and not handle.done
+                    and any(
+                        handle.session_id == ref or handle.session_id.startswith(ref)
+                        for ref in refs
+                    )
+                ):
+                    raise RpcError(
+                        "busy",
+                        "one or more sessions have a running Web turn",
+                        session_id=handle.session_id,
+                        task_id=handle.task_id,
+                        client_run_id=handle.client_run_id,
+                    )
+            yield
 
     async def admit(
         self,
@@ -142,6 +227,11 @@ class RunManager:
     ) -> RunHandle:
         run_id = (client_run_id or "").strip() or uuid.uuid4().hex
         async with self._lock:
+            if self._closing:
+                raise RpcError(
+                    "shutting_down",
+                    "web process is shutting down",
+                )
             if session_id:
                 existing = self.by_session(rec.key, session_id)
                 if existing is not None and not existing.done:
@@ -193,6 +283,7 @@ class RunManager:
 
     async def shutdown(self, interrupt: Callable[[RunHandle], Any] | None = None) -> None:
         """Interrupt every live turn, await it, then drop handles."""
+        self.begin_shutdown()
         handles = [handle for handle in self._by_run.values() if not handle.done]
         for handle in handles:
             if interrupt is not None:
