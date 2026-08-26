@@ -383,7 +383,7 @@ def _english_only_exempt(path: Path) -> bool:
         return True
     if path.name.startswith("user-walkthrough-results-"):
         return True
-    relative = str(path.relative_to(ROOT.parent))
+    relative = path.relative_to(ROOT.parent).as_posix()
     if relative in _USER_LANGUAGE_MATCHERS:
         return True
     return any(root in path.parents for root in _VENDORED_PERSONA_SKILLS)

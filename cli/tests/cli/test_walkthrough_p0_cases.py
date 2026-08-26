@@ -332,8 +332,10 @@ def test_a_out_04_help_gitignore_and_catalog_do_not_use_out_dot() -> None:
     from omni.cli.main import app
 
     repo = Path(__file__).resolve().parents[3]
-    catalog = (repo / "cli" / "docs" / "user-walkthrough-cases.md").read_text()
-    gitignore = (repo / ".gitignore").read_text()
+    catalog = (repo / "cli" / "docs" / "user-walkthrough-cases.md").read_text(
+        encoding="utf-8"
+    )
+    gitignore = (repo / ".gitignore").read_text(encoding="utf-8")
     assert "--out outputs_walkthrough" in catalog
     assert ' --out ."' not in catalog
     assert "outputs_walkthrough/" in gitignore
