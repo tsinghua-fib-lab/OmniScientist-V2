@@ -272,6 +272,14 @@ def test_planner_prompt_routes_local_ops_to_react_fallback():
     assert "deleting files" in prompt or "shell command" in prompt
     assert "ledger deliverable" in prompt
     assert "write_file" in prompt
+    assert "git log" in prompt
+    assert "literature.search" in prompt
+
+
+def test_local_environment_changelog_is_git_first():
+    local = render_local_environment(_local_tools(), "/tmp/work")
+    assert "git log" in local
+    assert "repository-wide grep" in local
 
 
 def test_react_tool_policy_unblocks_sensitive_tools_when_approver_present():

@@ -76,6 +76,7 @@ _CHECK_GLYPHS = {
     "active": "[cyan]▸[/cyan]",
     "done": "[green]✔[/green]",
     "degraded": "[yellow]⚠[/yellow]",
+    "needs_input": "[yellow]⚠[/yellow]",
     "failed": "[red]✗[/red]",
     "skipped": "[dim]∅[/dim]",
     "restored": "[dim]⤳[/dim]",
@@ -89,6 +90,7 @@ _PLAN_TOOL_STATE = {
 _STEP_OUTCOME_STATE = {
     "done": "done",
     "degraded": "degraded",
+    "needs_input": "needs_input",
     "failed": "failed",
     "skipped": "skipped",
     "restored": "restored",
@@ -723,7 +725,7 @@ class TurnDisplay:
                 mark = "[green]✓[/green]"
             elif status == "degraded":
                 mark = "[yellow]≈[/yellow]"
-            elif status == "partial":
+            elif status in {"partial", "needs_input"}:
                 mark = "[yellow]⚠[/yellow]"
             else:
                 mark = "[red]✗[/red]"
@@ -762,6 +764,11 @@ class TurnDisplay:
                 f"  [green]✓[/green] execution [bold]{escape(skill)}[/bold] succeeded"
                 f"[dim]{elapsed} · execution={escape(subtask_id[:8])}{owner}[/dim]"
             )
+        elif status == "needs_input":
+            self._line(
+                f"  [yellow]⚠[/yellow] execution [bold]{escape(skill)}[/bold] needs_input"
+                f" [dim]execution={escape(subtask_id[:8])}{owner}{elapsed}[/dim]"
+            )
         elif action_required_presentation(data.get("result")) is not None:
             # A skill that stopped for a missing setting is not a crash, and the
             # card at the end of the turn already carries its full text and the
@@ -774,7 +781,7 @@ class TurnDisplay:
         else:
             glyph = (
                 "[yellow]⚠[/yellow]"
-                if status in {"degraded", "partial"}
+                if status in {"degraded", "partial", "needs_input"}
                 else "[red]✗[/red]"
             )
             detail = f" · {escape(terminal_detail)}" if terminal_detail and not shown else ""
@@ -901,6 +908,7 @@ class TurnDisplay:
         glyph = {
             "done": "[green]✓[/green]",
             "degraded": "[yellow]⚠[/yellow]",
+            "needs_input": "[yellow]⚠[/yellow]",
             "failed": "[red]✗[/red]",
             "skipped": "[dim]∅[/dim]",
             "restored": "[dim]⤳[/dim]",

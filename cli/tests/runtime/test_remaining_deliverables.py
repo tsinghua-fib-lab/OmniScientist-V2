@@ -394,13 +394,41 @@ def test_host_remaining_summary_reports_missing_manuscript() -> None:
         "outputs": ["artifact.figure", "draft.manuscript"],
         "verification_plan": {"required_outputs": ["artifact.figure", "draft.manuscript"]},
     }
-    missing = _host_remaining_summary(plan, [("figure", "RAG architecture", "figures/rag.png")])
+    # Production tuples are (title, path, uri), not (kind, title, target).
+    missing = _host_remaining_summary(
+        plan,
+        [("RAG architecture", "figures/rag.png", "artifact://fig")],
+    )
     assert missing == "missing draft.manuscript"
     filled = _host_remaining_summary(
         plan,
         [
-            ("figure", "RAG architecture", "figures/rag.png"),
-            ("report", "Survey", "reports/survey.md"),
+            ("RAG architecture", "figures/rag.png", "artifact://fig"),
+            ("Survey", "reports/survey.md", "artifact://md"),
+        ],
+    )
+    assert filled == "all named deliverables present"
+
+
+def test_p01_host_remaining_clears_when_display_paths_pay_debts() -> None:
+    """P-01: figure + manuscript + slides on disk clear remaining in task show."""
+    from omni.cli.commands.tasks_cmd import _host_remaining_summary
+
+    plan = {
+        "outputs": ["artifact.figure", "draft.manuscript", "artifact.slides"],
+        "verification_plan": {
+            "required_outputs": ["artifact.figure", "draft.manuscript", "artifact.slides"],
+        },
+    }
+    assert _host_remaining_summary(plan, []) == (
+        "missing artifact.figure, draft.manuscript, artifact.slides"
+    )
+    filled = _host_remaining_summary(
+        plan,
+        [
+            ("RAG architecture", "/tmp/out/RAG.png", "artifact://fig"),
+            ("RAG survey", "/tmp/out/RAG系统综述.md", "artifact://md"),
+            ("RAG slides", "/tmp/out/deck.pptx", "artifact://pptx"),
         ],
     )
     assert filled == "all named deliverables present"

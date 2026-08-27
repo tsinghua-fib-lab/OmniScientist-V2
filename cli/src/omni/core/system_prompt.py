@@ -231,7 +231,11 @@ def render_local_environment(
         "- Listing another task's folder does not satisfy this task's required_outputs. Produce each "
         "owed figure or paper on this task_id; an older sibling file is not delivery.\n"
         "- Re-read a generated file with the exact path or artifact:// URI the tool returned. Do not "
-        "rewrite quotation marks in the path."
+        "rewrite quotation marks in the path.\n"
+        "- When the user asks what changed recently in this repository (commits, changelog, last few "
+        "days of git history), start with a bounded `git log` / `git show` / `git diff`. Do not treat "
+        "a repository-wide grep as the first action. If git is unavailable, say so and do not invent "
+        "commit SHAs."
     )
 
 
@@ -247,6 +251,7 @@ def build_system_prompt(
     notebook_summary: str = "",
     working_dir: str | Path | None = None,
     now: datetime | None = None,
+    repo_history: str = "",
 ) -> str:
     tctx = local_time_context(now)
     # Sticky base identity first; an optional SoulAgent scientist-persona overlay
@@ -277,6 +282,8 @@ def build_system_prompt(
         parts.append(memory_block.strip())
     if recent_activity.strip():
         parts.append(recent_activity.strip())
+    if repo_history.strip():
+        parts.append(repo_history.strip())
     ctx = [
         f"Current research project: {project_name}",
         f"Current time: {tctx.now:%Y-%m-%d %H:%M} {tctx.offset}".rstrip(),

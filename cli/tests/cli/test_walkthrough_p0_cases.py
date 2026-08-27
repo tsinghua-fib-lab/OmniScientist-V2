@@ -96,6 +96,72 @@ def _load_paper_review():
 
 
 @pytest.mark.asyncio
+async def test_p01_succeeded_producers_clear_remaining_on_task_artifacts() -> None:
+    """P-01: successful figure/writing/slides + Task files → remaining empty and succeeded."""
+    from omni.cli.commands.tasks_cmd import _host_remaining_summary
+
+    plan = {
+        "outputs": ["artifact.figure", "draft.manuscript", "artifact.slides"],
+        "verification_plan": {
+            "required_outputs": ["artifact.figure", "draft.manuscript", "artifact.slides"],
+        },
+    }
+    store = _Store(
+        _task(subtask_ids=["fig-1"], outputs=plan["outputs"]),
+        events=[
+            _event(
+                "react.finished",
+                kind="text",
+                terminated_reason="done",
+                tool_names=["run_skill", "write_file"],
+            )
+        ],
+        children=[
+            _child(
+                "fig-1",
+                status="succeeded",
+                result={"status": "ok", "skill_name": "scientific-figure"},
+            )
+        ],
+        artifacts=[
+            SimpleNamespace(
+                kind="figure",
+                format="png",
+                path="outputs/RAG.png",
+                mime="image/png",
+                title="RAG architecture",
+            ),
+            SimpleNamespace(
+                kind="document",
+                format="md",
+                path="outputs/RAG系统综述.md",
+                mime="text/markdown",
+                title="RAG survey",
+            ),
+            SimpleNamespace(
+                kind="slides",
+                format="pptx",
+                path="outputs/deck.pptx",
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                title="RAG slides",
+            ),
+        ],
+    )
+    settled = await settlement_for(store, "parent")
+    assert settled.status == "succeeded"
+    assert not settled.detail.get("undelivered_outputs")
+    remaining = _host_remaining_summary(
+        plan,
+        [
+            ("RAG architecture", "outputs/RAG.png", "artifact://fig"),
+            ("RAG survey", "outputs/RAG系统综述.md", "artifact://md"),
+            ("RAG slides", "outputs/deck.pptx", "artifact://pptx"),
+        ],
+    )
+    assert remaining == "all named deliverables present"
+
+
+@pytest.mark.asyncio
 async def test_a_lf_04_leftover_deck_does_not_pay_editable_figure() -> None:
     """A-LF-04: failed livefigure + harvested deck → artifact.pptx unpaid."""
     plan = IntentPlan(
@@ -230,6 +296,33 @@ async def test_a_rev_04_unfetchable_arxiv_is_needs_input_not_missing_path(
     assert "1706.03762" in error
 
 
+@pytest.mark.asyncio
+async def test_a_rev_02_missing_local_pdf_is_needs_input_not_failed() -> None:
+    """A-REV-02: missing draft.pdf is ask-user, not Paper input does not exist."""
+    from omni.core.funnel_facts import project_skill_observation
+
+    module = _load_paper_review()
+    engine = module.PaperReviewEngine()
+    engine.ctx = SimpleNamespace(
+        llm=SimpleNamespace(chat=lambda *_a, **_k: ""),
+        settings=SimpleNamespace(),
+    )
+    for raw in ("draft.pdf", "the workspace file draft.pdf"):
+        result = await engine.execute(input=raw)
+        assert result["status"] == "needs_input"
+        assert result["outcome"] == "needs_input"
+        assert result["error_info"]["code"] == "missing_input"
+        error = str(result.get("error") or "")
+        assert "draft.pdf" in error
+        assert "does not exist" not in error.lower()
+        wrapped = project_skill_observation(
+            result,
+            extra={"status": "unknown", "skill_name": "paper-review"},
+        )
+        assert wrapped["status"] == "needs_input"
+        assert wrapped["outcome"] == "needs_input"
+
+
 def test_a_rev_05_doi_is_needs_input_not_a_path() -> None:
     """A-REV-05: DOI is an identifier, not a missing filesystem path."""
     module = _load_paper_review()
@@ -346,6 +439,38 @@ def test_a_out_04_help_gitignore_and_catalog_do_not_use_out_dot() -> None:
     assert "--out" in collapsed
     assert "outputs/" in help_text
     assert "default: the launch directory" not in help_text
+
+
+def test_a_chg_01_changelog_prompt_is_git_first_not_repo_grep() -> None:
+    """A-CHG-01: changelog turns inject bounded git log instead of repo-wide grep."""
+    from omni.core.react_agent import ToolSpec
+    from omni.core.system_prompt import build_system_prompt
+    from omni.runtime.git_info import repository_history_block, utterance_asks_repo_changelog
+
+    message = (
+        "Review the last four days of git commits in this repository. "
+        "Analyze new features, optimizations, problems solved, and anything "
+        "that looks unreasonable. What were the optimization points?"
+    )
+    assert utterance_asks_repo_changelog(message)
+    repo = Path(__file__).resolve().parents[3]
+    block = repository_history_block(repo, message)
+    prompt = build_system_prompt(
+        role="R",
+        tools=[
+            ToolSpec("bash", "shell", {"type": "object"}),
+            ToolSpec("grep", "search", {"type": "object"}),
+        ],
+        project_name="walkthrough",
+        working_dir=repo,
+        repo_history=block,
+    )
+    assert "git log" in prompt
+    assert "repository-wide grep" in prompt
+    assert "search_literature" not in prompt
+    if "Git is unavailable" not in block:
+        assert "[Repository history]" in prompt
+        assert "Host-injected" in prompt
 
 
 def test_a_rev_01_identifier_is_not_resolved_as_a_path() -> None:

@@ -1891,8 +1891,10 @@ def test_resolve_input_treats_doi_as_an_identifier() -> None:
 
 def test_resolve_input_does_not_treat_a_filename_as_arxiv() -> None:
     module = _load_engine()
-    with pytest.raises(ValueError, match="does not exist"):
+    with pytest.raises(module._MissingLocalPaper) as caught:
         module._resolve_input("notes-1706.03762.pdf")
+    assert "notes-1706.03762.pdf" in str(caught.value)
+    assert "does not exist" not in str(caught.value).lower()
 
 
 @pytest.mark.asyncio

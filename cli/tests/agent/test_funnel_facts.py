@@ -93,6 +93,21 @@ def test_arxiv_fetch_counts_as_hits() -> None:
     assert is_empty_literature_funnel(paper) is False
 
 
+def test_wrapper_hoists_needs_input_outcome() -> None:
+    wrapped = project_skill_observation(
+        {
+            "status": "needs_input",
+            "outcome": "needs_input",
+            "error": "Paper review needs a local PDF. Missing: draft.pdf.",
+            "error_info": {"code": "missing_input"},
+        },
+        extra={"status": "unknown", "skill_name": "paper-review"},
+    )
+    assert wrapped["status"] == "needs_input"
+    assert wrapped["outcome"] == "needs_input"
+    assert "draft.pdf" in str(wrapped.get("error") or "")
+
+
 def test_wrapper_projects_empty_funnel_as_degraded() -> None:
     wrapped = project_skill_observation(
         _ideation(papers=[]),

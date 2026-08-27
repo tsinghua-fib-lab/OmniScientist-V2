@@ -442,6 +442,32 @@ def test_human_progress_is_visible_and_placeholder_question_mark_is_suppressed()
     assert "20%" in out
 
 
+def test_needs_input_execution_uses_yellow_warning() -> None:
+    display = TurnDisplay(verbosity="normal", status_line=False)
+    out = _capture(
+        display,
+        [
+            (
+                "task_done",
+                {
+                    "subtask_id": "review-2",
+                    "task_id": "owner-task-2",
+                    "skill": "paper-review",
+                    "status": "needs_input",
+                    "result": {
+                        "status": "needs_input",
+                        "outcome": "needs_input",
+                        "error": "Paper review needs a local PDF. Missing: draft.pdf.",
+                    },
+                },
+            )
+        ],
+    )
+    assert "⚠" in out
+    assert "needs_input" in out
+    assert "✗" not in out
+
+
 def test_degraded_execution_shows_cause_and_missing_artifact() -> None:
     display = TurnDisplay(verbosity="normal", status_line=False)
     out = _capture(

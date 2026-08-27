@@ -99,6 +99,19 @@ async def _emit_event(callback: Any, phase: str, data: dict[str, Any]) -> None:
         await result
 
 
+def _result_needs_input(result: Any) -> bool:
+    """True when a skill asked the user to supply input instead of failing."""
+    if not isinstance(result, dict):
+        return False
+    status = str(result.get("status") or "").strip().lower()
+    outcome = result.get("outcome")
+    if isinstance(outcome, dict):
+        outcome = str(outcome.get("code") or outcome.get("status") or "").strip().lower()
+    else:
+        outcome = str(outcome or "").strip().lower()
+    return status == "needs_input" or outcome == "needs_input"
+
+
 class SubtaskRuntime:
     def __init__(
         self,
@@ -722,6 +735,41 @@ class SubtaskRuntime:
                         **event_link,
                         error=err,
                         output_json=timeout_result,
+                    )
+                    if refresh_parent:
+                        await self._task_recorder.refresh_from_executions(task_id)
+                return
+
+            if _result_needs_input(result):
+                # Codex ask-user: a missing file/identifier is a pause, not
+                # a failed retry or a silent succeeded fall-through.
+                result_error = _result_error_message(result) or "needs_input"
+                await self._fail(
+                    subtask_id,
+                    result_error,
+                    trace,
+                    notify_channel,
+                    result=result if isinstance(result, dict) else {"result": result},
+                    status="needs_input",
+                )
+                await _emit_event(
+                    on_event,
+                    "task_done",
+                    _skill_execution_event(
+                        task_id, subtask_id, skill_name,
+                        status="needs_input", error=result_error, result=result,
+                    ),
+                )
+                if self._task_recorder is not None and task_id:
+                    await self._task_recorder.append_event(
+                        task_id,
+                        event_type="subtask.needs_input",
+                        status="needs_input",
+                        name=skill_name,
+                        skill_name=skill_name,
+                        **event_link,
+                        output_json=result if isinstance(result, dict) else {"result": result},
+                        error=result_error,
                     )
                     if refresh_parent:
                         await self._task_recorder.refresh_from_executions(task_id)

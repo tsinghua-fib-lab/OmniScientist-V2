@@ -240,6 +240,8 @@ class PaperReviewEngine:
                 supplied_text = ""
             else:
                 return _source_needs_input(exc)
+        except _MissingLocalPaper as exc:
+            return _path_needs_input(exc)
         except ValueError as exc:
             return _input_error(str(exc))
 
@@ -3286,6 +3288,18 @@ _ARXIV_BARE_OLD = re.compile(
 _DOI_RE = re.compile(r"\b(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)", re.IGNORECASE)
 
 
+class _MissingLocalPaper(ValueError):
+    """A named local paper is missing. Ask the user; do not fail the turn."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        display = path.strip() or "a local PDF or text file"
+        super().__init__(
+            f"Paper review needs a local PDF or text file. Missing: {display}. "
+            "Attach the file or pass an arXiv id such as 1706.03762."
+        )
+
+
 class _RemotePaperRef(ValueError):
     """The supplied input is an identifier, not a missing local path."""
 
@@ -3425,7 +3439,7 @@ def _resolve_input(value: str) -> tuple[Path | None, str]:
             return None, value
         else:
             _raise_if_identifier(value)
-            raise ValueError(f"Paper input does not exist: {candidate}")
+            raise _MissingLocalPaper(str(candidate))
     return _validated_paper_path(candidate), ""
 
 
@@ -3491,7 +3505,7 @@ def _existing_path(value: str) -> Path | None:
 
 def _validated_paper_path(candidate: Path) -> Path:
     if not candidate.is_file():
-        raise ValueError(f"Paper input does not exist: {candidate}")
+        raise _MissingLocalPaper(str(candidate))
     if candidate.suffix.casefold() not in {".pdf", ".txt", ".md"}:
         raise ValueError("Paper input must be a PDF, text/Markdown file, or extracted text.")
     return candidate.resolve()
@@ -4490,6 +4504,28 @@ def _input_error(message: str) -> dict[str, Any]:
             "code": "invalid_input",
             "category": "input",
             "retryable": False,
+        },
+    }
+
+
+def _path_needs_input(ref: _MissingLocalPaper) -> dict[str, Any]:
+    """Pause for a missing local file the user can attach (Codex ask-user)."""
+    message = str(ref)
+    return {
+        "status": "needs_input",
+        "outcome": "needs_input",
+        "summary": message,
+        "error": message,
+        "recoverable": True,
+        "blocking": True,
+        "next_actions": [
+            "Attach a local PDF or text file and retry paper-review.",
+            "Or pass an arXiv id such as 1706.03762.",
+        ],
+        "error_info": {
+            "code": "missing_input",
+            "category": "input",
+            "retryable": True,
         },
     }
 

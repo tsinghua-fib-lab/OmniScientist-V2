@@ -12,6 +12,7 @@ from omni.config.settings import resolve_max_input_tokens
 from omni.core.system_prompt import build_system_prompt
 from omni.memory.files import load_curated_memory
 from omni.memory.notebook import read_recent
+from omni.runtime.git_info import repository_history_block
 from omni.skills_runtime.context import ExecContext
 
 
@@ -73,4 +74,5 @@ async def assemble_react_system_prompt(
         project_name=agent.paths.project_name,
         notebook_summary=read_recent(agent.paths.notebook, max_chars=800),
         working_dir=ctx.working_dir,
+        repo_history=repository_history_block(ctx.working_dir, user_message),
     )

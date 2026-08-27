@@ -2669,6 +2669,24 @@ class TaskRecorder:
         components: list[Any] = [*workflows, *direct_executions, *direct_child_tasks]
         if any(component.status in _ACTIVE_EXECUTION_STATUSES for component in components):
             return
+        waiting = [component for component in components if component.status == "needs_input"]
+        if waiting:
+            summary = next(
+                (
+                    str(component.error or "").strip()
+                    for component in waiting
+                    if str(getattr(component, "error", "") or "").strip()
+                ),
+                "",
+            )
+            if not summary:
+                payload = getattr(waiting[0], "result_json", {}) or {}
+                if isinstance(payload, dict):
+                    summary = str(
+                        payload.get("error") or payload.get("summary") or payload.get("message") or ""
+                    ).strip()
+            await self.mark_needs_input(task_id, summary=summary or "needs_input")
+            return
         failed_results = [
             getattr(component, "result_json", {})
             for component in components
