@@ -52,12 +52,36 @@ def _fast_wechat_poll(monkeypatch):
     from omni.web import channels as web_channels
 
     monkeypatch.setattr(web_channels, "_POLL_SLEEP_SECONDS", 0.01)
+    # Shipping TTL is 5 minutes. Leftover waiting pollers then parked Linux
+    # 3.11 at 97% while pytest-asyncio waited for each background task.
+    monkeypatch.setattr(web_channels, "_LOGIN_TTL_SECONDS", 3)
 
 
 @pytest.fixture
-def app_client():
+async def app_client():
+    from omni.web.workspace import close_workspace_hub
+
     app = create_app(cors_origins=[], trusted_hosts=["omni.test"])
-    return app, httpx.ASGITransport(app=app)
+    try:
+        yield app, httpx.ASGITransport(app=app)
+    finally:
+        registry = getattr(app.state, "wechat_login_registry", None)
+        leftover = []
+        if registry is not None:
+            for attempt in list(registry._attempts.values()):
+                task = attempt.task
+                if task is not None and not task.done():
+                    task.cancel()
+                    leftover.append(task)
+        leftover.extend(
+            task
+            for task in asyncio.all_tasks()
+            if task.get_name().startswith(("wechat-login:", "web-turn-"))
+            and not task.done()
+        )
+        if leftover:
+            await asyncio.gather(*leftover, return_exceptions=True)
+        await close_workspace_hub(app.state.hub, timeout=1)
 
 
 @pytest.fixture

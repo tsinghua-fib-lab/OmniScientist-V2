@@ -17,6 +17,20 @@ from omni.agent import OmniAgent  # noqa: E402
 from omni.storage.artifacts import ArtifactStore  # noqa: E402
 from omni.storage.models import SubtaskORM, WorkflowRunORM, WorkflowStepORM  # noqa: E402
 from omni.web.app import create_app  # noqa: E402
+from omni.web.workspace import close_workspace_hub  # noqa: E402
+
+
+async def _close_app(app) -> None:  # noqa: ANN001
+    leftover = [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_name().startswith("web-turn-") and not task.done()
+    ]
+    for task in leftover:
+        task.cancel()
+    if leftover:
+        await asyncio.gather(*leftover, return_exceptions=True)
+    await close_workspace_hub(app.state.hub, timeout=1)
 
 
 async def _rpc(client: httpx.AsyncClient, method: str, params: dict | None = None) -> dict:
@@ -45,72 +59,75 @@ async def test_turn_sse_and_resume_keeps_cli_channel(tmp_path: Path) -> None:
 
     app = create_app(cors_origins=[])
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(
-        transport=transport, base_url="http://127.0.0.1:1088"
-    ) as client:
-        opened = await _rpc(client, "workspace.open", {"path": str(work)})
-        assert opened["ok"] is True
+    try:
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://127.0.0.1:1088"
+        ) as client:
+            opened = await _rpc(client, "workspace.open", {"path": str(work)})
+            assert opened["ok"] is True
 
-        health = await client.get("/health")
-        assert health.json()["ok"] is True
+            health = await client.get("/health")
+            assert health.json()["ok"] is True
 
-        listed = await _rpc(client, "host.listDirectory", {"path": str(tmp_path), "show_hidden": True})
-        assert listed["ok"] is True
-        assert listed["path"] == str(tmp_path.resolve())
+            listed = await _rpc(client, "host.listDirectory", {"path": str(tmp_path), "show_hidden": True})
+            assert listed["ok"] is True
+            assert listed["path"] == str(tmp_path.resolve())
 
-        drawers = await _rpc(client, "task.list", {"workspace": str(work)})
-        assert drawers["ok"] is True
-        rom = await _rpc(client, "rom.get", {"workspace": str(work)})
-        assert rom["ok"] is True
-        notebook = await _rpc(client, "notebook.get", {"workspace": str(work)})
-        assert notebook["ok"] is True
-        cost = await _rpc(client, "cost.get", {"workspace": str(work)})
-        assert cost["ok"] is True
+            drawers = await _rpc(client, "task.list", {"workspace": str(work)})
+            assert drawers["ok"] is True
+            rom = await _rpc(client, "rom.get", {"workspace": str(work)})
+            assert rom["ok"] is True
+            notebook = await _rpc(client, "notebook.get", {"workspace": str(work)})
+            assert notebook["ok"] is True
+            cost = await _rpc(client, "cost.get", {"workspace": str(work)})
+            assert cost["ok"] is True
 
-        started = await _rpc(
-            client,
-            "turn.start",
-            {
-                "workspace": str(work),
-                "session_id": sid,
-                "text": "say hello",
-                "interaction_mode": "auto",
-            },
-        )
-        assert started["ok"] is True
-        assert started["session_id"] == sid
-        assert started["task_id"]
-        # Do not open task.watch here. ASGI SSE ignores httpx timeouts and
-        # can ignore CancelledError, which parked Linux 3.12 coverage and
-        # Linux 3.13 at 97% until the job was cancelled.
-        for _ in range(80):
-            messages = await _rpc(
-                client, "session.messages", {"workspace": str(work), "session_id": sid}
+            started = await _rpc(
+                client,
+                "turn.start",
+                {
+                    "workspace": str(work),
+                    "session_id": sid,
+                    "text": "say hello",
+                    "interaction_mode": "auto",
+                },
             )
-            if any(row.get("role") == "assistant" for row in messages.get("messages") or []):
-                break
-            await asyncio.sleep(0.05)
-        events = await _rpc(
-            client,
-            "task.events",
-            {"workspace": str(work), "task_id": started["task_id"], "after_seq": 0},
-        )
-        assert events["ok"] is True
-        assert "input_json" not in str(events.get("events"))
+            assert started["ok"] is True
+            assert started["session_id"] == sid
+            assert started["task_id"]
+            # Do not open task.watch here. ASGI SSE ignores httpx timeouts and
+            # can ignore CancelledError, which parked Linux 3.12 coverage and
+            # Linux 3.13 at 97% until the job was cancelled.
+            for _ in range(80):
+                messages = await _rpc(
+                    client, "session.messages", {"workspace": str(work), "session_id": sid}
+                )
+                if any(row.get("role") == "assistant" for row in messages.get("messages") or []):
+                    break
+                await asyncio.sleep(0.05)
+            events = await _rpc(
+                client,
+                "task.events",
+                {"workspace": str(work), "task_id": started["task_id"], "after_seq": 0},
+            )
+            assert events["ok"] is True
+            assert "input_json" not in str(events.get("events"))
 
-        after = await _rpc(client, "session.get", {"workspace": str(work), "session_id": sid})
-        assert after["ok"] is True
-        assert after["session"]["channel"] == "cli"
+            after = await _rpc(client, "session.get", {"workspace": str(work), "session_id": sid})
+            assert after["ok"] is True
+            assert after["session"]["channel"] == "cli"
 
-        created = await _rpc(client, "session.create", {"workspace": str(work)})
-        web_sid = created["session"]["id"]
-        assert created["session"]["channel"] == "web"
-        filtered = await _rpc(
-            client, "session.list", {"workspace": str(work), "channel": "cli"}
-        )
-        assert all(row["channel"] == "cli" for row in filtered["sessions"])
-        assert web_sid not in {row["id"] for row in filtered["sessions"]}
-        assert sid in {row["id"] for row in filtered["sessions"]}
+            created = await _rpc(client, "session.create", {"workspace": str(work)})
+            web_sid = created["session"]["id"]
+            assert created["session"]["channel"] == "web"
+            filtered = await _rpc(
+                client, "session.list", {"workspace": str(work), "channel": "cli"}
+            )
+            assert all(row["channel"] == "cli" for row in filtered["sessions"])
+            assert web_sid not in {row["id"] for row in filtered["sessions"]}
+            assert sid in {row["id"] for row in filtered["sessions"]}
+    finally:
+        await _close_app(app)
 
 
 @pytest.mark.asyncio
@@ -120,26 +137,29 @@ async def test_turn_finishes_without_a_watcher(tmp_path: Path) -> None:
     trustmod.set_trusted(work)
     app = create_app(cors_origins=[])
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(
-        transport=transport, base_url="http://127.0.0.1:1088"
-    ) as client:
-        await _rpc(client, "workspace.open", {"path": str(work)})
-        created = await _rpc(client, "session.create", {"workspace": str(work)})
-        sid = created["session"]["id"]
-        started = await _rpc(
-            client,
-            "turn.start",
-            {"workspace": str(work), "session_id": sid, "text": "say hello"},
-        )
-        assert started["ok"] is True
-        for _ in range(50):
-            messages = await _rpc(
-                client, "session.messages", {"workspace": str(work), "session_id": sid}
+    try:
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://127.0.0.1:1088"
+        ) as client:
+            await _rpc(client, "workspace.open", {"path": str(work)})
+            created = await _rpc(client, "session.create", {"workspace": str(work)})
+            sid = created["session"]["id"]
+            started = await _rpc(
+                client,
+                "turn.start",
+                {"workspace": str(work), "session_id": sid, "text": "say hello"},
             )
-            if any(row.get("role") == "assistant" for row in messages.get("messages") or []):
-                return
-            await asyncio.sleep(0.05)
-        raise AssertionError("background turn did not persist an assistant message")
+            assert started["ok"] is True
+            for _ in range(50):
+                messages = await _rpc(
+                    client, "session.messages", {"workspace": str(work), "session_id": sid}
+                )
+                if any(row.get("role") == "assistant" for row in messages.get("messages") or []):
+                    return
+                await asyncio.sleep(0.05)
+            raise AssertionError("background turn did not persist an assistant message")
+    finally:
+        await _close_app(app)
 
 
 @pytest.mark.asyncio
