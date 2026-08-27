@@ -1055,6 +1055,11 @@ def build_shell_tools(ctx: ExecContext) -> list[Tool]:
             observation += (
                 f"\n[registered {registered} artifact(s) from ${OMNI_OUTPUT_ENV}={output_dir}]"
             )
+        from omni.skills_runtime.exec_feedback import unexpanded_env_hint
+
+        hint = unexpanded_env_hint(text, env)
+        if hint:
+            observation += f"\n{hint}"
         succeeded = exit_code == 0
         return _command_result(
             observation,

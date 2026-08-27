@@ -79,6 +79,11 @@ class UnpayableDebt:
         return gap
 
 
+def capability_for_deliverable(output: str) -> str:
+    """Capability slot that can pay this named file, or empty."""
+    return str(_DELIVERABLE_CAPABILITIES.get(str(output or "").strip()) or "")
+
+
 def plan_contract_files(plan: Any) -> list[str]:
     verification = getattr(plan, "verification_plan", None)
     names = list(getattr(verification, "required_outputs", None) or [])
@@ -316,6 +321,7 @@ __all__ = [
     "UnpayableDebt",
     "admitted_producers",
     "apply_unpayable_contract",
+    "capability_for_deliverable",
     "entry_pays_capability",
     "plan_contract_files",
     "unpayable_deliverables",

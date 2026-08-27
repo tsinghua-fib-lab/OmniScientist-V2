@@ -700,7 +700,11 @@ async def test_a_fig_05_invented_dot_is_ignored_on_unspecified_figure() -> None:
 
 def test_a_fig_04_catalog_and_cards_keep_graphviz_on_scientific_figure() -> None:
     """A-FIG-04: descriptions still send a Graphviz-named request to scientific-figure."""
-    from omni.agent.skill_lookup import FIND_SKILL_NEXT_ACTION, rank_skill_matches, skill_contract_card
+    from omni.agent.skill_lookup import (
+        FIND_SKILL_NEXT_ACTION,
+        rank_skill_matches,
+        skill_contract_card,
+    )
 
     catalog = _catalog_text()
     assert _A_FIG_04 in catalog

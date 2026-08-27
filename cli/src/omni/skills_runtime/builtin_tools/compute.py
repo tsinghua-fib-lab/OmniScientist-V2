@@ -109,6 +109,14 @@ def build_compute_tools(ctx: ExecContext) -> list[Tool]:
                     f"${OMNI_OUTPUT_ENV}={output_dir}"
                 )
                 res.detail = f"{res.detail}; {note}" if res.detail else note
+            from omni.skills_runtime.exec_feedback import unexpanded_env_hint
+
+            hint = unexpanded_env_hint(
+                f"{res.stdout}\n{res.detail}",
+                env,
+            )
+            if hint:
+                res.detail = f"{res.detail}; {hint}" if res.detail else hint
         if job_store is not None and job is not None:
             await job_store.finish(job.id, res)
         await _record_compute_event(

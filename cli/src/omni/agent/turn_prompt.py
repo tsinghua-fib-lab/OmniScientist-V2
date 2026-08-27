@@ -44,6 +44,7 @@ async def assemble_react_system_prompt(
         else ""
     )
     clarification_block = await agent._open_clarifications_block(ctx)  # noqa: SLF001
+    output_dir, scratch_dir = _compute_session_paths(ctx)
     return build_system_prompt(
         role=agent._role,  # noqa: SLF001
         tools=tool_specs,
@@ -55,6 +56,7 @@ async def assemble_react_system_prompt(
                 react_context_block(recovery_react_notes),
                 assumption_block(plan.missing_inputs),
                 _unpayable_block(plan),
+                _bound_skill_block(agent, plan, ctx),
                 context_summary if plan.context_policy.include_referenced_tasks else "",
                 referenced,
                 (agent.pending_thread_brief or "").strip(),
@@ -76,6 +78,8 @@ async def assemble_react_system_prompt(
         project_name=agent.paths.project_name,
         notebook_summary=read_recent(agent.paths.notebook, max_chars=800),
         working_dir=ctx.working_dir,
+        output_dir=output_dir,
+        scratch_dir=scratch_dir,
         repo_history=repository_history_block(ctx.working_dir, user_message),
     )
 
@@ -91,3 +95,19 @@ def _unpayable_block(plan: IntentPlan) -> str:
         + notice
         + " Do the work that still has a producer. Do not hunt the host ledger."
     )
+
+
+def _bound_skill_block(agent: Any, plan: IntentPlan, ctx: ExecContext) -> str:
+    from omni.agent.bound_skills import render_bound_skill_block, resolve_bound_skills
+
+    registry = getattr(agent, "registry", None)
+    return render_bound_skill_block(resolve_bound_skills(plan, registry, ctx=ctx))
+
+
+def _compute_session_paths(ctx: ExecContext) -> tuple[str, str]:
+    try:
+        from omni.skills_runtime.exec_io import durable_output_dir, exec_tmp_dir
+
+        return str(durable_output_dir(ctx)), str(exec_tmp_dir(ctx))
+    except (OSError, RuntimeError, AttributeError, TypeError):
+        return "", ""

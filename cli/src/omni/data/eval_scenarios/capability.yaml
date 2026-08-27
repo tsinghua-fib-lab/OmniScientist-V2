@@ -187,7 +187,7 @@
         skill_selected: scientist-kg-distiller
 
 - id: livefigure_missing_vlm_configuration
-  title: "Editable LiveFigure execution returns one missing-VLM action"
+  title: "Unnamed editable PPTX does not start a figure skill without VLM"
   channel: cli
   tags: [capability_selection, configuration, safety]
   turns:
@@ -203,9 +203,8 @@
         confidence: 0.95
         rationale: "the user explicitly requested an editable one-slide PPT figure"
       expect:
-        skill_selected: livefigure
         skills_executed_exclude: [livefigure, scientific-figure]
-        action_required: {kind: configure, command: "omni config vlm"}
+        text_contains: ["artifact.pptx"]
 
 - id: native_synthesis_drain
   title: "Research workflow drains to a native synthesis draft offline"
