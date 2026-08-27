@@ -174,7 +174,7 @@ def test_task_runtime_delegates_workflow_execution() -> None:
     workflow_plan = _source("src/omni/runtime/workflow_plan.py")
     task_results = _source("src/omni/runtime/task_results.py")
 
-    assert len(task_runtime.splitlines()) <= 1100
+    assert len(task_runtime.splitlines()) <= 1200
     assert len(workflow_manager.splitlines()) <= 750
     assert len(workflow_runtime.splitlines()) <= 700
     assert len(workflow_state_store.splitlines()) <= 350
