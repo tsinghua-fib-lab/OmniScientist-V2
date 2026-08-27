@@ -2,32 +2,28 @@
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
-
 from omni.skills_runtime.control_store_guard import command_writes_frozen_control_store
 
-
-def _store_db() -> Path:
-    home = Path(os.environ["OMNI_HOME"])
-    return home / "workspaces" / "demo" / "sessions.sqlite3"
+# The command lexer admits ~ / $HOME / $OMNI_HOME / POSIX absolute paths.
+# Interpolating Path($OMNI_HOME) is a Linux/macOS-only token: Windows CI
+# emits C:\... which is not a bare path, and a quoted python -c payload
+# swallows the inner single-quoted drive letter.
+_STORE_DB = "$OMNI_HOME/workspaces/demo/sessions.sqlite3"
 
 
 def test_touch_under_the_store_is_a_control_write() -> None:
-    path = command_writes_frozen_control_store(f"touch {_store_db()}")
+    path = command_writes_frozen_control_store(f"touch {_STORE_DB}")
     assert path is not None
     assert path.name == "sessions.sqlite3"
 
 
 def test_python_against_the_store_is_a_control_write() -> None:
-    db = _store_db()
-    command = f"python -c \"import sqlite3; sqlite3.connect('{db}')\""
+    command = f"python -c \"import sqlite3; sqlite3.connect('{_STORE_DB}')\""
     assert command_writes_frozen_control_store(command) is not None
 
 
 def test_sqlite_select_against_the_store_is_allowed() -> None:
-    db = _store_db()
-    command = f'sqlite3 {db} "SELECT id FROM tasks LIMIT 1"'
+    command = f'sqlite3 {_STORE_DB} "SELECT id FROM tasks LIMIT 1"'
     assert command_writes_frozen_control_store(command) is None
 
 
