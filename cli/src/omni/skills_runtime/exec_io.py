@@ -220,7 +220,36 @@ def compute_env(ctx: Any, base: dict[str, str] | None = None) -> dict[str, str]:
     """Environment for a sandboxed process: durable output + persistent TMPDIR."""
     env = dict(os.environ if base is None else base)
     env.update(compute_io_vars(ctx))
+    _inject_omni_io(ctx, env)
     return env
+
+
+def _inject_omni_io(ctx: Any, env: dict[str, str]) -> None:
+    """Put ``omni_io`` on PYTHONPATH under scratch (already a sandbox root).
+
+    Codex injects ``apply_patch`` into the child environment. Omni injects a
+    tiny path helper so leftover Python does not have to remember ``$VAR``
+    expansion rules. The module is copied into ``$TMPDIR`` so the sandbox can
+    read it even when the Omni install tree is outside workspace roots.
+    """
+    src = Path(__file__).resolve().parent / "omni_io.py"
+    try:
+        text = src.read_text(encoding="utf-8")
+    except OSError:
+        return
+    helper_dir = exec_tmp_dir(ctx) / "omni_helpers"
+    try:
+        helper_dir.mkdir(parents=True, exist_ok=True)
+        dest = helper_dir / "omni_io.py"
+        if not dest.exists() or dest.read_text(encoding="utf-8") != text:
+            dest.write_text(text, encoding="utf-8")
+    except OSError:
+        return
+    existing = env.get("PYTHONPATH", "")
+    parts = [str(helper_dir)]
+    if existing:
+        parts.append(existing)
+    env["PYTHONPATH"] = os.pathsep.join(parts)
 
 
 def kernel_write_roots(ctx: Any, extra: Sequence[Path | str] = ()) -> list[str]:

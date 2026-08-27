@@ -1218,7 +1218,15 @@ is cwd + configured roots + a host temp — never `$CODEX_HOME`. Omni does not
 grant `$OMNI_HOME` or the project store (`~/.omni/workspaces/...`) as a
 sandbox write root. `bash`, `run_compute`, CLI skill processes, and in-process
 engines that spawn children receive `$OMNI_OUTPUT_DIR` (a cache-side outbox)
-and a workspace-scoped `$TMPDIR`. Those directories are staging. The host
+and a workspace-scoped `$TMPDIR`. Those directories are staging. Session
+context lists their absolute paths next to the working directory (Codex
+`<environment_context>` / `<cwd>`). A compute process can `from omni_io import
+output_path` — the host copies that helper into `$TMPDIR` and prepends it to
+`PYTHONPATH`, the same idea as Codex injecting `apply_patch` into the child
+environment. If a command fails with `FileNotFoundError` / `ENOENT` and the
+path still contains a literal `$VAR` that the process exported, the observation
+adds an `[unexpanded-env]` hint with the resolved path. The host does not
+rewrite the script. The host
 publishes harvestable files into `outputs/<title>_<task8>/` (or the configured
 `--out`) and registers that copy; `~/.omni/.../artifacts/promoted` is not a
 user-visible location. Host `/tmp` is not an artifact sink. Linux bwrap
@@ -1407,7 +1415,13 @@ and cli-exec skills can participate in workflows.
 
 `find_skill` is the coordinator's parameter lookup (Codex stage-2 analogue). A hit returns a
 compact `input_schema` and a `run_skill` example, with an exact name ranked above a neighbour
-that merely mentions it. After that card is returned, further `docs_search` / `glob` /
+that merely mentions it. When the plan already owes a file slot (`artifact.figure`,
+`artifact.slides`, `artifact.poster`, editable PPTX), the host also injects that
+admitted skill's contract card into the turn — Codex injects `SKILL.md` on an
+explicit mention; Omni can do it earlier because settlement already named the
+slot. Admission and slot routing choose the producer; leftover `bash` /
+`run_compute` that writes the same kind of file is steered back to `run_skill`.
+After a card is returned, further `docs_search` / `glob` /
 `search_tasks` probes — or another `find_skill` that returns the same skill — count as
 no-progress (BUG-11). Docs-only retrieval with no `find_skill` card is how a product
 question reads bundled docs; it is not a hunt. A second `find_skill` for a disjoint skill

@@ -18,7 +18,7 @@ import inspect
 import json
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -37,7 +37,13 @@ from omni.core.llm.errors import classify_llm_exception
 from omni.core.llm.idle import IdleWatchdog, await_with_idle
 from omni.core.model_catalog import max_output_tokens_for
 from omni.core.run_context import RunContextWindow, evidence_checkpoint
-from omni.core.scientific_progress import LOOKUP_STEER, MIN_LOOKUP_STREAK, lookup_pressure
+from omni.core.scientific_progress import (
+    LOOKUP_STEER,
+    MIN_LOOKUP_STREAK,
+    bound_skill_steer,
+    leftover_skill_pressure,
+    lookup_pressure,
+)
 from omni.core.termination import OUTPUT_CAP_TRUNCATED, mark_truncated_output
 from omni.core.tool_result import (
     ToolResultEnvelope,
@@ -345,6 +351,7 @@ class ReActLoopAgent:
         parallel_tools: bool = True,
         require_opening_tool: bool = False,
         owes_scientific_outputs: bool = False,
+        bound_skills: Iterable[str] = (),
         fact_feed: Any | None = None,
     ) -> None:
         self._llm = llm_client
@@ -423,6 +430,9 @@ class ReActLoopAgent:
         # memory and task probes are lookup, not progress. Answer-only and
         # inspect/review turns leave this false so those tools remain the work.
         self._owes_scientific_outputs = owes_scientific_outputs
+        # File-producer skills already injected into this turn. Leftover bash
+        # that writes the same kind of file is steered back to run_skill.
+        self._bound_skills = frozenset(str(name) for name in bound_skills if name)
         # Host-owned task facts (snapshot / delta / deterministic debt). The
         # loop only injects observations; it never stages or picks tools.
         self._fact_feed = fact_feed
@@ -543,6 +553,7 @@ class ReActLoopAgent:
 
         iteration = 0
         lookup_steered = False
+        leftover_steered = False
         hunt_steered_for: frozenset[str] = frozenset()
         native_write_steered = False
         hunt_consume_replayed = False
@@ -1235,6 +1246,13 @@ class ReActLoopAgent:
                         budget=budget,
                         transcript_repairs=transcript_repairs,
                     )
+
+            leftover = leftover_skill_pressure(trace, bound_skills=self._bound_skills)
+            if leftover > 0 and not leftover_steered:
+                messages.append(
+                    {"role": "user", "content": bound_skill_steer(self._bound_skills)}
+                )
+                leftover_steered = True
 
             # A model whose calls keep being refused before they run — unknown
             # tools, unparseable arguments, a quota the host will not lift — is

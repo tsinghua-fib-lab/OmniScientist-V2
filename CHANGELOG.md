@@ -17,6 +17,15 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) and semanti
 
 ### Changed
 
+- Compute I/O is now a concrete environment, not a dollar token. Session
+  context lists the absolute ``OMNI_OUTPUT_DIR`` / ``TMPDIR`` paths (Codex
+  ``<environment_context>``). Sandboxed Python gets ``omni_io`` on
+  ``PYTHONPATH``. A missing path that still contains a live ``$VAR`` is
+  annotated, not rewritten. When ``required_outputs`` already bind a
+  figure / slides / poster skill, ReAct receives that contract card and
+  leftover bash that writes the same kind of file is steered back to
+  ``run_skill``.
+
 - The ReAct turn now treats a bound file with no admitted producer as
   unpayable: ask when that is the only remaining file debt, otherwise keep
   executing work that still has a consume path. A user-forbidden host

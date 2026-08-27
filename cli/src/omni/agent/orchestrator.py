@@ -152,6 +152,12 @@ def _artifact_mirror_dir(settings: OmniSettings) -> Path | None:
     return (paths.project_dir / USER_OUTPUT_DIRNAME).resolve()
 
 
+def _bound_skill_names(plan: IntentPlan, registry: SkillRegistry, ctx: ExecContext) -> frozenset[str]:
+    from omni.agent.bound_skills import bound_skill_names, resolve_bound_skills
+
+    return bound_skill_names(resolve_bound_skills(plan, registry, ctx=ctx))
+
+
 def _react_on_token(plan: IntentPlan, on_token: Any) -> Any:
     """Buffer model prose when the host must project authoritative task facts."""
     if CAPABILITY_TASK_INSPECT in plan.capability_inputs:
@@ -1366,6 +1372,7 @@ class OmniAgent:
             shared_tool_budget=turn_tool_budget,
             require_opening_tool=plan.tool_policy.require_opening_tool,
             owes_scientific_outputs=plan_owes_scientific_outputs(plan),
+            bound_skills=_bound_skill_names(plan, self.registry, ctx),
             fact_feed=fact_feed,
             **react_usage_limits(self.settings, self.llm),
         )

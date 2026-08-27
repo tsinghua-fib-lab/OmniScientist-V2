@@ -31,6 +31,7 @@ from omni.skills_runtime.builtin_tools.shell import build_shell_tools
 from omni.skills_runtime.context import ExecContext
 from omni.skills_runtime.exec_io import (
     OMNI_OUTPUT_ENV,
+    compute_env,
     durable_output_dir,
     exec_tmp_dir,
     kernel_write_roots,
@@ -38,6 +39,7 @@ from omni.skills_runtime.exec_io import (
 from omni.storage.artifacts import ArtifactStore
 from omni.storage.db import get_database
 from omni.storage.models import TaskORM
+from tests.conftest import python_shell_command
 
 
 def _obs(value: object) -> str:
@@ -327,3 +329,46 @@ async def test_bash_harvest_lands_in_task_bundle_not_promoted(tmp_path: Path) ->
         resolved = await ctx.artifacts.resolve_path(row.uri)
         assert resolved is not None and resolved.is_file()
         assert resolved.is_relative_to(out)
+
+
+@pytest.mark.asyncio
+async def test_bash_python_can_import_omni_io(tmp_path: Path) -> None:
+    ctx = await _named_project_ctx(tmp_path, task_id="f" * 32, os_sandbox="off")
+    from omni.skills_runtime.builtin_tools.shell import posix_shell_executable
+
+    if posix_shell_executable() is None:
+        pytest.skip("bash tool needs a POSIX shell")
+    env = compute_env(ctx)
+    assert "omni_helpers" in env.get("PYTHONPATH", "")
+    bash = build_shell_tools(ctx)[0].handler
+    result = await bash(
+        {
+            "command": python_shell_command(
+                "from omni_io import output_path; "
+                "output_path('from_helper.csv').write_text('a,1\\n'); "
+                "print('HELPER')"
+            )
+        }
+    )
+    assert "HELPER" in _obs(result)
+    assert (durable_output_dir(ctx) / "from_helper.csv").read_text() == "a,1\n"
+
+
+@pytest.mark.asyncio
+async def test_literal_dollar_output_dir_gets_unexpanded_hint(tmp_path: Path) -> None:
+    ctx = await _named_project_ctx(tmp_path, task_id="g" * 32, os_sandbox="off")
+    from omni.skills_runtime.builtin_tools.shell import posix_shell_executable
+
+    if posix_shell_executable() is None:
+        pytest.skip("bash tool needs a POSIX shell")
+    bash = build_shell_tools(ctx)[0].handler
+    result = await bash(
+        {
+            "command": python_shell_command(
+                "open('$OMNI_OUTPUT_DIR/missing.csv', 'w').write('x')"
+            )
+        }
+    )
+    observation = _obs(result)
+    assert "unexpanded-env" in observation
+    assert str(durable_output_dir(ctx)) in observation
