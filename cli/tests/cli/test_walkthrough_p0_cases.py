@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -418,6 +419,73 @@ async def test_a_out_03_walkthrough_out_writes_a_bundle_not_checkout_root(
     assert root_bundles == []
 
 
+@pytest.mark.asyncio
+async def test_a_out_05_harvest_publishes_into_task_bundle_not_promoted(
+    tmp_path: Path,
+) -> None:
+    """A-OUT-05: outbox harvest location is <out>/<title>_<task8>/, not artifacts/promoted."""
+    from omni.config import load_settings
+    from omni.config.paths import OmniPaths
+    from omni.skills_runtime.context import ExecContext
+    from omni.skills_runtime.exec_io import durable_output_dir, register_output_dir
+    from omni.storage.artifacts import ArtifactStore
+    from omni.storage.db import get_database
+    from omni.storage.models import TaskORM
+
+    home = tmp_path / "omni-home"
+    project_dir = home / "projects" / "demo"
+    work = tmp_path / "work"
+    work.mkdir()
+    out = tmp_path / "outputs"
+    settings = load_settings()
+    paths = OmniPaths(
+        home=home,
+        project_name="demo",
+        project_dir=project_dir,
+        workspace_root=None,
+        invocation_cwd=work,
+    )
+    paths.ensure_dirs()
+    settings.paths = paths
+    db = get_database(paths.project_db)
+    await db.init()
+    task_id = "aout0501harvest1"
+    async with db.session() as session:
+        session.add(
+            TaskORM(
+                id=task_id,
+                status="running",
+                kind="turn",
+                title="RAG harvest publish",
+            )
+        )
+        await session.commit()
+    ctx = ExecContext(
+        settings=settings,
+        paths=paths,
+        project="demo",
+        session_id="sess-aout05",
+        channel="cli",
+        task_id=task_id,
+        working_dir=work,
+        db=db,
+        artifacts=ArtifactStore(paths, db, mirror_dir=out),
+    )
+    outbox = durable_output_dir(ctx)
+    (outbox / "results.csv").write_text("a,1\n", encoding="utf-8")
+    (outbox / "deck.pptx").write_bytes(b"PK")
+    assert await register_output_dir(ctx, outbox) == 2
+    rows = await ctx.artifacts.list_by_task(task_id)
+    assert {Path(row.rel_path).name for row in rows} == {"results.csv", "deck.pptx"}
+    for row in rows:
+        resolved = await ctx.artifacts.resolve_path(row.uri)
+        assert resolved is not None
+        assert resolved.is_relative_to(out)
+        assert "promoted" not in resolved.parts
+        assert outbox.resolve() not in resolved.parents
+        assert resolved.parent.name.endswith("_aout0501")
+
+
 def test_a_out_04_help_gitignore_and_catalog_do_not_use_out_dot() -> None:
     """A-OUT-04: default is outputs/; walkthrough folder is ignored; catalog avoids --out ."""
     from typer.testing import CliRunner
@@ -480,3 +548,340 @@ def test_a_rev_01_identifier_is_not_resolved_as_a_path() -> None:
         module._resolve_input("Review arXiv 1706.03762 as a NeurIPS reviewer.")
     assert caught.value.kind == "arxiv"
     assert caught.value.identifier == "1706.03762"
+
+
+_A_FIG_01 = (
+    "Draw a RAG architecture diagram that includes query, retriever, reranker, and LLM."
+)
+_A_FIG_04 = (
+    "Draw a RAG architecture diagram as SVG using Graphviz, including query, "
+    "retriever, reranker, and LLM."
+)
+_A_LF_01 = (
+    "$livefigure Make one editable PPTX slide of a RAG architecture with query, "
+    "retriever, reranker, and LLM."
+)
+_A_LF_02 = "Make this RAG figure one editable scientific figure in PowerPoint."
+_A_SLD_01 = "Make a group-meeting deck from the Transformer paper."
+_A_SLD_02 = "$research-pptx thesis-defense deck on RAG factuality."
+_A_FIG_02 = "Change the previous figure's retriever to hybrid. Keep the color language."
+_P_01 = (
+    "Prepare materials for a RAG system survey: fetch the abstract of Attention "
+    "Is All You Need, generate a scientific architecture figure that includes "
+    "query, retriever, reranker, and LLM, and write a paper plus a slide deck."
+)
+_P_02 = (
+    "Prepare materials for an agentic loop-engineering system survey and produce "
+    "a detailed introductory slide deck."
+)
+
+
+def _catalog_text() -> str:
+    repo = Path(__file__).resolve().parents[3]
+    return (repo / "cli" / "docs" / "user-walkthrough-cases.md").read_text(encoding="utf-8")
+
+
+def _vlm(*, available: bool):
+    return SimpleNamespace(
+        available=available,
+        setup_command="omni config vlm",
+        error_code="" if available else "vlm_not_configured",
+        missing=() if available else ("model", "endpoint", "api_key"),
+    )
+
+
+def _figure_registry(*, vlm: bool):
+    from omni.config import load_settings
+    from omni.skills_runtime.registry import SkillRegistry
+
+    registry = SkillRegistry(load_settings())
+    registry.build_index()
+    registry.use_admission_services({"vlm": _vlm(available=vlm)})
+    return registry
+
+
+def test_a_fig_catalog_covers_format_neutral_routing() -> None:
+    """A-FIG-01/03/04/05: catalog names the slot and the default producer."""
+    catalog = _catalog_text()
+    for token in (
+        "A-FIG-01",
+        "A-FIG-03",
+        "A-FIG-04",
+        "A-FIG-05",
+        "format-neutral",
+        "scientific-figure",
+        "figure.editable.pptx",
+        "Do not upgrade an ordinary",
+        "start condition",
+        _A_FIG_01,
+        _A_FIG_04,
+    ):
+        assert token in catalog
+    stale = "`artifact.figure` / `scientific-figure`. PNG/SVG."
+    assert stale not in catalog
+
+
+def test_a_fig_01_unspecified_resolves_to_scientific_figure() -> None:
+    """A-FIG-01: unspecified architecture → scientific-figure, VLM or not."""
+    from omni.skills_runtime.slot_routing import user_named_skill
+
+    assert not user_named_skill(_A_FIG_01, "livefigure")
+    assert not user_named_skill(_A_FIG_01, "scientific-figure")
+    for vlm in (True, False):
+        selected, _ = _figure_registry(vlm=vlm).resolve_capability(
+            "artifact.figure", request=_A_FIG_01
+        )
+        assert selected is not None and selected.name == "scientific-figure"
+
+
+def test_a_fig_03_unspecified_stays_on_scientific_figure_when_vlm_down() -> None:
+    """A-FIG-03: same provider as A-FIG-01. Not needs_input."""
+    selected, rejected = _figure_registry(vlm=False).resolve_capability(
+        "artifact.figure", request=_A_FIG_01
+    )
+    assert selected is not None and selected.name == "scientific-figure"
+    assert any(
+        "livefigure" in item.name and "vlm_not_configured" in why for item, why in rejected
+    )
+
+
+def test_a_fig_04_named_graphviz_is_model_choice_not_host_rerank() -> None:
+    """A-FIG-04: host resolve is admission+priority; Graphviz words are not a name."""
+    from omni.skills_runtime.slot_routing import user_named_skill
+
+    assert not user_named_skill(_A_FIG_04, "scientific-figure")
+    assert not user_named_skill(_A_FIG_04, "livefigure")
+    selected, _ = _figure_registry(vlm=True).resolve_capability(
+        "artifact.figure", request=_A_FIG_04
+    )
+    assert selected is not None and selected.name == "scientific-figure"
+
+
+def test_a_lf_03_named_livefigure_does_not_fall_back() -> None:
+    """A-LF-03: named livefigure without VLM does not swap to scientific-figure."""
+    from omni.skills_runtime.slot_routing import allow_slot_fallback
+
+    selected, rejected = _figure_registry(vlm=False).resolve_capability(
+        "figure.editable.pptx", request=_A_LF_01
+    )
+    assert selected is None
+    assert any(item.name == "livefigure" for item, _ in rejected)
+    assert not allow_slot_fallback(
+        preferred="livefigure",
+        slot="artifact.figure",
+        user_message=_A_LF_01,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_fig_05_invented_dot_is_ignored_on_unspecified_figure() -> None:
+    """A-FIG-05: host fill drops a model-invented .dot on the A-FIG-01 input."""
+    from omni.agent.figure_runner import host_fill_figure
+
+    runtime = SimpleNamespace(
+        enqueue=AsyncMock(return_value="sub-1"),
+        process=AsyncMock(),
+        get_subtask=AsyncMock(
+            return_value=SimpleNamespace(status="succeeded", error="", result_json={})
+        ),
+    )
+    await host_fill_figure(
+        runtime=runtime,
+        registry=_figure_registry(vlm=True),
+        task_id="t1",
+        session_id="s1",
+        user_message=_A_FIG_01,
+        source_artifact_path="figures/rag.dot",
+    )
+    params = runtime.enqueue.await_args.args[1]
+    assert runtime.enqueue.await_args.args[0] == "scientific-figure"
+    assert "source_artifact_path" not in params
+
+
+def test_a_fig_04_catalog_and_cards_keep_graphviz_on_scientific_figure() -> None:
+    """A-FIG-04: descriptions still send a Graphviz-named request to scientific-figure."""
+    from omni.agent.skill_lookup import FIND_SKILL_NEXT_ACTION, rank_skill_matches, skill_contract_card
+
+    catalog = _catalog_text()
+    assert _A_FIG_04 in catalog
+    assert "Host resolve is admission+priority" in catalog or "model case" in catalog.casefold()
+
+    registry = _figure_registry(vlm=True)
+    services = registry.admission_services()
+    live = next(item for item in registry.list_selectable() if item.name == "livefigure")
+    sci = next(item for item in registry.list_selectable() if item.name == "scientific-figure")
+    live_card = skill_contract_card(live, services=services)
+    sci_card = skill_contract_card(sci, services=services)
+    live_route = f"{live.description} {live.when_to_use} {live_card.get('when_not_to_use', '')}"
+    sci_route = f"{sci.description} {sci.when_to_use} {sci_card.get('when_to_use', '')}"
+    assert "graphviz" in sci_route.casefold()
+    assert "scientific-figure" in live_route.casefold()
+    assert "first-choice" not in live.description.casefold()
+    assert live_card["next_action"] == FIND_SKILL_NEXT_ACTION
+    assert "call run_skill now" in FIND_SKILL_NEXT_ACTION.casefold()
+    named = rank_skill_matches(registry.list_selectable(), "scientific-figure", services=services)
+    assert named[0].name == "scientific-figure"
+
+
+@pytest.mark.asyncio
+async def test_a_fig_05_user_dot_is_passed_through() -> None:
+    """A-FIG-05: only an explicit scientific-figure path may pass a task .dot."""
+    from omni.agent.figure_runner import host_fill_figure
+
+    runtime = SimpleNamespace(
+        enqueue=AsyncMock(return_value="sub-1"),
+        process=AsyncMock(),
+        get_subtask=AsyncMock(
+            return_value=SimpleNamespace(status="succeeded", error="", result_json={})
+        ),
+    )
+    await host_fill_figure(
+        runtime=runtime,
+        registry=_figure_registry(vlm=True),
+        task_id="t1",
+        session_id="s1",
+        user_message="Draw a RAG architecture diagram using Graphviz from rag.dot",
+        source_artifact_path="figures/rag.dot",
+    )
+    assert runtime.enqueue.await_args.args[0] == "scientific-figure"
+    assert "source_artifact_path" not in runtime.enqueue.await_args.args[1]
+
+    await host_fill_figure(
+        runtime=runtime,
+        registry=_figure_registry(vlm=True),
+        task_id="t1",
+        session_id="s1",
+        user_message="$scientific-figure render rag.dot",
+        source_artifact_path="figures/rag.dot",
+        explicit_skill="scientific-figure",
+        pass_source=True,
+    )
+    assert runtime.enqueue.await_args.args[0] == "scientific-figure"
+    assert runtime.enqueue.await_args.args[1]["source_artifact_path"] == "figures/rag.dot"
+
+
+def test_a_fig_02_revise_stays_on_artifact_revise() -> None:
+    """A-FIG-02: change-the-previous-figure is revise, not a new Graphviz contract."""
+    from omni.agent.model_planner import _planner_system_prompt
+    from omni.config import load_settings
+    from omni.runtime.remaining import infer_figure_and_paper_outputs, infer_slide_outputs
+    from omni.skills_runtime.registry import SkillRegistry
+    from omni.skills_runtime.slot_routing import user_named_skill
+
+    assert not user_named_skill(_A_FIG_02, "scientific-figure")
+    assert not user_named_skill(_A_FIG_02, "livefigure")
+    assert infer_figure_and_paper_outputs(_A_FIG_02) == []
+    assert infer_slide_outputs(_A_FIG_02) == []
+    registry = SkillRegistry(load_settings())
+    registry.build_index()
+    prompt = _planner_system_prompt(registry)
+    assert "artifact.revise" in prompt
+    assert "Prefer livefigure" not in prompt
+    assert "Do not name a concrete provider" in prompt
+
+
+def test_a_lf_01_and_02_bind_livefigure_not_a_deck() -> None:
+    """A-LF-01 / A-LF-02: named editable PPTX stays on livefigure when VLM is up."""
+    from omni.runtime.remaining import infer_slide_outputs
+    from omni.skills_runtime.slot_routing import (
+        allow_slot_fallback,
+        user_named_skill,
+    )
+
+    assert user_named_skill(_A_LF_01, "livefigure")
+    assert not user_named_skill(_A_LF_02, "livefigure")
+    assert not allow_slot_fallback(
+        preferred="livefigure",
+        slot="artifact.figure",
+        user_message=_A_LF_01,
+    )
+    for message in (_A_LF_01, _A_LF_02):
+        assert infer_slide_outputs(message) == []
+        selected, _ = _figure_registry(vlm=True).resolve_capability(
+            "figure.editable.pptx", request=message
+        )
+        assert selected is not None and selected.name == "livefigure"
+
+
+def test_a_sld_01_and_02_bind_slides_not_a_figure() -> None:
+    """A-SLD-01 / A-SLD-02: a deck is research-pptx, not livefigure."""
+    from omni.runtime.remaining import infer_figure_and_paper_outputs, infer_slide_outputs
+    from omni.skills_runtime.slot_routing import user_named_skill
+
+    assert infer_slide_outputs(_A_SLD_01) == ["artifact.slides"]
+    assert infer_figure_and_paper_outputs(_A_SLD_01) == []
+    assert not user_named_skill(_A_SLD_01, "livefigure")
+    assert infer_slide_outputs(_A_SLD_02) == ["artifact.slides"]
+    registry = _figure_registry(vlm=True)
+    assert registry.suggest(_A_SLD_01)[0].name == "research-pptx"
+    assert registry.suggest("research-pptx thesis-defense deck")[0].name == "research-pptx"
+
+
+def test_p01_and_p02_keep_figure_and_deck_distinct() -> None:
+    """P-01 / P-02: figure, manuscript, and slides stay separate debts."""
+    from omni.runtime.remaining import infer_figure_and_paper_outputs, infer_slide_outputs
+
+    assert infer_figure_and_paper_outputs(_P_01) == ["artifact.figure", "draft.manuscript"]
+    assert infer_slide_outputs(_P_01) == ["artifact.slides"]
+    assert infer_figure_and_paper_outputs(_P_02) == []
+    assert infer_slide_outputs(_P_02) == ["artifact.slides"]
+    on = _figure_registry(vlm=True)
+    off = _figure_registry(vlm=False)
+    selected_on, _ = on.resolve_capability("artifact.figure", request=_P_01)
+    selected_off, rejected = off.resolve_capability("artifact.figure", request=_P_01)
+    assert selected_on is not None and selected_on.name == "scientific-figure"
+    assert selected_off is not None and selected_off.name == "scientific-figure"
+    assert any("vlm_not_configured" in why for _, why in rejected)
+    slides, _ = on.resolve_capability("slides.generate", request=_P_01)
+    assert slides is not None and slides.name == "research-pptx"
+
+
+def test_e_03_named_livefigure_does_not_silent_swap() -> None:
+    """E-03 / A-LF-03: a required editable slide does not degrade to Graphviz."""
+    from omni.skills_runtime.slot_routing import allow_slot_fallback, skip_observation
+
+    message = (
+        "In one request: search RAG 2024 papers, write a two-paragraph related-work "
+        "section, and make one editable LiveFigure PPTX slide."
+    )
+    selected, rejected = _figure_registry(vlm=False).resolve_capability(
+        "figure.editable.pptx", request=message
+    )
+    assert selected is None
+    assert any(item.name == "livefigure" for item, _ in rejected)
+    assert not allow_slot_fallback(
+        preferred="livefigure",
+        slot="artifact.figure",
+        user_message=message,
+    )
+    notice = skip_observation(
+        skipped="livefigure",
+        fallback="scientific-figure",
+        reason="vlm_not_configured",
+    )
+    assert "Using scientific-figure instead" in notice
+
+
+def test_react_catalog_distinguishes_figure_skills() -> None:
+    """Catalog the coordinator sees still distinguishes the two figure skills."""
+    from omni.config import load_settings
+    from omni.skills_runtime.registry import SkillRegistry
+
+    registry = SkillRegistry(load_settings())
+    registry.build_index()
+    text = registry.react_skill_catalog().casefold()
+    assert "livefigure" in text and "scientific-figure" in text
+    assert "first-choice" not in text
+    assert "graphviz" in text
+    assert "find_skill that exact name" in text or "follow the" in text
+    assert "prefer livefigure" not in _planner_prompt().casefold()
+
+
+def _planner_prompt() -> str:
+    from omni.agent.model_planner import _planner_system_prompt
+    from omni.config import load_settings
+    from omni.skills_runtime.registry import SkillRegistry
+
+    registry = SkillRegistry(load_settings())
+    registry.build_index()
+    return _planner_system_prompt(registry)

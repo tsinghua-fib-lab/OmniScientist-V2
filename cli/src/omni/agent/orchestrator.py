@@ -864,6 +864,9 @@ class OmniAgent:
             deferred_goal=self._plan_deferred_goal(plan),
             receipt_time=receipt_time,
         )
+        from omni.skills_runtime.admission import apply_turn_constraints
+
+        apply_turn_constraints(ctx, plan)
         ctx.execution_authority = execution_authority
         if plan.intent_type == IntentType.MEMORY_UPDATE:
             policy_tools = []
@@ -1260,6 +1263,9 @@ class OmniAgent:
             deferred_goal=self._plan_deferred_goal(plan),
             receipt_time=receipt_time,
         )
+        from omni.skills_runtime.admission import apply_turn_constraints
+
+        apply_turn_constraints(ctx, plan)
         # Turn-scoped async multi-agent control plane (Codex ``AgentControl``
         # analog). Present only when async delegation is enabled; the async
         # spawn/wait/list/interrupt tools read it from ``ctx`` and it is joined or

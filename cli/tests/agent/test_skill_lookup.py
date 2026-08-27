@@ -42,17 +42,16 @@ def test_long_figure_query_hits_figure_skills() -> None:
             ),
             _entry(
                 "livefigure",
-                capabilities=["figure.livefigure"],
-                default_for=["architecture diagram"],
-                priority=110,
+                capabilities=["artifact.figure", "figure.livefigure"],
+                default_for=["editable PPTX figure"],
+                priority=60,
             ),
             _entry("research-pptx", capabilities=["slides.generate"], priority=100),
         ],
         "scientific figure generation architecture diagram",
     )
     names = [entry.name for entry in hits]
-    assert "scientific-figure" in names or "livefigure" in names
-    assert names[0] in {"scientific-figure", "livefigure"}
+    assert names[0] == "scientific-figure"
 
 
 def test_long_pptx_query_hits_research_pptx() -> None:
@@ -88,7 +87,7 @@ def test_built_registry_ranks_figure_and_pptx_queries() -> None:
     selectable = registry.list_selectable()
     figure = rank_skill_matches(selectable, "scientific figure generation architecture diagram")
     assert figure
-    assert figure[0].name in {"scientific-figure", "livefigure"}
+    assert figure[0].name == "scientific-figure"
     slides = rank_skill_matches(selectable, "research pptx slides presentation generation")
     assert slides
     assert slides[0].name == "research-pptx"

@@ -854,8 +854,11 @@ closer (the same carve-out `_qa_figure_pair` already has for answer-plus-figure)
 the produce path on the critical path (`apply_patch` in the current workspace). Omni's produce
 path for a survey is retrieval plus native synthesis onto **this** `task_id`. Sibling-task
 files inform a footnote; they do not settle the contract. ReAct may still sequence richer
-turns (figure + draft, ideation, third-party skills). A first lookup-only batch is orientation
-and is steered; a second lookup-only batch while a manuscript is owed is the empty loop. An
+turns (figure + draft, ideation, third-party skills). A first ledger-lookup batch
+(`get_task` / `memory_search` / `open_artifact`) is orientation and is steered; a
+second while a manuscript is owed is the empty loop. `bash` / `read_file` /
+`git` of this workspace are not lookup. `task.inspect` compiles only when the
+user asked for a prior task's status or location. An
 empty literature funnel is not this-turn research: the host lifts `queries` / `n_kept` onto
 the `run_skill` observation (Codex `function_call_output`) and does not treat `n_kept=0` as
 evidence that the manuscript can be written.
@@ -884,10 +887,15 @@ Graphviz after the engine returns.
 
 ### Host figure fill
 
-When ReAct stops still owing `artifact.figure`, `turn_execution` calls `host_fill_figure`
-(`agent/figure_runner.py`) on *this* task only. A PNG already on the task skips the fill; a
-sibling-task file does not count. If the task owns an unrendered `.dot` (no sibling PNG/SVG), host
-fill passes it as `source_artifact_path` so the engine renders that graph.
+When ReAct stops still owing `artifact.figure` (or an editable PPTX debt),
+`turn_execution` calls `host_fill_figure` (`agent/figure_runner.py`) on *this*
+task only. Host facts only: the bound slot, an explicit `$skill` / selected
+skill, admission, and a `.dot` the caller already decided to pass. Default
+producer for `artifact.figure` is `scientific-figure` (SVG/PNG). `livefigure`
+runs for `$livefigure` or `figure.editable.pptx`. A configured VLM does not
+upgrade an ordinary figure to PPTX. The host does not parse Graphviz / SVG /
+"one slide" words. A leftover `.dot` is not injected on an unspecified
+figure. Named livefigure does not switch to Graphviz.
 
 Resume of a retryable terminal status can do the same via
 `task_recovery._fill_remaining_deliverables` when the leftover debts are only a figure and/or
@@ -1205,15 +1213,17 @@ prints the active *Tool working dir*.
 | `full` | allowed | allowed |
 
 Compute tools share one permission envelope with `write_file` (the turn working
-directory, the project store, and managed output roots). Codex `workspace-write`
-is the same shape — cwd + configured roots + persistent `/tmp`. Omni keeps a
-separate ArtifactStore, so `bash`, `run_compute`, and CLI skill processes also
-receive a durable `$OMNI_OUTPUT_DIR` (`<project>/artifacts/compute/<task_id>`)
-and a workspace-scoped `$TMPDIR`. Files written to `$OMNI_OUTPUT_DIR` are
-registered through `register_existing` and are what verification sees. Host
-`/tmp` stays writable for scratch but is not readable by `read_file` and is not
-an artifact sink. Linux bwrap bind-mounts the persistent exec tmp over `/tmp`
-instead of a fresh `--tmpfs`, so successive calls see the same scratch.
+directory and managed **user-facing** output roots). Codex `workspace-write`
+is cwd + configured roots + a host temp — never `$CODEX_HOME`. Omni does not
+grant `$OMNI_HOME` or the project store (`~/.omni/workspaces/...`) as a
+sandbox write root. `bash`, `run_compute`, CLI skill processes, and in-process
+engines that spawn children receive `$OMNI_OUTPUT_DIR` (a cache-side outbox)
+and a workspace-scoped `$TMPDIR`. Those directories are staging. The host
+publishes harvestable files into `outputs/<title>_<task8>/` (or the configured
+`--out`) and registers that copy; `~/.omni/.../artifacts/promoted` is not a
+user-visible location. Host `/tmp` is not an artifact sink. Linux bwrap
+bind-mounts the persistent exec tmp over `/tmp` instead of a fresh `--tmpfs`,
+so successive calls see the same scratch.
 
 Mutating/executing calls (`bash`, `write_file`, `edit_file`, `run_compute`) still enter the
 **approval gate**, and destructive shell commands are classified `destructive` so a prompt names

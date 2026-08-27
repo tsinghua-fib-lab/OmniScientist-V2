@@ -40,8 +40,10 @@ from omni.runtime.hooks import execution_policy_active, execution_policy_covers
 from omni.runtime.tool_gateway import ToolGateway
 from omni.skills_runtime.admission import (
     binary_admission,
+    constraint_admission,
     module_admission,
     service_admission_from_ctx,
+    turn_constraints_from,
 )
 from omni.skills_runtime.context import ExecContext
 from omni.skills_runtime.manifest import SkillEntry, SkillKind
@@ -1091,6 +1093,9 @@ async def execute_skill(
     # declared-but-missing binary is a structural admission failure. python_engine
     # skills run in-process and own their degradation (e.g. research-pptx returns a
     # ``node_unavailable`` domain outcome), so we never preempt them here.
+    unmet_constraint = constraint_admission(entry, turn_constraints_from(ctx))
+    if unmet_constraint is not None:
+        return unmet_constraint
     if entry.kind == SkillKind.CLI_EXEC:
         unmet_binary = _missing_binary_action(entry)
         if unmet_binary is not None:

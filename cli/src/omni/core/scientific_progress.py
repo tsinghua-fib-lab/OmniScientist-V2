@@ -15,7 +15,8 @@ from typing import Any
 from omni.core.funnel_facts import is_empty_literature_funnel
 
 # Tools that reopen earlier work. They never register this turn's figure,
-# manuscript, slides, or review.
+# manuscript, slides, or review. Workspace read/git/shell is not this set —
+# Codex treats those as progress toward the request.
 LOOKUP_TOOLS = frozenset(
     {
         "memory_search",
@@ -65,16 +66,19 @@ LOOKUP_STEER = (
     "This turn still owes a manuscript on this task_id. Files from another task "
     "do not count. Retrieve sources if this task has none, then produce the file "
     "with write_file or the relevant skill. Do not stop after lookup and wait "
-    "for the host to write."
+    "for the host to write. git / read_file / list_dir of this workspace are "
+    "not lookup — they are how the file gets written."
 )
 
 
 def lookup_pressure(trace: Iterable[Any], *, owed: bool) -> int:
-    """Trailing lookup calls after the last this-turn scientific produce.
+    """Ledger lookups after the last this-turn scientific produce.
 
     ``owed`` is false for answer-only / inspect / review turns: lookup *is*
-    the work, so the fuse stays off. Interleaved bash or read_file does not
-    reset the streak — those calls do not produce the owed artifact either.
+    the work, so the fuse stays off. ``bash`` / ``read_file`` / ``grep`` do
+    not increment — those are workspace progress (Codex). A successful
+    produce anywhere in the turn clears the fuse; sibling-task archaeology
+    after that is leftover, not a missing file.
     """
     if not owed:
         return 0
@@ -82,10 +86,8 @@ def lookup_pressure(trace: Iterable[Any], *, owed: bool) -> int:
     if any(_produce_clears_pressure(record) for record in records):
         return 0
     trailing = 0
-    for record in reversed(records):
+    for record in records:
         name = getattr(record, "name", "") or ""
-        if name in RESEARCH_PRODUCE_TOOLS:
-            break
         if name in LOOKUP_TOOLS:
             trailing += 1
     return trailing

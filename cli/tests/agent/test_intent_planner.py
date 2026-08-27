@@ -620,6 +620,51 @@ def test_task_inspect_capability_requires_authoritative_get_task_lookup() -> Non
     assert PlanValidator(registry).validate(plan).status == "validated"
 
 
+def test_task_inspect_does_not_compile_on_a_new_survey() -> None:
+    registry = SkillRegistry(load_settings())
+    planner = IntentPlanner(registry)
+    proposal = ModelPlanProposal.from_payload(
+        {
+            "intent_type": "react_fallback",
+            "required_capabilities": ["task.inspect"],
+            "outputs": ["answer"],
+            "confidence": 0.9,
+            "rationale": "reuse the earlier survey",
+        }
+    )
+    plan = planner.plan_from_proposal(
+        "帮我调研如何利用隐空间干预的方式提升LLM的Agentic能力",
+        proposal,
+        task_id="run-survey-not-inspect",
+    )
+    assert plan.tool_policy.allowed_tools != ["get_task"]
+    assert plan.tool_policy.allows("search_literature") is True
+    assert plan.tool_policy.allows("write_file") is True
+    assert "draft.section" in plan.outputs or "draft.section" in plan.verification_plan.required_outputs
+
+
+def test_task_inspect_does_not_compile_on_an_uncommitted_review() -> None:
+    registry = SkillRegistry(load_settings())
+    planner = IntentPlanner(registry)
+    proposal = ModelPlanProposal.from_payload(
+        {
+            "intent_type": "react_fallback",
+            "required_capabilities": ["task.inspect"],
+            "outputs": ["answer"],
+            "confidence": 0.9,
+            "rationale": "open the earlier review",
+        }
+    )
+    plan = planner.plan_from_proposal(
+        "对当前未提交代再做一次整体的review，分析做了什么，对标 codex、kimi-code",
+        proposal,
+        task_id="run-review-not-inspect",
+    )
+    assert plan.tool_policy.allowed_tools != ["get_task"]
+    assert plan.tool_policy.allows("get_task") is True
+    assert "draft.manuscript" not in plan.verification_plan.required_outputs
+
+
 def test_task_review_capability_maps_to_enumerative_recall_surface() -> None:
     registry = SkillRegistry(load_settings())
     planner = IntentPlanner(registry)

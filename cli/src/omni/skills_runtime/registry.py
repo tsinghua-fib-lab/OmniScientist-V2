@@ -294,6 +294,10 @@ class SkillRegistry:
         # in the product catalog (``list_all``/``list_selectable``) or automatic
         # selection. Populated from the packaged system-skills dir on every build.
         self._system_entries: dict[str, SkillEntry] = {}
+        # Test/host override for admission probes. Production resolve uses
+        # ``ctx`` or ``VlmGateway(settings.vlm)`` so planner-time picks skip a
+        # doomed VLM skill without starting it.
+        self._admission_services: dict[str, Any] | None = None
 
     def refresh_settings(self, settings: OmniSettings) -> int:
         """Reload settings-backed filters while preserving this registry object."""
@@ -493,6 +497,29 @@ class SkillRegistry:
     def configured_default_for(self) -> dict[str, str]:
         return dict(self._settings.skills.default_for)
 
+    def use_admission_services(self, services: dict[str, Any] | None) -> None:
+        """Pin host-service probes for resolve/find_skill (tests and host fill)."""
+        self._admission_services = services
+
+    def admission_services(
+        self,
+        *,
+        services: dict[str, Any] | None = None,
+        ctx: Any | None = None,
+    ) -> dict[str, Any]:
+        """Probes for ``skill_admission_rejection``. Explicit wins, then ctx, then settings."""
+        if services is not None:
+            return services
+        if ctx is not None:
+            from omni.skills_runtime.admission import host_services_from_ctx
+
+            return host_services_from_ctx(ctx)
+        if self._admission_services is not None:
+            return self._admission_services
+        from omni.core.vlm import VlmGateway
+
+        return {"vlm": VlmGateway(self._settings.vlm)}
+
     def async_skill_names(self) -> set[str]:
         return {e.name for e in self.list_async_skills()}
 
@@ -502,6 +529,9 @@ class SkillRegistry:
         *,
         allow_contract_none: bool = False,
         limit_rejections: int = 5,
+        services: dict[str, Any] | None = None,
+        ctx: Any | None = None,
+        request: str = "",
     ) -> tuple[SkillEntry | None, list[tuple[SkillEntry, str]]]:
         """Select the best installed skill for a semantic capability slot.
 
@@ -510,7 +540,15 @@ class SkillRegistry:
         built-in, project, or user skill will satisfy it. Contract-less third
         party skills stay visible as rejected candidates unless explicitly
         allowed by the caller.
+
+        Admission is applied before priority: a skill that cannot start
+        (missing VLM, binary, or module) is skipped with a visible reason so
+        a sibling that can pay the same slot can win. Domain choice lives in
+        skill descriptions; this method does not rerank by format words.
         """
+        from omni.skills_runtime.admission import skill_admission_rejection
+
+        probed = self.admission_services(services=services, ctx=ctx)
         candidates: list[_CapabilityCandidate] = []
         rejected: list[tuple[SkillEntry, str]] = []
         for entry in self.list_selectable():
@@ -521,6 +559,11 @@ class SkillRegistry:
             if tier is None:
                 if len(rejected) < limit_rejections:
                     rejected.append((entry, "contract is none; automatic required workflow step requires a contract"))
+                continue
+            admission = skill_admission_rejection(entry, services=probed, ctx=ctx)
+            if admission is not None:
+                if len(rejected) < limit_rejections:
+                    rejected.append((entry, _admission_skip_reason(entry, admission)))
                 continue
             candidates.append(_CapabilityCandidate(entry=entry, score=score, reason=reason, tier=tier))
 
@@ -599,6 +642,7 @@ class SkillRegistry:
         msg = (message or "").casefold().strip()
         if not msg:
             return []
+
         msg_tokens = {w for w in re.findall(r"\w+", msg, flags=re.UNICODE) if len(w) > 1}
         scored: list[tuple[float, str, SkillEntry]] = []
         for e in self._entries.values():
@@ -671,6 +715,20 @@ def _capability_tier(entry: SkillEntry, *, allow_contract_none: bool) -> int | N
     if not is_core and contract in {"full", "partial"}:
         return 2
     return 3 if allow_contract_none else None
+
+
+def _admission_skip_reason(entry: SkillEntry, admission: dict[str, Any]) -> str:
+    from omni.skills_runtime.slot_routing import admission_reason_code, fallback_skill
+
+    code = admission_reason_code(admission) or "admission_rejected"
+    command = str(admission.get("setup_command") or "").strip()
+    fallback = fallback_skill(entry.name, "artifact.figure")
+    parts = [f"{entry.name} skipped: {code}"]
+    if command:
+        parts.append(f"run `{command}`")
+    if fallback:
+        parts.append(f"fallback={fallback}")
+    return "; ".join(parts)
 
 
 def _capability_rejection_reason(selected: _CapabilityCandidate, candidate: _CapabilityCandidate) -> str:

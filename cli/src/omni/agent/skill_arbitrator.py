@@ -50,7 +50,7 @@ class SkillArbitrator:
         reason: str,
         confidence: float,
     ) -> SkillSelection | None:
-        entry, rejected = self._registry.resolve_capability(capability)
+        entry, rejected = self._registry.resolve_capability(capability, request=message)
         if entry is None:
             return None
         return SkillSelection(

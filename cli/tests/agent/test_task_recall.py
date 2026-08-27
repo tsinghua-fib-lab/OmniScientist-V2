@@ -57,6 +57,23 @@ async def test_search_and_get_task_return_typed_linked_outputs() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_task_refuses_the_in_flight_task() -> None:
+    agent = await OmniAgent.create(load_settings())
+    run = await _historical_run(agent)
+    session_id = await agent.ensure_session(channel="cli")
+    ctx = agent._make_ctx(session_id, "cli", None, task_id=run.id, principal="local")
+    tools = {tool.spec.name: tool for tool in build_recall_tools(ctx)}
+    try:
+        detail = await tools["get_task"].handler({"task_id": f"task:{run.id}"})
+        prefix = await tools["get_task"].handler({"task_id": run.id[:8]})
+    finally:
+        await agent.aclose()
+
+    assert detail["error"] == "cannot inspect the in-flight task"
+    assert prefix["error"] == "cannot inspect the in-flight task"
+
+
+@pytest.mark.asyncio
 async def test_human_title_followup_converges_after_search_and_get() -> None:
     agent = await OmniAgent.create(load_settings())
     run = await _historical_run(agent)

@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -285,7 +286,7 @@ def test_contributed_skill_notices_record_exact_upstream_revision():
     revisions = {
         "livefigure": "bd6d406de2e1c09652e763f6259cc6167a0f61e7",
         "paper-review": "2f75b9f5a7d20dc744eead1f1100a9673596f88a",
-        "research-ideation": "b056c68a0ea22022998f68fc7cae1e7347463e79",
+        "research-ideation": "1c067da398f9161045277f9350aecea25b3f4a95",
         "research-pptx": "eba86d7822c4f3d3ced19f14c8e4f590af30d291",
         "review-response": "442872e9af4045570ca5d95422cf970a29e5639b",
         "scientific-poster": "b2104fe288aa4869fe5929cac2ecabb609defcb1",
@@ -324,8 +325,6 @@ def test_manifest_driven_registry_exposes_active_capability_table(settings):
     expected = {
         "literature.search": "openalex-search",
         "paper.fetch.arxiv": "arxiv-fetch",
-        "artifact.figure": "scientific-figure",
-        "figure.editable.pptx": "livefigure",
         "poster.scientific": "scientific-poster",
         "review.paper": "paper-review",
         "review.response": "review-response",
@@ -333,13 +332,33 @@ def test_manifest_driven_registry_exposes_active_capability_table(settings):
         "slides.generate": "research-pptx",
         "artifact.slides": "research-pptx",
     }
+    unavailable = SimpleNamespace(
+        available=False,
+        setup_command="omni config vlm",
+        error_code="vlm_not_configured",
+        missing=("model", "endpoint", "api_key"),
+    )
+    available = SimpleNamespace(available=True, setup_command="omni config vlm", error_code="", missing=())
     for capability, provider_name in expected.items():
-        provider, _ = registry.resolve_capability(capability)
+        provider, _ = registry.resolve_capability(capability, services={"vlm": unavailable})
         assert provider is not None and provider.name == provider_name
+
+    figure_off, rejected = registry.resolve_capability(
+        "artifact.figure", services={"vlm": unavailable}
+    )
+    assert figure_off is not None and figure_off.name == "scientific-figure"
+    assert any(item.name == "livefigure" and "vlm_not_configured" in why for item, why in rejected)
+
+    figure_on, _ = registry.resolve_capability("artifact.figure", services={"vlm": available})
+    assert figure_on is not None and figure_on.name == "scientific-figure"
+    editable, _ = registry.resolve_capability(
+        "figure.editable.pptx", services={"vlm": available}
+    )
+    assert editable is not None and editable.name == "livefigure"
 
     livefigure = registry.get("livefigure")
     assert livefigure is not None
-    assert "artifact.figure" not in livefigure.capabilities
+    assert "artifact.figure" in livefigure.capabilities
 
     catalog = registry.selection_prompt()
     assert "Skill contract catalog for workflow planning" in catalog
@@ -352,6 +371,8 @@ def test_catalog_search_disambiguates_single_editable_figure_from_full_deck(sett
     registry.build_index()
 
     assert registry.suggest("Create a single editable PPTX scientific figure")[0].name == "livefigure"
+    assert registry.suggest("Draw a RAG architecture diagram")[0].name == "scientific-figure"
+    assert registry.suggest("画一张科研架构图")[0].name == "scientific-figure"
     assert registry.suggest("Generate a complete 12-slide thesis defense deck")[0].name == "research-pptx"
     assert registry.suggest("Draw an ordinary RAG architecture diagram as SVG")[0].name == "scientific-figure"
     assert registry.suggest("Create an ordinary workflow flowchart as SVG")[0].name == "scientific-figure"

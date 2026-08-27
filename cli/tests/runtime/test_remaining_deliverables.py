@@ -117,6 +117,40 @@ def test_figure_kind_pptx_pays_editable_figure() -> None:
         uri="artifact://live",
     )
     assert remaining_deliverables(["artifact.pptx"], [slide]) == []
+    assert remaining_deliverables(["artifact.figure"], [slide]) == []
+
+
+def test_harvested_deck_does_not_pay_format_neutral_figure() -> None:
+    deck = SimpleNamespace(
+        kind="slides",
+        title="deck",
+        rel_path="outputs/deck.pptx",
+        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        uri="artifact://deck",
+    )
+    assert remaining_deliverables(["artifact.figure"], [deck]) == ["artifact.figure"]
+
+
+def test_leftover_editable_titled_pptx_does_not_pay_figure() -> None:
+    leftover = SimpleNamespace(
+        kind="document",
+        title="editable figure",
+        rel_path="outputs/editable.pptx",
+        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        uri="artifact://edit",
+    )
+    assert remaining_deliverables(["artifact.figure"], [leftover]) == ["artifact.figure"]
+
+
+def test_livefigure_named_pptx_pays_format_neutral_figure() -> None:
+    slide = SimpleNamespace(
+        kind="file",
+        title="livefigure output",
+        rel_path="outputs/livefigure.pptx",
+        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        uri="artifact://lf",
+    )
+    assert remaining_deliverables(["artifact.figure"], [slide]) == []
 
 
 def test_failed_livefigure_keeps_editable_figure_debt() -> None:
@@ -126,7 +160,7 @@ def test_failed_livefigure_keeps_editable_figure_debt() -> None:
         result={"status": "error", "skill_name": "livefigure", "error": "dunder"},
         status="succeeded",
     )
-    assert failed_canonical_file_debts([record], []) == ["artifact.pptx"]
+    assert failed_canonical_file_debts([record], []) == ["artifact.figure", "artifact.pptx"]
 
 
 def test_markdown_report_satisfies_manuscript() -> None:
@@ -301,6 +335,35 @@ def test_analysis_report_wording_binds_a_manuscript() -> None:
     assert infer_analysis_report_outputs(
         "仔细review 今天 push 到master 上的代码，实现是对标了 codex 源码设计的。不做代码改动"
     ) == []
+    assert infer_analysis_report_outputs(
+        "对当前未提交代再做一次整体的review，分析做了什么，"
+        "对标 codex、kimi-code 是否是最佳实践了，会引入什么新的问题？"
+    ) == []
+    assert infer_analysis_report_outputs(
+        "再整体review 最新的这4天的整个提交，分析功能，优化点，解决的问题，看是否有什么不合理的地方。"
+    ) == []
+
+
+def test_prior_task_status_is_not_a_new_produce_request() -> None:
+    from omni.runtime.remaining import (
+        utterance_asks_prior_task_status,
+        utterance_asks_written_survey,
+    )
+
+    assert utterance_asks_prior_task_status("刚才的审稿成功了吗？结果在哪里？")
+    assert utterance_asks_prior_task_status("这个任务的产物是什么")
+    assert not utterance_asks_prior_task_status(
+        "帮我调研如何利用隐空间干预的方式提升LLM的Agentic能力"
+    )
+    assert not utterance_asks_prior_task_status(
+        "对当前未提交代再做一次整体的review，分析做了什么，对标 codex、kimi-code"
+    )
+    assert utterance_asks_written_survey(
+        "帮我调研如何利用隐空间干预的方式提升LLM的Agentic能力"
+    )
+    assert not utterance_asks_written_survey(
+        "对当前未提交代再做一次整体的review，分析做了什么，对标 codex"
+    )
 
 
 def test_analysis_report_bind_unblocks_write_file() -> None:

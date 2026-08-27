@@ -306,6 +306,11 @@ def main() -> None:
     result["skill"] = "research-ideation"
     result["elapsed_seconds"] = round(time.time() - start, 1)
 
+    # Always attach a rendered Markdown report as `text` so consumers don't
+    # need to reassemble the structured fields themselves.
+    if result.get("status") in ("ok", "partial"):
+        result["text"] = _build_report(result)
+
     # Write portable artifacts.
     if args.output_dir and result.get("status") == "ok":
         os.makedirs(args.output_dir, exist_ok=True)
@@ -365,6 +370,15 @@ def _build_report(result: dict) -> str:
             f"**Method**: {final.get('proposed_method', '')}",
             "",
         ]
+
+    # Cite the retrieved literature so the report is self-contained.
+    from core import build_reference_lines
+
+    sources = result.get("sources")
+    reference_papers = sources if isinstance(sources, list) and sources else search.get("papers", [])
+    lines += build_reference_lines(
+        reference_papers if isinstance(reference_papers, list) else []
+    )
 
     return "\n".join(lines)
 

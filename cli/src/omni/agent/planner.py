@@ -50,7 +50,13 @@ from omni.agent.plan_factory import (
 )
 from omni.agent.plan_runner_utils import gap_default, gap_question
 from omni.agent.skill_arbitrator import SkillArbitrator
-from omni.runtime.remaining import bind_contract_outputs, infer_figure_and_paper_outputs
+from omni.runtime.remaining import (
+    bind_contract_outputs,
+    infer_figure_and_paper_outputs,
+    utterance_asks_prior_task_status,
+    utterance_asks_written_survey,
+)
+from omni.runtime.unpayable import apply_unpayable_contract
 from omni.skills_runtime.registry import SkillRegistry
 
 # The gap stated when the model asks without naming what it needs. ``ask`` is
@@ -87,7 +93,7 @@ class IntentPlanner:
         boundary = self.boundary_plan(user_message, task_id=task_id)
         if boundary is not None:
             return boundary
-        return bind_contract_outputs(
+        return self._bind(
             build_assistant_plan(
                 user_message or "",
                 task_id=task_id,
@@ -103,8 +109,16 @@ class IntentPlanner:
         task_id: str = "",
     ) -> IntentPlan:
         """Build an executable plan from a capability-level model proposal."""
-        return bind_contract_outputs(
+        return self._bind(
             self._plan_from_proposal(user_message, proposal, task_id=task_id),
+            proposal=proposal,
+        )
+
+    def _bind(self, plan: IntentPlan, proposal: ModelPlanProposal | None = None) -> IntentPlan:
+        """Attach settlement names, then mark files this turn cannot pay."""
+        return apply_unpayable_contract(
+            bind_contract_outputs(plan, proposal=proposal),
+            registry=self._registry,
             proposal=proposal,
         )
 
@@ -225,14 +239,22 @@ class IntentPlanner:
             )
             return carry_capability_inputs(plan, proposal, CAPABILITY_TASK_REVIEW)
 
+        inspect_misapplied = False
         if CAPABILITY_TASK_INSPECT in all_caps:
-            plan = build_task_inspect_plan(
-                text,
-                task_id=task_id,
-                rationale=rationale,
-                confidence=proposal.confidence or 0.8,
-            )
-            return carry_capability_inputs(plan, proposal, CAPABILITY_TASK_INSPECT)
+            if utterance_asks_prior_task_status(text):
+                plan = build_task_inspect_plan(
+                    text,
+                    task_id=task_id,
+                    rationale=rationale,
+                    confidence=proposal.confidence or 0.8,
+                )
+                return carry_capability_inputs(plan, proposal, CAPABILITY_TASK_INSPECT)
+            # A new survey / review / comparison is not a status card. Drop
+            # inspect and keep compiling the produce path (Codex: new message
+            # is new work). Sibling files still do not pay this task_id.
+            inspect_misapplied = True
+            all_caps = [cap for cap in all_caps if cap != CAPABILITY_TASK_INSPECT]
+            caps = [cap for cap in caps if cap != CAPABILITY_TASK_INSPECT]
 
         figure_and_paper = bool(infer_figure_and_paper_outputs(text))
         if is_survey_pair(all_caps, proposal.outputs) and not figure_and_paper:
@@ -338,6 +360,17 @@ class IntentPlanner:
                 confidence=proposal.confidence or 0.72,
             )
             return carry_capability_inputs(plan, proposal, capability)
+        if inspect_misapplied and utterance_asks_written_survey(text) and not all_caps:
+            plan = build_assistant_plan(
+                text,
+                task_id=task_id,
+                rationale=rationale
+                or "written survey sequenced by the model against live results",
+            )
+            plan.confidence = proposal.confidence or 0.86
+            plan.provenance_mode = proposal.provenance_mode
+            plan.outputs = list(dict.fromkeys([*(proposal.outputs or []), "draft.section"]))
+            return _carry_survey_retrieve(plan, proposal, text)
         if proposal.intent_type == "direct_answer":
             return build_assistant_plan(
                 text,
@@ -391,22 +424,22 @@ class IntentPlanner:
         capable assistant every other agent uses as its default, instead of dead
         ending. Tool policy still blocks irreversible mutations.
         """
-        return bind_contract_outputs(build_assistant_plan(text, task_id=task_id, rationale=rationale))
+        return self._bind(build_assistant_plan(text, task_id=task_id, rationale=rationale))
 
     def _plan_for_boundary(self, text: str, decision: BoundaryDecision, *, task_id: str) -> IntentPlan:
         if decision.kind == "explicit_skill":
             explicit = self._explicit_skill_plan(text, task_id=task_id)
             if explicit is not None:
-                return bind_contract_outputs(explicit)
+                return self._bind(explicit)
         if decision.kind == "explicit_tool":
             # Freeze the named tool. Produce debts may still bind; write stays
             # closed while run_skill is blocked (the retrieve window).
-            return bind_contract_outputs(
+            return self._bind(
                 build_named_native_tool_plan(text, tool=decision.tool, task_id=task_id)
             )
         # A gate matched but could not be materialised (e.g. explicit skill not
         # found) — hand the turn to the capable model/react path.
-        return bind_contract_outputs(
+        return self._bind(
             build_assistant_plan(text, task_id=task_id, rationale=decision.reason or "boundary fallthrough")
         )
 

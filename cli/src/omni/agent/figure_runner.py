@@ -297,22 +297,93 @@ async def host_fill_figure(
     user_message: str,
     title: str = "",
     source_artifact_path: str = "",
+    services: dict[str, Any] | None = None,
+    ctx: Any | None = None,
+    prior_failed: list[str] | None = None,
+    slot: str = "",
+    explicit_skill: str = "",
+    pass_source: bool = False,
 ) -> dict[str, Any]:
-    """Run the figure provider on this task and wait until it finishes.
+    """Run one figure provider on this task and wait until it finishes.
 
-    Used when ReAct stopped still owing ``artifact.figure``. Only artifacts
-    already on ``task_id`` can skip this; sibling-task files are not consulted.
-    ``queue=False`` keeps a background worker from racing the in-turn wait.
-    A task-owned unrendered DOT is passed through so the engine renders that
-    graph instead of restamping ``_rag_dot``.
+    Salvage when ReAct still owes a figure. Host facts only: the bound slot,
+    an explicit ``$skill`` / selected skill, admission, and a ``.dot`` the
+    caller already decided to pass. No utterance hint scan. No sibling retry
+    after an engine failure — named livefigure / editable PPTX never switch.
     """
-    skill = "scientific-figure"
-    if registry is not None:
-        resolve = getattr(registry, "resolve_capability", None)
-        if callable(resolve):
-            entry, _rejected = resolve("artifact.figure")
-            if entry is not None and getattr(entry, "name", ""):
-                skill = str(entry.name)
+    from omni.agent.capabilities import CAPABILITY_EDITABLE_PPTX_FIGURE, CAPABILITY_FIGURE
+    from omni.skills_runtime.slot_routing import explicit_figure_skill
+
+    failed = {str(name) for name in (prior_failed or []) if str(name).strip()}
+    named = str(explicit_skill or "").strip() or explicit_figure_skill(user_message)
+    bound_slot = str(slot or "").strip() or (
+        CAPABILITY_EDITABLE_PPTX_FIGURE if named == "livefigure" else CAPABILITY_FIGURE
+    )
+    skill = named if named in {"livefigure", "scientific-figure"} else ""
+    if not skill:
+        skill = _resolve_figure_skill(
+            registry, slot=bound_slot, services=services, ctx=ctx
+        )
+    if skill in failed:
+        return {
+            "subtask_id": "",
+            "skill": skill,
+            "status": "blocked",
+            "error": f"{skill} already failed this turn; host will not switch producers.",
+            "result": None,
+            "observations": [],
+            "reason": "already_failed",
+        }
+    use_source = bool(source_artifact_path) and pass_source and skill == "scientific-figure"
+    filled = await _enqueue_figure_skill(
+        runtime,
+        skill=skill,
+        user_message=user_message,
+        title=title,
+        source_artifact_path=source_artifact_path if use_source else "",
+        session_id=session_id,
+        task_id=task_id,
+    )
+    filled["observations"] = []
+    if _figure_attempt_failed(filled):
+        filled["reason"] = _failure_reason_code(filled) or "figure_failed"
+    return filled
+
+
+def _resolve_figure_skill(
+    registry: Any | None,
+    *,
+    slot: str,
+    services: dict[str, Any] | None,
+    ctx: Any | None,
+) -> str:
+    from omni.agent.capabilities import CAPABILITY_EDITABLE_PPTX_FIGURE
+
+    default = "livefigure" if slot == CAPABILITY_EDITABLE_PPTX_FIGURE else "scientific-figure"
+    if registry is None:
+        return default
+    resolve = getattr(registry, "resolve_capability", None)
+    if not callable(resolve):
+        return default
+    try:
+        entry, _rejected = resolve(slot, services=services, ctx=ctx)
+    except TypeError:
+        entry, _rejected = resolve(slot)
+    if entry is not None and getattr(entry, "name", ""):
+        return str(entry.name)
+    return default
+
+
+async def _enqueue_figure_skill(
+    runtime: Any,
+    *,
+    skill: str,
+    user_message: str,
+    title: str,
+    source_artifact_path: str,
+    session_id: str,
+    task_id: str,
+) -> dict[str, Any]:
     params: dict[str, Any] = {"input": user_message}
     if title:
         params["title"] = title
@@ -333,13 +404,57 @@ async def host_fill_figure(
     getter = getattr(runtime, "get_subtask", None)
     if callable(getter):
         task = await getter(subtask_id)
+    result = getattr(task, "result_json", None) if task is not None else None
     return {
         "subtask_id": subtask_id,
         "skill": skill,
         "status": str(getattr(task, "status", "") or ""),
         "error": str(getattr(task, "error", "") or ""),
-        "result": getattr(task, "result_json", None) if task is not None else None,
+        "result": result,
     }
+
+
+def _figure_attempt_failed(filled: dict[str, Any]) -> bool:
+    status = str(filled.get("status") or "").strip().lower()
+    if status in {"failed", "error", "needs_input", "blocked", "cancelled", "timed_out", "rejected"}:
+        return True
+    result = filled.get("result")
+    if isinstance(result, dict):
+        inner = str(result.get("status") or "").strip().lower()
+        if inner in {"error", "failed", "blocked"}:
+            return True
+        from omni.skills_runtime.admission import first_admission_result
+
+        if first_admission_result(result) is not None:
+            return True
+    return bool(filled.get("error"))
+
+
+def _failure_reason_code(filled: dict[str, Any]) -> str:
+    from omni.skills_runtime.admission import first_admission_result
+    from omni.skills_runtime.slot_routing import admission_reason_code
+
+    result = filled.get("result")
+    admission = first_admission_result(result)
+    code = admission_reason_code(admission)
+    if code:
+        return code
+    error = str(filled.get("error") or "").strip().lower()
+    if isinstance(result, dict):
+        error = f"{error} {result.get('error') or ''} {result.get('summary') or ''}".lower()
+    if "vlm_not_configured" in error or "not configured" in error:
+        return "vlm_not_configured"
+    if any(
+        token in error
+        for token in (
+            "permission denied",
+            "permissionerror",
+            "operation not permitted",
+            "pptx generation failed",
+        )
+    ):
+        return "livefigure_sandbox_write_denied"
+    return "livefigure_failed"
 
 
 def _search_query(message: str) -> str:

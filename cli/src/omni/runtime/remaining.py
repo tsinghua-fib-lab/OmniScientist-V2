@@ -133,9 +133,14 @@ _ANALYSIS_REPORT_TARGET = (
     "implementation",
 )
 # A code-review ask can mention "对标 Codex" as a criterion without owing a report.
+# Bare "review" is not listed: it would also hide "literature review".
 _ANALYSIS_REPORT_NEGATIVE = (
     "\u4ed4\u7ec6review",
     "code review",
+    "\u6574\u4f53\u7684review",
+    "\u6574\u4f53review",
+    "\u672a\u63d0\u4ea4",
+    "uncommitted",
     "review \u4eca\u5929",
     "review today's",
     "push \u5230",
@@ -144,6 +149,38 @@ _ANALYSIS_REPORT_NEGATIVE = (
     "do not change code",
     "only review",
     "\u4ec5\u505a review",
+)
+
+# Host compiles task.inspect only when the user asked for a prior task's
+# status or artifact location — not when they repeat a produce request.
+_PRIOR_TASK_STATUS_HINTS = (
+    "\u72b6\u6001",
+    "status",
+    "\u6210\u529f\u4e86\u5417",
+    "\u5931\u8d25\u4e86\u5417",
+    "\u5931\u8d25\u539f\u56e0",
+    "\u4e3a\u4ec0\u4e48\u5931\u8d25",
+    "\u600e\u4e48\u6837\u4e86",
+    "\u5b8c\u6210\u4e86\u5417",
+    "did it succeed",
+    "did it fail",
+    "how did it go",
+    "\u4ea7\u7269\u662f\u4ec0\u4e48",
+    "\u4ea7\u51fa\u662f\u4ec0\u4e48",
+    "\u4ea7\u7269\u5728\u54ea",
+    "\u4ea7\u51fa\u5728\u54ea",
+    "\u7ed3\u679c\u5728\u54ea\u91cc",
+    "\u7ed3\u679c\u5728\u54ea",
+    "artifact location",
+    "look at the output",
+    "what did that task",
+    "previous task",
+    "that task",
+    "\u8fd9\u4e2a\u4efb\u52a1",
+    "\u524d\u9762\u95ee\u7684",
+    "\u521a\u624d\u90a3\u4e2a",
+    "\u521a\u624d\u7684",
+    "\u4e0a\u4e00\u4e2a\u4efb\u52a1",
 )
 
 # Asking about an earlier task's figure/paper is recall, not a new contract.
@@ -267,7 +304,7 @@ def plan_owes_scientific_outputs(plan: Any) -> bool:
 
 
 def remaining_figure(remaining: list[str]) -> list[str]:
-    """Figure debts the host can fill by running the ``artifact.figure`` provider."""
+    """Format-neutral figure debts the host can fill (PPTX or SVG/PNG)."""
     return [name for name in remaining if name == CAPABILITY_FIGURE]
 
 
@@ -435,13 +472,37 @@ def infer_figure_and_paper_outputs(user_message: str) -> list[str]:
     return ["artifact.figure", "draft.manuscript"]
 
 
+def utterance_asks_prior_task_status(user_message: str) -> bool:
+    """Whether the user is asking about an earlier task's status or location.
+
+    A new survey, code review, or architecture comparison is false even when
+    Recent activity lists a similar title.
+    """
+    text = str(user_message or "")
+    if not text:
+        return False
+    folded = text.casefold()
+    return any(hint in text or hint in folded for hint in _PRIOR_TASK_STATUS_HINTS)
+
+
+def utterance_asks_written_survey(user_message: str) -> bool:
+    """A produce-the-survey request, not a code review that mentions 调研."""
+    text = str(user_message or "")
+    if not text:
+        return False
+    folded = text.casefold()
+    if any(hint in text or hint in folded for hint in _ANALYSIS_REPORT_NEGATIVE):
+        return False
+    return any(hint in text or hint in folded for hint in _SURVEY_CLOSER_HINTS)
+
+
 def infer_analysis_report_outputs(user_message: str) -> list[str]:
     """Bind a manuscript when the user asked for a source/architecture comparison.
 
     ``outputs=["answer"]`` is not enough: a finding-ack then settles as
     succeeded. A named ``draft.manuscript`` unblocks ``write_file`` and
     leaves the file unpaid until it exists. Does not fire on a lone
-    "analyze this" chat, a survey, or a slide request.
+    "analyze this" chat, a survey, a code review, or a slide request.
     """
     text = str(user_message or "")
     if not text:
@@ -519,8 +580,11 @@ async def remaining_retry_context(tasks: Any, artifacts: Any, task_id: str) -> s
 
 
 # Skills whose named file is not paid by a write_file / bash leftover.
+# livefigure pays the format-neutral figure slot and the stricter editable
+# PPTX debt. A failed livefigure leaves both unpaid so a sibling can settle
+# ``artifact.figure``; ``artifact.pptx`` stays owed only when the user named it.
 CANONICAL_FILE_PRODUCERS: dict[str, tuple[str, ...]] = {
-    "livefigure": ("artifact.pptx",),
+    "livefigure": ("artifact.figure", "artifact.pptx"),
     "paper-review": ("review",),
     "scientific-figure": ("artifact.figure",),
     "research-pptx": ("artifact.slides",),
@@ -622,7 +686,10 @@ def _outputs_satisfied_by(artifact: Any) -> set[str]:
     title = str(getattr(artifact, "title", "") or "").lower()
     is_figure = kind in _FIGURE_KINDS or suffix in _FIGURE_SUFFIXES or mime in _FIGURE_MIMES
     is_slides = suffix in _SLIDE_SUFFIXES or kind in {"slides", "pptx"}
-    if is_figure:
+    pays_figure_pptx = _pays_format_neutral_figure_pptx(
+        kind=kind, suffix=suffix, title=title, path=_path_of(artifact)
+    )
+    if is_figure or pays_figure_pptx:
         names.add("artifact.figure")
         names.add("artifact")
     if _is_writing_artifact(artifact, kind=kind, suffix=suffix, mime=mime):
@@ -634,7 +701,7 @@ def _outputs_satisfied_by(artifact: Any) -> set[str]:
     if is_slides:
         names.add("artifact.slides")
         names.add("artifact")
-        if kind in _FIGURE_KINDS or (
+        if kind in _FIGURE_KINDS or pays_figure_pptx or (
             not kind and ("livefigure" in title or "editable" in title)
         ):
             names.add("artifact.pptx")
@@ -702,6 +769,24 @@ def _path_is_utf8_text(artifact: Any) -> bool:
     return True
 
 
+def _pays_format_neutral_figure_pptx(
+    *,
+    kind: str,
+    suffix: str,
+    title: str,
+    path: str,
+) -> bool:
+    """A single-slide figure PPTX pays ``artifact.figure``; a talk deck does not."""
+    if suffix not in _SLIDE_SUFFIXES:
+        return False
+    if kind in {"slides"}:
+        return False
+    if kind in _FIGURE_KINDS:
+        return True
+    hay = f"{title} {path}".lower()
+    return "livefigure" in hay
+
+
 def _pays_named_review(artifact: Any, *, kind: str, title: str) -> bool:
     """``review`` is a paper-review deliverable, not every Markdown write.
 
@@ -754,6 +839,8 @@ __all__ = [
     "bind_contract_outputs",
     "incoming_plan_is_retrieve_only",
     "utterance_asks_only_source_ids",
+    "utterance_asks_prior_task_status",
+    "utterance_asks_written_survey",
     "infer_analysis_report_outputs",
     "infer_figure_and_paper_outputs",
     "infer_slide_outputs",

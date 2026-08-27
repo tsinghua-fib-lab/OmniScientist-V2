@@ -174,6 +174,12 @@ class IntentPlan:
         compare=False,
     )
     missing_inputs: list[dict[str, Any]] = field(default_factory=list)
+    # This-turn owner constraints. Empty lists omit from the hash/payload so
+    # older persisted plans stay stable. Admission reads the same names off
+    # the exec context after the orchestrator copies them.
+    unavailable_services: list[str] = field(default_factory=list)
+    unavailable_skills: list[str] = field(default_factory=list)
+    unpayable_outputs: list[dict[str, Any]] = field(default_factory=list)
     verification_plan: VerificationPlan = field(default_factory=VerificationPlan)
     validation_warnings: list[str] = field(default_factory=list)
     degraded_warnings: list[str] = field(default_factory=list)
@@ -228,6 +234,12 @@ class IntentPlan:
             "validation_warnings": list(self.validation_warnings),
             "degraded_warnings": list(self.degraded_warnings),
         }
+        if self.unavailable_services:
+            payload["unavailable_services"] = list(self.unavailable_services)
+        if self.unavailable_skills:
+            payload["unavailable_skills"] = list(self.unavailable_skills)
+        if self.unpayable_outputs:
+            payload["unpayable_outputs"] = [dict(item) for item in self.unpayable_outputs]
         if self.user_notices:
             payload["user_notices"] = list(self.user_notices)
         if self.twin_task_id:
@@ -346,6 +358,21 @@ class IntentPlan:
             ],
             _resolver_evidence_present="resolver_evidence" in payload,
             missing_inputs=[item for item in payload.get("missing_inputs") or [] if isinstance(item, dict)],
+            unavailable_services=[
+                str(item).strip()
+                for item in payload.get("unavailable_services") or []
+                if str(item).strip()
+            ],
+            unavailable_skills=[
+                str(item).strip()
+                for item in payload.get("unavailable_skills") or []
+                if str(item).strip()
+            ],
+            unpayable_outputs=[
+                dict(item)
+                for item in payload.get("unpayable_outputs") or []
+                if isinstance(item, dict)
+            ],
             verification_plan=VerificationPlan(**_known_fields(VerificationPlan, verify)),
             validation_warnings=[str(item) for item in payload.get("validation_warnings") or []],
             degraded_warnings=[str(item) for item in payload.get("degraded_warnings") or []],

@@ -1,10 +1,13 @@
-"""Trusted compute I/O: private scratch/outbox, host promotion into ArtifactStore.
+"""Trusted compute I/O: private scratch/outbox, host publish into the task bundle.
 
 Codex ``WorkspaceWrite`` is cwd + configured roots + a host temp — never
 ``CODEX_HOME``. Omni keeps a separate ArtifactStore, so a compute process
-writes deliverables to a host-owned outbox; the host then copies them into
-the store and registers the durable copy. Scratch is per-task, mode ``0700``,
-and refuses symlinks so a planted link cannot reopen the control plane.
+writes deliverables to a host-owned outbox (``$OMNI_OUTPUT_DIR``); the host
+then copies them into the user-facing task folder
+(``outputs/<title>_<task8>/`` when a launch ``--out`` is set) and registers
+that copy. Scratch is per-task, mode ``0700``, and refuses symlinks so a
+planted link cannot reopen the control plane. ``~/.omni/.../artifacts/promoted``
+is not a user-visible location.
 """
 
 from __future__ import annotations
@@ -321,15 +324,73 @@ def _dedupe_roots(roots: Sequence[str]) -> list[str]:
     return out
 
 
-def _inside_project(path: Path, paths: Any) -> bool:
-    project = getattr(paths, "project_dir", None)
-    if project is None:
-        return False
+def _artifact_inner(store: Any) -> Any:
+    return getattr(store, "_store", store)
+
+
+def user_facing_output_roots(ctx: Any) -> list[Path]:
+    """Launch-directory deliverable roots. Never ``$OMNI_HOME`` or ``artifacts/``."""
+    roots: list[Path] = []
+    store = getattr(ctx, "artifacts", None)
+    inner = _artifact_inner(store)
+    mirror = getattr(store, "mirror_dir", None) or getattr(inner, "mirror_dir", None)
+    if mirror is not None:
+        roots.append(Path(mirror))
+    for scope in getattr(inner, "_task_scopes", {}) or {}.values():
+        for attr in ("bundle_dir", "output_root"):
+            raw = getattr(scope, attr, None)
+            if raw is not None:
+                roots.append(Path(raw))
+    resolved: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        try:
+            value = root.expanduser().resolve()
+        except OSError:
+            continue
+        key = str(value)
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved.append(value)
+    return resolved
+
+
+def _inside_control_store(path: Path, ctx: Any) -> bool:
     try:
-        path.resolve().relative_to(Path(project).resolve())
-        return True
-    except (ValueError, OSError):
+        resolved = path.resolve()
+    except OSError:
         return False
+    artifacts = getattr(getattr(ctx, "paths", None), "artifacts_dir", None)
+    if artifacts is not None:
+        try:
+            resolved.relative_to(Path(artifacts).resolve())
+            return True
+        except (ValueError, OSError):
+            pass
+    return sits_in_any_control_store(resolved)
+
+
+def _inside_user_facing_root(ctx: Any, path: Path) -> bool:
+    """True when *path* already lives in the user-facing task folder.
+
+    ``project_dir`` is the control-plane store (``~/.omni/workspaces/...``),
+    the Codex ``$CODEX_HOME`` analogue — not the user's checkout. A file under
+    ``artifacts/promoted/`` is therefore *not* a published deliverable.
+    """
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    if _inside_control_store(resolved, ctx):
+        return False
+    for root in user_facing_output_roots(ctx):
+        try:
+            resolved.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
 
 
 # Bulk harvest of $OMNI_OUTPUT_DIR. A model that dumps a venv into the outbox
@@ -424,25 +485,77 @@ def harvestable_output(path: Path, root: Path) -> bool:
     return resolved.suffix.lower() in _HARVEST_SUFFIXES
 
 
-def _promoted_store_path(ctx: Any, outbox: Path, src: Path) -> Path:
-    """Stable host-owned copy of an outbox file, inside the project store."""
-    rel = src.resolve().relative_to(outbox)
-    artifacts = getattr(ctx.paths, "artifacts_dir", None)
-    if artifacts is None:
-        raise RuntimeError("no artifacts_dir to promote into")
-    return Path(artifacts) / "promoted" / _task_key(ctx) / rel
+async def _task_bundle_dest(ctx: Any, src: Path, kind: str) -> Path | None:
+    """Stable destination in the current task folder, preserving the filename."""
+    store = getattr(ctx, "artifacts", None)
+    locator = getattr(store, "task_output_path", None)
+    if not callable(locator):
+        return None
+    try:
+        dest = await locator(src.name, kind=kind)
+    except TypeError:
+        dest = await locator(src.name, task_id=str(ctx.task_id), kind=kind)
+    return Path(dest) if dest is not None else None
+
+
+async def _write_task_manifest(ctx: Any, kind: str) -> None:
+    inner = _artifact_inner(getattr(ctx, "artifacts", None))
+    writer = getattr(inner, "_write_manifest", None)
+    scope_fn = getattr(inner, "_task_scope", None)
+    if not callable(writer) or not callable(scope_fn):
+        return
+    try:
+        scope = await scope_fn(str(ctx.task_id), kind, create=False)
+    except TypeError:
+        return
+    if scope is not None:
+        await writer(str(ctx.task_id), scope)
+
+
+async def _publish_outbox_file(ctx: Any, src: Path, kind: str, mime: str) -> None:
+    """Copy an outbox file into the user-facing task bundle and register it.
+
+    Codex imagegen: a project-referenced asset must not remain only under
+    ``$CODEX_HOME``. Omni's analogue is ``outputs/<title>_<task8>/`` (or the
+    store-local kind folder when no launch ``--out`` is set). ``artifacts/promoted``
+    is never the registered location.
+    """
+    from omni.skills_runtime.builtin_tools.fs import register_written_file
+
+    store = getattr(ctx, "artifacts", None)
+    if _inside_user_facing_root(ctx, src):
+        await register_written_file(ctx, src)
+        return
+    dest = await _task_bundle_dest(ctx, src, kind)
+    if dest is None:
+        await store.put_file(
+            src,
+            kind=kind,
+            title=src.stem,
+            mime=mime,
+            session_id=str(getattr(ctx, "session_id", "") or ""),
+            task_id=ctx.task_id,
+            copy=True,
+        )
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.resolve() != src.resolve():
+        shutil.copy2(src, dest)
+    await register_written_file(ctx, dest)
+    await _write_task_manifest(ctx, kind)
 
 
 async def register_output_dir(ctx: Any, directory: Path | None = None) -> int:
-    """Promote outbox files into the project store, then register that copy.
+    """Publish outbox files into the task bundle, then register that copy.
 
-    Sandboxed processes write outside the store. The host copies each file to
-    a stable path under ``artifacts/promoted/<task>/`` and registers that
-    durable copy, so ``artifact://`` survives outbox cleanup and a second
-    harvest does not create a new UUID object. ``put_file`` is the fallback
-    when the store copy would still sit outside the project.
+    Sandboxed processes write outside the store. The host copies each
+    harvestable file into ``outputs/<title>_<task8>/`` (when a launch output
+    root is set) under a stable filename so ``artifact://`` survives outbox
+    cleanup and a second harvest does not create a new UUID object. Control
+    store paths (``~/.omni/.../artifacts/promoted``) are never the published
+    location.
     """
-    from omni.skills_runtime.builtin_tools.fs import document_kind_for, register_written_file
+    from omni.skills_runtime.builtin_tools.fs import document_kind_for
 
     store = getattr(ctx, "artifacts", None)
     if store is None or not str(getattr(ctx, "task_id", "") or ""):
@@ -456,24 +569,7 @@ async def register_output_dir(ctx: Any, directory: Path | None = None) -> int:
             continue
         kind, mime = document_kind_for(path)
         try:
-            if _inside_project(path, ctx.paths):
-                await register_written_file(ctx, path)
-            else:
-                dest = _promoted_store_path(ctx, root, path)
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                if dest.resolve() != path.resolve():
-                    shutil.copy2(path, dest)
-                if _inside_project(dest, ctx.paths):
-                    await register_written_file(ctx, dest)
-                else:
-                    await store.put_file(
-                        path,
-                        kind=kind,
-                        title=path.stem,
-                        mime=mime,
-                        session_id=str(getattr(ctx, "session_id", "") or ""),
-                        task_id=ctx.task_id,
-                    )
+            await _publish_outbox_file(ctx, path, kind, mime)
             count += 1
         except Exception:  # noqa: BLE001 - inventory is not worth failing a good write over
             logger.debug("artifact.promote_failed path=%s", path, exc_info=True)
@@ -497,4 +593,5 @@ __all__ = [
     "input_write_roots",
     "kernel_write_roots",
     "register_output_dir",
+    "user_facing_output_roots",
 ]

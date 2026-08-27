@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import mimetypes
+import os
 import re
 import sys
 import uuid
@@ -212,12 +213,62 @@ def _redact_authorization(message: str) -> str:
     )
 
 
+def _try_dir(raw: Any) -> Path | None:
+    if raw in (None, ""):
+        return None
+    try:
+        return Path(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _under_artifacts_dir(path: Path, ctx: Any) -> bool:
+    artifacts = getattr(getattr(ctx, "paths", None), "artifacts_dir", None)
+    if artifacts is None:
+        return False
+    try:
+        path.expanduser().resolve().relative_to(Path(artifacts).resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def _host_run_root(ctx: Any) -> Path | None:
+    """Sandbox-writable scratch the host already granted. Never the control store.
+
+    Codex WorkspaceWrite is cwd + extra roots + TMPDIR — not ``$CODEX_HOME``.
+    Omni's ``artifacts_dir`` sits inside ``$OMNI_HOME``; a sandboxed child
+    cannot write there. Prefer ``ctx.scratch_dir`` (``$TMPDIR``) so generated
+    intermediates are not harvested from the outbox as user deliverables.
+    """
+    if ctx is None:
+        return None
+    for attr in ("scratch_dir", "output_dir"):
+        try:
+            raw = getattr(ctx, attr, None)
+        except Exception:  # noqa: BLE001 - missing host I/O must fall through
+            continue
+        path = _try_dir(raw)
+        if path is None or _under_artifacts_dir(path, ctx):
+            continue
+        return path
+    return None
+
+
+def _env_run_root() -> Path | None:
+    for key in ("TMPDIR", "TMP", "TEMP"):
+        path = _try_dir((os.environ.get(key) or "").strip())
+        if path is not None:
+            return path
+    return None
+
+
 def _resolve_output_dir(ctx: Any, input_data: dict[str, Any]) -> Path:
-    del input_data  # Omni outputs are always constrained to its artifact workspace.
-    if ctx is not None and getattr(ctx, "paths", None) is not None:
-        path = Path(ctx.paths.artifacts_dir) / "livefigure-runs" / uuid.uuid4().hex
-    else:
-        path = Path.cwd() / "livefigure-output" / uuid.uuid4().hex
+    del input_data  # caller-supplied output_dir is not trusted
+    root = _host_run_root(ctx) or _env_run_root()
+    if root is None:
+        root = Path.cwd() / "livefigure-output"
+    path = Path(root) / "livefigure-runs" / uuid.uuid4().hex
     path.mkdir(parents=True, exist_ok=True)
     return path
 

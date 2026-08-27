@@ -459,4 +459,13 @@ def _build_markdown_report(result: dict) -> str:
             "",
         ]
 
+    # Cite the literature the idea was grounded in. Sources live at the top level
+    # via _portable_provenance and, before that, in steps.search.papers; prefer
+    # whichever is populated so the citation list survives a partial run.
+    raw_sources = result.get("sources")
+    reference_papers = raw_sources if isinstance(raw_sources, list) and raw_sources else search.get("papers")
+    lines += _core.build_reference_lines(
+        reference_papers if isinstance(reference_papers, list) else []
+    )
+
     return "\n".join(lines)

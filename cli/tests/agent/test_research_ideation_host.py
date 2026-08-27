@@ -200,7 +200,7 @@ def test_empty_literature_continues_with_llm_only_ideation(
     assert result["steps"]["search"]["paper_count"] == 0
     assert result["final_idea"]["title"] == "Fallback Idea"
     assert "Continuing with LLM-only reasoning" in result["warning"]
-    assert calls == {"paper_limit": 10, "n_ideas": 2}
+    assert calls == {"paper_limit": core.DEFAULT_PAPER_LIMIT, "n_ideas": 2}
     assert result["sources"] == []
     assert result["research"] == {"source_ids": [], "run_id": ""}
     assert result["run_id"] == ""
@@ -236,8 +236,11 @@ def test_search_isolates_query_failures_and_caps_unique_papers(
 
     result = core.search_and_extract("wide topic", llm=SearchLLM())
 
-    assert search_calls == [("broken query", 10), ("working query", 10)]
-    assert len(result["papers"]) == 50
+    assert search_calls == [
+        ("broken query", core.DEFAULT_PAPER_LIMIT),
+        ("working query", core.DEFAULT_PAPER_LIMIT),
+    ]
+    assert len(result["papers"]) == core.MAX_TOTAL_PAPERS
     assert result["search_failures"] == [
         {
             "query": "broken query",
@@ -597,6 +600,36 @@ def test_markdown_report_normalizes_non_string_model_fields() -> None:
     assert "Core concepts: retrieval, 456" in report
     assert "Application domains: 789" in report
     assert "### Gap 1\n123\n- Rationale: ['paper-a']" in report
+    assert "## References" not in report
+
+
+def test_markdown_report_appends_references_from_sources() -> None:
+    engine_module = _load_module(
+        "engine.py", "research_ideation_report_references_engine"
+    )
+
+    report = engine_module._build_markdown_report(
+        {
+            "research_question": "latent steering",
+            "steps": {"search": {"papers": []}},
+            "sources": [
+                {
+                    "title": "Inference-Time Intervention",
+                    "authors": ["Kevin Li", "Ada Researcher"],
+                    "year": 2023,
+                    "venue": "NeurIPS",
+                    "doi": "10.1000/iti",
+                }
+            ],
+            "final_idea": {"title": "Steer agents in latent space"},
+        }
+    )
+
+    assert "## References" in report
+    assert (
+        "1. Inference-Time Intervention. Kevin Li et al. 2023. NeurIPS. "
+        "https://doi.org/10.1000/iti"
+    ) in report
 
 
 @pytest.mark.asyncio

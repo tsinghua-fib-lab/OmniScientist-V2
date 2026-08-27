@@ -4,6 +4,9 @@ from __future__ import annotations
 
 CAPABILITY_LITERATURE_SEARCH = "literature.search"
 CAPABILITY_GROUNDED_QA = "qa.grounded"
+# Format-neutral figure object. Default producer is scientific-figure
+# (SVG/PNG). A livefigure PPTX can also pay it. Only ``figure.editable.pptx``
+# requires the editable single-slide PPTX.
 CAPABILITY_FIGURE = "artifact.figure"
 CAPABILITY_EDITABLE_PPTX_FIGURE = "figure.editable.pptx"
 CAPABILITY_SLIDES_GENERATE = "slides.generate"

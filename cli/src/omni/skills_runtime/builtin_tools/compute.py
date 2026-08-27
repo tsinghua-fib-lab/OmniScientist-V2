@@ -167,7 +167,8 @@ def build_compute_tools(ctx: ExecContext) -> list[Tool]:
                 "Run a command through a compute backend. Local execution is the default; configured "
                 "Docker, SSH, Slurm, or Modal backends may handle long or compute-heavy jobs. "
                 f"On the local backend, write durable CSV/JSON/PNG/SVG to {durable_output_dir(ctx)} "
-                f"(${OMNI_OUTPUT_ENV}); that directory is registered as this task's artifacts."
+                f"(${OMNI_OUTPUT_ENV}); that directory is staging. The host publishes "
+                "harvestable files into this task's outputs/<title>_<task8>/ folder."
             ), {
                 "type": "object",
                 "properties": {

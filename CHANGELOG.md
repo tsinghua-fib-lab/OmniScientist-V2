@@ -4,7 +4,39 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) and semanti
 
 ## Unreleased
 
+### Fixed
+
+- LiveFigure generated-code cwd no longer sits under
+  ``~/.omni/.../artifacts/livefigure-runs`` (the OS sandbox refuses writes
+  there). The engine uses host ``$TMPDIR`` / ``ctx.scratch_dir``, then
+  ``put_file`` into ``outputs/<title>_<task8>/``.
+- ``$OMNI_OUTPUT_DIR`` harvest publishes into the current task bundle instead
+  of registering ``artifacts/promoted/<task>/`` as the user-visible path
+  (Codex imagegen: never leave a project-referenced asset only under
+  ``$CODEX_HOME``).
+
 ### Changed
+
+- The ReAct turn now treats a bound file with no admitted producer as
+  unpayable: ask when that is the only remaining file debt, otherwise keep
+  executing work that still has a consume path. A user-forbidden host
+  service or skill is a this-turn admission fact. Lookup fuse counts only
+  ledger tools (``get_task`` / ``memory_search`` / ``open_artifact``).
+  ``bash`` / ``read_file`` / ``git`` of this workspace are progress, not
+  inspect. A code review that names 对标 as a quality bar does not owe
+  ``draft.manuscript``. ``task.inspect`` compiles only when the user asked
+  for a prior task's status or location. Bash refuses writes into frozen
+  Omni control stores with the same host-owned observation ``write_file``
+  already uses.
+
+- Figure routing is Codex-shaped: host facts only. An unspecified
+  ``artifact.figure`` resolves to ``scientific-figure`` (SVG/PNG) whether
+  or not a VLM is configured. ``livefigure`` runs when the user names it
+  (``$livefigure``) or the plan binds ``figure.editable.pptx``. Host no
+  longer classifies ``one slide`` / Graphviz / ``.dot`` in prose, no
+  longer retries a sibling after an engine failure, and no longer
+  injects a leftover ``.dot`` unless ``scientific-figure`` was explicit.
+  Named livefigure without VLM stays unpayable / ``needs_input``.
 
 - Walkthrough catalog launches use ``--out outputs_walkthrough`` (gitignored)
   instead of ``--out .``, so validation deliverables do not appear as
@@ -46,9 +78,6 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) and semanti
   embeddings / VLM / S2 when they are unset. A VLM site origin or ``/v1``
   base URL is expanded to ``chat/completions`` (Claude Code
   ``ANTHROPIC_BASE_URL`` style); a complete path is left unchanged.
-
-### Fixed
-
 - A failed ``livefigure`` / ``paper-review`` no longer lets a
   ``write_file`` Markdown or harvested deck settle the parent Task as
   ``succeeded``. ``review`` is paid only by ``kind=review``; ``artifact.pptx``

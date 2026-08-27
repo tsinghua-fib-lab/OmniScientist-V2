@@ -10,11 +10,13 @@ A named-project (``-P``) turn used to have three disconnected envelopes:
 
 Codex ``WorkspaceWrite`` is cwd + configured roots + a host temp. Omni keeps
 the ArtifactStore: the same permission model, minus whole ``/tmp``, plus a
-host-owned ``$OMNI_OUTPUT_DIR`` that the host promotes with ``put_file``.
+host-owned ``$OMNI_OUTPUT_DIR`` that the host publishes into the task bundle
+with a stable filename (never ``artifacts/promoted/`` as the user path).
 """
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -57,6 +59,8 @@ async def _named_project_ctx(
     *,
     task_id: str,
     os_sandbox: str = "off",
+    mirror_dir: Path | None = None,
+    title: str = "handoff",
 ) -> ExecContext:
     home = tmp_path / "omni-home"
     project_dir = home / "projects" / "demo"
@@ -79,7 +83,7 @@ async def _named_project_ctx(
     db = get_database(paths.project_db)
     await db.init()
     async with db.session() as session:
-        session.add(TaskORM(id=task_id, status="running", kind="turn", title="handoff"))
+        session.add(TaskORM(id=task_id, status="running", kind="turn", title=title))
         await session.commit()
     return ExecContext(
         settings=settings,
@@ -90,7 +94,7 @@ async def _named_project_ctx(
         task_id=task_id,
         working_dir=work,
         db=db,
-        artifacts=ArtifactStore(paths, db),
+        artifacts=ArtifactStore(paths, db, mirror_dir=mirror_dir),
     )
 
 
@@ -205,13 +209,13 @@ async def test_bash_output_dir_persists_registers_and_is_readable(tmp_path: Path
     for row in promoted:
         resolved = await ctx.artifacts.resolve_path(row.uri)
         assert resolved is not None and resolved.is_file()
-    import shutil
 
     shutil.rmtree(output)
     for row in promoted:
         resolved = await ctx.artifacts.resolve_path(row.uri)
         assert resolved is not None and resolved.is_file()
         assert output.resolve() not in resolved.parents
+        assert "promoted" not in Path(resolved).parts
 
 
 @pytest.mark.asyncio
@@ -274,3 +278,52 @@ async def test_os_sandbox_allows_working_dir_and_output_dir(tmp_path: Path) -> N
     denied = await bash({"command": f'echo pwned > "{outside}" && echo ESCAPED'})
     assert "ESCAPED" not in _obs(denied)
     assert not outside.exists()
+
+
+@pytest.mark.asyncio
+async def test_bash_harvest_lands_in_task_bundle_not_promoted(tmp_path: Path) -> None:
+    """A-OUT-05: harvested files publish under --out/<title>_<task8>/, not promoted/."""
+    out = tmp_path / "outputs"
+    task_id = "e" * 32
+    ctx = await _named_project_ctx(
+        tmp_path,
+        task_id=task_id,
+        os_sandbox="off",
+        mirror_dir=out,
+        title="RAG harvest publish",
+    )
+    from omni.skills_runtime.builtin_tools.shell import posix_shell_executable
+
+    if posix_shell_executable() is None:
+        pytest.skip("bash tool needs a POSIX shell for $OMNI_OUTPUT_DIR expansion")
+    bash = build_shell_tools(ctx)[0].handler
+    output = durable_output_dir(ctx)
+    result = await bash(
+        {
+            "command": (
+                'printf "a,1\\n" > "$OMNI_OUTPUT_DIR/results.csv" && '
+                'printf "<svg/>" > "$OMNI_OUTPUT_DIR/plot.svg" && '
+                "printf PK > \"$OMNI_OUTPUT_DIR/RAG-Pipeline-Architecture-Editable.pptx\" && "
+                "echo WROTE"
+            )
+        }
+    )
+    assert "WROTE" in _obs(result)
+    rows = await ctx.artifacts.list_by_task(ctx.task_id)
+    names = {Path(row.rel_path).name for row in rows if row.rel_path}
+    assert {"results.csv", "plot.svg", "RAG-Pipeline-Architecture-Editable.pptx"} <= names
+    bundle = None
+    for row in rows:
+        resolved = await ctx.artifacts.resolve_path(row.uri)
+        assert resolved is not None and resolved.is_file()
+        assert resolved.is_relative_to(out)
+        assert "promoted" not in resolved.parts
+        assert output.resolve() not in resolved.parents
+        bundle = resolved.parent
+    assert bundle is not None
+    assert bundle.name.endswith(f"_{task_id[:8]}")
+    shutil.rmtree(output)
+    for row in rows:
+        resolved = await ctx.artifacts.resolve_path(row.uri)
+        assert resolved is not None and resolved.is_file()
+        assert resolved.is_relative_to(out)

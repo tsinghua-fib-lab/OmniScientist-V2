@@ -1229,8 +1229,8 @@ class ReActLoopAgent:
                         user_message=user_message,
                         reason="no_progress",
                         salvage=(
-                            "Lookup tools do not produce this turn's required outputs; "
-                            "do the scientific work instead."
+                            "Memory and task lookup do not produce this turn's "
+                            "required outputs; do the scientific work instead."
                         ),
                         budget=budget,
                         transcript_repairs=transcript_repairs,

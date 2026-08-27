@@ -60,7 +60,6 @@ def test_new_artifact_capabilities_participate_in_workflows_and_deliverables() -
 @pytest.mark.parametrize(
     ("capability", "expected_skill"),
     [
-        ("artifact.figure", "scientific-figure"),
         ("figure.editable.pptx", "livefigure"),
         ("slides.generate", "research-pptx"),
         ("research.ideation", "research-ideation"),
@@ -75,6 +74,10 @@ def test_model_capability_routes_to_the_specialized_provider(
 ) -> None:
     registry = SkillRegistry(load_settings())
     registry.build_index()
+    if capability == "figure.editable.pptx":
+        registry.use_admission_services(
+            {"vlm": SimpleNamespace(available=True, setup_command="omni config vlm")}
+        )
     planner = IntentPlanner(registry)
     plan = planner.plan_from_proposal(
         "Create the requested research artifact about RAG factuality.",
@@ -167,7 +170,8 @@ def test_contributed_manifests_declare_omni_instruction_contracts() -> None:
     livefigure = manifests["livefigure"]["metadata"]["helixforge"]
     assert livefigure["input_schema"]["properties"]["input"]["x-omni"]["semantic_role"] == "instruction"
     assert livefigure["workflow"]["failure_policy"] == "continue_with_partial"
-    assert livefigure["deliverables"] == ["artifact.pptx"]
+    assert "artifact.figure" in livefigure["capabilities"]
+    assert livefigure["deliverables"] == ["artifact.figure", "artifact.pptx"]
 
     ideation = manifests["research-ideation"]["metadata"]["helixforge"]
     assert ideation["input_schema"]["properties"]["input"]["x-omni"]["semantic_role"] == "instruction"
@@ -451,10 +455,34 @@ def test_livefigure_omni_engine_ignores_untrusted_output_dir(tmp_path: Path) -> 
         artifacts_dir = tmp_path / "artifacts"
 
     class Context:
+        scratch_dir = tmp_path / "exec"
+        output_dir = tmp_path / "outbox"
         paths = Paths()
 
     resolved = module._resolve_output_dir(Context(), {"output_dir": "/tmp/outside"})
-    assert resolved.is_relative_to(Paths.artifacts_dir)
+    assert resolved.is_relative_to(Context.scratch_dir)
+    assert resolved.as_posix().endswith(f"livefigure-runs/{resolved.name}")
+    assert not resolved.is_relative_to(Paths.artifacts_dir)
+    assert "/tmp/outside" not in resolved.as_posix()
+
+
+def test_livefigure_omni_engine_does_not_use_artifacts_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Control-store artifacts_dir is never a generated-code cwd (sandbox would deny it)."""
+    module = _load_module("livefigure", "engine.py", "contributed_livefigure_engine")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "tmp"))
+
+    class Paths:
+        artifacts_dir = tmp_path / "artifacts"
+
+    class Context:
+        paths = Paths()
+
+    resolved = module._resolve_output_dir(Context(), {})
+    assert not resolved.is_relative_to(Paths.artifacts_dir)
+    assert resolved.is_relative_to(tmp_path / "tmp")
 
 
 @pytest.mark.asyncio

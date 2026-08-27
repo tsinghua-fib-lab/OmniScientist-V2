@@ -103,15 +103,16 @@ needs `{workflow_run_id} {step_id}`; a lone task id exits 2.
 | Retrieve-only | A-LIT-01–04, X8-02 | Host-projected `source_id` list, one id per line. Not a title `summary`. `rows` is per connector; the deduped union may exceed `rows`. No second `[Background skill execution completed]` line. A spilled `source_ids` path must be readable; a jail denial is `rejected` / blocked, not `succeeded`. | `outputs` / `required_outputs` include `sources`. Any persisted `source_id` pays that debt (existence-only). `omni why` shows route + settlement. |
 | Survey / related work | A-SUR-01–02 | A manuscript / `draft.section`, not a title list. Synthesis labels conclusions **grounded / inferred / insufficient evidence** when it writes them. | Verification includes `draft.section`. |
 | Full paper | P-01 | `draft.manuscript` is a full paper, not a section and not a title list. Do not use the ledger token as a `write_file` path. | Distinct from `draft.section`. |
-| User-facing files | P-01, A-FIG, A-SLD, A-POS, A-LF, A-OUT | Deliverables land under `<out>/<title>_<task8>/` (for example `outputs/RAG-system-survey_67f26c86/`). Filenames stay `<slug>-<task8>-<art8>.ext`. Product default `--out` is `outputs/`. This catalog launches with `--out outputs_walkthrough` so validation files stay out of `git status` and out of real `outputs/`. Do not use `--out .` from a checkout. Do not present `artifact://` as the path the user should open. `research-pptx` binds sources by a durable handle, not a missing raw file. A bash dump of `.venv` / LICENSE into `$OMNI_OUTPUT_DIR` is not a deliverable inventory. | Recent contract: hide `artifact://` from the reader. Harvest is suffix-allowlisted. Walkthrough isolation is A-OUT-03 / A-OUT-04. |
+| User-facing files | P-01, A-FIG, A-SLD, A-POS, A-LF, A-OUT | Deliverables land under `<out>/<title>_<task8>/` (for example `outputs/RAG-system-survey_67f26c86/`). Filenames stay `<slug>-<task8>-<art8>.ext`. Product default `--out` is `outputs/`. This catalog launches with `--out outputs_walkthrough` so validation files stay out of `git status` and out of real `outputs/`. Do not use `--out .` from a checkout. Do not present `artifact://` or `~/.omni/.../artifacts/promoted/` as the path the user should open. `research-pptx` binds sources by a durable handle, not a missing raw file. A bash dump of `.venv` / LICENSE into `$OMNI_OUTPUT_DIR` is not a deliverable inventory. | Recent contract: hide `artifact://` from the reader. Harvest is suffix-allowlisted and republished into the task bundle (A-OUT-05). Walkthrough isolation is A-OUT-03 / A-OUT-04. |
 | Corpus QA | A-COR-01–02, C-LITC-01 | `omni lit` / `search_corpus` with inline `[S#]`. Empty library says so; no invented DOI. `omni lit` is the corpus, not `source list`. | `[S#]` maps to a real in-library chunk. |
 | arXiv fetch | A-ARX-01–02 | Metadata, abstract, `pdf_url`, and `source_id`. Foreground body, not `Created execution`. A local PDF is not required by the contract. | `source_id` is on this Task. |
 | Paper review | A-REV-01–05 | Review body in the turn. Missing file → `needs_input`. An arXiv id is fetched (or `needs_input` if the PDF cannot be materialized). A DOI is `needs_input`, not `Paper input does not exist`. With VLM: visual crops are interpreted. Without VLM: text review continues, visual is partial, `omni config vlm` and `skip_visual=true` are offered. | Not a receipt. Do not call visual review `succeeded` when the code is `vlm_not_configured`. A `write_file` Markdown leftover does not pay `review` after `paper-review` failed. |
 | Response letter | A-RR-01–02 | `response_letter` artifact. Does not restart retrieval. | |
-| Figure | A-FIG-01–02, P-01 | PNG/SVG (`scientific-figure`). Not a deck. A sidecar `.dot` / `.json` does not satisfy `artifact.figure`. The RAG architecture figure names **query, retriever, reranker, and LLM**. `scientific-figure` does not need a VLM. | |
-| LiveFigure (VLM on) | A-LF-01–02, A-LF-04 | One editable PPTX slide. Provider is `livefigure`. File under `outputs/<title>_<task8>/`. No `vlm_not_configured`. No API key in output. | Debt is `figure.editable.pptx` / `artifact.pptx`. Not `research-pptx`. A harvested deck or `write_file` leftover does not pay that debt after `livefigure` failed. |
-| LiveFigure (VLM off) | A-LF-03 | `vlm_not_configured`. `needs_input` or execution "needs configuration". Next action is `omni config vlm`. Engine is not loaded. No silent `scientific-figure` swap. | Do not call this `succeeded`. |
-| Slides | A-SLD-01–02 | Multi-slide `.pptx` (`research-pptx`). Not a one-slide figure. Text-domain critique; no VLM required. | Debt is `artifact.slides`. |
+| Figure (format-neutral) | A-FIG-01, A-FIG-03, P-01, E-01 | Unspecified "draw a figure" / architecture / flowchart / schematic. Provider `scientific-figure` (PNG/SVG) whether or not a VLM is configured. Four boxes: **query, retriever, reranker, LLM**. Not a `livefigure` PPTX and not a multi-slide deck. A sidecar `.dot` / `.json` does not satisfy `artifact.figure`. Do not invent DOT first. Do not upgrade to PPTX because a VLM is configured. | `scientific-figure` pays `artifact.figure`. A `$livefigure` / `figure.editable.pptx` PPTX can also pay it after that skill itself succeeded. |
+| Named Graphviz figure | A-FIG-04, A-FIG-05 | Model follows the `scientific-figure` description when the utterance names Graphviz / `.dot`. Host `resolve_capability` does not parse those words — default is already `scientific-figure`. A leftover invented `.dot` on an unspecified figure is not passed through. An explicit `$scientific-figure` path may pass a task-owned `.dot`. | Host fill stays on the bound producer. |
+| LiveFigure (VLM on) | A-LF-01–02, A-LF-04 | Only `$livefigure` or a user-asked editable / single-slide PPTX (`figure.editable.pptx`). Provider is `livefigure`. File under `outputs/<title>_<task8>/`. No `vlm_not_configured`. No API key in output. VLM is the start condition, not the default for "draw a figure". | Debt is `figure.editable.pptx` / `artifact.pptx`. Not `research-pptx`. A harvested deck or `write_file` leftover does not pay that debt after `livefigure` failed. |
+| LiveFigure (VLM off) | A-LF-03 | `$livefigure` / planner `figure.editable.pptx`. `vlm_not_configured`. `needs_input` or execution "needs configuration". Next action is `omni config vlm`. Engine is not loaded. No silent `scientific-figure` swap. Distinct from A-FIG-01/03 (unspecified figure uses `scientific-figure` and is not `needs_input`). | Do not call this `succeeded`. |
+| Slides | A-SLD-01–02 | Multi-slide talk / defense / group meeting (`.pptx`, `research-pptx`). Not a one-slide figure. Text-domain critique; no VLM required. | Debt is `artifact.slides`. |
 | Poster (VLM on) | A-POS-01–02 | Distinct from slides. `visual_review_mode=vlm` (or the visual loop actually ran). | Debt is `artifact.poster`. |
 | Poster (VLM off) | A-POS-03 | Poster may still land (`deterministic-only`). Visual quality is pending, not VLM-approved. Missing VLM is not `needs_input`. | Do not claim a VLM reviewed it. |
 | Ideation | A-IDE-01–02 | Testable follow-ups, claims, and risks. Not another paper list. | |
@@ -143,11 +144,13 @@ needs `{workflow_run_id} {step_id}`; a lone task id exits 2.
 | Local corpus QA | A-COR-01, A-COR-02 | model | `omni lit` / `search_corpus` with `[S#]`. Empty library does not invent a DOI. |
 | arXiv fetch | A-ARX-01, A-ARX-02 | network | `$arxiv-fetch` / `paper.fetch.arxiv` returns metadata, abstract, `pdf_url`, and `source_id`. |
 | Paper review | A-REV-01, A-REV-02, A-REV-03, A-REV-04, A-REV-05 | model/network | Body, not a receipt. A-REV-01 is VLM-on visual. A-REV-03 is VLM-off partial. Missing file asks. An arXiv id is not a missing local path. A DOI asks; it is not fetched. |
-| VLM-driven skills | A-LF-01, A-LF-02, A-LF-03, A-LF-04, A-REV-01, A-REV-03, A-REV-04, A-REV-05, A-POS-01, A-POS-03 | model/network | Probe `omni config vlm`. If VLM is on, run both the configured and the unconfigured rows. If VLM is off, run only the unconfigured degrade rows. Identifier and leftover-file honesty rows are VLM-independent. |
+| VLM-driven skills | A-LF-01, A-LF-02, A-LF-03, A-LF-04, A-REV-01, A-REV-03, A-REV-04, A-REV-05, A-POS-01, A-POS-03 | model/network | Probe `omni config vlm`. If VLM is on, run both the configured and the unconfigured rows. If VLM is off, run only the unconfigured degrade rows. Identifier and leftover-file honesty rows are VLM-independent. Ordinary figures (A-FIG-01/03) do not require a VLM. |
 | Review response | A-RR-01, A-RR-02 | model | `review-response` writes a response letter from the prior review. |
-| Scientific figure | A-FIG-01, A-FIG-02 | model | `scientific-figure` then in-place `artifact.revise`. RAG figure names query / retriever / reranker / LLM. Not a deck. |
-| Editable LiveFigure | A-LF-01, A-LF-02, A-LF-03, A-LF-04 | model | VLM-on: one editable PPTX. VLM-off (A-LF-03): `vlm_not_configured`, no silent `scientific-figure` swap. A-LF-04: failed `livefigure` plus a leftover deck does not settle the parent `succeeded`. |
-| Slides | A-SLD-01, A-SLD-02 | model | `research-pptx` / `artifact.slides`. Not a one-slide figure. No VLM required. |
+| Format-neutral architecture figure | A-FIG-01, A-FIG-03 | model | Unspecified "draw a RAG architecture diagram". Provider `scientific-figure` PNG/SVG with or without VLM. Four boxes. Not a `livefigure` PPTX and not a deck. Do not invent DOT first. Not `needs_input` (that is `$livefigure` / `figure.editable.pptx` only). |
+| Named Graphviz figure | A-FIG-04, A-FIG-05 | model/offline | A-FIG-04 is a model case: descriptions send a Graphviz-named request to `scientific-figure`. Host resolve is already `scientific-figure` (admission+priority) and does not parse Graphviz words. A leftover invented `.dot` is not passed on an unspecified figure. An explicit `$scientific-figure` path may pass a task-owned `.dot`. |
+| Figure revise | A-FIG-02, A-FIG-01 | model | `artifact.revise` in place after A-FIG-01, or a full redraw if there is no active figure. Keep the color language. |
+| Editable LiveFigure | A-LF-01, A-LF-02, A-LF-03, A-LF-04 | model | A-LF-01 is `$livefigure`. A-LF-02 is planner `figure.editable.pptx` (editable / PowerPoint, no `$`). VLM-on: one editable PPTX. VLM-off (A-LF-03, `$livefigure`): `vlm_not_configured`, no silent `scientific-figure` swap. A-LF-04: failed `livefigure` plus a leftover deck does not settle the parent `succeeded`. |
+| Slides | A-SLD-01, A-SLD-02 | model | `research-pptx` / `artifact.slides`. Multi-slide talk. Not a one-slide figure. No VLM required. |
 | Poster | A-POS-01, A-POS-02, A-POS-03 | model | VLM-on: visual loop. VLM-off (A-POS-03): `deterministic-only`, poster may still land. |
 | Research ideation | A-IDE-01, A-IDE-02 | model/network | `research-ideation` proposes testable follow-ups. |
 | Explicit `$skill` | A-SKL-01, A-SKL-02 | model/network | `$name` binds that skill. Unknown `$name` falls through to ReAct. |
@@ -191,7 +194,7 @@ needs `{workflow_run_id} {step_id}`; a lone task id exits 2.
 | Memory CLI | C-MEM-01, C-MEM-02, C-MEM-03, C-MEM-04 | offline | `list` / `path` / `pin` / `clear` / `link` / `graph` / `detail` / `edit`. |
 | Task CLI | C-TSK-01, C-TSK-02, C-TSK-03, C-TSK-04, C-TSK-05, C-TSK-06, C-TSK-07, C-TSK-08 | offline/model | Observe, control, then `attach` / `archive` / `drain` help. Do not archive or drain another operator's running task. |
 | Artifacts CLI | C-ART-01, C-ART-02, C-ART-03, C-ART-04 | offline | `preview` / `versions` / `review` / `diff` / `help`. |
-| Outbox harvest | A-OUT-01, A-OUT-02 | offline | `$OMNI_OUTPUT_DIR` harvest skips `.venv` / LICENSE. A harvested deck does not pay `artifact.pptx`. |
+| Outbox harvest | A-OUT-01, A-OUT-02, A-OUT-05 | offline | `$OMNI_OUTPUT_DIR` harvest skips `.venv` / LICENSE. A harvested deck does not pay `artifact.pptx`. Harvested files land in `outputs/<title>_<task8>/`, not `~/.omni/.../artifacts/promoted`. |
 | Walkthrough output isolation | A-OUT-03, A-OUT-04 | offline | Catalog `--out outputs_walkthrough`. Bundles are `outputs_walkthrough/<title>_<task8>/`, not checkout-root `*_xxxxxxxx/`. `git check-ignore` covers that folder. `--out` help names `outputs/` as the product default. |
 | Cite and source | C-CIT-01, C-CIT-02 | offline | `cite list` / `export`, `source list` / `reindex`. |
 | ROM CLI | C-HYP-01, C-HYP-02 | offline | `hypo` / `claim` / `evidence` / `run`. |
@@ -220,9 +223,10 @@ be used at the keyboard; public rows stay English.
 Task `72590550` user input was: prepare RAG survey materials, fetch the
 Attention Is All You Need abstract, generate a scientific architecture figure
 with query / retriever / reranker / LLM, and deliver a paper plus PPT. That
-shape is **P-01**. A run that only calls `find_skill` / `search_corpus` and
-settles `degraded` with `remaining artifact.figure, draft.manuscript,
-artifact.slides` **fails** P-01.
+shape is **P-01**. The figure is format-neutral (`artifact.figure`) and is
+`scientific-figure` PNG/SVG. A run that only calls `find_skill` /
+`search_corpus` and settles `degraded` with `remaining artifact.figure,
+draft.manuscript, artifact.slides` **fails** P-01.
 
 ## Coverage inventory
 
@@ -238,7 +242,7 @@ second cases. Hidden hooks are out.
 | `openalex-search` | A-SKL-01, W-02 |
 | `paper-review` | A-REV-01, A-REV-02, A-REV-03, A-REV-04, A-REV-05, E-02, E-05 |
 | `review-response` | A-RR-01, A-RR-02 |
-| `scientific-figure` | A-FIG-01, A-FIG-02, P-01, E-01 |
+| `scientific-figure` | A-FIG-01, A-FIG-02, A-FIG-03, A-FIG-04, A-FIG-05, P-01, E-01 |
 | `livefigure` | A-LF-01, A-LF-02, A-LF-03, A-LF-04, E-03, E-05 |
 | `research-pptx` | A-SLD-01, A-SLD-02, P-01, P-02, E-02 |
 | `scientific-poster` | A-POS-01, A-POS-02, A-POS-03 |
@@ -285,9 +289,26 @@ second cases. Hidden hooks are out.
 Three built-in skills use a vision model as a driver. `scientific-figure` and
 `research-pptx` do **not**; they stay in the no-VLM path.
 
+Figure and deck skills do not compete for first choice:
+
+- Unspecified "draw a figure" / architecture / flowchart / schematic is
+  `artifact.figure` paid by `scientific-figure` (SVG/PNG). Cheap, embeddable
+  in a paper. Independent of VLM. A-FIG-01 / A-FIG-03 / P-01 / E-01.
+- `livefigure` only when the user names `$livefigure` or the planner binds
+  `figure.editable.pptx` (editable / single-slide PowerPoint). VLM is that
+  skill's start condition, not the default implementation of "draw a figure".
+  A-LF-01 / A-LF-02. Without VLM that path hard-stops (A-LF-03). Do not
+  silently swap to `scientific-figure`.
+- Multi-slide talk / defense / group meeting is `research-pptx`
+  (`slides.generate`). A-SLD-01 / P-01 deck.
+
+Do not upgrade an ordinary architecture figure to PPTX because a VLM is
+configured. A-FIG rows below are not VLM-driven; they sit next to A-LF so
+A-FIG-03 is not scored as a livefigure degrade.
+
 | Skill | VLM role | No-VLM behavior |
 |---|---|---|
-| `livefigure` | Required (`services: [vlm]`). Draws and revises one editable PPTX. | Hard stop before the engine loads. `vlm_not_configured`. `needs_input` / "needs configuration". Action is `omni config vlm`. Must not swap to `scientific-figure`. |
+| `livefigure` | Required (`services: [vlm]`). Draws and revises one editable PPTX. Not the default `artifact.figure` producer. | `$livefigure` / `figure.editable.pptx`: hard stop before the engine loads. `vlm_not_configured`. `needs_input` / "needs configuration". Action is `omni config vlm`. Must not swap to `scientific-figure`. **Unspecified** figure stays on `scientific-figure` (A-FIG-03). |
 | `paper-review` | Drives MinerU crop interpretation. Text model stays separate. | Notify immediately. Continue text review and crop extraction. Visual outcome `vlm_not_configured`. Offer `omni config vlm` and `skip_visual=true`. Review body is still delivered. Do not call visual review `succeeded`. |
 | `scientific-poster` | Drives the pixel visual-review loop. | `visual_review_mode=deterministic-only`. Poster may still land if Chromium inspection passes. Missing VLM is not a human checkpoint and not `needs_input`. Do not claim a VLM reviewed it. |
 
@@ -304,8 +325,10 @@ the model @ endpoint. Do not `config vlm --disable` on a real home.
 
 **Branch**
 
-- VLM **not** configured → run only the `novlm` rows (A-LF-03, A-REV-03, A-POS-03).
-- VLM **is** configured → run the `vlm` rows **and** the `novlm` rows. For
+- VLM **not** configured → run `either` rows and the `novlm` rows
+  (A-FIG-01, A-FIG-03, A-LF-03, A-REV-03, A-POS-03). Skip `vlm`-only happy
+  paths (A-LF-01, A-LF-02, A-REV-01 visual, A-POS-01).
+- VLM **is** configured → run the `vlm` rows **and** the `either` rows. For
   `novlm` while the owner VLM stays on, use an isolated home (set `OMNI_HOME`
   and remap `XDG_CONFIG_HOME`; do **not** `omni init --home`):
 
@@ -324,9 +347,13 @@ home that already has a VLM; it must not print the key.
 
 | ID | Branch | Need | Input | Expected output |
 |---|---|---|---|---|
+| A-FIG-01 | either | model | `Draw a RAG architecture diagram that includes query, retriever, reranker, and LLM.` | Format unspecified. Provider `scientific-figure`. PNG/SVG under `outputs/<title>_<task8>/` pays `artifact.figure`. Four boxes present. Not a `livefigure` PPTX and not a multi-slide `research-pptx` deck. No invented `.dot` as the deliverable. Independent of VLM. |
+| A-FIG-03 | novlm | model | Same input as A-FIG-01. | Same provider as A-FIG-01 (`scientific-figure` PNG/SVG). Not a livefigure degrade and not `needs_input`. Parent may succeed. Do not invent DOT first. |
+| A-FIG-04 | either | model | `Draw a RAG architecture diagram as SVG using Graphviz, including query, retriever, reranker, and LLM.` | Model follows `scientific-figure` (descriptions). Host resolve is admission+priority and does not parse Graphviz words — default is already `scientific-figure`. PNG/SVG. Four boxes. |
+| A-FIG-05 | either | offline | After ReAct on the A-FIG-01 input, a leftover `rag.dot` the user never named is registered. | Host fill uses `scientific-figure` and does **not** pass the invented `source_artifact_path`. An explicit `$scientific-figure` path may pass a task-owned `.dot`. |
 | A-LF-01 | vlm | model | `$livefigure` Make one editable PPTX slide of a RAG architecture with query, retriever, reranker, and LLM. | Provider `livefigure`. One editable PPTX under `outputs/<title>_<task8>/`. Four boxes present. No `vlm_not_configured`. No `scientific-figure` swap. No API key in the answer or `task show`. Live line `✓ execution livefigure succeeded`. If `livefigure` fails, parent is not `succeeded` (see A-LF-04 / E-05). |
-| A-LF-02 | vlm | model | `Make this RAG figure one editable scientific figure in PowerPoint.` | Same as A-LF-01. Distinct from `research-pptx` (full deck) and from `scientific-figure` (PNG/SVG). |
-| A-LF-03 | novlm | model | Same as A-LF-01 (`$livefigure` … four boxes). | Admission: `vlm_not_configured` plus `omni config vlm`. Engine not loaded. Inline turn is `needs_input` or the execution card is `⚠ … needs configuration` / `!` degraded. No editable PPTX. No silent `scientific-figure`. Do not record `succeeded` / `result_success=true`. |
+| A-LF-02 | vlm | model | `Make this RAG figure one editable scientific figure in PowerPoint.` | Planner binds `figure.editable.pptx`. Not `$livefigure`. Same LiveFigure contract as A-LF-01. Distinct from `research-pptx` (full deck) and from `scientific-figure` (PNG/SVG). |
+| A-LF-03 | novlm | model | Same as A-LF-01 (`$livefigure` … four boxes). | Admission: `vlm_not_configured` plus `omni config vlm`. Engine not loaded. Inline turn is `needs_input` or the execution card is `⚠ … needs configuration` / `!` degraded. No editable PPTX. No silent `scientific-figure`. Do not record `succeeded` / `result_success=true`. Distinct from A-FIG-03. |
 | A-LF-04 | either | model | After a failed `livefigure` (dunder / engine error), a leftover `deck.pptx` from `bash` / `write_file` is registered. | Parent is `degraded` or `failed`. `artifact.pptx` remains unpaid. The leftover deck is `artifact.slides` at most. `task show` does not narrate success. |
 | A-REV-01 | vlm | network | `Review arXiv 1706.03762 as a NeurIPS reviewer.` | `paper-review` resolves the arXiv id to a local PDF (not `Paper input does not exist`). Review body in the turn, not `Created execution`. Visual stage is not `vlm_not_configured`. Figures/tables are interpreted, or the visual status is honest. Venue form + Detailed Revision Plan. A `write_file` Markdown leftover after `paper-review` failed does not settle `succeeded`. |
 | A-REV-02 | either | model | `$paper-review` the workspace file `draft.pdf` | Missing file → `needs_input`. No invented URL. Independent of VLM. |
@@ -392,17 +419,24 @@ accepts image input. A text-only chat model used as the VLM fails that test.
 
 ### Figure, slides, poster, ideation
 
+Unspecified figure → `scientific-figure` (SVG/PNG). Editable single-slide
+PPTX → `livefigure` (needs VLM). Multi-slide deck → `research-pptx`. Do not
+upgrade an ordinary figure to PPTX because a VLM is configured.
+
 | ID | Need | Input | Pass |
 |---|---|---|---|
-| A-FIG-01 | model | `Draw a RAG architecture diagram that includes query, retriever, reranker, and LLM.` | `artifact.figure` / `scientific-figure`. PNG/SVG. The four boxes are present. Not a deck. File lands under `outputs/<title>_<task8>/`. |
+| A-FIG-01 | model | `Draw a RAG architecture diagram that includes query, retriever, reranker, and LLM.` | Format unspecified. `scientific-figure` PNG/SVG pays `artifact.figure`. Four boxes. Not a `livefigure` PPTX and not a multi-slide deck. Do not invent DOT first. File under `outputs/<title>_<task8>/`. Independent of VLM. |
 | A-FIG-02 | model | `Change the previous figure's retriever to hybrid. Keep the color language.` | `artifact.revise` in place, or a full redraw if there is no active figure. |
+| A-FIG-03 | model | Same input as A-FIG-01. | Same provider as A-FIG-01 (`scientific-figure` PNG/SVG). Not `needs_input`. Four boxes. |
+| A-FIG-04 | model | `Draw a RAG architecture diagram as SVG using Graphviz, including query, retriever, reranker, and LLM.` | Model case: Graphviz-named description → `scientific-figure`. Host resolve is already `scientific-figure` (admission+priority) and does not parse Graphviz words. |
+| A-FIG-05 | offline | Invented leftover `rag.dot` after the A-FIG-01 input. | Host fill ignores the invented path. An explicit `$scientific-figure` path may pass a task-owned `.dot`. |
 | A-SLD-01 | model | `Make a group-meeting deck from the Transformer paper.` | `slides.generate` / `research-pptx`. `.pptx`. Not a one-slide figure. File lands under `outputs/<title>_<task8>/`. |
 | A-SLD-02 | model | `$research-pptx` thesis-defense deck on RAG factuality. | Explicit skill. Debt is `artifact.slides`. |
 | A-POS-01 | model | `Make a scientific poster summarizing RAG evaluation benchmarks.` | VLM-on. `scientific-poster`. `artifact.poster`. `visual_review_mode=vlm` or the visual loop ran. Not slides. |
 | A-POS-02 | model | `$scientific-poster` from the survey we just wrote. | Explicit skill. Same poster debt. Run on the VLM-on home when VLM is configured. |
 | A-POS-03 | model | `Make a scientific poster summarizing RAG evaluation benchmarks.` | VLM-off. Poster may still land (`deterministic-only`). Visual quality pending. Missing VLM is not `needs_input`. Do not claim a VLM reviewed it. |
 | A-LF-01 | model | `$livefigure` Make one editable PPTX slide of a RAG architecture with query, retriever, reranker, and LLM. | VLM-on. One editable PPTX under `outputs/<title>_<task8>/`. No `vlm_not_configured`. No `scientific-figure` swap. No API key in output. If the skill fails, see A-LF-04. |
-| A-LF-02 | model | `Make this RAG figure one editable scientific figure in PowerPoint.` | VLM-on. Same LiveFigure contract as A-LF-01. Not a full `research-pptx` deck. |
+| A-LF-02 | model | `Make this RAG figure one editable scientific figure in PowerPoint.` | VLM-on. Planner binds `figure.editable.pptx`. Not `$livefigure`. Same LiveFigure contract as A-LF-01. Not a full `research-pptx` deck. |
 | A-LF-03 | model | Same input as A-LF-01. | VLM-off. `vlm_not_configured` + `omni config vlm`. Engine not loaded. `needs_input` / needs configuration. No silent `scientific-figure`. Not `succeeded`. |
 | A-LF-04 | model | Failed `livefigure` plus a leftover `deck.pptx` from bash / `write_file`. | Parent is `degraded` / `failed`. `artifact.pptx` unpaid. Leftover deck is not the editable figure. |
 | A-IDE-01 | network | `From the RAG papers we just retrieved, propose 3 testable follow-ups.` | `research.ideation`. Does not stop at another literature search. |
@@ -416,6 +450,7 @@ accepts image input. A text-only chat model used as the VLM fails that test.
 | A-OUT-02 | offline | A harvested `deck.pptx` (`kind=slides`) sits on a Task that owes `artifact.pptx`. | `artifact.pptx` remains unpaid. The deck may pay `artifact.slides`. |
 | A-OUT-03 | offline | From the checkout: `omni --project walkthrough-aug24 --trust --out outputs_walkthrough` then publish one task deliverable. | File is `outputs_walkthrough/<title>_<task8>/…` with `_omni-manifest.json`. Checkout root has no new `<title>_<task8>/` sibling of `cli/`. |
 | A-OUT-04 | offline | `omni --help` for `--out`; `git check-ignore -v outputs_walkthrough/probe.md`; `git status --porcelain` after A-OUT-03. | `--out` help says default is `outputs/`. `outputs_walkthrough/` is ignored. No new untracked root-level `*_xxxxxxxx/` directory. |
+| A-OUT-05 | offline | A bash fallback writes `results.csv` / `plot.svg` / a leftover PPTX under `$OMNI_OUTPUT_DIR`. | Registered `location` is `<out>/<title>_<task8>/…`. Not `~/.omni/.../artifacts/promoted/…` and not the cache outbox. Outbox may be deleted; the bundle copy remains. |
 
 ### Explicit `$skill`, plan mode, review mode
 
@@ -485,12 +520,12 @@ accepts image input. A text-only chat model used as the VLM fails that test.
 | ID | Need | Input | Pass |
 |---|---|---|---|
 | X3-01 | network | `1) search_literature query='RAG evaluation benchmark 2024' rows=8, keep source_id only. 2) Remember I only want Vancouver. 3) Do not write a survey.` | Retrieve plus memory write. Tool remains `search_literature`. |
-| X3-02 | network | `Fetch 1706.03762, draw a self-attention architecture figure, then run omni why.` | Fetch + figure + explainable route. Both debts remain. |
-| X4-01 | network | `Search RAG factuality papers, write related work, draw an architecture figure, and record a claim with one evidence edge.` | Four live steps. Related work is `draft.section`; figure is not a deck. A failed search must not settle the figure as `succeeded` (same honesty rule as E-03). |
+| X3-02 | network | `Fetch 1706.03762, draw a self-attention architecture figure, then run omni why.` | Fetch + figure + explainable route. Figure pays `artifact.figure` via `scientific-figure` PNG/SVG, not a `livefigure` PPTX. Both debts remain. |
+| X4-01 | network | `Search RAG factuality papers, write related work, draw an architecture figure, and record a claim with one evidence edge.` | Four live steps. Related work is `draft.section`. Figure pays `artifact.figure` via `scientific-figure` PNG/SVG, not a deck. A failed search must not settle the figure as `succeeded` (same honesty rule as E-03). |
 | X4-02 | model | `$research-pptx` for a group meeting, remember the 12-slide cap, `/mode plan` for an outline, then `task approve`. | Plan pauses. Same task id produces the pptx after approval. Memory stores the cap. |
 | X5-01 | network | `Fetch 1706.03762, review it for NeurIPS, make a group-meeting deck, remember that future reviews use the NeurIPS bar, then omni why.` | Five-step live sequence. Not `SINGLE_SKILL_TASK`. |
 | X5-02 | network | `search_literature RAG 2024 rows=8; search_corpus on hallucination; record_hypothesis one item; cite_source one item; do not spawn_subagents.` | Four ROM/retrieve tools stay callable. Spawn stays off. |
-| X6-01 | network | `Search, write a survey, draw a figure, make a poster, record a hypothesis, and bind it to one source.` | Six debts. Poster and slides stay distinct capabilities. |
+| X6-01 | network | `Search, write a survey, draw a figure, make a poster, record a hypothesis, and bind it to one source.` | Six debts. Figure pays `artifact.figure` via `scientific-figure` PNG/SVG. Poster and slides stay distinct capabilities. |
 | X6-02 | model | `Review yesterday's tasks, recall Vancouver, run a follow-up search, revise the last figure, append the notebook, and verify claims.` | `task.review` + memory + search + revise + notebook + verify. |
 | X7-01 | network | `Search RAG, write related work, architecture figure, group-meeting deck, a review, a weekly search schedule, and remember the 12-slide cap.` | Seven observable debts. Schedule asks or waits for approval. Plan mode must not hang unbounded. |
 | X7-02 | network | `search_literature + fetch 1706.03762 + review + response letter + two follow-ups + bind evidence + /verify.` | ROM chain closes: source to claim/evidence to verify. |
@@ -505,7 +540,7 @@ task `72590550`. A pack that stops at `find_skill` and leaves
 
 | ID | Need | Input | Pass |
 |---|---|---|---|
-| P-01 | network | `Prepare materials for a RAG system survey: fetch the abstract of Attention Is All You Need, generate a scientific architecture figure that includes query, retriever, reranker, and LLM, and write a paper plus a slide deck.` | `arxiv-fetch` / `paper.fetch.arxiv` for the abstract. Figure is PNG/SVG with the four boxes, not a deck. Paper is `draft.manuscript`, not only `draft.section`. Slides are `.pptx` via `research-pptx`. Files land under `<out>/<title>_<task8>/` (this catalog: `outputs_walkthrough/…`), not a bare tree and not checkout-root `*_xxxxxxxx/`. Settlement remaining is empty for those three debts. Do not stop at `find_skill`. No second background-completion line. |
+| P-01 | network | `Prepare materials for a RAG system survey: fetch the abstract of Attention Is All You Need, generate a scientific architecture figure that includes query, retriever, reranker, and LLM, and write a paper plus a slide deck.` | `arxiv-fetch` / `paper.fetch.arxiv` for the abstract. Figure pays `artifact.figure` via `scientific-figure` PNG/SVG. Four boxes. Distinct from the slide deck (`research-pptx`). Do not invent DOT first. Paper is `draft.manuscript`, not only `draft.section`. Slides are `.pptx` via `research-pptx`. Files land under `<out>/<title>_<task8>/` (this catalog: `outputs_walkthrough/…`), not a bare tree and not checkout-root `*_xxxxxxxx/`. Settlement remaining is empty for those three debts. Do not stop at `find_skill`. No second background-completion line. |
 | P-02 | network | `Prepare materials for an agentic loop-engineering system survey and produce a detailed introductory slide deck.` | Literature plus a manuscript or long survey, plus a detailed `.pptx` (not a one-slide figure). Topic is loop engineering, not the P-01 RAG pack. |
 
 ## Long-horizon campaigns
@@ -536,7 +571,7 @@ keeps the step id and creates a new execution id.
 
 | ID | Need | Input | Pass |
 |---|---|---|---|
-| E-01 | network | `Search RAG evaluation papers, write a short related-work paragraph, and draw one architecture figure. Keep all three on this same request.` | One Task id. `task show` lists a WorkflowRun with ≥2 steps, or ≥2 Skill Executions. Live lines use `execution=xxxxxxxx`. Related work is `draft.section`, not a title list. Figure is PNG/SVG, not a deck. Retrieve-only projection does not apply (writing and a figure are owed). |
+| E-01 | network | `Search RAG evaluation papers, write a short related-work paragraph, and draw one architecture figure. Keep all three on this same request.` | One Task id. `task show` lists a WorkflowRun with ≥2 steps, or ≥2 Skill Executions. Live lines use `execution=xxxxxxxx`. Related work is `draft.section`, not a title list. Figure pays `artifact.figure` via `scientific-figure` PNG/SVG. Not a multi-slide deck. Retrieve-only projection does not apply (writing and a figure are owed). |
 | E-02 | network | `Fetch arXiv 1706.03762, review it as a NeurIPS reviewer, then make a 12-slide group-meeting deck from that review.` | One Task id. ≥2 durable executions (fetch / review / slides). `task subtask <task>` lists Skill Executions. `task step` needs `{workflow_run_id} {step_id}`; a lone Task id exits 2. Review body is in the turn, not `Created execution`. Deck is `.pptx`, not a figure. |
 
 ## Execution-level degrade and recover

@@ -13,6 +13,7 @@ from omni.core.system_prompt import build_system_prompt
 from omni.memory.files import load_curated_memory
 from omni.memory.notebook import read_recent
 from omni.runtime.git_info import repository_history_block
+from omni.runtime.unpayable import unpayable_notice_text
 from omni.skills_runtime.context import ExecContext
 
 
@@ -53,6 +54,7 @@ async def assemble_react_system_prompt(
                 clarification_block,
                 react_context_block(recovery_react_notes),
                 assumption_block(plan.missing_inputs),
+                _unpayable_block(plan),
                 context_summary if plan.context_policy.include_referenced_tasks else "",
                 referenced,
                 (agent.pending_thread_brief or "").strip(),
@@ -75,4 +77,17 @@ async def assemble_react_system_prompt(
         notebook_summary=read_recent(agent.paths.notebook, max_chars=800),
         working_dir=ctx.working_dir,
         repo_history=repository_history_block(ctx.working_dir, user_message),
+    )
+
+
+def _unpayable_block(plan: IntentPlan) -> str:
+    """Tell ReAct which bound files have no producer this turn."""
+    items = list(getattr(plan, "unpayable_outputs", None) or [])
+    notice = unpayable_notice_text(items)
+    if not notice:
+        return ""
+    return (
+        "[Unpayable this turn] "
+        + notice
+        + " Do the work that still has a producer. Do not hunt the host ledger."
     )
