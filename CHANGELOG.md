@@ -4,6 +4,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) and semanti
 
 ## Unreleased
 
+## [2.0.0rc7] - 2026-08-28
+
 ### Fixed
 
 - LiveFigure generated-code cwd no longer sits under
@@ -17,6 +19,9 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) and semanti
 
 ### Changed
 
+- Bumped the release candidate to `2.0.0rc7` (Git tag `v2.0.0rc7`).
+  PyPI will not replace `2.0.0rc6` (that filename was already used and
+  deleted, so the index refuses a reuse).
 - Compute I/O is now a concrete environment, not a dollar token. Session
   context lists the absolute ``OMNI_OUTPUT_DIR`` / ``TMPDIR`` paths (Codex
   ``<environment_context>``). Sandboxed Python gets ``omni_io`` on
