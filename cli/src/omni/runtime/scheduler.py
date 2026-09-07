@@ -78,8 +78,8 @@ class _RunView:
 # sandbox / filesystem roots still constrain *where* they may act.
 _AUTONOMY_TOOLS: dict[str, tuple[str, ...]] = {
     "off": (),
-    "standard": ("write_file", "edit_file", "run_compute"),
-    "full": ("write_file", "edit_file", "run_compute", "bash"),
+    "standard": ("write_file", "edit_file", "apply_patch", "run_compute"),
+    "full": ("write_file", "edit_file", "apply_patch", "run_compute", "bash"),
 }
 
 

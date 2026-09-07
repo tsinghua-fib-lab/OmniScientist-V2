@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from omni.config.live_settings import OWNER_CONNECTION_RELOAD_NOTICE, is_owner_connection_key
 from omni.config.paths import get_paths
 from omni.config.settings import load_settings
 from omni.config.user_edits import (
@@ -51,6 +52,8 @@ def _paths():
 def _notice_for_key(key: str) -> str:
     if key == "research.semantic_scholar_api_key":
         return SEMANTIC_SCHOLAR_RELOAD_NOTICE
+    if is_owner_connection_key(key):
+        return OWNER_CONNECTION_RELOAD_NOTICE
     return (
         "This omni web process will use the new setting on the next turn. "
         "A new CLI command reads the files immediately. Restart an open REPL "
@@ -175,6 +178,7 @@ def _apply_vlm(params: dict[str, Any]) -> dict[str, Any]:
             paths,
             endpoint=str(params.get("endpoint") or params.get("base_url") or ""),
             model=str(params.get("model") or ""),
+            image_model=str(params.get("image_model") or params.get("imageModel") or ""),
             api_key=str(params.get("api_key") or params.get("apiKey") or ""),
             protocol=str(params.get("protocol") or ""),
             timeout_s=timeout_s,

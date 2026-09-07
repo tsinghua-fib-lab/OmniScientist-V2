@@ -526,7 +526,7 @@ def specialist_skill_entries(
         for item in (input_data.get("tools") or [])
         if str(item)
     }
-    blocked = {"write_file", "edit_file", "bash", "run_compute"}
+    blocked = {"write_file", "edit_file", "apply_patch", "bash", "run_compute"}
     entries: list[Any] = []
     for entry in registry.list_sync_tools():
         kind = getattr(entry, "kind", "")

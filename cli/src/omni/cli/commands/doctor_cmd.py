@@ -15,8 +15,10 @@ from omni.cli.command_surface import spell_commands
 from omni.cli.render import console, data_table
 from omni.cli.state import AppState, make_agent, run_async
 from omni.cli.terminal_harness import inspect_terminal
+from omni.config.live_settings import format_vlm_identity
 from omni.config.paths import OmniPaths
 from omni.core.vlm import VlmGateway
+from omni.runtime.service_state import service_runtime_info
 from omni.runtime.uninstall import (
     InstallationRecord,
     current_installation,
@@ -281,6 +283,25 @@ def doctor(ctx: typer.Context) -> None:
         else:
             detail = invalid or "missing " + ", ".join(missing) + "; run `omni config vlm`"
         checks.append(["VLM", _OK if not missing and not invalid else _WARN, detail])
+
+    running = service_runtime_info(s.paths)
+    if running is not None and "vlm_enabled" in running:
+        disk = format_vlm_identity(vlm.enabled, vlm.model, vlm.endpoint)
+        serve = format_vlm_identity(
+            running.get("vlm_enabled"),
+            running.get("vlm_model"),
+            running.get("vlm_endpoint"),
+        )
+        if serve == disk:
+            checks.append(["VLM (serve)", _OK, serve])
+        else:
+            checks.append(
+                [
+                    "VLM (serve)",
+                    _WARN,
+                    f"running {serve}; disk is {disk}. The next serve turn uses disk.",
+                ]
+            )
 
     # MCP extra
     try:

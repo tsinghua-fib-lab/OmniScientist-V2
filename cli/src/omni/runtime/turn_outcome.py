@@ -108,6 +108,13 @@ def _is_informational_host_fill(text: str) -> bool:
     return "could not fill" not in lowered and "ended " not in lowered
 
 
+def _is_informational_research_review(text: str) -> bool:
+    """Independent review findings are events, not a second success contract."""
+    return text.startswith("Research review rejected:") or text.startswith(
+        "Research review:"
+    )
+
+
 def informational_host_fill_notes(turn: Any) -> list[str]:
     """Successful host-fill lines kept on the audit list for a quiet info print."""
     seen: list[str] = []
@@ -127,7 +134,12 @@ def display_warnings(turn: Any) -> list[str]:
     seen: list[str] = []
     for item in getattr(turn, "degraded_warnings", None) or []:
         text = str(item or "").strip()
-        if text and text not in seen and not _is_informational_host_fill(text):
+        if (
+            text
+            and text not in seen
+            and not _is_informational_host_fill(text)
+            and not _is_informational_research_review(text)
+        ):
             seen.append(text)
     for payload in _result_payloads(turn):
         for text in bound_saturation_warnings(payload):

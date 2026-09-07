@@ -24,6 +24,8 @@ from typing import Any
 
 from omni.core.llm.client import chat_result
 from omni.core.termination import mark_truncated_output
+from omni.core.tool_errors import FATAL_TURN, INVALID_ARGS, RETRYABLE_IO, UNPAYABLE
+from omni.research.citation_anchors import apply_synthesis_citation_gate
 from omni.runtime.task_title import manuscript_basename, short_task_title
 
 
@@ -133,7 +135,7 @@ def execute_final_synthesis(goal: str, step: dict[str, Any], results_by_id: dict
         conclusions=conclusions,
     )
     text = SynthesisTemplateRegistry().render(contract)
-    return {
+    result = {
         "status": status,
         "summary": f"Generated research deliverable {deliverable}",
         "deliverable": deliverable,
@@ -146,6 +148,7 @@ def execute_final_synthesis(goal: str, step: dict[str, Any], results_by_id: dict
         "source_steps": [str(step_id) for step_id in results_by_id],
         "upstream_summaries": summaries,
     }
+    return apply_synthesis_citation_gate(result)
 
 
 # --- LLM-first native synthesis (universal executor ladder) -----------------
@@ -177,8 +180,9 @@ SYNTHESIS_SYSTEM_PROMPT = (
     "You are OmniScientist's research writing executor. Write the requested "
     "research deliverable as clean Markdown, starting with a single `#` title "
     "line. Ground every substantive statement in the provided upstream "
-    "materials; cite sources inline (arXiv id / DOI / URL) when they appear in "
-    "the material. Statements without upstream support must be explicitly "
+    "materials; cite sources inline as [S#] (or the recorded source_id / DOI / "
+    "arXiv id) when they appear in the material. Statements without upstream "
+    "support must be explicitly "
     "marked as unverified. Never invent citations, numbers, or experimental "
     "results. Write in the same language as the user goal unless the request "
     "names another language."
@@ -291,6 +295,7 @@ async def run_native_synthesis(
         result["draft_markdown"] = draft
         result["synthesis_mode"] = "llm"
         result["summary"] = f"Drafted research deliverable {result['deliverable']} from upstream results."
+        apply_synthesis_citation_gate(result)
     else:
         result["synthesis_mode"] = "template_fallback"
         if llm_error:
@@ -348,6 +353,10 @@ def _draft_deliverable_assessment(
     else:
         status = "passed"
         summary = f"Model-written draft contains {len(text)} non-whitespace characters."
+    anchors = result.get("citation_anchors") if isinstance(result.get("citation_anchors"), dict) else {}
+    if anchors.get("uncovered"):
+        status = "degraded"
+        summary = str(anchors.get("notice") or summary)
 
     evidence_refs = [
         str(result.get("report_uri") or ""),
@@ -707,6 +716,8 @@ def _collect_provenance(results_by_id: dict[str, Any]) -> dict[str, list[str]]:
 
     def walk(value: Any) -> None:
         if isinstance(value, dict):
+            if not _upstream_sources_usable(value):
+                return
             for key in ("source_ids", "claim_ids", "evidence_ids", "artifact_ids"):
                 add(key, value.get(key))
             for key, raw in value.items():
@@ -734,6 +745,20 @@ def _collect_provenance(results_by_id: dict[str, Any]) -> dict[str, list[str]]:
 
     walk(results_by_id)
     return out
+
+
+_UNUSABLE_UPSTREAM = frozenset(
+    {INVALID_ARGS, RETRYABLE_IO, UNPAYABLE, FATAL_TURN, "failed", "error"}
+)
+
+
+def _upstream_sources_usable(result: dict[str, Any]) -> bool:
+    """Failed upstream steps are visible but do not count as grounded sources."""
+    error_class = str(result.get("error_class") or "").strip()
+    if error_class in _UNUSABLE_UPSTREAM:
+        return False
+    status = str(result.get("status") or "").strip().lower()
+    return status not in {"error", "failed"}
 
 
 def _provenance_note(provenance: dict[str, list[str]]) -> str:

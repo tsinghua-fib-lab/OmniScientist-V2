@@ -146,12 +146,20 @@ def build_research_tools(ctx: ExecContext) -> list[Tool]:
             return {"error": "need at least one of: title, arxiv_id, doi, url"}
         src = await store.add_source(meta, origin=str(args.get("origin", "manual")), date_pin=_as_of(ctx))
         _save_to_library(ctx, meta)
-        return _observe({
+        payload = {
             "status": "ok",
             "source_id": src.id,
             "title": src.title,
             "dedup_key": src.dedup_key,
-        })
+        }
+        await _record_named_event(
+            ctx,
+            event_type="cite_source",
+            name="cite_source",
+            payload=payload,
+            summary=f"cited {src.title or src.id}",
+        )
+        return _observe(payload)
 
     # ── add_evidence ──
     async def add_evidence(args: dict) -> Any:
@@ -220,6 +228,31 @@ def build_research_tools(ctx: ExecContext) -> list[Tool]:
         rows = max(1, min(int(args.get("rows", 6) or 6), 25))
         sources = [str(s).strip().lower() for s in (args.get("sources") or []) if str(s).strip()]
         return await _funnel(ctx, query=query, rows=rows, sources=sources or None)
+
+    # ── scan_contradictions ──
+    async def scan_contradictions(args: dict) -> Any:
+        from omni.research.verify import verify_session
+
+        report = await verify_session(store, session_id=ctx.session_id)
+        rows = [
+            {
+                "claim_id": claim.id,
+                "text": claim.text,
+                "contradictions": count,
+            }
+            for claim, count in report.contradicted
+        ]
+        return _observe({
+            "status": "ok" if rows else "empty",
+            "count": len(rows),
+            "contradicted": rows[: int(args.get("limit", 20) or 20)],
+            "note": (
+                "Claims with contradicting evidence. Bind more add_evidence or "
+                "withdraw the weaker claim."
+                if rows
+                else "No contradicted claims in this session."
+            ),
+        })
 
     # ── citation_neighbors ──
     async def citation_neighbors_tool(args: dict) -> Any:
@@ -527,6 +560,13 @@ def build_research_tools(ctx: ExecContext) -> list[Tool]:
             }, "required": ["query"]},
         ), search_literature),
         Tool(ToolSpec(
+            "scan_contradictions",
+            "Scan recorded claims for contradicting evidence (evidence.contradiction_scan).",
+            {"type": "object", "properties": {
+                "limit": {"type": "integer", "description": "Maximum contradicted claims to return; default 20"},
+            }},
+        ), scan_contradictions),
+        Tool(ToolSpec(
             "citation_neighbors",
             "Traverse the local citation graph to return references or citing works for a source.",
             {"type": "object", "properties": {
@@ -698,6 +738,35 @@ async def _run_connector(name: str, query: str, rows: int, reg: Any) -> list[dic
             r.setdefault("origin", "arxiv")
         return found
     return []
+
+
+async def _record_named_event(
+    ctx: ExecContext,
+    *,
+    event_type: str,
+    name: str,
+    payload: dict[str, Any],
+    summary: str,
+    status: str = "succeeded",
+) -> None:
+    db = getattr(ctx, "db", None)
+    run_id = getattr(ctx, "task_id", "") or ""
+    if db is None or not run_id:
+        return
+    try:
+        from omni.runtime.task_recorder import TaskRecorder
+
+        recorder = TaskRecorder(db, project=getattr(ctx, "project", "default") or "default")
+        await recorder.append_event(
+            run_id,
+            event_type=event_type,
+            status=status,
+            name=name,
+            output_json=payload,
+            summary=summary,
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 async def _record_provenance_event(ctx: ExecContext, capsule: Any, *, grounded: bool) -> None:

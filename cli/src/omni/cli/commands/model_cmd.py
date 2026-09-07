@@ -620,19 +620,33 @@ def vision_cmd(
     timeout: float | None = typer.Option(None, "--timeout", "--timeout-s"),
     enabled: bool | None = typer.Option(None, "--enable/--disable"),
     test: bool = typer.Option(False, "--test"),
+    image_model: str = typer.Option("", "--image-model"),
 ) -> None:
     """Configure the persistent vision/VLM role using the existing Home scope."""
-    supplied = bool(endpoint or model or api_key or protocol or timeout is not None)
+    supplied = bool(
+        endpoint or model or image_model or api_key or protocol or timeout is not None
+    )
     if not supplied and enabled is None and not test:
         render_model_explain(ctx.obj, ModelRole.VISION.value)
         return
-    config_cmd.vlm_cmd(ctx, endpoint, model, api_key, protocol, timeout, enabled, test)
+    config_cmd.vlm_cmd(
+        ctx,
+        endpoint,
+        model,
+        api_key,
+        protocol,
+        timeout,
+        enabled,
+        test,
+        image_model,
+    )
     if supplied or enabled is not None:
         changed_paths = [
             path
             for value, path in (
                 (endpoint, "vlm.endpoint"),
                 (model, "vlm.model"),
+                (image_model, "vlm.image_model"),
                 (api_key, "vlm.api_key"),
                 (protocol, "vlm.protocol"),
             )

@@ -612,6 +612,18 @@ class OmniPaths:
         return self.project_dir / "artifacts"
 
     @property
+    def inputs_dir(self) -> Path:
+        """User-provided files (clipboard paste, web upload, WeChat media).
+
+        Sibling of ``artifacts/`` on the workspace store so CLI, web, and IM
+        channels share one folder. Not the git tree — inbound files must not
+        dirty the repository the way ``outputs/`` mirrors sometimes do.
+        """
+        from omni.core.user_inputs import USER_INPUT_DIRNAME
+
+        return self.project_dir / USER_INPUT_DIRNAME
+
+    @property
     def local_ops_dir(self) -> Path:
         """Directory local file/shell tools should operate in for a local turn.
 

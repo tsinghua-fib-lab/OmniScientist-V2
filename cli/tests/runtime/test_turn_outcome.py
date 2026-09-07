@@ -269,6 +269,22 @@ def test_successful_host_fill_notes_do_not_paint_partial_success() -> None:
     assert format_exec_file(turn)[0] == "answer"
 
 
+def test_research_review_notes_do_not_paint_partial_success() -> None:
+    turn = _turn(
+        text="Wrote the survey with arXiv citations.",
+        kind="text",
+        terminated_reason="done",
+        settlement_status="succeeded",
+        degraded_warnings=[
+            "Research review rejected: dangling anchors: 1706.03762, 2005.11401",
+        ],
+    )
+
+    assert display_warnings(turn) == []
+    assert classify_turn_outcome(turn) == "succeeded"
+    assert header_state(turn) == ""
+
+
 def test_failed_host_fill_notes_still_paint_partial_success() -> None:
     turn = _turn(
         text="Found last week's report.",

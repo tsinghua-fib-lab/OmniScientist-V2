@@ -21,6 +21,7 @@ metadata:
     capabilities: [review.response, writing.revision]
     deliverables: [response_letter, cover_letter, revision_package]
     execution:
+      effects: [user_files.write]
       max_iterations: 12
       max_tool_calls: 24
       max_seconds: 600

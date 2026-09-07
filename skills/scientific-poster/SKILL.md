@@ -15,6 +15,7 @@ metadata:
     priority: 90
     delivery_mode: async_task
     execution:
+      effects: [user_files.write]
       max_seconds: 600
     engine:
       module: engine

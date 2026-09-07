@@ -73,6 +73,13 @@ from omni.agent.turn_execution import (
 from omni.agent.turn_memory import TurnMemory
 from omni.agent.turn_prompt import assemble_react_system_prompt
 from omni.channels.security import is_im_channel
+from omni.config.live_settings import (
+    adopt_owner_connection,
+    connection_token,
+    owner_source_stamp,
+    public_connection_identity,
+    try_load_owner_settings,
+)
 from omni.config.settings import (
     OmniSettings,
     microcompact_token_budget,
@@ -187,7 +194,10 @@ class OmniAgent:
             channel_identity=settings.memory.channel_identity,
         )
         self.llm: LLMClient = create_llm_client(settings)
-        self.vlm = VlmGateway(settings.vlm)
+        self.vlm = VlmGateway(settings.vlm, livefigure_gemini=settings.livefigure.gemini)
+        self._owner_source_stamp = owner_source_stamp(self.paths) if self.paths else None
+        self._owner_connection_token = connection_token(settings)
+        self._owner_bad_stamp: tuple[tuple[int, int], tuple[int, int], tuple[int, int]] | None = None
         self.registry = SkillRegistry(settings)
         self.memory = MemoryService(self.db, settings, llm=self.llm, global_db=self._global_db)
         self.artifacts = ArtifactStore(
@@ -297,6 +307,54 @@ class OmniAgent:
         self._external_tools_authoritative = False
         # Cross-session hypothesis brief. Observation only; never a contract.
         self.pending_thread_brief: str = ""
+
+    def refresh_owner_connection(self) -> bool:
+        """Re-read owner model/VLM when ``config.toml`` / ``secrets.toml`` change.
+
+        Returns True when this process replaced its clients. An in-flight turn
+        that already captured ``self.vlm`` / ``self.llm`` keeps those objects.
+        A corrupt file keeps the last-good connection. In-memory test overrides
+        survive when the owner files have not changed.
+        """
+        if self.paths is None:
+            return False
+        stamp = owner_source_stamp(self.paths)
+        if stamp == self._owner_source_stamp:
+            return False
+        if stamp == self._owner_bad_stamp:
+            return False
+        fresh = try_load_owner_settings(self.paths)
+        if fresh is None:
+            self._owner_bad_stamp = stamp
+            return False
+        token = connection_token(fresh)
+        self._owner_source_stamp = stamp
+        self._owner_bad_stamp = None
+        if token == self._owner_connection_token:
+            return False
+        vlm = VlmGateway(fresh.vlm)
+        adopt_owner_connection(self.settings, fresh)
+        llm = create_llm_client(self.settings)
+        self._owner_connection_token = token
+        self._retarget_owner_clients(vlm=vlm, llm=llm)
+        identity = public_connection_identity(self.settings)
+        logger.info(
+            "owner connection reloaded: model=%s/%s vlm_enabled=%s vlm=%s",
+            identity.get("model_provider"),
+            identity.get("model_name"),
+            identity.get("vlm_enabled"),
+            identity.get("vlm_model") or "(none)",
+        )
+        return True
+
+    def _retarget_owner_clients(self, *, vlm: VlmGateway, llm: LLMClient) -> None:
+        self.vlm = vlm
+        self.llm = llm
+        self.memory._llm = llm
+        self.compactor._llm = llm
+        self.turn_memory._llm = llm
+        self.turn_completion._llm = llm
+        self.registry.adopt_settings(self.settings)
 
     @classmethod
     async def create(cls, settings: OmniSettings, *, notifier: Notifier | None = None) -> OmniAgent:
@@ -963,6 +1021,7 @@ class OmniAgent:
     ) -> TurnResult:
         receipt_time = local_time_context().now
         await self.setup()
+        self.refresh_owner_connection()
         if not existing_task_id:
             session_hint = session_id or await self.ensure_session(channel=channel)
             existing_task_id = await resolve_continue_task(

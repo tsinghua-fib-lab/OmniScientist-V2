@@ -19,6 +19,7 @@ metadata:
       class: PaperReviewEngine
       method: execute
     execution:
+      effects: [user_files.write]
       max_tool_calls: 40
       max_seconds: 1200
       tool_limits:

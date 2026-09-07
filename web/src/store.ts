@@ -1,6 +1,11 @@
 import { useSyncExternalStore } from "react";
 import { ApiError, api, watchTask } from "./api";
-import { bindAttachments } from "./attachments";
+import { canSendComposer, readyFileUris, upsertAttachment } from "./attachments";
+import {
+  clipboardImageFiles,
+  failedPasteImageMessage,
+  PASTE_IMAGE_NO_IMAGE,
+} from "./clipboardImages";
 import { readNav, sameNav, writeNav } from "./nav";
 import {
   applyActivity,
@@ -21,6 +26,7 @@ import type {
   Artifact,
   CatalogWorkspace,
   ChatMessage,
+  ComposerAttachment,
   DirectoryListing,
   DraftState,
   Drawer,
@@ -81,7 +87,8 @@ export type Snapshot = {
   rom: Record<string, unknown> | null;
   notebook: string;
   cost: Record<string, unknown> | null;
-  attachments: { name: string; uri: string }[];
+  attachments: ComposerAttachment[];
+  composerSubmitting: boolean;
   error: string;
   notice: string;
 };
@@ -93,6 +100,8 @@ const turns: Record<string, TurnState> = {};
 const messagesBySession: Record<string, ChatMessage[]> = {};
 const transcriptFingerprints: Record<string, SessionFingerprint> = {};
 const requestGens = new Map<string, number>();
+const uploadWaiters = new Map<string, Promise<void>>();
+let sendGate = false;
 const watchEpochs = new Map<string, number>();
 let taskDrawerRequestId = 0;
 let taskDetailRequestId = 0;
@@ -234,6 +243,7 @@ function project(): Snapshot {
     notebook: core.notebook,
     cost: core.cost,
     attachments: draft.attachments,
+    composerSubmitting: draft.submitting,
     error: core.error,
     notice: core.notice,
   };
@@ -305,8 +315,29 @@ function ws(): string {
 }
 
 function putDraft(sessionId: string, patch: Partial<DraftState>) {
-  const key = keyOf(sessionId);
-  drafts[key] = { ...draftOf(sessionId), ...patch };
+  putDraftAt(workspaceKey(), sessionId, patch);
+}
+
+function draftAt(workspace: string, sessionId: string): DraftState {
+  return drafts[bucketKey(workspace, sessionId)] ?? emptyDraft(core.defaultMode);
+}
+
+function putDraftAt(workspace: string, sessionId: string, patch: Partial<DraftState>) {
+  const key = bucketKey(workspace, sessionId);
+  drafts[key] = { ...draftAt(workspace, sessionId), ...patch };
+  emit();
+}
+
+function newAttachmentId(): string {
+  return typeof crypto !== "undefined" && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `att-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function putOwnedAttachment(item: ComposerAttachment) {
+  const key = bucketKey(item.ownerWorkspace, item.ownerSession);
+  const current = drafts[key] ?? emptyDraft(core.defaultMode);
+  drafts[key] = { ...current, attachments: upsertAttachment(current.attachments, item) };
   emit();
 }
 
@@ -980,7 +1011,16 @@ export const actions = {
       message_count: 0,
       last_message_id: "",
     });
-    drafts[keyOf(session.id)] = drafts[keyOf("pending")] ?? emptyDraft(core.defaultMode);
+    const pendingDraft = drafts[keyOf("pending")] ?? emptyDraft(core.defaultMode);
+    drafts[keyOf(session.id)] = {
+      ...pendingDraft,
+      submitting: false,
+      attachments: pendingDraft.attachments.map((item) => ({
+        ...item,
+        ownerWorkspace,
+        ownerSession: session.id,
+      })),
+    };
     delete drafts[keyOf("pending")];
     bumpInspectorRequests();
     emit({
@@ -1233,7 +1273,7 @@ export const actions = {
     }
   },
   async send() {
-    if (!core.workspace) return;
+    if (!core.workspace || sendGate) return;
     let sessionId = core.sessionId;
     if (!sessionId) {
       await actions.newSession();
@@ -1241,105 +1281,130 @@ export const actions = {
     }
     if (!sessionId) return;
     const ownerWorkspace = workspaceKey();
+    const ownerOpenPath = ws();
     const draft = draftOf(sessionId);
-    const text = draft.composer.trim();
-    if (!text || sessionBusy(turnOf(sessionId))) return;
-    const bound = bindAttachments(
-      text,
-      draft.attachments.map((a) => a.uri),
+    if (draft.submitting || sessionBusy(turnOf(sessionId))) return;
+    if (!canSendComposer(draft.composer, draft.attachments)) return;
+    sendGate = true;
+    putDraftAt(ownerWorkspace, sessionId, { submitting: true });
+    const frozenComposer = draft.composer;
+    const frozenMode = draft.mode;
+    const batch = draft.attachments.filter(
+      (item) => item.ownerWorkspace === ownerWorkspace && item.ownerSession === sessionId,
     );
-    const clientRunId =
-      typeof crypto !== "undefined" && crypto.randomUUID
-        ? crypto.randomUUID().replace(/-/g, "")
-        : `run-${Date.now()}`;
-    const owner = { workspaceKey: ownerWorkspace, sessionId, clientRunId };
-    const localId = `local-${clientRunId}`;
-    const existingMessages = messagesBySession[keyOf(sessionId)] || [];
-    messagesBySession[keyOf(sessionId)] = [
-      ...existingMessages,
-      {
-        id: localId,
-        role: "user",
-        content: bound.text,
-        created_at: new Date().toISOString(),
-      },
-    ];
-    putDraft(sessionId, { composer: "", attachments: [] });
-    putTurn(
-      sessionId,
-      emptyTurn({
-        workspaceKey: ownerWorkspace,
-        sessionId,
-        clientRunId,
-      }),
-    );
-    patchTurn(owner, (turn) => ({ ...turn, status: "running", worker: "live", error: "" }));
-    emit({ error: "" });
+    const pendingIds = batch.filter((item) => item.status === "pending").map((item) => item.id);
     try {
-      const started = await api.startTurn(ws(), {
-        text: bound.text,
-        session_id: sessionId,
-        interaction_mode: draft.mode,
-        file_uris: bound.fileUris,
-        client_run_id: clientRunId,
-      });
-      if (started.kind === "command") {
-        await actions.reloadMessages(owner.workspaceKey, started.session_id || sessionId);
-        patchTurn(owner, (turn) => ({
-          ...turn,
-          status: "done",
-          worker: "",
-          partialText: "",
-        }));
-        await actions.refreshSessions();
+      await Promise.all(pendingIds.map((id) => uploadWaiters.get(id) ?? Promise.resolve()));
+      const latest = draftAt(ownerWorkspace, sessionId);
+      const owned = latest.attachments.filter(
+        (item) => item.ownerWorkspace === ownerWorkspace && item.ownerSession === sessionId,
+      );
+      if (owned.some((item) => item.status === "failed")) {
         return;
       }
-      const boundSession = started.session_id || sessionId;
-      const boundTask = started.task_id;
-      const boundRun = started.client_run_id || clientRunId;
-      const streamOwner = {
-        workspaceKey: ownerWorkspace,
-        sessionId: boundSession,
-        clientRunId: boundRun,
-      };
-      if (boundSession !== sessionId) {
-        turns[bucketKey(ownerWorkspace, boundSession)] = {
-          ...(turns[bucketKey(ownerWorkspace, sessionId)] || emptyTurn(streamOwner)),
+      const text = latest.composer.trim();
+      const fileUris = readyFileUris(owned);
+      if (!text && !fileUris.length) return;
+      const clientRunId =
+        typeof crypto !== "undefined" && crypto.randomUUID
+          ? crypto.randomUUID().replace(/-/g, "")
+          : `run-${Date.now()}`;
+      const owner = { workspaceKey: ownerWorkspace, sessionId, clientRunId };
+      const localId = `local-${clientRunId}`;
+      const messageKey = bucketKey(ownerWorkspace, sessionId);
+      try {
+        const started = await api.startTurn(ownerOpenPath, {
+          text,
+          session_id: sessionId,
+          interaction_mode: frozenMode,
+          file_uris: fileUris,
+          client_run_id: clientRunId,
+        });
+        const canonical = started.text || text;
+        const existingMessages = messagesBySession[messageKey] || [];
+        messagesBySession[messageKey] = [
+          ...existingMessages,
+          {
+            id: localId,
+            role: "user",
+            content: canonical,
+            created_at: new Date().toISOString(),
+          },
+        ];
+        putDraftAt(ownerWorkspace, sessionId, { composer: "", attachments: [], submitting: false });
+        putTurn(
+          sessionId,
+          emptyTurn({
+            workspaceKey: ownerWorkspace,
+            sessionId,
+            clientRunId,
+          }),
+        );
+        patchTurn(owner, (turn) => ({ ...turn, status: "running", worker: "live", error: "" }));
+        emit({ error: "" });
+        if (started.kind === "command") {
+          await actions.reloadMessages(owner.workspaceKey, started.session_id || sessionId);
+          patchTurn(owner, (turn) => ({
+            ...turn,
+            status: "done",
+            worker: "",
+            partialText: "",
+          }));
+          await actions.refreshSessions();
+          return;
+        }
+        const boundSession = started.session_id || sessionId;
+        const boundTask = started.task_id;
+        const boundRun = started.client_run_id || clientRunId;
+        const streamOwner = {
+          workspaceKey: ownerWorkspace,
           sessionId: boundSession,
-          taskId: boundTask,
           clientRunId: boundRun,
         };
-      } else {
-        patchTurn(streamOwner, (turn) => ({ ...turn, taskId: boundTask, clientRunId: boundRun }));
+        if (boundSession !== sessionId) {
+          turns[bucketKey(ownerWorkspace, boundSession)] = {
+            ...(turns[bucketKey(ownerWorkspace, sessionId)] || emptyTurn(streamOwner)),
+            sessionId: boundSession,
+            taskId: boundTask,
+            clientRunId: boundRun,
+          };
+        } else {
+          patchTurn(streamOwner, (turn) => ({ ...turn, taskId: boundTask, clientRunId: boundRun }));
+        }
+        if (
+          workspaceKey() === ownerWorkspace &&
+          core.sessionId === sessionId &&
+          boundSession !== sessionId
+        ) {
+          emit({ sessionId: boundSession });
+        }
+        if (workspaceKey() === ownerWorkspace) {
+          void actions.refreshSessionTasks(boundSession);
+        }
+        await actions.watchExisting(boundSession, boundTask, boundRun, ownerWorkspace);
+      } catch (err) {
+        const code = err instanceof ApiError ? err.code : "";
+        const message = err instanceof Error ? err.message : String(err);
+        messagesBySession[messageKey] = dropLocalMessage(
+          messagesBySession[messageKey] || [],
+          localId,
+        );
+        putDraftAt(ownerWorkspace, sessionId, { composer: frozenComposer, attachments: owned });
+        patchTurn(owner, (turn) => ({
+          ...turn,
+          status: code === "capacity" || code === "busy" ? "queued" : "error",
+          error: message,
+        }));
+        if (workspaceKey() === ownerWorkspace && core.sessionId === sessionId) {
+          emit({ error: message });
+        } else {
+          emit();
+        }
       }
-      if (
-        workspaceKey() === ownerWorkspace &&
-        core.sessionId === sessionId &&
-        boundSession !== sessionId
-      ) {
-        emit({ sessionId: boundSession });
-      }
-      if (workspaceKey() === ownerWorkspace) {
-        void actions.refreshSessionTasks(boundSession);
-      }
-      await actions.watchExisting(boundSession, boundTask, boundRun, ownerWorkspace);
-    } catch (err) {
-      const code = err instanceof ApiError ? err.code : "";
-      const message = err instanceof Error ? err.message : String(err);
-      messagesBySession[keyOf(sessionId)] = dropLocalMessage(
-        messagesBySession[keyOf(sessionId)] || [],
-        localId,
-      );
-      patchTurn(owner, (turn) => ({
-        ...turn,
-        status: code === "capacity" || code === "busy" ? "queued" : "error",
-        error: message,
-      }));
-      if (workspaceKey() === ownerWorkspace && core.sessionId === sessionId) {
-        emit({ error: message });
-      } else {
-        emit();
-      }
+    } finally {
+      sendGate = false;
+      const current = draftAt(ownerWorkspace, sessionId);
+      if (current.submitting) putDraftAt(ownerWorkspace, sessionId, { submitting: false });
     }
   },
   async watchExisting(
@@ -1485,17 +1550,62 @@ export const actions = {
     if (!core.workspace) return;
     if (!core.sessionId) await actions.newSession();
     if (!core.sessionId) return;
-    const next = [...draftOf(core.sessionId).attachments];
+    const ownerWorkspace = workspaceKey();
+    const ownerSession = core.sessionId;
+    const jobs: Promise<void>[] = [];
     for (const file of Array.from(files)) {
-      const uri = await api.upload(ws(), file);
-      next.push({ name: file.name, uri });
+      const id = newAttachmentId();
+      const pending: ComposerAttachment = {
+        id,
+        name: file.name,
+        uri: "",
+        status: "pending",
+        ownerWorkspace,
+        ownerSession,
+      };
+      putOwnedAttachment(pending);
+      const waiter = api
+        .upload(ws(), file)
+        .then((uri) => {
+          putOwnedAttachment({ ...pending, uri, status: "ready" });
+        })
+        .catch((err: unknown) => {
+          putOwnedAttachment({ ...pending, status: "failed" });
+          throw err;
+        });
+      uploadWaiters.set(
+        id,
+        waiter.then(
+          () => undefined,
+          () => undefined,
+        ),
+      );
+      jobs.push(waiter);
     }
-    putDraft(core.sessionId, { attachments: next });
+    try {
+      await Promise.all(jobs);
+    } finally {
+      for (const job of jobs) {
+        void job;
+      }
+    }
   },
-  removeAttachment(uri: string) {
+  async pasteImages(data: DataTransfer | null) {
+    const files = clipboardImageFiles(data);
+    if (!files.length) {
+      emit({ error: failedPasteImageMessage(PASTE_IMAGE_NO_IMAGE) });
+      return;
+    }
+    try {
+      await actions.attach(files);
+    } catch (err) {
+      emit({ error: failedPasteImageMessage(err) });
+    }
+  },
+  removeAttachment(id: string) {
     if (!core.sessionId) return;
     putDraft(core.sessionId, {
-      attachments: draftOf(core.sessionId).attachments.filter((a) => a.uri !== uri),
+      attachments: draftOf(core.sessionId).attachments.filter((item) => item.id !== id && item.uri !== id),
     });
   },
   async steer(instruction: string) {

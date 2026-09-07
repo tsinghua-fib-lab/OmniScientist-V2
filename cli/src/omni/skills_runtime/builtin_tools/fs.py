@@ -1,4 +1,4 @@
-"""Filesystem tools: read_file, write_file, edit_file, grep, glob, list_dir.
+"""Filesystem tools: read_file, write_file, edit_file, apply_patch, grep, glob, list_dir.
 
 Reads follow Codex WorkspaceWrite: any path except sensitive files and
 frozen Omni control stores. Writes stay confined to the project dir +
@@ -185,6 +185,13 @@ async def register_written_file(ctx: ExecContext, path: Path) -> None:
     if store is None or not getattr(ctx, "task_id", ""):
         return
     kind, mime = document_kind_for(path)
+    meta: dict[str, str] = {}
+    if kind == "figure":
+        from omni.research.figure_provenance import sibling_source_script
+
+        script = sibling_source_script(path)
+        if script:
+            meta["source_script"] = script
     try:
         await store.register_existing(
             path,
@@ -193,6 +200,7 @@ async def register_written_file(ctx: ExecContext, path: Path) -> None:
             mime=mime,
             session_id=getattr(ctx, "session_id", "") or "",
             task_id=ctx.task_id,
+            **({"meta": meta} if meta else {}),
         )
     except Exception:  # noqa: BLE001 - inventory is not worth failing a good write over
         logger.debug("artifact.register_failed path=%s", path, exc_info=True)
@@ -571,6 +579,9 @@ def _document_text(path: Path) -> str:
     """File contents as text, normalising formats ``read_text`` cannot handle."""
     if path.suffix.lower() == ".pdf":
         return _pdf_markdown(path)
+    image = _image_observation(path)
+    if image is not None:
+        return image
     try:
         with path.open("rb") as handle:
             probe = handle.read(4096)
@@ -583,6 +594,58 @@ def _document_text(path: Path) -> str:
             "read. Describe it by name/size, or use a skill that handles this format.)"
         )
     return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _image_observation(path: Path) -> str | None:
+    """Describe a raster attachment instead of dumping replacement characters.
+
+    Pixels are not text. A pasted or ``@``-mentioned PNG must still be
+    actionable: dimensions plus a next step (configure a VLM, or a vision
+    skill). ``read_file`` may then append a VLM description when one is wired.
+    """
+    from omni.core.image_files import inspect_image, looks_like_image_path
+
+    if not looks_like_image_path(path):
+        return None
+    info = inspect_image(path)
+    if info is None:
+        return None
+    size = path.stat().st_size
+    return (
+        f"({path.name} is a {info.encoded_format.label()} image, "
+        f"{info.width}×{info.height} pixels, {size} bytes. Pixels are not text. "
+        "A configured VLM or vision skill can inspect the picture; otherwise "
+        "describe it from the user's request and this file name.)"
+    )
+
+
+async def _maybe_describe_image(ctx: ExecContext, path: Path) -> str:
+    """Best-effort VLM caption. Never raise — paste must still attach."""
+    from omni.core.image_files import image_data_url, looks_like_image_path
+
+    if not looks_like_image_path(path):
+        return ""
+    vlm = getattr(ctx, "vlm", None)
+    if vlm is None or not getattr(vlm, "available", False):
+        return ""
+    generate = getattr(vlm, "generate_text", None)
+    if not callable(generate):
+        return ""
+    uri = image_data_url(path)
+    if uri is None:
+        return ""
+    try:
+        return str(
+            await generate(
+                "Describe this image in detail for a research assistant. "
+                "Transcribe visible text. Be concrete about layout, colours, "
+                "and any warnings or UI chrome.",
+                reference_image_uri=uri,
+            )
+        ).strip()
+    except Exception:  # noqa: BLE001 - vision is optional; metadata still landed
+        logger.debug("VLM image description failed for %s", path, exc_info=True)
+        return ""
 
 
 def _format_listing(base: Path) -> str:
@@ -645,6 +708,9 @@ def build_fs_tools(ctx: ExecContext) -> list[Tool]:
                 next_step="Use list_dir to inspect a directory or glob to find files.",
             )
         text = _document_text(path)
+        described = await _maybe_describe_image(ctx, path)
+        if described:
+            text = f"{text}\n\nVisual description:\n{described}"
         offset = int(args.get("offset", 0) or 0)
         limit = int(args.get("limit", 0) or 0)
         if offset or limit:
@@ -738,6 +804,73 @@ def build_fs_tools(ctx: ExecContext) -> list[Tool]:
         await _register_written(ctx, path)
         return f"OK: edited {path}"
 
+    async def apply_patch(args: dict) -> str:
+        from omni.skills_runtime.apply_patch_helper import (
+            PatchError,
+            apply_file_patches,
+            parse_patch,
+        )
+
+        raw_patch = str(args.get("patch") or args.get("diff") or "").strip()
+        if not raw_patch:
+            return "ERROR: apply_patch needs a 'patch' (unified diff or *** Begin Patch)."
+        try:
+            patches = parse_patch(raw_patch)
+        except PatchError as exc:
+            return f"ERROR: {exc}"
+        if not patches:
+            return "ERROR: patch contained no file operations."
+
+        async def resolved(path: str) -> Path:
+            dest = await resolve_write_target(ctx, path)
+            if not path_exists(dest):
+                existing = resolve_existing_path(dest)
+                if existing is not None:
+                    return existing
+            return dest
+
+        resolved_by_raw: dict[str, Path] = {}
+        for item in patches:
+            dest = await resolved(item.path)
+            if not _within(dest, _write_roots(ctx)):
+                return f"ERROR: write denied outside allowed roots: {dest}"
+            if is_write_protected_path(dest, _output_roots(ctx)):
+                return f"ERROR: write denied in a protected directory: {dest}"
+            if _is_sensitive_target(dest):
+                return f"ERROR: write to sensitive file denied by security policy: {dest.name}"
+            resolved_by_raw[item.path] = dest
+            item.path = str(dest)
+
+        def exists(path: str) -> bool:
+            return path_is_file(Path(path))
+
+        def read_text(path: str) -> str:
+            return Path(path).read_text(encoding="utf-8")
+
+        def write_text(path: str, text: str) -> None:
+            dest = Path(path)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(text, encoding="utf-8", newline="")
+
+        def delete(path: str) -> None:
+            Path(path).unlink()
+
+        try:
+            notes = apply_file_patches(
+                patches,
+                read_text=read_text,
+                write_text=write_text,
+                exists=exists,
+                delete=delete,
+            )
+        except PatchError as exc:
+            which = f" (hunk {exc.hunk_index})" if exc.hunk_index else ""
+            return f"ERROR: apply_patch failed{which}: {exc}"
+        for dest in resolved_by_raw.values():
+            if dest.is_file():
+                await _register_written(ctx, dest)
+        return "OK: " + "; ".join(notes)
+
     async def grep(args: dict) -> str:
         pattern = str(args.get("pattern", ""))
         base = Path(str(args.get("path", default_base))).expanduser()
@@ -779,7 +912,7 @@ def build_fs_tools(ctx: ExecContext) -> list[Tool]:
 
     tools = [
         Tool(
-            ToolSpec("read_file", f"Read a local file (default {default_base}), a path the user named, or any @ attachment; artifact:// URIs resolve through the artifact store. Use the exact path or URI from a previous tool result — do not rewrite quotation marks. Sensitive files and Omni control stores are hidden. PDFs are extracted as markdown. Directories return a listing. Use offset/limit to page through a long file. Prefer this over bash for a single file.", {
+            ToolSpec("read_file", f"Read a local file (default {default_base}), a path the user named, or any @ attachment; artifact:// URIs resolve through the artifact store. Use the exact path or URI from a previous tool result — do not rewrite quotation marks. Sensitive files and Omni control stores are hidden. PDFs are extracted as markdown. Raster images return dimensions and, when a VLM is configured, a visual description. Directories return a listing. Use offset/limit to page through a long file. Prefer this over bash for a single file.", {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
@@ -799,11 +932,11 @@ def build_fs_tools(ctx: ExecContext) -> list[Tool]:
         ),
         Tool(
             ToolSpec("write_file", (
-                "Write a file under an allowed root. To write a document longer "
-                "than a few thousand words, send the first part with append "
-                "omitted, then the rest in further calls with append=true — one "
-                "call carrying the whole document can exceed the response limit "
-                "and be cut off."
+                "Create a new file under an allowed root, or replace one only when "
+                "the user asked for a full rewrite. Prefer apply_patch for an "
+                "existing markdown/DOT/script. To write a document longer than a "
+                "few thousand words, send the first part with append omitted, then "
+                "the rest in further calls with append=true."
             ), {
                 "type": "object",
                 "properties": {
@@ -845,6 +978,28 @@ def build_fs_tools(ctx: ExecContext) -> list[Tool]:
                 "required": ["path", "old_string", "new_string"],
             }),
             edit_file,
+        ),
+        Tool(
+            ToolSpec("apply_patch", (
+                "Apply a unified diff or Codex-style patch to one or more existing "
+                "files (multi-hunk). Context must match; on failure the observation "
+                "names the hunk that did not apply. Prefer this over write_file for "
+                "edits to a file that already exists."
+            ), {
+                "type": "object",
+                "properties": {
+                    "patch": {
+                        "type": "string",
+                        "description": (
+                            "Unified diff (---/+++ / @@ hunks) or a *** Begin Patch "
+                            "block with *** Update File / *** Add File / *** Delete File."
+                        ),
+                    },
+                    "diff": {"type": "string"},
+                },
+                "required": ["patch"],
+            }),
+            apply_patch,
         ),
         Tool(
             ToolSpec("grep", f"Search file contents by substring (default {default_base}). Name a directory — the filesystem root is refused. Skips sensitive and noisy directories.", {

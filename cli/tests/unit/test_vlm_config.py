@@ -28,6 +28,7 @@ def _clear_vlm_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep VLM tests independent from the developer's real credentials."""
     for name in (
         "OMNI_VLM_MODEL",
+        "OMNI_VLM_IMAGE_MODEL",
         "OMNI_VLM_ENDPOINT",
         "OMNI_VLM_API_KEY",
     ):
@@ -39,6 +40,7 @@ def test_vlm_defaults_are_safe_and_protocol_is_explicit() -> None:
 
     assert settings.vlm.enabled is False
     assert settings.vlm.model == ""
+    assert settings.vlm.image_model == ""
     assert settings.vlm.endpoint == ""
     assert settings.vlm.api_key == ""
     assert settings.vlm.protocol == "openai_compatible_chat"
@@ -77,11 +79,13 @@ def test_generic_vlm_environment_contract_enables_vlm(monkeypatch: pytest.Monkey
         "OMNI_VLM_ENDPOINT", "https://env-vision.example/v1/chat/completions"
     )
     monkeypatch.setenv("OMNI_VLM_API_KEY", "env-vlm-secret")
+    monkeypatch.setenv("OMNI_VLM_IMAGE_MODEL", "gpt-image-2")
 
     settings = load_settings()
 
     assert settings.vlm.enabled is True
     assert settings.vlm.model == "env-vision-model"
+    assert settings.vlm.image_model == "gpt-image-2"
     assert settings.vlm.endpoint == "https://env-vision.example/v1/chat/completions"
     assert settings.vlm.api_key == "env-vlm-secret"
     assert settings.vlm.protocol == "openai_compatible_chat"
@@ -159,7 +163,7 @@ def test_wrapped_project_config_cannot_override_owner_vlm_setting() -> None:
     assert settings.vlm.api_key == "owner-secret"
 
 
-def test_unpublished_livefigure_gemini_config_is_not_promoted_to_vlm() -> None:
+def test_legacy_livefigure_gemini_config_is_loaded_without_changing_vlm() -> None:
     paths = get_paths()
     _write_toml(
         paths.config_file,
@@ -182,7 +186,10 @@ def test_unpublished_livefigure_gemini_config_is_not_promoted_to_vlm() -> None:
 
     settings = load_settings()
 
-    assert not hasattr(settings, "livefigure")
+    assert settings.livefigure.gemini.enabled is True
+    assert settings.livefigure.gemini.base_url == "https://generativelanguage.googleapis.com/v1beta"
+    assert settings.livefigure.gemini.api_key == "legacy-gemini-secret"
+    assert settings.livefigure.gemini.timeout_s == 90.0
     assert settings.vlm.enabled is False
     assert settings.vlm.endpoint == ""
     assert settings.vlm.model == ""
@@ -191,7 +198,7 @@ def test_unpublished_livefigure_gemini_config_is_not_promoted_to_vlm() -> None:
     assert settings.vlm.timeout_s == 180.0
 
 
-def test_explicit_vlm_config_is_not_mixed_with_unpublished_gemini_values() -> None:
+def test_explicit_vlm_config_is_not_mixed_with_livefigure_gemini_values() -> None:
     paths = get_paths()
     _write_toml(
         paths.config_file,
@@ -220,7 +227,9 @@ def test_explicit_vlm_config_is_not_mixed_with_unpublished_gemini_values() -> No
     assert settings.vlm.api_key == ""
     assert settings.vlm.protocol == "openai_compatible_chat"
     assert settings.vlm.timeout_s == 180.0
-    assert not hasattr(settings, "livefigure")
+    assert settings.livefigure.gemini.enabled is True
+    assert settings.livefigure.gemini.base_url == "https://legacy.example/v1beta"
+    assert settings.livefigure.gemini.api_key == "legacy-secret"
 
 
 def test_config_vlm_command_persists_public_fields_and_masks_secret() -> None:
@@ -270,7 +279,7 @@ def test_config_vlm_command_persists_public_fields_and_masks_secret() -> None:
     list_result = runner.invoke(app, ["config", "list"])
     assert list_result.exit_code == 0
     assert secret not in list_result.stdout
-    for label in ("vlm.model", "vlm.endpoint", "vlm.protocol", "vlm.api_key"):
+    for label in ("vlm.model", "vlm.image_model", "vlm.endpoint", "vlm.protocol", "vlm.api_key"):
         assert label in list_result.stdout
 
 
@@ -332,6 +341,30 @@ def test_config_vlm_accepts_a_site_origin_base_url() -> None:
     assert settings.vlm.model == "gpt-image-2"
 
 
+def test_config_vlm_persists_an_openai_images_model() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "config",
+            "vlm",
+            "-u",
+            "https://zgc.apihy.com",
+            "-m",
+            "gemini-3-pro-image-preview",
+            "--image-model",
+            "gpt-image-2",
+            "-k",
+            "vlm-secret",
+        ],
+    )
+    assert result.exit_code == 0
+    settings = load_settings()
+    assert settings.vlm.enabled is True
+    assert settings.vlm.endpoint == "https://zgc.apihy.com"
+    assert settings.vlm.model == "gemini-3-pro-image-preview"
+    assert settings.vlm.image_model == "gpt-image-2"
+
+
 def test_config_vlm_test_checks_saved_effective_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -343,7 +376,11 @@ def test_config_vlm_test_checks_saved_effective_configuration(
         seen.append(config)
         return True, "VLM configuration verified."
 
+    async def fake_images(config):  # noqa: ANN001
+        return True, "VLM Images generation verified."
+
     monkeypatch.setattr(config_cmd, "check_vlm_connectivity", fake_check, raising=False)
+    monkeypatch.setattr(config_cmd, "check_vlm_images_connectivity", fake_images, raising=False)
     result = runner.invoke(
         app,
         [
@@ -404,14 +441,19 @@ def test_config_test_live_probes_configured_vlm(monkeypatch: pytest.MonkeyPatch)
 
     async def fake_vlm(settings):  # noqa: ANN001
         assert settings.vlm.model == "vision-model"
-        return True, "VLM multimodal configuration verified: the model accepted an image probe."
+        return True, "VLM multimodal chat verified: the model accepted an image-input probe."
+
+    async def fake_vlm_images(settings):  # noqa: ANN001
+        return True, "VLM Images generation verified at https://vision.example/v1/images/generations using gpt-image-2 (64 bytes)."
 
     monkeypatch.setattr(user_edits, "test_model_connectivity", fake_model)
     monkeypatch.setattr(user_edits, "test_vlm_connectivity", fake_vlm)
+    monkeypatch.setattr(user_edits, "test_vlm_images_connectivity", fake_vlm_images)
     result = runner.invoke(app, ["config", "test"])
     output = result.stdout + result.stderr
     assert result.exit_code == 0
-    assert "image probe" in output
+    assert "image-input probe" in output
+    assert "images/generations" in output
     assert "Semantic Scholar key is not configured" in output
 
 
@@ -423,3 +465,32 @@ def test_doctor_reports_optional_vlm_once_with_actionable_setup_command() -> Non
     assert "omni config vlm" in result.stdout
     assert "not configured (optional)" in result.stdout
     assert "LiveFigure runtime" not in result.stdout
+    assert "VLM (serve)" not in result.stdout
+
+
+def test_doctor_compares_disk_vlm_to_running_serve() -> None:
+    from omni.config.user_edits import apply_vlm_config
+    from omni.runtime.service_state import write_runtime
+
+    paths = get_paths()
+    apply_vlm_config(
+        paths,
+        endpoint="https://vision.example/v1/chat/completions",
+        model="gpt-image-2",
+        api_key="vlm-secret",
+    )
+    write_runtime(
+        paths,
+        {
+            "ready": True,
+            "phase": "ready",
+            "vlm_enabled": False,
+            "vlm_model": "",
+            "vlm_endpoint": "",
+        },
+    )
+    result = runner.invoke(app, ["doctor"], env={"COLUMNS": "240"})
+    assert result.exit_code == 0
+    assert "VLM (serve)" in result.stdout
+    assert "disabled" in result.stdout
+    assert "gpt-image-2" in result.stdout

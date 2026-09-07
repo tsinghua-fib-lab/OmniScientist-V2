@@ -17,6 +17,7 @@ from typing import Any, Literal
 
 import tomli_w
 
+from omni.config.live_settings import is_owner_connection_key, request_settings_reload
 from omni.config.model_stack import MODEL_PROVIDER_CATALOG, ModelRole, safe_endpoint_display
 from omni.config.paths import (
     OmniPaths,
@@ -190,6 +191,8 @@ def apply_config_value(
         raw_display = json.dumps(value, ensure_ascii=False) if isinstance(value, (list, dict)) else str(value)
     target = write_config_value(paths, resolved, coerced)
     display = mask_secret(coerced) if is_sensitive(resolved) else raw_display
+    if is_owner_connection_key(resolved):
+        request_settings_reload(paths.home)
     return resolved, coerced, target, display
 
 
@@ -215,6 +218,8 @@ def unset_config_value(paths: OmniPaths, key: str) -> Path:
             else:
                 with target.open("wb") as fh:
                     tomli_w.dump(data, fh)
+            if is_owner_connection_key(resolved):
+                request_settings_reload(paths.home)
             return target
     raise LookupError(f"Setting {resolved} was not found.")
 
@@ -284,6 +289,7 @@ def apply_model_config(
         write_config_value(paths, "model.provider", "openai_compatible")
         changed.insert(0, "provider=openai_compatible (automatic)")
     mark_model_unverified(load_settings())
+    request_settings_reload(paths.home)
     return changed
 
 
@@ -292,13 +298,16 @@ def apply_vlm_config(
     *,
     endpoint: str = "",
     model: str = "",
+    image_model: str = "",
     api_key: str = "",
     protocol: str = "",
     timeout_s: float | None = None,
     enabled: bool | None = None,
 ) -> list[str]:
     """Apply ``omni config vlm`` writes. All-empty is a no-op."""
-    supplied = bool(endpoint or model or api_key or protocol or timeout_s is not None)
+    supplied = bool(
+        endpoint or model or image_model or api_key or protocol or timeout_s is not None
+    )
     if enabled is None and not supplied:
         return []
     if timeout_s is not None and timeout_s <= 0:
@@ -317,6 +326,10 @@ def apply_vlm_config(
         value = model.strip()
         write_config_value(paths, "vlm.model", value)
         changed.append(f"model={value}")
+    if image_model:
+        value = image_model.strip()
+        write_config_value(paths, "vlm.image_model", value)
+        changed.append(f"image_model={value}")
     if api_key:
         write_config_value(paths, "vlm.api_key", api_key)
         changed.append(f"api_key={mask_secret(api_key)}")
@@ -331,6 +344,8 @@ def apply_vlm_config(
         resolved_enabled = enabled if enabled is not None else True
         write_config_value(paths, "vlm.enabled", resolved_enabled)
         changed.append(f"enabled={str(resolved_enabled).lower()}")
+    if changed:
+        request_settings_reload(paths.home)
     return changed
 
 
@@ -556,6 +571,7 @@ def describe_effective(settings: OmniSettings) -> dict[str, Any]:
         _row("model.health_detail", model_health.message if model_health else None),
         _row("vlm.enabled", settings.vlm.enabled),
         _row("vlm.model", settings.vlm.model or None),
+        _row("vlm.image_model", settings.vlm.image_model or None),
         _row("vlm.endpoint", settings.vlm.endpoint or None),
         _row("vlm.protocol", settings.vlm.protocol),
         _row("vlm.api_key", None, secret=True, present=_secret_set(settings.vlm.api_key)),
@@ -644,6 +660,7 @@ def describe_effective(settings: OmniSettings) -> dict[str, Any]:
             "vlm": {
                 "enabled": settings.vlm.enabled,
                 "model": settings.vlm.model,
+                "image_model": settings.vlm.image_model,
                 "endpoint": settings.vlm.endpoint,
                 "protocol": settings.vlm.protocol,
                 "timeout_s": settings.vlm.timeout_s,
@@ -795,6 +812,12 @@ async def test_vlm_connectivity(settings: OmniSettings) -> tuple[bool, str]:
     return await check_vlm_connectivity(settings.vlm)
 
 
+async def test_vlm_images_connectivity(settings: OmniSettings) -> tuple[bool, str]:
+    from omni.core.vlm import check_vlm_images_connectivity
+
+    return await check_vlm_images_connectivity(settings.vlm)
+
+
 async def test_semantic_scholar_connectivity(settings: OmniSettings) -> tuple[bool, str]:
     from omni.research import connectors
 
@@ -904,6 +927,18 @@ async def collect_config_health(
             on_start(f"Testing VLM {vlm.protocol} / {vlm.model or '(unset)'}...")
         ok, detail = await test_vlm_connectivity(settings)
         items.append(ConfigHealthItem(name="vlm", status="passed" if ok else "failed", detail=detail))
+        if on_start is not None:
+            on_start(
+                f"Testing VLM Images / {vlm.image_model or vlm.model or '(unset)'}..."
+            )
+        images_ok, images_detail = await test_vlm_images_connectivity(settings)
+        items.append(
+            ConfigHealthItem(
+                name="vlm_images",
+                status="passed" if images_ok else "failed",
+                detail=images_detail,
+            )
+        )
 
     if not str(settings.research.semantic_scholar_api_key or "").strip():
         items.append(

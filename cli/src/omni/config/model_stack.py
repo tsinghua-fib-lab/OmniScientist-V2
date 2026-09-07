@@ -96,7 +96,7 @@ MODEL_ROLE_SPECS: tuple[ModelRoleSpec, ...] = (
         model_path="vlm.model",
         credential_path="vlm.api_key",
         protocol_path="vlm.protocol",
-        extra_paths=("vlm.timeout_s",),
+        extra_paths=("vlm.timeout_s", "vlm.image_model"),
     ),
     ModelRoleSpec(
         role=ModelRole.EMBEDDING,

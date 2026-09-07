@@ -13,6 +13,21 @@ from omni.core.react_agent import ReActLoopAgent, ToolSpec
 from tests.conftest import ScriptedLLM
 
 SLEEP = ToolSpec("sleep", "sleep then echo", {"type": "object", "properties": {"i": {"type": "string"}}})
+SEARCH = ToolSpec(
+    "search_literature",
+    "search",
+    {"type": "object", "properties": {"i": {"type": "string"}}},
+)
+CORPUS = ToolSpec(
+    "search_corpus",
+    "corpus",
+    {"type": "object", "properties": {"i": {"type": "string"}}},
+)
+WRITE = ToolSpec(
+    "write_file",
+    "write",
+    {"type": "object", "properties": {"i": {"type": "string"}}},
+)
 _DELAY = 0.05
 
 
@@ -365,3 +380,52 @@ async def test_cancel_closes_every_inflight_parallel_tool_call() -> None:
         "cancelled",
         "cancelled",
     ]
+
+
+@pytest.mark.asyncio
+async def test_read_only_literature_tools_run_in_parallel() -> None:
+    llm = ScriptedLLM(
+        [
+            ChatWithToolsResult(
+                tool_calls=[
+                    ToolCall("a", "search_literature", {"i": "1"}),
+                    ToolCall("b", "search_corpus", {"i": "2"}),
+                ]
+            ),
+            ChatWithToolsResult(content="done"),
+        ]
+    )
+    started = time.monotonic()
+    result = await ReActLoopAgent(llm, _slow_invoker, max_iterations=4, parallel_tools=True).run(
+        system_prompt="s",
+        user_message="u",
+        tools=[SEARCH, CORPUS],
+    )
+    elapsed = time.monotonic() - started
+    assert result.kind == "text"
+    assert [record.name for record in result.tool_trace] == ["search_literature", "search_corpus"]
+    assert elapsed < 0.12, f"read-only literature tools should run together, took {elapsed:.3f}s"
+
+
+@pytest.mark.asyncio
+async def test_write_tools_stay_serial_even_in_a_batch() -> None:
+    llm = ScriptedLLM(
+        [
+            ChatWithToolsResult(
+                tool_calls=[
+                    ToolCall("a", "write_file", {"i": "1"}),
+                    ToolCall("b", "write_file", {"i": "2"}),
+                ]
+            ),
+            ChatWithToolsResult(content="done"),
+        ]
+    )
+    started = time.monotonic()
+    result = await ReActLoopAgent(llm, _slow_invoker, max_iterations=4, parallel_tools=True).run(
+        system_prompt="s",
+        user_message="u",
+        tools=[WRITE],
+    )
+    elapsed = time.monotonic() - started
+    assert result.kind == "text"
+    assert elapsed >= 2 * _DELAY * 0.8, f"writes should stay serial, took {elapsed:.3f}s"

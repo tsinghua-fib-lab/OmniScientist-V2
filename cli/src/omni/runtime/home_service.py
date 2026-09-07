@@ -34,6 +34,7 @@ from typing import Any
 
 from omni import __version__
 from omni.config import OmniSettings, load_settings
+from omni.config.live_settings import public_connection_identity
 from omni.config.paths import is_within_home
 from omni.config.workspaces import register_workspace
 from omni.runtime import service_state
@@ -363,6 +364,7 @@ class HomeService:
                 await self.reconcile()
             except Exception:  # noqa: BLE001
                 logger.exception("home service reconcile tick failed")
+            self._refresh_owner_connections()
 
     async def _heartbeat_loop(self) -> None:
         while not self._stop.is_set():
@@ -372,7 +374,29 @@ class HomeService:
                 pass
             if self._stop.is_set():
                 return
+            self._refresh_owner_connections()
             self._write_runtime(ready=True)
+
+    def _refresh_owner_connections(self) -> None:
+        """Adopt owner model/VLM writes without rebuilding workspace agents."""
+        for ws in self._ws.values():
+            try:
+                ws.agent.refresh_owner_connection()
+            except Exception:  # noqa: BLE001 — one workspace must not starve others
+                logger.debug(
+                    "home service: owner connection refresh failed for %s",
+                    ws.name,
+                    exc_info=True,
+                )
+
+    def _owner_connection_payload(self) -> dict[str, Any]:
+        anchor = self._ws.get(self._anchor_key)
+        if anchor is None:
+            return {}
+        try:
+            return public_connection_identity(anchor.agent.settings)
+        except Exception:  # noqa: BLE001
+            return {}
 
     def _channel_health(self) -> dict[str, Any]:
         anchor = self._ws.get(self._anchor_key)
@@ -413,6 +437,7 @@ class HomeService:
                 "channels": self._channel_names(),
                 "channel_health": self._channel_health(),
                 "reconcile_generation": self._generation,
+                **self._owner_connection_payload(),
             },
         )
 

@@ -16,6 +16,7 @@ from omni.cli.repl_composer import (
     ChatAction,
     cancel_completion,
     install_multiline_bindings,
+    install_paste_image_bindings,
 )
 
 
@@ -339,3 +340,16 @@ async def test_terminal_shortcuts_compose_one_multiline_submission(newline_input
         result = await prompt
 
     assert result == "first line\nsecond line"
+
+
+def test_paste_image_bindings_reserve_ctrl_v_and_ctrl_alt_v() -> None:
+    bindings = KeyBindings()
+    hits: list[str] = []
+    install_paste_image_bindings(
+        bindings, handler=lambda event: hits.append(event.current_buffer.text)
+    )
+    buffer = Buffer(multiline=True)
+    buffer.text = "draft"
+    _invoke(bindings, (Keys.ControlV,), buffer)
+    _invoke(bindings, (Keys.Escape, Keys.ControlV), buffer)
+    assert hits == ["draft", "draft"]

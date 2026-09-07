@@ -508,7 +508,7 @@ def _prompt_partial_outputs(tool_trace: list[Any]) -> list[dict[str, Any]]:
         name = str(getattr(record, "name", ""))
         args = getattr(record, "arguments", {}) if isinstance(getattr(record, "arguments", {}), dict) else {}
         item: dict[str, Any] | None = None
-        if name in {"write_file", "edit_file"} and args.get("path"):
+        if name in {"write_file", "edit_file", "apply_patch"} and args.get("path"):
             item = {"tool": name, "path": str(args.get("path"))}
         elif name == "bash" and args.get("command"):
             item = {"tool": name, "command": str(args.get("command"))[:500]}
@@ -836,7 +836,7 @@ def _prompt_has_file_deliverable(result: Any) -> bool:
         args = getattr(record, "arguments", {})
         if not isinstance(args, dict):
             continue
-        if name in {"write_file", "edit_file"} and str(args.get("path") or "").strip():
+        if name in {"write_file", "edit_file", "apply_patch"} and str(args.get("path") or "").strip():
             return True
     return False
 

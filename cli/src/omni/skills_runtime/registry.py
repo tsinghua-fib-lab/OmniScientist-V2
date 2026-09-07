@@ -99,6 +99,9 @@ _CAPABILITY_ALIASES: dict[str, tuple[str, ...]] = {
     "literature.search": ("literature.search", "literature.review", "research.literature_search"),
     "corpus.index": ("corpus.index", "literature.index", "research.corpus_index"),
     "qa.grounded": ("qa.grounded", "literature.qa", "research.grounded_qa"),
+    "literature.qa": ("literature.qa", "qa.grounded", "research.grounded_qa"),
+    "literature.survey": ("literature.survey", "literature.search", "draft.manuscript"),
+    "literature.precedent": ("literature.precedent", "literature.search"),
     "synthesis.final": ("synthesis.final", "draft.section", "draft.manuscript"),
     "draft.section": ("draft.section", "synthesis.final", "paper.write.section"),
     "draft.manuscript": ("draft.manuscript", "synthesis.final", "paper.write"),
@@ -299,10 +302,18 @@ class SkillRegistry:
         # doomed VLM skill without starting it.
         self._admission_services: dict[str, Any] | None = None
 
-    def refresh_settings(self, settings: OmniSettings) -> int:
-        """Reload settings-backed filters while preserving this registry object."""
+    def adopt_settings(self, settings: OmniSettings) -> None:
+        """Point admission probes at ``settings`` without rebuilding the catalog.
+
+        A VLM/model write must not re-walk skill directories. Planner-time
+        ``admission_services()`` reads ``settings.vlm`` from this pointer.
+        """
         self._settings = settings
         self._paths = settings.paths
+
+    def refresh_settings(self, settings: OmniSettings) -> int:
+        """Reload settings-backed filters while preserving this registry object."""
+        self.adopt_settings(settings)
         if self._uses_config_sources:
             self._sources = list(settings.skills.sources)
         return self.build_index()

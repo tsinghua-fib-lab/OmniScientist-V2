@@ -270,6 +270,24 @@ def test_degraded_warnings_are_printed_as_a_partial_success_banner() -> None:
     assert "429" in out
 
 
+def test_research_review_rejected_does_not_paint_partial_banner() -> None:
+    turn = SimpleNamespace(
+        kind="text",
+        settlement_status="succeeded",
+        terminated_reason="done",
+        degraded_warnings=[
+            "Research review rejected: dangling anchors: 1706.03762, 2005.11401",
+        ],
+        drained_results=[],
+        tool_trace=[],
+    )
+    with console.capture() as cap:
+        render_turn_outcome(turn)
+    out = cap.get()
+    assert "Partial success" not in out
+    assert "Verification:" not in out
+
+
 def test_successful_host_fill_is_an_info_line_not_a_partial_banner() -> None:
     turn = SimpleNamespace(
         kind="text",

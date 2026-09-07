@@ -46,13 +46,11 @@ class VerifyReport:
 
     @property
     def issues(self) -> int:
-        semantic = self.citation_support
-        semantic_issues = (
-            len(semantic.weak) + len(semantic.unsupported) if semantic is not None else 0
-        )
+        # Lexical citation-support is a warning tier (omni verify annotate-only).
+        # Weak word overlap must not veto a structurally grounded graph.
         return (
             len(self.unsupported) + len(self.contradicted) + len(self.overconfident)
-            + len(self.memory_unsupported) + semantic_issues
+            + len(self.memory_unsupported)
         )
 
     @property

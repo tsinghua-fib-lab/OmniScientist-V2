@@ -37,7 +37,7 @@ from omni.config.user_edits import (
     test_semantic_scholar_connectivity,
     unset_config_value,
 )
-from omni.core.vlm import check_vlm_connectivity
+from omni.core.vlm import check_vlm_connectivity, check_vlm_images_connectivity
 
 app = typer.Typer(help="Inspect and modify layered TOML configuration.", no_args_is_help=True)
 _CONFIG_SUBCOMMANDS = (
@@ -65,7 +65,11 @@ def render_config_usage_help() -> None:
                 spell_commands("/config set research.semantic_scholar_api_key <API_KEY>"),
             ],
             ["model", "Set model endpoint, key, and name", spell_commands("/config model -p openai -u <BASE_URL> -m <MODEL> -k <API_KEY>")],
-            ["vlm", "Configure the optional vision model used by visual skills", spell_commands("/config vlm -u <ENDPOINT> -m <MODEL> -k <API_KEY>")],
+            [
+                "vlm",
+                "Configure a multimodal model; LiveFigure needs image input and image output",
+                spell_commands("/config vlm -u <ENDPOINT> -m <MODEL> -k <API_KEY>"),
+            ],
             ["semantic-scholar", "Configure literature-search credentials", spell_commands("/config semantic-scholar -k <API_KEY> --test")],
             ["embeddings", "Configure remote or local semantic embeddings", spell_commands("/config embeddings --enable -p specter2 --python <PYTHON> --base-model <DIR> --adapter <DIR>")],
             ["home [PATH]", "Show or change the Omni data directory; --reset restores ~/.omni", spell_commands("/config home /data/omni")],
@@ -118,14 +122,15 @@ def _render_vlm_config_guide() -> None:
     from omni.cli.render import console
 
     text = Text()
-    text.append("Configure an optional vision model for visual skills:\n", "bold")
+    text.append("Configure a multimodal large language model (MLLM) for visual skills:\n", "bold")
     text.append("  ", "dim")
     text.append(
         f"{spell_commands('/config vlm -u https://vision.example/v1 -m <VISION_MODEL> -k <API_KEY>')}\n",
         "cyan",
     )
     text.append(
-        "  A site origin or /v1 base URL is expanded to chat/completions, "
+        "  LiveFigure requires a model that accepts image input and can produce "
+        "image output. A site origin or /v1 base URL is expanded to chat/completions, "
         "same as Claude Code's ANTHROPIC_BASE_URL. HTTPS for remote services "
         "(HTTP is allowed only on loopback). The API key is kept in secrets.toml. "
         "Add --test, or run `/config test`.",
@@ -234,6 +239,7 @@ def list_cmd(ctx: typer.Context) -> None:
         ("model.health_detail", model_health.message),
         ("vlm.enabled", s.vlm.enabled),
         ("vlm.model", s.vlm.model or "(unset)"),
+        ("vlm.image_model", s.vlm.image_model or "(unset)"),
         ("vlm.endpoint", s.vlm.endpoint or "(unset)"),
         ("vlm.protocol", s.vlm.protocol),
         ("vlm.api_key", "***set***" if s.vlm.api_key else "(unset)"),
@@ -462,7 +468,12 @@ def vlm_cmd(
         "-u",
         help="Complete multimodal endpoint URL; stored without path rewriting.",
     ),
-    model: str = typer.Option("", "--model", "-m", help="Vision-capable model name."),
+    model: str = typer.Option(
+        "",
+        "--model",
+        "-m",
+        help="Multimodal chat model name; used for image input and code generation.",
+    ),
     api_key: str = typer.Option(
         "", "--api-key", "-k", help="Token stored separately in secrets.toml."
     ),
@@ -478,23 +489,35 @@ def vlm_cmd(
     test: bool = typer.Option(
         False, "--test", help="Verify the saved endpoint with a tiny multimodal request."
     ),
+    image_model: str = typer.Option(
+        "",
+        "--image-model",
+        help="OpenAI Images model for /v1/images/generations (for example gpt-image-2).",
+    ),
 ) -> None:
-    """Configure the optional vision model shared by VLM-backed skills."""
+    """Configure the multimodal model shared by VLM-backed skills."""
     settings = ctx.obj.settings()
     vlm = settings.vlm
     paths = settings.paths
-    supplied = bool(endpoint or model or api_key or protocol or timeout is not None)
+    supplied = bool(
+        endpoint or model or image_model or api_key or protocol or timeout is not None
+    )
 
     if enabled is None and not supplied and not test:
-        kv_table("Vision model (VLM)", [
+        kv_table("Multimodal model (MLLM; configured as VLM)", [
             ("enabled", vlm.enabled),
             ("model", vlm.model or "(unset)"),
+            ("image_model", vlm.image_model or "(unset)"),
             ("endpoint", vlm.endpoint or "(unset)"),
             ("protocol", vlm.protocol),
             ("timeout_s", vlm.timeout_s),
             ("api_key", "***set***" if vlm.api_key else "(unset)"),
         ])
-        info("Configure with `config vlm -u <ENDPOINT> -m <MODEL> -k <API_KEY>`.")
+        info(
+            "LiveFigure requires a chat VLM plus an OpenAI Images generator. "
+            "Configure with `config vlm -u <ENDPOINT> -m <MODEL> -k <API_KEY>` "
+            "and optionally `--image-model gpt-image-2`."
+        )
         return
 
     try:
@@ -502,6 +525,7 @@ def vlm_cmd(
             paths,
             endpoint=endpoint,
             model=model,
+            image_model=image_model,
             api_key=api_key,
             protocol=protocol,
             timeout_s=timeout,
@@ -512,6 +536,10 @@ def vlm_cmd(
         raise typer.Exit(2) from exc
     if changed:
         success("Updated VLM configuration: " + ", ".join(changed))
+        info(
+            "A running `omni serve` (WeChat included) and an open REPL pick this "
+            "up on the next turn."
+        )
     if test:
         _run_vlm_connectivity_test(ctx)
 
@@ -524,9 +552,14 @@ def _run_vlm_connectivity_test(ctx: typer.Context) -> bool:
     info(f"Testing VLM {config.protocol} / {config.model or '(unset)'}...")
     ok, detail = run_async(check_vlm_connectivity(config))
     (success if ok else error)(detail)
-    if not ok:
+    info(
+        f"Testing VLM Images / {config.image_model or config.model or '(unset)'}..."
+    )
+    images_ok, images_detail = run_async(check_vlm_images_connectivity(config))
+    (success if images_ok else error)(images_detail)
+    if not ok or not images_ok:
         info("Update the VLM with `config vlm ...`, then run `config vlm --test` again.")
-    return ok
+    return ok and images_ok
 
 
 @app.command("semantic-scholar")

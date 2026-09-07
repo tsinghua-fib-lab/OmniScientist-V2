@@ -133,11 +133,13 @@ def test_busy_footer_keeps_esc_and_fits(columns: int):
 def test_unfitted_footer_text_stays_complete_for_existing_callers():
     tui = ReplTui(commands=())
     assert tui.footer_text() == (
-        "auto mode · Enter send · Ctrl+J newline · select to copy · Ctrl+D exit"
+        "auto mode · Enter send · Ctrl+J newline · Ctrl+V paste image · "
+        "select to copy · Ctrl+D exit"
     )
     ready = ReplTui(commands=(), shift_enter_ready=True)
     assert ready.footer_text() == (
-        "auto mode · Enter send · Shift+Enter newline · select to copy · Ctrl+D exit"
+        "auto mode · Enter send · Shift+Enter newline · Ctrl+V paste image · "
+        "select to copy · Ctrl+D exit"
     )
 
 

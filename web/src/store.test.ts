@@ -23,6 +23,7 @@ const mocked = vi.hoisted(() => ({
   getNotebook: vi.fn(),
   getCost: vi.fn(),
   startTurn: vi.fn(),
+  upload: vi.fn(),
   watchTask: vi.fn(),
   cancel: vi.fn(),
   approve: vi.fn(),
@@ -64,6 +65,7 @@ vi.mock("./api", () => {
       getNotebook: mocked.getNotebook,
       getCost: mocked.getCost,
       startTurn: mocked.startTurn,
+      upload: mocked.upload,
       cancel: mocked.cancel,
       approve: mocked.approve,
     },
@@ -216,6 +218,7 @@ describe("session Task marker read model", () => {
     });
     mocked.getTask.mockResolvedValue({ task: null });
     mocked.listArtifacts.mockResolvedValue({ artifacts: [] });
+    mocked.upload.mockResolvedValue("/tmp/project/inputs/shot.png");
     mocked.startTurn.mockResolvedValue({
       session_id: session.id,
       task_id: "task-started",
@@ -669,7 +672,139 @@ describe("session Task marker read model", () => {
 
     expect(readSnapshot(store).messages.map((item) => item.content)).toEqual(["Core result"]);
     expect(readSnapshot(store).messages.some((item) => item.id.startsWith("local-"))).toBe(false);
+    expect(readSnapshot(store).composer).toBe("try from web");
     expect(readSnapshot(store).error).toContain("capacity reached");
+  });
+
+  it("waits for a pending upload and submits raw text plus file_uris", async () => {
+    const pending = deferred<string>();
+    mocked.upload.mockReturnValueOnce(pending.promise);
+    mocked.startTurn.mockResolvedValueOnce({
+      session_id: session.id,
+      task_id: "task-started",
+      client_run_id: "run-started",
+      channel: "web",
+      kind: "turn",
+      text: "see this\n[Image #1]\n@/tmp/project/inputs/shot.png",
+    });
+    const store = await import("./store");
+    await openSession(store);
+    store.actions.setComposer("see this");
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "shot.png", { type: "image/png" });
+    const attaching = store.actions.attach([file]);
+    await vi.waitFor(() => expect(readSnapshot(store).attachments[0]?.status).toBe("pending"));
+    const sending = store.actions.send();
+    await Promise.resolve();
+    expect(mocked.startTurn).not.toHaveBeenCalled();
+    pending.resolve("/tmp/project/inputs/shot.png");
+    await attaching;
+    await sending;
+    expect(mocked.startTurn).toHaveBeenCalledWith(
+      workspace.open_path,
+      expect.objectContaining({
+        text: "see this",
+        session_id: session.id,
+        file_uris: ["/tmp/project/inputs/shot.png"],
+      }),
+    );
+    expect(readSnapshot(store).composer).toBe("");
+    expect(readSnapshot(store).messages.some((item) => String(item.content).includes("[Image #1]"))).toBe(
+      true,
+    );
+  });
+
+  it("does not submit text after an attachment has already failed", async () => {
+    mocked.upload.mockRejectedValueOnce(new Error("upload failed"));
+    mocked.startTurn.mockResolvedValueOnce({
+      session_id: session.id,
+      task_id: "task-started",
+      client_run_id: "run-started",
+      channel: "web",
+      kind: "turn",
+      text: "see this",
+    });
+    const store = await import("./store");
+    await openSession(store);
+    store.actions.setComposer("see this");
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "shot.png", { type: "image/png" });
+    await store.actions.attach([file]).catch(() => undefined);
+    await vi.waitFor(() => expect(readSnapshot(store).attachments[0]?.status).toBe("failed"));
+    await store.actions.send();
+    expect(mocked.startTurn).not.toHaveBeenCalled();
+    expect(readSnapshot(store).composer).toBe("see this");
+  });
+
+  it("submits a pending turn to the workspace that owned the draft", async () => {
+    const pending = deferred<string>();
+    mocked.upload.mockReturnValueOnce(pending.promise);
+    mocked.startTurn.mockResolvedValueOnce({
+      session_id: session.id,
+      task_id: "task-started",
+      client_run_id: "run-started",
+      channel: "web",
+      kind: "turn",
+      text: "see this\n[Image #1]\n@/tmp/project/inputs/shot.png",
+    });
+    const store = await import("./store");
+    await openSession(store);
+    store.actions.setComposer("see this");
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "shot.png", { type: "image/png" });
+    const attaching = store.actions.attach([file]);
+    await vi.waitFor(() => expect(readSnapshot(store).attachments[0]?.status).toBe("pending"));
+    const sending = store.actions.send();
+    const workspaceB = {
+      ...workspace,
+      root: "/tmp/project-b",
+      project_dir: "/tmp/project-b",
+      project_name: "project-b",
+      invocation_cwd: "/tmp/project-b",
+      label: "project-b",
+      open_path: "/tmp/project-b",
+      artifacts_dir: "/tmp/project-b/artifacts",
+      db: "/tmp/project-b/sessions.sqlite3",
+    };
+    mocked.openWorkspace.mockResolvedValueOnce({ workspace: workspaceB });
+    mocked.listSessions.mockResolvedValue({ sessions: [] });
+    mocked.sessionMessages.mockResolvedValue({ messages: [] });
+    await store.actions.openWorkspace(workspaceB.open_path);
+    pending.resolve("/tmp/project/inputs/shot.png");
+    await attaching;
+    await sending;
+    expect(mocked.startTurn).toHaveBeenCalledWith(
+      workspace.open_path,
+      expect.objectContaining({
+        text: "see this",
+        session_id: session.id,
+        file_uris: ["/tmp/project/inputs/shot.png"],
+      }),
+    );
+  });
+
+  it("does not submit twice while a send is already in flight", async () => {
+    const started = deferred<{
+      session_id: string;
+      task_id: string;
+      client_run_id: string;
+      channel: string;
+      kind: string;
+    }>();
+    mocked.startTurn.mockImplementationOnce(() => started.promise);
+    const store = await import("./store");
+    await openSession(store);
+    store.actions.setComposer("once");
+    const first = store.actions.send();
+    const second = store.actions.send();
+    await vi.waitFor(() => expect(mocked.startTurn).toHaveBeenCalledTimes(1));
+    started.resolve({
+      session_id: session.id,
+      task_id: "task-started",
+      client_run_id: "run-started",
+      channel: "web",
+      kind: "turn",
+    });
+    await first;
+    await second;
+    expect(mocked.startTurn).toHaveBeenCalledTimes(1);
   });
 
   it("unlocks the composer when the observation stream fails", async () => {

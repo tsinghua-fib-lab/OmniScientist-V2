@@ -592,7 +592,6 @@ async def test_explicit_file_question_can_use_read_only_workspace_tools():
     [
         ("获取 arXiv 1706.03762 的全文", "arxiv-fetch"),
         ("检查这篇 RAG 草稿是否像审稿人会指出严重问题", "paper-review"),
-        ("这个结论有没有反例或冲突证据？", "contradiction-scan"),
     ],
 )
 async def test_research_skill_scenario_prompts_submit_expected_child_skill(prompt: str, skill: str):

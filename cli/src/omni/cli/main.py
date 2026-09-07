@@ -1254,16 +1254,28 @@ def _show_repl_help() -> None:
     init_cmd.render_init_config_map(surface=REPL)
 
 
-def _render_update_menu(latest: str) -> None:
-    """Codex-style "update available" banner + numbered choices."""
+def _update_menu_text(latest: str) -> Text:
+    """Codex TUI copy: banner, release notes, Update now / Skip / Skip until next."""
     text = Text()
-    text.append("A new version is available: ", "bold yellow")
-    text.append(f"{__version__} -> {latest}\n", "bold")
-    text.append("  Update with `omni update` or reinstall using your package manager.\n", "dim")
-    text.append("› 1. Update now\n", "cyan")
-    text.append("  2. Skip\n")
-    text.append("  3. Ignore this version")
-    console.print(text)
+    text.append("  ✨ ", "bold cyan")
+    text.append("Update available!", "bold")
+    text.append(f"  {__version__} -> {latest}\n", "dim")
+    text.append("\n")
+    text.append("  Release notes: ", "dim")
+    text.append(f"{update_check.RELEASE_NOTES_URL}\n", "dim underline")
+    text.append("\n")
+    text.append("  › 1. ", "cyan")
+    text.append("Update now (runs `omni update`)\n", "cyan")
+    text.append("    2. Skip\n")
+    text.append("    3. Skip until next version\n")
+    text.append("\n")
+    text.append("  Press Enter to continue", "dim")
+    return text
+
+
+def _render_update_menu(latest: str) -> None:
+    """Print the Codex-shaped startup update menu."""
+    console.print(_update_menu_text(latest))
 
 
 def _fresh_cli_command(args: list[str]) -> list[str]:
@@ -1285,7 +1297,8 @@ def _fresh_cli_command(args: list[str]) -> list[str]:
 
 def _run_update_now() -> bool:
     """Run the same parameterless update command exposed to shell users."""
-    info("Updating with `omni update`...")
+    console.print()
+    info("Updating Omni via `omni update`...")
     try:
         proc = subprocess.run(  # noqa: S603 - fixed argv, no shell.
             _fresh_cli_command(["update"]), check=False
@@ -1294,7 +1307,8 @@ def _run_update_now() -> bool:
         warn(f"Automatic update failed: {exc}. Run `omni update` manually.")
         return False
     if proc.returncode == 0:
-        success("Update completed; restarting omni on the installed version.")
+        console.print()
+        console.print("🎉 Update ran successfully! Please restart Omni.")
         return True
     warn("Update did not complete. Run `omni update` for details.")
     return False
@@ -1305,8 +1319,8 @@ def _maybe_prompt_update(settings: OmniSettings) -> bool:
 
     Reads the cache a prior background refresh wrote, so startup never blocks.
     Only an interactive TTY gets the menu; a piped REPL gets a one-line hint.
-    Returns ``True`` when an update was launched (so the caller skips the
-    background refresh it would otherwise kick off).
+    Returns ``True`` when an update finished successfully so the caller can
+    exit — the user types ``omni`` again to load the new package (Codex).
     """
     paths = settings.paths
     if paths is None:
@@ -1334,7 +1348,7 @@ def _maybe_prompt_update(settings: OmniSettings) -> bool:
         return False
     _render_update_menu(latest)
     try:
-        choice = console.input("[bold cyan]›[/bold cyan] Select an option (Enter=1): ").strip()
+        choice = console.input("[bold cyan]›[/bold cyan] ").strip()
     except (EOFError, KeyboardInterrupt):
         console.print()
         return False
@@ -1342,7 +1356,7 @@ def _maybe_prompt_update(settings: OmniSettings) -> bool:
         return _run_update_now()
     if choice == "3":
         update_check.mark_skip_version(paths, latest)
-        info(f"Ignored version {latest}; notifications resume for a newer release.")
+        info(f"Skipped {latest} until the next version.")
     else:
         info("Update skipped. Run `omni update` at any time.")
     return False
@@ -2004,11 +2018,11 @@ async def _prepare_foreground_task_retry(
 
 
 async def _repl_async(state: AppState, *, resume_session_id: str | None = None) -> None:
-    # The cached check is local and fast. If the user accepts an update, replace
-    # this process before constructing any agent from the old imported package.
+    # The cached check is local and fast. If the user accepts an update, exit
+    # before constructing any agent from the old imported package — they type
+    # ``omni`` again, same as Codex after ``npm install -g``.
     launch_settings = state.settings()
     if _maybe_prompt_update(launch_settings):
-        _relaunch_omni()
         return
     update_check.maybe_refresh_in_background(launch_settings)
     agent = await make_agent(state)
@@ -2031,6 +2045,7 @@ async def _repl_async(state: AppState, *, resume_session_id: str | None = None) 
     output_base = Path(
         str(getattr(s.artifacts, "output_dir", "outputs") or "outputs")
     ).expanduser()
+    inputs_dir = agent.paths.inputs_dir
     # xterm modifyOtherKeys readiness — not a Kitty CSI-u probe. Footer and
     # placeholder advertise Shift+Enter only when this report says they work.
     shift_enter_ready = inspect_terminal().shift_enter_ready
@@ -2043,6 +2058,7 @@ async def _repl_async(state: AppState, *, resume_session_id: str | None = None) 
             diagnostic_max_bytes=log_max_bytes,
             diagnostic_files=log_files,
             output_base=output_base,
+            inputs_dir=inputs_dir,
             shift_enter_ready=shift_enter_ready,
         )
         try:
@@ -2058,6 +2074,7 @@ async def _repl_async(state: AppState, *, resume_session_id: str | None = None) 
     input_box = tui or ReplInputBox(
         commands=commands,
         output_base=output_base,
+        inputs_dir=inputs_dir,
         shift_enter_ready=shift_enter_ready,
     )
     guide(_repl_banner_text(agent.paths.project_name, s))
@@ -2118,7 +2135,11 @@ async def _repl_async(state: AppState, *, resume_session_id: str | None = None) 
 
                 agent.approver = build_cli_approver()
                 tui = None
-                input_box = ReplInputBox(commands=commands, output_base=output_base)
+                input_box = ReplInputBox(
+                    commands=commands,
+                    output_base=output_base,
+                    inputs_dir=inputs_dir,
+                )
                 continue
             if not line:
                 if tui is not None and turn_id:
@@ -2381,8 +2402,9 @@ def _relaunch_omni(*, continue_session: bool = False) -> None:
     """Replace this process with a fresh ``omni`` after a runtime-level change.
 
     Uses ``sys.orig_argv`` (the exact launch command, incl. interpreter) so the
-    reopened REPL preserves the original global flags. This is used after an
-    update or data-home switch. Best-effort: on failure it tells the user to
+    reopened REPL preserves the original global flags. Used after a data-home
+    switch or an in-REPL ``/update``. A startup update exits instead, so the
+    user types ``omni`` again. Best-effort: on failure it tells the user to
     restart manually rather than leaving a half-exited process.
     """
     argv = list(getattr(sys, "orig_argv", None) or [sys.executable, *sys.argv])

@@ -55,6 +55,7 @@ def test_repl_input_box_advertises_the_portable_newline_shortcut(monkeypatch):
 
     assert "Enter send" in toolbar
     assert "Ctrl+J newline" in toolbar
+    assert "Ctrl+V paste image" in toolbar
 
 
 def test_repl_input_box_advertises_shift_enter_when_modified_keys_are_ready(monkeypatch):

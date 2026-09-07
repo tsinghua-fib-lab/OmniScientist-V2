@@ -22,20 +22,49 @@ at least two case IDs, and what the user is checking. Detailed inputs live
 in the sections after it.
 
 Use a dedicated named project so walkthrough store rows stay off real work.
+
+### Before you score (activation + coverage)
+
+A catalog row is not covered until the **Pass column** is observed on a
+command that is running **this tree**. Planner-compile scripts, offline
+`mock` / `ScriptedLLM` tests, and `task show` of an older run do not score
+A-SUR, P-01, or P-03–P-05. Those families fail only after retrieve + write
++ figure/deck actually run. That is why a “full walkthrough” that only
+compiled plans missed the live `native_synthesis` / `livefigure` regressions
+on the same prompts (A-SUR-01 ≈ latent-space intervention survey; P-03/P-05
+≈ RAG pack with an editable / PPT-format figure).
+
+Prove the binary before the first case:
+
+```bash
+PYTHONPATH=cli/src .venv/bin/python -c "import omni, pathlib; print(pathlib.Path(omni.__file__).resolve())"
+# must print: <this-checkout>/cli/src/omni/__init__.py
+```
+
 From a source checkout, put `cli/src` first on `PYTHONPATH` so the command
-hits this tree rather than a previously installed wheel (do not run
-`omni update --local` just to pick up local edits). Publish walkthrough
-files with `--out outputs_walkthrough` (gitignored). Do **not** use
-`--out .`: that writes `<title>_<task8>/` next to `cli/` and dirties
-`git status`. Real dogfood stays in `outputs/`.
+hits this tree rather than a previously installed wheel:
 
 ```bash
 PYTHONPATH=cli/src .venv/bin/omni --project walkthrough-aug24 --trust --out outputs_walkthrough
 ```
 
+Do **not** run `omni update --local` just to pick up local edits. That
+command is a snapshot reinstall: it aborts when tracked files are dirty,
+and a PATH `omni` (conda / uv tool copy) can keep serving yesterday’s
+tree. If you must refresh a snapshot install of the **current dirty
+worktree**, use `omni update --to "$PWD/cli" -y` and re-prove
+`omni.__file__`. An editable checkout (`./cli/scripts/install.sh --local
+--editable`) plus `PYTHONPATH=cli/src` is the developer default.
+
+Publish walkthrough files with `--out outputs_walkthrough` (gitignored). Do
+**not** use `--out .`: that writes `<title>_<task8>/` next to `cli/` and
+dirties `git status`. Real dogfood stays in `outputs/`.
+
 The offline `mock` provider is enough for CLI help, list, status, and
 `offline_mock_smoke`. Named literature retrieval, surveys, figures, decks, and
-stacked prompts need a configured model and usually the network.
+stacked prompts need a configured model and usually the network. Score those
+as live runs. `A-LIT-01`, `A-SUR-01`, `P-01`, and `P-03`–`P-05` are
+release-blocker live families: compile-only is a fail.
 
 VLM-driven built-in skills (`livefigure`, `paper-review`, `scientific-poster`)
 branch on whether a vision model is configured. Probe first; do not guess.
@@ -101,21 +130,27 @@ needs `{workflow_run_id} {step_id}`; a lone task id exits 2.
 | Family | Cases | User-visible answer | Inspect / settlement |
 |---|---|---|---|
 | Retrieve-only | A-LIT-01–04, X8-02 | Host-projected `source_id` list, one id per line. Not a title `summary`. `rows` is per connector; the deduped union may exceed `rows`. No second `[Background skill execution completed]` line. A spilled `source_ids` path must be readable; a jail denial is `rejected` / blocked, not `succeeded`. | `outputs` / `required_outputs` include `sources`. Any persisted `source_id` pays that debt (existence-only). `omni why` shows route + settlement. |
-| Survey / related work | A-SUR-01–02 | A manuscript / `draft.section`, not a title list. Synthesis labels conclusions **grounded / inferred / insufficient evidence** when it writes them. | Verification includes `draft.section`. |
-| Full paper | P-01 | `draft.manuscript` is a full paper, not a section and not a title list. Do not use the ledger token as a `write_file` path. | Distinct from `draft.section`. |
-| User-facing files | P-01, A-FIG, A-SLD, A-POS, A-LF, A-OUT | Deliverables land under `<out>/<title>_<task8>/` (for example `outputs/RAG-system-survey_67f26c86/`). Filenames stay `<slug>-<task8>-<art8>.ext`. Product default `--out` is `outputs/`. This catalog launches with `--out outputs_walkthrough` so validation files stay out of `git status` and out of real `outputs/`. Do not use `--out .` from a checkout. Do not present `artifact://` or `~/.omni/.../artifacts/promoted/` as the path the user should open. `research-pptx` binds sources by a durable handle, not a missing raw file. A bash dump of `.venv` / LICENSE into `$OMNI_OUTPUT_DIR` is not a deliverable inventory. | Recent contract: hide `artifact://` from the reader. Harvest is suffix-allowlisted and republished into the task bundle (A-OUT-05). Walkthrough isolation is A-OUT-03 / A-OUT-04. |
+| Survey / related work | A-SUR-01–02, R-STG-01 | A manuscript / `draft.section`, not a title list. Synthesis labels conclusions **grounded / inferred / insufficient evidence** when it writes them. `/task show` lists research stages (retrieve → evidence → outline → write). | Verification includes `draft.section`. Stages are informational; missing outline is not Partial success. |
+| Full paper | P-01, P-03–P-05 | `draft.manuscript` is a full paper, not a section and not a title list. Do not use the ledger token as a `write_file` path. | Distinct from `draft.section`. P-02 does not request a paper. |
+| User-facing files | P-01–P-05, A-FIG, A-SLD, A-POS, A-LF, A-OUT | Deliverables land under `<out>/<title>_<task8>/` (for example `outputs/RAG-system-survey_67f26c86/`). Filenames stay `<slug>-<task8>-<art8>.ext`. Product default `--out` is `outputs/`. This catalog launches with `--out outputs_walkthrough` so validation files stay out of `git status` and out of real `outputs/`. Do not use `--out .` from a checkout. Do not present `artifact://` or `~/.omni/.../artifacts/promoted/` as the path the user should open. `research-pptx` binds sources by a durable handle, not a missing raw file. A bash dump of `.venv` / LICENSE into `$OMNI_OUTPUT_DIR` is not a deliverable inventory. | Recent contract: hide `artifact://` from the reader. Harvest is suffix-allowlisted and republished into the task bundle (A-OUT-05). Walkthrough isolation is A-OUT-03 / A-OUT-04. |
+| Inbound user files | A-FIL-03, A-FIL-04, C-CH-03 | Clipboard paste, web paperclip, and WeChat / Feishu / DingTalk media land under the workspace `inputs/` folder. Composer `[Image #N]` expands to `@path`. `read_file` on a raster returns dimensions (and a VLM description when configured). Image + caption is one inbound turn. | Files stay under workspace `inputs/`, not `outputs/` and not `~/.omni/.../artifacts/promoted`. |
 | Corpus QA | A-COR-01–02, C-LITC-01 | `omni lit` / `search_corpus` with inline `[S#]`. Empty library says so; no invented DOI. `omni lit` is the corpus, not `source list`. | `[S#]` maps to a real in-library chunk. |
 | arXiv fetch | A-ARX-01–02 | Metadata, abstract, `pdf_url`, and `source_id`. Foreground body, not `Created execution`. A local PDF is not required by the contract. | `source_id` is on this Task. |
 | Paper review | A-REV-01–05 | Review body in the turn. Missing file → `needs_input`. An arXiv id is fetched (or `needs_input` if the PDF cannot be materialized). A DOI is `needs_input`, not `Paper input does not exist`. With VLM: visual crops are interpreted. Without VLM: text review continues, visual is partial, `omni config vlm` and `skip_visual=true` are offered. | Not a receipt. Do not call visual review `succeeded` when the code is `vlm_not_configured`. A `write_file` Markdown leftover does not pay `review` after `paper-review` failed. |
 | Response letter | A-RR-01–02 | `response_letter` artifact. Does not restart retrieval. | |
-| Figure (format-neutral) | A-FIG-01, A-FIG-03, P-01, E-01 | Unspecified "draw a figure" / architecture / flowchart / schematic. Provider `scientific-figure` (PNG/SVG) whether or not a VLM is configured. Four boxes: **query, retriever, reranker, LLM**. Not a `livefigure` PPTX and not a multi-slide deck. A sidecar `.dot` / `.json` does not satisfy `artifact.figure`. Do not invent DOT first. Do not upgrade to PPTX because a VLM is configured. | `scientific-figure` pays `artifact.figure`. A `$livefigure` / `figure.editable.pptx` PPTX can also pay it after that skill itself succeeded. |
+| Figure (format-neutral) | A-FIG-01, A-FIG-03, P-01, E-01 | Unspecified "draw a figure" / architecture / flowchart / schematic. Provider `scientific-figure` (PNG/SVG) whether or not a VLM is configured. Four boxes: **query, retriever, reranker, LLM**. Not a `livefigure` PPTX and not a multi-slide deck. A sidecar `.dot` / `.json` does not satisfy `artifact.figure`. Do not invent DOT first. Do not upgrade to PPTX because a VLM is configured. | `scientific-figure` pays `artifact.figure`. P-01 may add one low-noise capability hint about editable PPT-format figures only after every requested deliverable exists; the hint never replaces or delays delivery and must not launch another skill. |
 | Named Graphviz figure | A-FIG-04, A-FIG-05 | Model follows the `scientific-figure` description when the utterance names Graphviz / `.dot`. Host `resolve_capability` does not parse those words — default is already `scientific-figure`. A leftover invented `.dot` on an unspecified figure is not passed through. An explicit `$scientific-figure` path may pass a task-owned `.dot`. | Host fill stays on the bound producer. |
-| LiveFigure (VLM on) | A-LF-01–02, A-LF-04 | Only `$livefigure` or a user-asked editable / single-slide PPTX (`figure.editable.pptx`). Provider is `livefigure`. File under `outputs/<title>_<task8>/`. No `vlm_not_configured`. No API key in output. VLM is the start condition, not the default for "draw a figure". | Debt is `figure.editable.pptx` / `artifact.pptx`. Not `research-pptx`. A harvested deck or `write_file` leftover does not pay that debt after `livefigure` failed. |
-| LiveFigure (VLM off) | A-LF-03 | `$livefigure` / planner `figure.editable.pptx`. `vlm_not_configured`. `needs_input` or execution "needs configuration". Next action is `omni config vlm`. Engine is not loaded. No silent `scientific-figure` swap. Distinct from A-FIG-01/03 (unspecified figure uses `scientific-figure` and is not `needs_input`). | Do not call this `succeeded`. |
-| Slides | A-SLD-01–02 | Multi-slide talk / defense / group meeting (`.pptx`, `research-pptx`). Not a one-slide figure. Text-domain critique; no VLM required. | Debt is `artifact.slides`. |
+| LiveFigure (VLM on) | A-LF-01–02, A-LF-04, P-03–P-05 | Only `$livefigure` or a user-asked editable / single-figure PPTX (`figure.editable.pptx`). Provider is `livefigure`. File under `outputs/<title>_<task8>/`. No `vlm_not_configured`. No API key in output. VLM is the start condition, not the default for "draw a figure". | Debt is `figure.editable.pptx` / `artifact.pptx`. Not `research-pptx`. P-03–P-05 also request a separate full slide deck; the two PPTX artifacts are not interchangeable. A harvested deck or `write_file` leftover does not pay this debt after `livefigure` failed. |
+| LiveFigure (VLM off) | A-LF-03, P-03–P-05 no-VLM replay | `$livefigure` / planner `figure.editable.pptx`. `vlm_not_configured`. `needs_input` or execution "needs configuration". Next action is `omni config vlm`. Engine is not loaded. No silent `scientific-figure` swap. Distinct from A-FIG-01/03 and P-01 (unspecified figure uses `scientific-figure` and is not `needs_input`). | Do not call the editable figure or parent `succeeded`. In P-03–P-05, independent retrieval, manuscript, and full-deck work must continue and remain inspectable. |
+| Slides | A-SLD-01–02, P-01–P-05 | Multi-slide talk / defense / group meeting (`.pptx`, `research-pptx`). Not a one-slide figure. Text-domain critique; no VLM required. | Debt is `artifact.slides`. P-03–P-05 additionally require a distinct editable figure PPTX. |
 | Poster (VLM on) | A-POS-01–02 | Distinct from slides. `visual_review_mode=vlm` (or the visual loop actually ran). | Debt is `artifact.poster`. |
 | Poster (VLM off) | A-POS-03 | Poster may still land (`deterministic-only`). Visual quality is pending, not VLM-approved. Missing VLM is not `needs_input`. | Do not claim a VLM reviewed it. |
 | Ideation | A-IDE-01–02 | Testable follow-ups, claims, and risks. Not another paper list. | |
+| Precedent (Owl) | R-PRE-01–02 | First line is yes / no / unclear, then sources. Not a survey. | Plan notice may say to start with the verdict. Missing verdict is a real notice. |
+| Review findings | R-REV-01–02 | Cards on `/task show`. Informational. | Not a second settlement. No Partial success from review alone. |
+| Survey stages | R-STG-01 | retrieve → evidence → outline → write marks. | Informational. |
+| Figure package | R-FIG-01, A-FIG-01 | `name ← script` or honest missing script. | |
+| Expensive-work plan gate | R-PLN-01, A-SLD-01, P-02 | Names deck / LiveFigure. Auto still ran. | Not `awaiting_approval`. |
 | Plan mode | A-PLN-01–02, W-03 | Bounded plan. `awaiting_approval`. No execution events before `task approve`. Approval reuses the same Task id. | |
 | Review mode | A-RD-01–02 | Read-only. No `write_file` / `run_skill`. | |
 | Task inspect | A-TSK-01 | `Task {id} status: **{status}** ({description}).` Degraded means "completed with warnings or missing pieces; this is not a full success". Failed uses **Why it failed**, not System summary. | Does not narrate success. |
@@ -124,11 +159,11 @@ needs `{workflow_run_id} {step_id}`; a lone task id exits 2.
 | Current focus | A-WHY-02 | Table: session, origin, skill, target_kind, task, workflow, workflow_step, skill_execution, child_task, title, artifact, source, confidence. | |
 | Skill card (CLI) | A-REV, A-FIG, A-SLD, A-POS | `✅ **skill** (succeeded) execution=xxxxxxxx task=xxxxxxxx` / `!` degraded / `❌` failed. Artifacts, Research record (`sources` / claims / evidence), Next actions. Degraded with no file: "No saved artifact was produced." | |
 | Live execution line | E-01–04, A-SUB | `◷ execution {skill} started execution=xxxxxxxx` → `✓ … succeeded` / `⚠ … degraded` / `⚠ … needs configuration` / `✗` failed. Workflow: `≈ workflow degraded workflow=xxxxxxxx`. | |
-| Task show | C-TSK-04, E-01–04 | `object_kind=task`, user input, plan (intent / skills / contract / settlement / remaining), workflow runs, workflow steps, skill executions (`execution_id`, step, skill, attempt, status), child tasks, activity. Failed tools stay visible. Degraded/failed recommended action is `omni task retry {short}`. | |
+| Task show | C-TSK-04, E-01–04, R-REV-01, R-STG-01, R-FIG-01, R-PLN-01 | `object_kind=task`, user input, plan (intent / skills / contract / settlement / remaining), workflow runs, workflow steps, skill executions (`execution_id`, step, skill, attempt, status), child tasks, activity. Failed tools stay visible. Degraded/failed recommended action is `omni task retry {short}`. After a survey / figure / deck, also list **research review findings**, **research stages**, **plan gate**, and **figure package** when those events exist. Findings do not paint Partial success. | |
 | Task all | C-TSK-03 | Footer `Showing N of M`. Default kind is `all`. | |
 | Memory list / search | M-WR, M-RC, C-MEM-01 | Truncated summaries. `memory detail` for full text. | |
 | Memory graph | M-GR-01, C-MEM-03, W-04 | Stored edges only. No invented edges. | |
-| Verify | A-VFY-01–02 | `--session` requires an id. Flags unsupported / contradicted / overconfident. | |
+| Verify | A-VFY-01–02, R-VFY-01 | `--session` requires an id. Flags unsupported / contradicted / overconfident. Citation support is a **warning tier** (`weak` / lexical unsupported) and does not change task status. | |
 | One task, many executions | E-01–02 | One Task id. Each skill-backed step has its own `execution=` id. `task show` / `task subtask` list ≥2 rows. | Ledger of what ran, not a contract the model must follow. |
 | Execution degrade | E-03–05, W-02 | The bad execution is `degraded` / `failed` / `needs_input`. Do not call it `succeeded`. Siblings that delivered stay. Parent is `degraded` (or `needs_input` / `failed`) unless a later retry superseded that child and every required output is already on this Task. Leftover `write_file` / harvested files do not count as that retry. `task retry <execution>` creates a new execution id and keeps the WorkflowStep id. `task resume` continues from the checkpoint. `task requeue` accepts a standalone skill-execution id only. | |
 
@@ -138,19 +173,19 @@ needs `{workflow_run_id} {step_id}`; a lone task id exits 2.
 |---|---|---|---|
 | Named `search_literature` | A-LIT-01, A-LIT-02 | network | Named native tool stays in this turn. Reply is `source_id` values. No `run_skill`. No second background-completion line. |
 | Natural-language literature search | A-LIT-03, A-LIT-04 | network | Lone `literature.search` stays ReAct + `search_literature`. Settlement uses `source_ids`. |
-| Retrieval plus written survey | A-SUR-01, A-SUR-02 | network | Survey pair: host retrieve then native synthesis. A-SUR-01 is the latent-space-intervention research brief. Manuscript debt is paid. |
+| Retrieval plus written survey | A-SUR-01, A-SUR-02, R-STG-01, R-REV-01 | network | Survey pair: host retrieve then native synthesis. A-SUR-01 is the latent-space-intervention research brief. Manuscript debt is paid. `/task show` then shows research stages and review findings **without** Partial success. |
 | Recent-commit / changelog review | A-CHG-01, A-CHG-02 | model | Review the last few days of local git commits. Features, optimizations, problems solved, remaining risks. Not a literature search. |
-| Survey pack (fetch + figure + paper + slides) | P-01, P-02 | network | P-01 is task `72590550`: Attention abstract + query/retriever/reranker/LLM figure + `draft.manuscript` + PPT. P-02 is loop-engineering survey + a detailed intro deck. Do not stop at `find_skill`. |
+| Survey packs | P-01–P-05 | network | P-01 is an ordinary RAG figure (`scientific-figure`) + paper + deck. P-02 is loop-engineering materials + a detailed deck, with no unasked manuscript. P-03–P-05 are three distinct editable/PPT-format cues for one `livefigure` figure + paper + a separate `research-pptx` deck. Do not stop at `find_skill`. |
 | Local corpus QA | A-COR-01, A-COR-02 | model | `omni lit` / `search_corpus` with `[S#]`. Empty library does not invent a DOI. |
 | arXiv fetch | A-ARX-01, A-ARX-02 | network | `$arxiv-fetch` / `paper.fetch.arxiv` returns metadata, abstract, `pdf_url`, and `source_id`. |
 | Paper review | A-REV-01, A-REV-02, A-REV-03, A-REV-04, A-REV-05 | model/network | Body, not a receipt. A-REV-01 is VLM-on visual. A-REV-03 is VLM-off partial. Missing file asks. An arXiv id is not a missing local path. A DOI asks; it is not fetched. |
-| VLM-driven skills | A-LF-01, A-LF-02, A-LF-03, A-LF-04, A-REV-01, A-REV-03, A-REV-04, A-REV-05, A-POS-01, A-POS-03 | model/network | Probe `omni config vlm`. If VLM is on, run both the configured and the unconfigured rows. If VLM is off, run only the unconfigured degrade rows. Identifier and leftover-file honesty rows are VLM-independent. Ordinary figures (A-FIG-01/03) do not require a VLM. |
+| VLM-driven skills | A-LF-01, A-LF-02, A-LF-03, A-LF-04, P-03–P-05, A-REV-01, A-REV-03, A-REV-04, A-REV-05, A-POS-01, A-POS-03 | model/network | Probe `omni config vlm`. If VLM is on, run both the configured and the unconfigured rows. If VLM is off, run only the unconfigured degrade rows. Identifier and leftover-file honesty rows are VLM-independent. Ordinary figures (A-FIG-01/03/P-01) do not require a VLM. |
 | Review response | A-RR-01, A-RR-02 | model | `review-response` writes a response letter from the prior review. |
 | Format-neutral architecture figure | A-FIG-01, A-FIG-03 | model | Unspecified "draw a RAG architecture diagram". Provider `scientific-figure` PNG/SVG with or without VLM. Four boxes. Not a `livefigure` PPTX and not a deck. Do not invent DOT first. Not `needs_input` (that is `$livefigure` / `figure.editable.pptx` only). |
 | Named Graphviz figure | A-FIG-04, A-FIG-05 | model/offline | A-FIG-04 is a model case: descriptions send a Graphviz-named request to `scientific-figure`. Host resolve is already `scientific-figure` (admission+priority) and does not parse Graphviz words. A leftover invented `.dot` is not passed on an unspecified figure. An explicit `$scientific-figure` path may pass a task-owned `.dot`. |
-| Figure revise | A-FIG-02, A-FIG-01 | model | `artifact.revise` in place after A-FIG-01, or a full redraw if there is no active figure. Keep the color language. |
-| Editable LiveFigure | A-LF-01, A-LF-02, A-LF-03, A-LF-04 | model | A-LF-01 is `$livefigure`. A-LF-02 is planner `figure.editable.pptx` (editable / PowerPoint, no `$`). VLM-on: one editable PPTX. VLM-off (A-LF-03, `$livefigure`): `vlm_not_configured`, no silent `scientific-figure` swap. A-LF-04: failed `livefigure` plus a leftover deck does not settle the parent `succeeded`. |
-| Slides | A-SLD-01, A-SLD-02 | model | `research-pptx` / `artifact.slides`. Multi-slide talk. Not a one-slide figure. No VLM required. |
+| Figure revise | A-FIG-02, A-FIG-01, R-FIG-02 | model | `artifact.revise` in place after A-FIG-01, or a full redraw if there is no active figure. Keep the color language. Natural-language edit must not invent a second figure. |
+| Editable LiveFigure | A-LF-01, A-LF-02, A-LF-03, A-LF-04, P-03–P-05 | model | A-LF-01 is `$livefigure`. A-LF-02 and P-03–P-05 bind `figure.editable.pptx` from semantic intent (editable / PPT-format figure, no `$`). VLM-on: one editable PPTX. VLM-off: `vlm_not_configured`, no silent `scientific-figure` swap. A failed `livefigure` plus a leftover deck does not settle the parent `succeeded`. |
+| Slides | A-SLD-01, A-SLD-02, P-01–P-05 | model | `research-pptx` / `artifact.slides`. Multi-slide talk. Not a one-slide figure. No VLM required. |
 | Poster | A-POS-01, A-POS-02, A-POS-03 | model | VLM-on: visual loop. VLM-off (A-POS-03): `deterministic-only`, poster may still land. |
 | Research ideation | A-IDE-01, A-IDE-02 | model/network | `research-ideation` proposes testable follow-ups. |
 | Explicit `$skill` | A-SKL-01, A-SKL-02 | model/network | `$name` binds that skill. Unknown `$name` falls through to ReAct. |
@@ -161,12 +196,16 @@ needs `{workflow_run_id} {step_id}`; a lone task id exits 2.
 | Schedules | A-SCH-01, A-SCH-02 | model/serve | Recurring `schedule_task`. Ambiguous time asks. `omni schedule run` fires due jobs in this process; `omni serve` is for unattended fire. |
 | One-shot wall-clock schedule | A-SCH-03, C-SCH-05 | model/offline | Today 7:10 / `--at` local wall-clock for the P-01 RAG pack. A time already in the past is refused. |
 | Subagents and workflows | A-SUB-01, A-SUB-02 | model/network | Multi-step work sequences live. Retrieve-only can block `spawn_subagents`. |
-| Local files | A-FIL-01, A-FIL-02 | model | `read_file` / `@attachment`. Missing file asks. |
+| Local files | A-FIL-01, A-FIL-02, A-FIL-03, A-FIL-04 | model/offline | `read_file` / `@attachment`. Missing file asks. Ctrl+V clipboard image is A-FIL-03. A raster under workspace `inputs/` is A-FIL-04 (dimensions; VLM description when configured). |
 | Product self-knowledge | A-DOC-01, A-DOC-02 | model/offline | `docs_search` or honest mock. No absolute home-path leak. |
 | Steer and stop | A-CTL-01, A-CTL-02 | model | `/steer` updates the turn. `/stop` cancels at the next boundary. |
 | Explain and focus | A-WHY-01, A-WHY-02 | offline | `omni why` / `omni current`. |
 | Hypothesis, claim, evidence | A-ROM-01, A-ROM-02 | model | ROM tools persist; CLI `hypo` / `evidence` can show them. |
-| Verification | A-VFY-01, A-VFY-02 | model | `omni verify` and statistical audit. |
+| Verification | A-VFY-01, A-VFY-02, R-VFY-01 | model | `omni verify` and statistical audit. Citation support is warning-only. |
+| Precedent (Owl) | R-PRE-01, R-PRE-02 | network | First line is yes / no / unclear plus sources. Not a survey. |
+| Review findings (informational) | R-REV-01, R-REV-02 | network | `/task show` lists research review findings as cards. Task may stay `succeeded`. No `Partial success` from review alone. |
+| Figure package | R-FIG-01, A-FIG-01 | model | `/task show` lists figure package (script/DOT + method). |
+| Expensive-work plan gate | R-PLN-01, P-02, A-SLD-01 | model | `/task show` names expensive producers (deck / LiveFigure) as informational. Auto mode still ran. |
 | Contradiction scan | A-CON-01, A-CON-02 | model | `evidence.contradiction_scan` or `review_statistics`. |
 | Scientist persona | A-PER-01, A-PER-02 | offline/model | `omni soul` lists personas. Persona changes tone, not tool names. |
 | Scientist KG distiller | A-KG-01, C-SOUL-03 | model/offline | `$scientist-kg-distiller` or `soul create --dry-run`. Dry-run does not install a KG. |
@@ -185,7 +224,7 @@ needs `{workflow_run_id} {step_id}`; a lone task id exits 2.
 | Execution-level degrade | E-03, E-04, E-05 | model/network | One execution fails or is incomplete. That row is `degraded` / `failed` / `needs_input`. Siblings that delivered stay. Parent is not `succeeded`. Leftover Markdown / harvested PPTX do not retire `review` / `artifact.pptx`. `task retry` / `resume` target the execution and keep the step id. |
 | One-shot and unknown command | C-CHAT-01, C-CHAT-02 | model/offline | Bare `omni "..."` vs a mistyped command. |
 | Init and doctor | C-INIT-01, C-INIT-02 | offline | `omni doctor` / `omni init --help`. |
-| Config | C-CFG-01, C-CFG-02, C-CFG-03, C-CFG-04, C-CFG-05, C-CFG-06 | offline | `list` / `path` / `test` / `get` / `home` plus `vlm` / `embeddings` / `semantic-scholar` / `model` help. Do not `set` on a real home. |
+| Config | C-CFG-01, C-CFG-02, C-CFG-03, C-CFG-04, C-CFG-05, C-CFG-06, C-CFG-07 | offline | `list` / `path` / `test` / `get` / `home` plus `vlm` / `embeddings` / `semantic-scholar` / `model` help. C-CFG-07 is live owner model/VLM reload (disk vs running `omni serve`). Do not `set` on a real home. |
 | Project | C-PRJ-01, C-PRJ-02, C-PRJ-03, C-PRJ-04 | offline | `project list` / `info` / `help` / `new --help`. No `migrate`. |
 | Profile | C-PRF-01, C-PRF-02 | offline | `profile list` / `show`. Missing default profile exits 1. |
 | Session | C-SES-01, C-SES-02, C-SES-03, C-SES-04 | offline | `session list` / `fork` / `resume` / `show` / `export`. |
@@ -201,23 +240,31 @@ needs `{workflow_run_id} {step_id}`; a lone task id exits 2.
 | Lit, bench, eval | C-LITC-01, C-LITC-02 | model/offline | `omni lit`. Black-box with zero successes exits 1. |
 | Schedule CLI | C-SCH-01, C-SCH-02, C-SCH-03, C-SCH-04, C-SCH-05, C-SCH-06 | offline/serve | Recurring cron plus one-shot `--at`. Past `--at` is refused. Then `remove` the walkthrough job. |
 | Serve, status, web | C-SRV-01, C-SRV-02, C-SRV-03 | offline | Loopback only. Same store as `--project`. |
-| Channels | C-CH-01, C-CH-02 | offline | `list` / `test`. QR login is interactive (blocked here). |
+| Channels | C-CH-01, C-CH-02, C-CH-03 | offline | `list` / `test` for WeChat, Feishu, and DingTalk. QR login is interactive (blocked here). Inbound image + caption is one turn; files land under workspace `inputs/`. |
 | MCP, trust, exec, replay | C-MCP-01, C-MCP-02, C-MCP-03, C-EXE-01, C-EXE-02, C-TRU-01 | offline/model | `mcp` help/list/agents; `exec` a one-shot prompt; `replay` a session; `trust --list`. |
 | Soul CLI | C-SOUL-01, C-SOUL-02, C-SOUL-03 | offline | `status` / `list` / `help` / `create --dry-run`. |
 | AutoSOTA wrapper | C-AS-01, C-AS-02 | offline | `info` / `doctor` / `status`. No Omni background task. |
-| Update, terminal, uninstall | C-OPS-01, C-OPS-02 | offline | Status plus `uninstall --dry-run`. |
+| Update, terminal, uninstall | C-OPS-01, C-OPS-02, C-OPS-03 | offline | Status plus `uninstall --dry-run`. C-OPS-03 is the Codex-shaped startup update menu (`Please restart Omni`). |
 | REPL verbs | C-REPL-01, C-REPL-02, C-REPL-03, C-REPL-04, C-REPL-05, C-REPL-06, C-REPL-07 | offline | `/help` plus context/compact/copy/verbose/debug/clear/new/inbox/task all, and `/web` in the background. |
 
 ## Named user prompts this catalog must hit
 
-These four prompts (or the same shape) are required. Live Chinese wording may
-be used at the keyboard; public rows stay English.
+The five survey-pack prompts below are exact copy-paste inputs, not translated
+summaries. The other named prompts remain shape-level probes. These examples
+test semantic planning; do not implement them as exact-sentence or keyword
+matching in production code.
 
 | User prompt | Case IDs | Notes |
 |---|---|---|
 | Review the last four days of commits: features, optimizations, problems solved, anything unreasonable. What were the optimization points? | A-CHG-01, A-CHG-02 | Local git / docs. Not `search_literature` as the only action. |
-| Research how latent-space intervention improves LLM agentic ability. | A-SUR-01, A-IDE-02 | A-SUR-01 writes related work. A-IDE-02 stress-tests the claim. |
-| Prepare materials for an agentic loop-engineering survey and output a detailed introductory PPT. | P-02, A-SLD-01 | Survey + detailed `.pptx`, not a one-slide figure. |
+| Research how latent-space intervention improves LLM agentic ability. | A-SUR-01, A-IDE-02, R-STG-01, R-REV-01 | A-SUR-01 writes related work. A-IDE-02 stress-tests the claim. `/task show` then scores stages + findings. |
+| Has anyone used activation steering for tool-use agents? Answer yes/no/unclear with sources. | R-PRE-01 | Owl precedent: first line is a verdict, then sources. Not a survey. |
+| 有没有人做过用激活引导提升 tool-use agent 的工作？先回答 yes/no/unclear 并给出出处。 | R-PRE-02 | Same precedent contract in Chinese. |
+| 为 智能体 loop engineering 系统综述准备材料，并输出一份详细的介绍ppt | P-02, A-SLD-01 | Source-backed materials + detailed `.pptx`, not a one-slide figure; do not add an unasked paper. |
+| 为 RAG 系统综述准备材料：获取 Attention Is All You Need 摘要，并生成包含 query、retriever、reranker、LLM 的科研架构图。并输出一篇论文和 ppt 发给我 | P-01 | Format-neutral figure → `scientific-figure`; paper and full deck remain separate outputs. |
+| 为 RAG 系统综述准备材料：获取 Attention Is All You Need 摘要，并生成包含 query、retriever、reranker、LLM 的可编辑的科研架构图。并输出一篇论文和 ppt 发给我 | P-03 | Editable figure → `figure.editable.pptx` / `livefigure`; the requested full deck is still `research-pptx`. |
+| 为 RAG 系统综述准备材料：获取 Attention Is All You Need 摘要，并生成包含 query、retriever、reranker、LLM 的PPT格式的科研架构图。并输出一篇论文和 ppt 发给我 | P-04 | Singular PPT-format figure → `figure.editable.pptx` / `livefigure`, distinct from the full deck. |
+| 为 RAG 系统综述准备材料：获取 Attention Is All You Need 摘要，并生成包含 query、retriever、reranker、LLM 的可编辑的PPT格式的科研架构图。并输出一篇论文和 ppt 发给我 | P-05 | Redundant editable + PPT-format cues still request exactly one `livefigure` figure, not two. |
 | Set a one-time job today at 7:10 to prepare RAG survey materials: fetch the Attention Is All You Need abstract, draw a query/retriever/reranker/LLM figure, and write a paper. | A-SCH-03, C-SCH-05, P-01 | P-01 is the live pack (also task `72590550`). The 7:10 job is one-shot `--at`. |
 
 Task `72590550` user input was: prepare RAG survey materials, fetch the
@@ -238,20 +285,21 @@ second cases. Hidden hooks are out.
 
 | Skill | Cases |
 |---|---|
-| `arxiv-fetch` | A-ARX-01, A-ARX-02, P-01, E-02 |
+| `arxiv-fetch` | A-ARX-01, A-ARX-02, P-01, P-03–P-05, E-02 |
 | `openalex-search` | A-SKL-01, W-02 |
 | `paper-review` | A-REV-01, A-REV-02, A-REV-03, A-REV-04, A-REV-05, E-02, E-05 |
 | `review-response` | A-RR-01, A-RR-02 |
 | `scientific-figure` | A-FIG-01, A-FIG-02, A-FIG-03, A-FIG-04, A-FIG-05, P-01, E-01 |
-| `livefigure` | A-LF-01, A-LF-02, A-LF-03, A-LF-04, E-03, E-05 |
-| `research-pptx` | A-SLD-01, A-SLD-02, P-01, P-02, E-02 |
+| `livefigure` | A-LF-01, A-LF-02, A-LF-03, A-LF-04, P-03–P-05, E-03, E-05 |
+| `research-pptx` | A-SLD-01, A-SLD-02, P-01–P-05, E-02 |
 | `scientific-poster` | A-POS-01, A-POS-02, A-POS-03 |
 | `research-ideation` | A-IDE-01, A-IDE-02 |
 | `scientist-kg-distiller` | A-KG-01, C-SOUL-03 |
 | `soulagent` | A-PER-01, A-PER-02 |
 | `agent-goal` (schedule `--goal`) | A-SCH-01, A-SCH-03, C-SCH-02, C-SCH-05 |
 | Native `search_literature` | A-LIT-01–04 |
-| Native `draft.section` / `draft.manuscript` | A-SUR-01–02, P-01, P-02 |
+| Native `draft.section` / `draft.manuscript` | A-SUR-01–02, P-01, P-03–P-05, R-STG-01, R-REV-01 |
+| Native `literature.precedent` | R-PRE-01, R-PRE-02 |
 | Third-party local SKILL.md | C-SKL-05, A-SKL-03, C-SKL-06 |
 
 ### CLI command groups
@@ -259,15 +307,15 @@ second cases. Hidden hooks are out.
 | Group | Cases that exercise it |
 |---|---|
 | `omni` / `chat` / one-shot prompt | C-CHAT-01, A-LIT-01, P-01 |
-| `lit` / `verify` / `bench` / `eval` | A-COR-01, A-VFY-01, C-LITC-01, C-LITC-02 |
+| `lit` / `verify` / `bench` / `eval` | A-COR-01, A-VFY-01, R-VFY-01, C-LITC-01, C-LITC-02 |
 | `exec` / `replay` | C-EXE-01, C-EXE-02 |
 | `trust` | C-TRU-01, C-MCP-01 |
 | `current` / `why` | A-WHY-01, A-WHY-02 |
 | `doctor` / `init` | C-INIT-01, C-INIT-02 |
 | `status` / `serve` / `web` | C-SRV-01, C-SRV-02, C-SRV-03, C-REPL-07 |
 | `resume` | C-SES-02 |
-| `update` / `terminal` / `uninstall` | C-OPS-01, C-OPS-02, C-TERM-01 |
-| `config` | C-CFG-01–06 |
+| `update` / `terminal` / `uninstall` | C-OPS-01, C-OPS-02, C-OPS-03, C-TERM-01 |
+| `config` | C-CFG-01–07 |
 | `autosota` | C-AS-01, C-AS-02 |
 | `skills` | C-SKL-01–06, A-SKL-01–03 |
 | `soul` | C-SOUL-01–03, A-PER, A-KG-01 |
@@ -275,9 +323,9 @@ second cases. Hidden hooks are out.
 | `session` | C-SES-01–04 |
 | `memory` | M-*, C-MEM-01–04 |
 | `cite` / `source` | C-CIT-01–03 |
-| `task` | C-TSK-01–08, A-TSK, E-01–05, A-PLN-02 |
+| `task` | C-TSK-01–08, A-TSK, E-01–05, A-PLN-02, R-REV-01, R-STG-01, R-FIG-01, R-PLN-01 |
 | `artifacts` | C-ART-01–04, A-OUT-01, A-OUT-02, A-OUT-03, A-OUT-04 |
-| `channel` | C-CH-01, C-CH-02 |
+| `channel` | C-CH-01, C-CH-02, C-CH-03 |
 | `mcp` | C-MCP-01–04 |
 | `schedule` | A-SCH-01–03, C-SCH-01–06 |
 | `hypo` / `claim` / `evidence` / `run` | A-ROM-01–02, C-HYP-01–03 |
@@ -295,12 +343,13 @@ Figure and deck skills do not compete for first choice:
   `artifact.figure` paid by `scientific-figure` (SVG/PNG). Cheap, embeddable
   in a paper. Independent of VLM. A-FIG-01 / A-FIG-03 / P-01 / E-01.
 - `livefigure` only when the user names `$livefigure` or the planner binds
-  `figure.editable.pptx` (editable / single-slide PowerPoint). VLM is that
+  `figure.editable.pptx` (editable / single-figure PowerPoint). VLM is that
   skill's start condition, not the default implementation of "draw a figure".
-  A-LF-01 / A-LF-02. Without VLM that path hard-stops (A-LF-03). Do not
-  silently swap to `scientific-figure`.
+  A-LF-01 / A-LF-02 / P-03–P-05. Without VLM that figure path hard-stops
+  (A-LF-03), while independent P-03–P-05 outputs continue. Do not silently
+  swap to `scientific-figure`.
 - Multi-slide talk / defense / group meeting is `research-pptx`
-  (`slides.generate`). A-SLD-01 / P-01 deck.
+  (`slides.generate`). A-SLD-01 / P-01–P-05 deck.
 
 Do not upgrade an ordinary architecture figure to PPTX because a VLM is
 configured. A-FIG rows below are not VLM-driven; they sit next to A-LF so
@@ -319,29 +368,39 @@ omni config vlm
 omni doctor
 ```
 
-`omni config vlm` with no flags prints enabled / model / endpoint / key-set.
-It does not write. `omni doctor` VLM row is `not configured (optional)` or
-the model @ endpoint. Do not `config vlm --disable` on a real home.
+`omni config vlm` with no flags prints enabled / model / `image_model` /
+endpoint / key-set. It does not write. `omni doctor` VLM row is
+`not configured (optional)` or the model @ endpoint. `enabled=false` is not
+reported as missing `model` / `endpoint` / `api_key`. When `omni serve` is
+up, doctor also has `VLM (serve)` (disk vs running). Do not
+`config vlm --disable` on a real home. `omni config test` / `omni config vlm
+--test` report `vlm` (chat image-input) and `vlm_images` (generateContent or
+OpenAI Images). A passing chat row does not prove LiveFigure. Gemini image
+chat models use `generateContent`; GPT Image / DALL·E use Images. A gateway
+HTTP 503 on Images is retryable, not `vlm_not_configured`.
 
 **Branch**
 
 - VLM **not** configured → run `either` rows and the `novlm` rows
-  (A-FIG-01, A-FIG-03, A-LF-03, A-REV-03, A-POS-03). Skip `vlm`-only happy
-  paths (A-LF-01, A-LF-02, A-REV-01 visual, A-POS-01).
+  (A-FIG-01, A-FIG-03, A-LF-03, A-REV-03, A-POS-03), plus the P-03–P-05
+  no-VLM resilience replays. Skip their VLM happy paths.
 - VLM **is** configured → run the `vlm` rows **and** the `either` rows. For
   `novlm` while the owner VLM stays on, use an isolated home (set `OMNI_HOME`
   and remap `XDG_CONFIG_HOME`; do **not** `omni init --home`):
 
 ```bash
-export HOME=/tmp/omni-walkthrough-novlm
-export XDG_CONFIG_HOME="$HOME/.config"
-export OMNI_HOME="$HOME/.omni"
-PYTHONPATH=cli/src .venv/bin/omni --project walkthrough-novlm --trust --out outputs_walkthrough
-omni config vlm    # must show not configured
+walkthrough_state="$(mktemp -d /tmp/omni-walkthrough-novlm.XXXXXX)"
+env -u OMNI_VLM_MODEL -u OMNI_VLM_ENDPOINT -u OMNI_VLM_API_KEY -u OMNI_VLM_IMAGE_MODEL \
+  OMNI_HOME="$walkthrough_state/omni" \
+  XDG_CONFIG_HOME="$walkthrough_state/config" \
+  PYTHONPATH=cli/src .venv/bin/omni config vlm  # must show not configured
 ```
 
-Do not put VLM keys in the case log. `omni config vlm --test` is allowed on a
-home that already has a VLM; it must not print the key.
+For a live no-VLM replay, configure only the text model in that isolated state
+(or provide the documented `OMNI_MODEL_*` environment variables) and prefix
+the run with the same `env -u OMNI_VLM_*` + `OMNI_HOME` / `XDG_CONFIG_HOME`
+values. Never echo or paste credentials into the case log. `omni config vlm
+--test` is allowed on a home that already has a VLM; it must not print the key.
 
 ### Cases
 
@@ -366,7 +425,10 @@ home that already has a VLM; it must not print the key.
 
 If the configured VLM rejects every crop or image, that is not the `novlm`
 row. Tell the operator to run `omni config vlm --test` and pick a model that
-accepts image input. A text-only chat model used as the VLM fails that test.
+accepts image input. A text-only chat model used as the VLM fails the `vlm`
+row. A chat-only model that cannot generate images fails `vlm_images` and
+LiveFigure; pin `--image-model gpt-image-2` or use a Gemini image chat
+model. A 503 on Images is retryable I/O, not the A-LF-03 unconfigured row.
 
 ## Conversation and research
 
@@ -388,7 +450,7 @@ accepts image input. A text-only chat model used as the VLM fails that test.
 
 | ID | Need | Input | Pass |
 |---|---|---|---|
-| A-SUR-01 | network | `Survey how latent-space intervention improves LLM agentic ability and write a related-work section.` | Required research-brief shape. Survey pair: host retrieve plus native synthesis. Verification includes `draft.section`. Conclusions labeled grounded / inferred / insufficient evidence when written. Not a title list. |
+| A-SUR-01 | network | `Survey how latent-space intervention improves LLM agentic ability and write a related-work section.` | Required research-brief shape. Survey pair: host retrieve plus native synthesis. Verification includes `draft.section`. Conclusions labeled grounded / inferred / insufficient evidence when written. Not a title list. After delivery, `/task show` may list research stages and review findings; those cards are informational and must not paint `Partial success` by themselves (R-STG-01, R-REV-01). |
 | A-SUR-02 | network | `Write a short related-work section on retrieval-augmented generation evaluation benchmarks.` | Literature hits plus a manuscript artifact; not a title list alone. Same synthesis labels as A-SUR-01. |
 
 ### Local corpus QA
@@ -425,12 +487,12 @@ upgrade an ordinary figure to PPTX because a VLM is configured.
 
 | ID | Need | Input | Pass |
 |---|---|---|---|
-| A-FIG-01 | model | `Draw a RAG architecture diagram that includes query, retriever, reranker, and LLM.` | Format unspecified. `scientific-figure` PNG/SVG pays `artifact.figure`. Four boxes. Not a `livefigure` PPTX and not a multi-slide deck. Do not invent DOT first. File under `outputs/<title>_<task8>/`. Independent of VLM. |
-| A-FIG-02 | model | `Change the previous figure's retriever to hybrid. Keep the color language.` | `artifact.revise` in place, or a full redraw if there is no active figure. |
+| A-FIG-01 | model | `Draw a RAG architecture diagram that includes query, retriever, reranker, and LLM.` | Format unspecified. `scientific-figure` PNG/SVG pays `artifact.figure`. Four boxes. Not a `livefigure` PPTX and not a multi-slide deck. Do not invent DOT first. File under `outputs/<title>_<task8>/`. Independent of VLM. `/task show` lists a **figure package** line (`name ← script` or an honest "no source script") — R-FIG-01. |
+| A-FIG-02 | model | `Change the previous figure's retriever to hybrid. Keep the color language.` | `artifact.revise` in place, or a full redraw if there is no active figure. Must not invent a second figure when an active figure exists (R-FIG-02). |
 | A-FIG-03 | model | Same input as A-FIG-01. | Same provider as A-FIG-01 (`scientific-figure` PNG/SVG). Not `needs_input`. Four boxes. |
 | A-FIG-04 | model | `Draw a RAG architecture diagram as SVG using Graphviz, including query, retriever, reranker, and LLM.` | Model case: Graphviz-named description → `scientific-figure`. Host resolve is already `scientific-figure` (admission+priority) and does not parse Graphviz words. |
 | A-FIG-05 | offline | Invented leftover `rag.dot` after the A-FIG-01 input. | Host fill ignores the invented path. An explicit `$scientific-figure` path may pass a task-owned `.dot`. |
-| A-SLD-01 | model | `Make a group-meeting deck from the Transformer paper.` | `slides.generate` / `research-pptx`. `.pptx`. Not a one-slide figure. File lands under `outputs/<title>_<task8>/`. |
+| A-SLD-01 | model | `Make a group-meeting deck from the Transformer paper.` | `slides.generate` / `research-pptx`. `.pptx`. Not a one-slide figure. File lands under `outputs/<title>_<task8>/`. `/task show` **plan gate** names the deck as expensive work and still shows the turn ran in auto mode (R-PLN-01). |
 | A-SLD-02 | model | `$research-pptx` thesis-defense deck on RAG factuality. | Explicit skill. Debt is `artifact.slides`. |
 | A-POS-01 | model | `Make a scientific poster summarizing RAG evaluation benchmarks.` | VLM-on. `scientific-poster`. `artifact.poster`. `visual_review_mode=vlm` or the visual loop ran. Not slides. |
 | A-POS-02 | model | `$scientific-poster` from the survey we just wrote. | Explicit skill. Same poster debt. Run on the VLM-on home when VLM is configured. |
@@ -477,6 +539,8 @@ upgrade an ordinary figure to PPTX because a VLM is configured.
 | A-SUB-02 | model | `Do not spawn_subagents. Use only search_literature in this turn.` | Named native tool. Retrieve-only policy blocks spawn even without a Chinese deny parser. |
 | A-FIL-01 | model | `Read cli/src/omni/agent/planner.py and say what the planning boundary owns.` | `read_file` inside the directory jail. |
 | A-FIL-02 | model | `Open @draft.pdf and summarize the methods section.` | Attachment path works. Missing file asks; no invented `https://`. |
+| A-FIL-03 | offline | Dock: `Ctrl+V` (or `Ctrl+Alt+V` under WSL) with an image on the system clipboard. On macOS `Cmd+V` remains text paste. | Composer shows `[Image #1]`. Submit expands to `@` of the PNG under the workspace `inputs/` folder (same store as web paperclip and WeChat / Feishu / DingTalk inbound media). Empty clipboard prints `Failed to paste image: no image on clipboard: …` — same wording on macOS, Linux, and Windows. Covered by `cli/tests/cli/test_clipboard_paste.py` and `test_repl_tui.py` (no live clipboard in CI). |
+| A-FIL-04 | offline | `read_file` a PNG that already sits under the walkthrough workspace `inputs/` folder (or `@` that path). | Reply names the raster (`PNG image`) and dimensions (`W×H`). Not `binary file`. No replacement-character noise. With VLM: a `Visual description:` line may follow. Without VLM: dimensions only. Covered by `cli/tests/unit/test_fs_document_reads.py`. |
 | A-DOC-01 | model | `How is storage implemented? Where do sessions, long-term memory, and artifacts live?` | `docs_search`. SQLite and filesystem. No `/Users` or `/home` leak. |
 | A-DOC-02 | offline | `Reply OK only.` | Mock: `Offline mock model`. No tools. Matches `offline_mock_smoke`. |
 | A-CHG-01 | model | `Review the last four days of git commits in this repository. Analyze new features, optimizations, problems solved, and anything that looks unreasonable. What were the optimization points?` | Uses local `git log` / files in the jail, or says git is unavailable. Structured: features / fixes / remaining risks. Does not invent SHAs. Not `search_literature` as the only action. |
@@ -492,13 +556,37 @@ upgrade an ordinary figure to PPTX because a VLM is configured.
 | A-WHY-02 | offline | `omni current` | Focus table: session, skill, task, workflow, workflow_step, skill_execution, artifact, source. |
 | A-ROM-01 | model | `Record the hypothesis: a dense retriever beats BM25 on long documents. Confidence 0.6.` | `record_hypothesis`. Visible on `omni hypo show`. |
 | A-ROM-02 | model | `Bind that claim to source_id X with stance=supports and a one-sentence quote.` | `record_claim` plus `add_evidence`. Visible on `omni evidence list`. |
-| A-VFY-01 | model | `omni verify --session <session>` | `--session` requires an id. Flags unsupported, contradicted, or overconfident claims. |
+| A-VFY-01 | model | `omni verify --session <session>` | `--session` requires an id. Flags unsupported, contradicted, or overconfident claims. Always prints `Citation support (warning only — does not change task status)` (R-VFY-01). |
 | A-VFY-02 | model | `Audit this statistic: p=0.03, n=12, claimed as a large-scale significant effect.` | `review_statistics` or `verify` flags the mismatch. |
 | A-CON-01 | model | `Scan recorded claims for contradictions against the RAG sources we just cited.` | `evidence.contradiction_scan` or `omni verify`. Does not restart retrieval as the only action. |
 | A-CON-02 | model | Same statistic audit as A-VFY-02 | Shared boundary: numeric overclaim is visible on `verify` / `review_statistics`. |
 | A-PER-01 | offline | `omni soul list` | Discoverable personas. Offline. |
 | A-PER-02 | model | `Rewrite the last related-work section in the active scientist persona, more cautious.` | Tone changes. Tool names do not. |
 | A-KG-01 | model | `$scientist-kg-distiller` for Ada Lovelace, field computing, dry-run only. | Binds `scientist-kg-distiller` or `soul create --dry-run`. Dry-run shows the resolved request and does not install a KG. |
+
+## Research-agent intelligence
+
+These rows score the research-agent surfaces that should make Omni feel like a
+careful scientist rather than a file dump. They **reuse** a just-finished
+A-SUR / A-FIG / A-SLD / P-02 task when one exists in this walkthrough project.
+Do not re-run the expensive produce only to inspect the panel.
+
+Review findings, survey stages, plan-gate cards, figure packages, and
+citation-support scores are **informational**. They must not flip settlement
+and must not paint `Partial success` / `Research review rejected` by
+themselves. Auto mode still runs expensive work.
+
+| ID | Need | Input | Pass |
+|---|---|---|---|
+| R-REV-01 | network | After A-SUR-01: `omni --project walkthrough-aug24 --trust --out outputs_walkthrough task show <task>` | A **research review findings** section lists cards (`[high]` / `[medium]` / `[low]` / `[info]`). Task status may stay `succeeded`. The reply is not `⚠ Partial success` from review alone. `omni task all` does not show that task as a yellow Partial-success row solely because review said `revise` or `reject`. |
+| R-REV-02 | network | Same `/task show` as R-REV-01. If the draft used arXiv ids / DOIs / `[S#]`, those tokens are not listed as dangling against 32-char hash `source_id`s. | Findings may mention thin outline or missing `cite_source`. They do not invent "dangling 1706.03762". A real `[S99]` on a two-source task may appear as a high dangling-anchor card. |
+| R-STG-01 | network | After A-SUR-01: same `task show`. | A **research stages** section shows retrieve → evidence → outline → write with `✓` / `·`. Missing outline is visible and is **not** Partial success. |
+| R-VFY-01 | model | After A-SUR-01 or A-ROM-02: `omni --project walkthrough-aug24 --trust --out outputs_walkthrough verify --session <session>` | Prints `Citation support (warning only — does not change task status)`. Weak / lexical-unsupported claims are listed in yellow. Task status is unchanged. `--session` without an id fails. |
+| R-PRE-01 | network | `Has anyone used activation steering for tool-use agents? Answer yes/no/unclear with sources.` | First non-empty line of the answer is `Yes` / `No` / `Unclear` (case-insensitive). Then named sources / `source_id` / arXiv / DOI. Not a related-work manuscript. Plan or `/task show` may notice "Precedent mode: start with yes, no, or unclear". Do not stop at a title list with no verdict. |
+| R-PRE-02 | network | `有没有人做过用激活引导提升 tool-use agent 的工作？先回答 yes/no/unclear 并给出出处。` | Same first-line verdict plus sources. Chinese question, English verdict tokens allowed. Not a survey pack. |
+| R-FIG-01 | model | After A-FIG-01: `task show <task>` | **figure package** lists the PNG/SVG and either `name ← script` (DOT/py) or an honest "no source script on record". Does not invent a `.dot` that was not written. |
+| R-FIG-02 | model | Same utterance as A-FIG-02, on the A-FIG-01 task / active figure. | Capability is `artifact.revise` (in-place or grounded redraw). A second new `scientific-figure` with a new task file fails this row even if the picture looks fine. Color language is kept. |
+| R-PLN-01 | model | After A-SLD-01 or P-02: `task show <task>` | **plan gate** names expensive work (deck and/or LiveFigure). The heading says informational and that auto mode still ran. The deck file exists; the task is not left `awaiting_approval` for a deck. |
 
 ## Memory
 
@@ -532,16 +620,84 @@ upgrade an ordinary figure to PPTX because a VLM is configured.
 | X8-01 | network | `Search, fetch full text, review, response letter, poster, ideation, weekly schedule, then ask what citation style I use.` | Eighth step must hit the stored preference. Schedule does not silently run a sensitive skill. |
 | X8-02 | network | Same utterance: list `source_id` only and forbid `write_file` / `run_skill` / `spawn_subagents`, **and** also demand a survey, figure, deck, hypothesis, memory write, and `/why`. | Source-id-only scope wins this turn. Honest behavior: deliver ids and say writing needs a new turn, or ask. Must not sneak `run_skill`. |
 
-## Survey packs (fetch + figure + paper + slides)
+## Survey packs
 
-These are the live multi-deliverable packs. P-01 is the English form of
-task `72590550`. A pack that stops at `find_skill` and leaves
-`artifact.figure`, `draft.manuscript`, and `artifact.slides` unpaid **fails**.
+These five rows preserve the actual Chinese requests so they can be replayed
+without translation drift. They are semantic planner probes, not a vocabulary
+table: **do not implement these examples as exact sentence, substring, or CJK
+keyword matching**. The invariant is the selected capability and the durable
+output, regardless of equivalent user wording.
+
+P-03–P-05 deliberately express the same editable-figure intent three ways.
+`livefigure` must create exactly one single-figure editable PPTX; the final
+"ppt" asks separately for a multi-slide `research-pptx` deck. With no VLM, the
+editable figure remains unpaid with `vlm_not_configured`; independent retrieval,
+paper, and deck work continues, and the parent must not be called `succeeded`.
+
+The following compact spellings are also verbatim replay inputs from the owner.
+They intentionally omit some spaces, and P-03 ends with the colloquial/incomplete
+``发给``. They must compile to the same semantic contracts as P-01–P-05; neither
+the planner nor the host may special-case these complete strings:
+
+| Equivalent case | Verbatim compact input |
+|---|---|
+| P-02 | `为 智能体 loop engineering 系统综述准备材料，并输出一份详细的介绍ppt；` |
+| P-03 | `为 RAG 系统综述准备材料：获取Attention Is All You Need摘要，并生成包含query、retriever、reranker、LLM的可编辑的科研架构图。并输出一篇论文和ppt发给；` |
+| P-04 | `为 RAG 系统综述准备材料：获取Attention Is All You Need摘要，并生成包含query、retriever、reranker、LLM的PPT格式的科研架构图。并输出一篇论文和ppt发给我；` |
+| P-05 | `为 RAG 系统综述准备材料：获取Attention Is All You Need摘要，并生成包含query、retriever、reranker、LLM的可编辑的PPT格式的科研架构图。并输出一篇论文和ppt发给我；` |
+| P-01 | `为 RAG 系统综述准备材料：获取Attention Is All You Need摘要，并生成包含query、retriever、reranker、LLM的科研架构图。并输出一篇论文和ppt发给我；` |
 
 | ID | Need | Input | Pass |
 |---|---|---|---|
-| P-01 | network | `Prepare materials for a RAG system survey: fetch the abstract of Attention Is All You Need, generate a scientific architecture figure that includes query, retriever, reranker, and LLM, and write a paper plus a slide deck.` | `arxiv-fetch` / `paper.fetch.arxiv` for the abstract. Figure pays `artifact.figure` via `scientific-figure` PNG/SVG. Four boxes. Distinct from the slide deck (`research-pptx`). Do not invent DOT first. Paper is `draft.manuscript`, not only `draft.section`. Slides are `.pptx` via `research-pptx`. Files land under `<out>/<title>_<task8>/` (this catalog: `outputs_walkthrough/…`), not a bare tree and not checkout-root `*_xxxxxxxx/`. Settlement remaining is empty for those three debts. Do not stop at `find_skill`. No second background-completion line. |
-| P-02 | network | `Prepare materials for an agentic loop-engineering system survey and produce a detailed introductory slide deck.` | Literature plus a manuscript or long survey, plus a detailed `.pptx` (not a one-slide figure). Topic is loop engineering, not the P-01 RAG pack. |
+| P-01 | network | `为 RAG 系统综述准备材料：获取 Attention Is All You Need 摘要，并生成包含 query、retriever、reranker、LLM 的科研架构图。并输出一篇论文和 ppt 发给我` | Fetch persists the paper/abstract. The unspecified figure is `artifact.figure` via `scientific-figure` PNG/SVG and contains all four named components; it is not a `livefigure`. A full `draft.manuscript` and a separate multi-slide `.pptx` via `research-pptx` are delivered under `outputs_walkthrough/<title>_<task8>/`. Remaining requested debts are empty; do not stop at `find_skill`. Only after delivery, the answer may add one low-noise sentence that editable PPT-format figures are supported. That optional hint must not replace a deliverable, start another execution, or delay completion. |
+| P-02 | network | `为 智能体 loop engineering 系统综述准备材料，并输出一份详细的介绍ppt` | Retrieval produces inspectable source-backed materials for the loop-engineering topic. `research-pptx` produces a detailed multi-slide `.pptx`, not a one-slide figure. A manuscript is not required because the user did not request one. `/task show` plan gate names the deck; auto mode still ran (R-PLN-01). |
+| P-03 | network | `为 RAG 系统综述准备材料：获取 Attention Is All You Need 摘要，并生成包含 query、retriever、reranker、LLM 的可编辑的科研架构图。并输出一篇论文和 ppt 发给我` | The planner binds `figure.editable.pptx`; `livefigure` produces exactly one editable figure PPTX with the four components. `draft.manuscript` and the separate multi-slide `artifact.slides` from `research-pptx` also land. Do not silently use `scientific-figure`. Apply the shared no-VLM behavior above. |
+| P-04 | network | `为 RAG 系统综述准备材料：获取 Attention Is All You Need 摘要，并生成包含 query、retriever、reranker、LLM 的PPT格式的科研架构图。并输出一篇论文和 ppt 发给我` | "PPT格式的科研架构图" binds `figure.editable.pptx` / `livefigure`, not the full-deck capability. Exactly one editable figure PPTX, one manuscript, and one separate `research-pptx` deck are delivered. Apply the shared no-VLM behavior above. |
+| P-05 | network | `为 RAG 系统综述准备材料：获取 Attention Is All You Need 摘要，并生成包含 query、retriever、reranker、LLM 的可编辑的PPT格式的科研架构图。并输出一篇论文和 ppt 发给我` | The two format cues still bind one `figure.editable.pptx` / `livefigure` execution, not duplicate figures. The manuscript and separate multi-slide `research-pptx` deck are also required. Apply the shared no-VLM behavior above. |
+
+### Survey-pack execution matrix
+
+| Lane | Cases | Count | Preconditions / expected result |
+|---|---|---:|---|
+| Offline catalog contract | P-01–P-05 | 5 cases in 1 pytest invocation | No model, network, VLM, or owner-store mutation. Exact rows and capability mapping are checked. |
+| Connected ordinary/deck happy path | P-01–P-02 | 2 live runs | Text model + network. P-01 uses `scientific-figure`; P-02 produces the detailed deck. |
+| Connected editable happy path | P-03–P-05 | 3 live runs | Text model + network + configured VLM. Each run has one `livefigure` figure plus an independent full deck. |
+| Isolated no-VLM resilience | P-03–P-05 | 3 live runs | Text model + network, VLM absent. Figure is incomplete; independent outputs continue; parent is not `succeeded`. |
+
+The full live matrix is **8 live observations** (five happy paths plus three
+no-VLM replays). Run the offline contract first:
+
+```bash
+PYTHONPATH=cli/src .venv/bin/pytest -q \
+  cli/tests/cli/test_walkthrough_p0_cases.py -k survey_pack
+```
+
+Then run each happy-path input in its own named project. This keeps task/session
+evidence separate and writes only to the gitignored walkthrough output folder:
+
+```bash
+PYTHONPATH=cli/src .venv/bin/omni --project walkthrough-survey-p01 --trust --out outputs_walkthrough '为 RAG 系统综述准备材料：获取 Attention Is All You Need 摘要，并生成包含 query、retriever、reranker、LLM 的科研架构图。并输出一篇论文和 ppt 发给我'
+PYTHONPATH=cli/src .venv/bin/omni --project walkthrough-survey-p02 --trust --out outputs_walkthrough '为 智能体 loop engineering 系统综述准备材料，并输出一份详细的介绍ppt'
+PYTHONPATH=cli/src .venv/bin/omni --project walkthrough-survey-p03 --trust --out outputs_walkthrough '为 RAG 系统综述准备材料：获取 Attention Is All You Need 摘要，并生成包含 query、retriever、reranker、LLM 的可编辑的科研架构图。并输出一篇论文和 ppt 发给我'
+PYTHONPATH=cli/src .venv/bin/omni --project walkthrough-survey-p04 --trust --out outputs_walkthrough '为 RAG 系统综述准备材料：获取 Attention Is All You Need 摘要，并生成包含 query、retriever、reranker、LLM 的PPT格式的科研架构图。并输出一篇论文和 ppt 发给我'
+PYTHONPATH=cli/src .venv/bin/omni --project walkthrough-survey-p05 --trust --out outputs_walkthrough '为 RAG 系统综述准备材料：获取 Attention Is All You Need 摘要，并生成包含 query、retriever、reranker、LLM 的可编辑的PPT格式的科研架构图。并输出一篇论文和 ppt 发给我'
+```
+
+Before P-03–P-05, `omni config vlm` must report a configured VLM. For the
+three resilience replays, use the isolated-state recipe in
+[VLM-driven skills](#vlm-driven-skills), keep the VLM environment variables
+unset, and use distinct projects `walkthrough-survey-p03-novlm` through
+`walkthrough-survey-p05-novlm`. Configure only the text model there. Never
+print credentials, modify the owner's VLM setting, use `--out .`, or reuse a
+real project.
+
+```bash
+walkthrough_state="$(mktemp -d /tmp/omni-walkthrough-survey-novlm.XXXXXX)"
+novlm=(env -u OMNI_VLM_MODEL -u OMNI_VLM_ENDPOINT -u OMNI_VLM_API_KEY OMNI_HOME="$walkthrough_state/omni" XDG_CONFIG_HOME="$walkthrough_state/config" PYTHONPATH=cli/src)
+"${novlm[@]}" .venv/bin/omni --project walkthrough-survey-p03-novlm --trust --out outputs_walkthrough '为 RAG 系统综述准备材料：获取 Attention Is All You Need 摘要，并生成包含 query、retriever、reranker、LLM 的可编辑的科研架构图。并输出一篇论文和 ppt 发给我'
+"${novlm[@]}" .venv/bin/omni --project walkthrough-survey-p04-novlm --trust --out outputs_walkthrough '为 RAG 系统综述准备材料：获取 Attention Is All You Need 摘要，并生成包含 query、retriever、reranker、LLM 的PPT格式的科研架构图。并输出一篇论文和 ppt 发给我'
+"${novlm[@]}" .venv/bin/omni --project walkthrough-survey-p05-novlm --trust --out outputs_walkthrough '为 RAG 系统综述准备材料：获取 Attention Is All You Need 摘要，并生成包含 query、retriever、reranker、LLM 的可编辑的PPT格式的科研架构图。并输出一篇论文和 ppt 发给我'
+```
 
 ## Long-horizon campaigns
 
@@ -603,11 +759,12 @@ are not duplicated. Removed commands are out of scope.
 | C-MOD-03 | offline | `omni model help` | Lists status/explain/main/vision/embedding/use. |
 | C-MOD-04 | offline | `omni model use --help` | Says whether the override is one-shot or persistent. Do not switch the owner's main model. |
 | C-CFG-01 | offline | `omni config list` | Effective config. Secrets stay redacted. |
-| C-CFG-02 | offline | `omni config path` then `omni config test` | Paths are printable. `test` hits the main model and names optional VLM / S2 / embeddings (live-probes VLM and S2 when they are set). A VLM site origin is expanded to chat/completions. A failure must name the reason. |
+| C-CFG-02 | offline | `omni config path` then `omni config test` | Paths are printable. `test` hits the main model and names optional VLM / VLM Images / S2 / embeddings (live-probes chat VLM and image generation when a VLM is set). The `vlm` row is image-input chat; `vlm_images` is generateContent or `/v1/images/generations`. A passing chat row does not prove LiveFigure. A VLM site origin is expanded to chat/completions. A failure must name the reason. |
 | C-CFG-03 | offline | `omni config get model.model` then `omni config home` | Prints the effective value and home. Does not write `~/.config/omni/home`. |
 | C-CFG-04 | offline | `omni config --help` | Discover get/set/unset/test/path. Do not `set`/`unset` on a real home. |
-| C-CFG-05 | offline | `omni config vlm` (no flags) then `omni config vlm --help` and `omni config embeddings --help` | Probe is read-only: enabled / model / endpoint / key-set. This is the VLM branch decision. `--help` is discoverable. Do not set or disable keys on a real home. |
+| C-CFG-05 | offline | `omni config vlm` (no flags) then `omni config vlm --help` and `omni config embeddings --help` | Probe is read-only: enabled / model / `image_model` / endpoint / key-set. This is the VLM branch decision. `--help` lists `--image-model`. Do not set or disable keys on a real home. |
 | C-CFG-06 | offline | `omni config semantic-scholar --help` and `omni model vision --help` | Discoverable. Do not write keys. |
+| C-CFG-07 | offline | `omni config vlm` (no flags) then `omni doctor` then `omni serve status` | When `enabled=false`, doctor VLM is `not configured (optional)` or serve VLM is `disabled` — not `missing model, endpoint, api_key`. If serve is up, doctor has `VLM (serve)` and serve status has Model / VLM. A mismatch is `running …; disk is …. The next serve turn uses disk.` A write (do not do this on a real home) prints that the next WeChat / web / REPL turn picks it up without restarting `omni serve`. |
 | C-PRJ-01 | offline | `omni project list` | Named projects and path-keyed workspaces. No `migrate` subcommand. |
 | C-PRJ-02 | offline | `omni --project walkthrough-aug24 project info` | Store path agrees with `-P`. |
 | C-PRJ-03 | offline | `omni project help` | Only list/new/info/help. No `migrate`. |
@@ -644,20 +801,21 @@ are not duplicated. Removed commands are out of scope.
 | C-CIT-03 | offline | After a retrieve: `omni source show <id>` | Shows the structured source. A missing id is a clear miss. |
 | C-HYP-01 | offline | `omni hypo new "Dense retriever beats BM25 on long docs" -c 0.6` then `omni hypo list` | Hypothesis is stored. |
 | C-HYP-02 | offline | `omni claim new "..."` then `omni evidence help` and `omni run list` | Claim lands. Evidence bind needs a real `source_id` after retrieval. Run ledger may be empty. |
-| C-HYP-03 | offline | `omni hypo show <id>` and `omni hypo status` | Show and status work on a stored hypothesis. A missing id is a clear miss. |
+| C-HYP-03 | offline | `omni hypo show <id>` then `omni hypo status --help` | `show` prints statement / status / confidence. `status` is a setter (`{hyp_id} {status}`); a missing id exits 2. Do not flip a real hypothesis in this catalog. |
 | C-LITC-01 | model | `omni lit "How does RAG reduce hallucination?"` | Same entry as A-COR-01. |
 | C-LITC-02 | offline | `omni bench --k 3` and `omni eval --research-quality` | Offline metrics. `omni eval --black-box` with zero successes must exit 1. |
 | C-SCH-01 | offline | `omni schedule list` and `omni schedule proposals` | Next fire and pending approvals. |
 | C-SCH-02 | offline | `omni schedule add --cron "0 18 * * *" --goal "Search for new RAG papers"` then `omni schedule run` | Exactly one trigger mode. `run` fires due jobs now; `omni serve` is for unattended repeats. |
 | C-SCH-03 | offline | `omni schedule all` and `omni schedule show <id>` | All-workspace list. A missing id is a clear miss. |
 | C-SCH-04 | offline | On a schedule created for this walkthrough: `schedule disable <id>` then `enable <id>` | State flips. `approve`/`deny`/`clarifications` only hit a real proposal. |
-| C-SCH-05 | offline | `omni schedule add --at 2026-08-26T07:10 --goal "Prepare RAG survey materials: fetch the Attention Is All You Need abstract, draw a query/retriever/reranker/LLM figure, write a paper."` | Exactly one trigger. Naive `--at` is local wall-clock. If 07:10 already passed, the command exits non-zero with guidance — it does not silently create a past job. A future `--at` appears on `schedule list` / `show`. |
+| C-SCH-05 | offline | `omni schedule add --at 2099-08-26T07:10 --goal "Prepare RAG survey materials: fetch the Attention Is All You Need abstract, draw a query/retriever/reranker/LLM figure, write a paper."` | Exactly one trigger. Naive `--at` is local wall-clock. The deliberately future-dated job appears on `schedule list` / `show`; remove it in C-SCH-06. |
 | C-SCH-06 | offline | `omni schedule add --at 1999-01-01T07:10 --goal "past job"` then, on a walkthrough job that exists, `omni schedule remove <id>` | Past `--at` is refused. `remove` deletes only the walkthrough job. |
-| C-SRV-01 | offline | `omni status` and `omni serve status` and `omni serve doctor` | Workspace, db, daemon. Bind address is not `0.0.0.0`. |
+| C-SRV-01 | offline | `omni status` and `omni serve status` and `omni serve doctor` | Workspace, db, daemon. Bind address is not `0.0.0.0`. Serve status lists Model / VLM when the process published them. Doctor `VLM (serve)` is disk vs running (C-CFG-07). |
 | C-SRV-02 | offline | `omni web start` then fetch `127.0.0.1:1088` then `omni web stop` | Loopback only. Same store as `-P`. Do not leave the process running. |
 | C-SRV-03 | offline | `omni web status` and `omni web help` | Status is honest when the UI is down. Bare `web port` requires `{port}` and is a setter, not a getter. |
 | C-CH-01 | offline | `omni channel list` and `omni channel test wechat` | List works offline. Test fails closed when the channel is unconfigured. |
 | C-CH-02 | offline | Do not run `omni channel login wechat --start` in this catalog | QR login is interactive. Record as blocked. |
+| C-CH-03 | offline | `omni channel test feishu` and `omni channel test dingtalk` | Same fail-closed as C-CH-01 when unconfigured. List includes Feishu and DingTalk. Live media download is blocked here. Inbound image + caption is one turn; files land under workspace `inputs/` as `@path` (same contract as A-FIL-03). Covered by `cli/tests/channels/test_inbound.py` and `test_channel_presentation.py`. |
 | C-MCP-01 | offline | `omni mcp list` and `omni trust --help` | External MCP and trusted directories. |
 | C-MCP-02 | offline | `omni exec --help` and `omni replay --help` | Non-interactive run and chronological replay. |
 | C-MCP-03 | offline | `omni mcp help` and `omni mcp agents` | Help and agent targets. |
@@ -672,6 +830,7 @@ are not duplicated. Removed commands are out of scope.
 | C-AS-02 | offline | `omni autosota status` | Does not create an Omni background task. |
 | C-OPS-01 | offline | `omni update status` and `omni terminal status` | Update state. Shift+Enter readiness. |
 | C-OPS-02 | offline | `omni uninstall --dry-run` | Preview only. |
+| C-OPS-03 | offline | `omni update --help` and `omni update status` | Status is read-only. Help/status do not relaunch the old process. When a newer version is cached on a TTY, bare `omni` shows `Update now` / `Skip` / `Skip until next version`. After a successful menu update the process prints `Please restart Omni` and exits — type `omni` again. Do not run `omni update` again in this catalog. |
 | C-TERM-01 | offline | `omni terminal setup --help` and `omni terminal setup --check` | Preview only. Does not write tmux config. |
 | C-REPL-01 | offline | `omni --help` | Slash verbs exist as Typer groups or in-process REPL commands. |
 | C-REPL-02 | offline | `/help` text in `omni --help` and `cli/src/omni/cli/repl_commands.py` | `/inbox` is in the catalog. `/exit` and `/quit` leave cleanly. |

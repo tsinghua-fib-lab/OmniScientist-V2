@@ -692,7 +692,11 @@ async def test_channel_inbound_media_downloads_and_notes_path(settings):
     assert agent.turns, "media-bearing message should reach the agent"
     turn_text = agent.turns[0]["text"]
     assert "看看这张图" in turn_text
-    assert "image" in turn_text and "saved locally" in turn_text and "x.png" in turn_text
+    assert "[Image #1]" in turn_text
+    assert "x.png" in turn_text
+    assert str(settings.paths.inputs_dir) in turn_text
+    assert agent.turns[0]["file_uris"]
+    assert any("x.png" in str(uri) for uri in agent.turns[0]["file_uris"])
     # reply still echoes the inbound context_token
     assert fake.sent and fake.sent[0][2] == "ctx-9"
 
@@ -719,7 +723,376 @@ async def test_channel_media_only_message_still_handled(settings):
         }
     )
     assert len(agent.turns) == 1
-    assert "image" in agent.turns[0]["text"]
+    assert "[Image #1]" in agent.turns[0]["text"]
+    assert "x.png" in agent.turns[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_cross_message_image_and_caption_become_one_turn(settings):
+    from omni.channels.security import add_allowed_external_key
+    from omni.channels.wechat import WeChatChannel
+
+    cfg = settings.paths.channels_dir / "wechat.toml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text('mode = "ilink"\n', encoding="utf-8")
+    add_allowed_external_key(cfg, "user@im.wechat")
+    agent = _DummyAgent()
+    fake = _FakeIlinkClient()
+    channel = WeChatChannel(settings, agent, client=fake)  # type: ignore[arg-type]
+    await channel.admit_ilink_message(
+        {
+            "message_type": 1,
+            "from_user_id": "user@im.wechat",
+            "context_token": "ctx-img",
+            "message_id": 101,
+            "item_list": [{"type": 2, "image_item": {"media": {"encrypt_query_param": "QP"}}}],
+        }
+    )
+    await channel.admit_ilink_message(
+        {
+            "message_type": 1,
+            "from_user_id": "user@im.wechat",
+            "context_token": "ctx-txt",
+            "message_id": 102,
+            "item_list": [{"type": 1, "text_item": {"text": "仔细分析这个截图讲的什么"}}],
+        }
+    )
+    await channel.inbound.idle()
+    assert len(agent.turns) == 1
+    assert "仔细分析这个截图讲的什么" in agent.turns[0]["text"]
+    assert "[Image #1]" in agent.turns[0]["text"]
+    assert fake.sent[0][2] == "ctx-txt"
+
+
+@pytest.mark.asyncio
+async def test_two_plain_texts_stay_two_turns(settings):
+    from omni.channels.security import add_allowed_external_key
+    from omni.channels.wechat import WeChatChannel
+
+    cfg = settings.paths.channels_dir / "wechat.toml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text('mode = "ilink"\n', encoding="utf-8")
+    add_allowed_external_key(cfg, "user@im.wechat")
+    agent = _DummyAgent()
+    channel = WeChatChannel(settings, agent, client=_FakeIlinkClient())  # type: ignore[arg-type]
+    channel.inbound.quiet_window_s = 0.05
+    channel.inbound.media_hold_s = 0.05
+    channel.inbound.deictic_hold_s = 0.05
+    await channel.admit_ilink_message(
+        {
+            "message_type": 1,
+            "from_user_id": "user@im.wechat",
+            "message_id": 201,
+            "item_list": [{"type": 1, "text_item": {"text": "问题 A"}}],
+        }
+    )
+    await channel.admit_ilink_message(
+        {
+            "message_type": 1,
+            "from_user_id": "user@im.wechat",
+            "message_id": 202,
+            "item_list": [{"type": 1, "text_item": {"text": "问题 B"}}],
+        }
+    )
+    await channel.inbound.idle()
+    assert [turn["text"] for turn in agent.turns] == ["问题 A", "问题 B"]
+
+
+@pytest.mark.asyncio
+async def test_poll_admits_before_cursor_and_does_not_await_agent(settings):
+    from omni.channels.security import add_allowed_external_key
+    from omni.channels.wechat import WeChatChannel
+
+    cfg = settings.paths.channels_dir / "wechat.toml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text('mode = "ilink"\n', encoding="utf-8")
+    add_allowed_external_key(cfg, "user@im.wechat")
+
+    class SlowAgent(_DummyAgent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def handle_turn(self, text: str, **kwargs: Any) -> TurnResult:
+            self.entered.set()
+            await self.release.wait()
+            return await super().handle_turn(text, **kwargs)
+
+    class PollClient(_FakeIlinkClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def get_updates(self, buf: str) -> dict[str, Any]:
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "ret": 0,
+                    "get_updates_buf": "NEXT-BUF",
+                    "msgs": [
+                        {
+                            "message_type": 1,
+                            "from_user_id": "user@im.wechat",
+                            "context_token": "ctx-p",
+                            "message_id": 301,
+                            "item_list": [
+                                {"type": 1, "text_item": {"text": "看看这张图"}},
+                                {"type": 2, "image_item": {"media": {"encrypt_query_param": "QP"}}},
+                            ],
+                        }
+                    ],
+                }
+            await asyncio.Event().wait()
+            return {"ret": 0, "msgs": [], "get_updates_buf": buf}
+
+    agent = SlowAgent()
+    fake = PollClient()
+    channel = WeChatChannel(settings, agent, client=fake)  # type: ignore[arg-type]
+    channel._cfg["bot_token"] = "tok"
+    task = asyncio.create_task(channel.start())
+    try:
+        await asyncio.wait_for(agent.entered.wait(), timeout=2)
+        assert channel._load_sync_buf() == "NEXT-BUF"
+        assert agent.turns == []
+        agent.release.set()
+        await channel.inbound.idle()
+        assert agent.turns and "看看这张图" in agent.turns[0]["text"]
+        assert "[Image #1]" in agent.turns[0]["text"]
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await channel.stop()
+
+
+@pytest.mark.asyncio
+async def test_same_poll_batch_slow_download_stays_one_turn(settings):
+    """Caption + image in one getupdates stay one task even if CDN is slow."""
+    from omni.channels.security import add_allowed_external_key
+    from omni.channels.wechat import WeChatChannel
+
+    cfg = settings.paths.channels_dir / "wechat.toml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text('mode = "ilink"\n', encoding="utf-8")
+    add_allowed_external_key(cfg, "user@im.wechat")
+
+    class SlowPollClient(_FakeIlinkClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def download_media_from_item(self, item: dict[str, Any], dest_dir: str):
+            await asyncio.sleep(0.2)
+            return await super().download_media_from_item(item, dest_dir)
+
+        async def get_updates(self, buf: str) -> dict[str, Any]:
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "ret": 0,
+                    "get_updates_buf": "NEXT-BUF",
+                    "msgs": [
+                        {
+                            "message_type": 1,
+                            "from_user_id": "user@im.wechat",
+                            "context_token": "ctx-t",
+                            "message_id": 401,
+                            "item_list": [
+                                {"type": 1, "text_item": {"text": "分析这张图讲了什么，你能做什么"}}
+                            ],
+                        },
+                        {
+                            "message_type": 1,
+                            "from_user_id": "user@im.wechat",
+                            "context_token": "ctx-i",
+                            "message_id": 402,
+                            "item_list": [
+                                {"type": 2, "image_item": {"media": {"encrypt_query_param": "QP"}}}
+                            ],
+                        },
+                    ],
+                }
+            await asyncio.Event().wait()
+            return {"ret": 0, "msgs": [], "get_updates_buf": buf}
+
+    agent = _DummyAgent()
+    fake = SlowPollClient()
+    channel = WeChatChannel(settings, agent, client=fake)  # type: ignore[arg-type]
+    channel._cfg["bot_token"] = "tok"
+    channel.inbound.quiet_window_s = 0.05
+    channel.inbound.media_hold_s = 0.05
+    channel.inbound.deictic_hold_s = 0.05
+    task = asyncio.create_task(channel.start())
+    try:
+        deadline = asyncio.get_running_loop().time() + 3
+        while not agent.turns and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.02)
+        await channel.inbound.idle()
+        assert len(agent.turns) == 1
+        assert "分析这张图讲了什么，你能做什么" in agent.turns[0]["text"]
+        assert "[Image #1]" in agent.turns[0]["text"]
+        assert channel._load_sync_buf() == "NEXT-BUF"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await channel.stop()
+
+
+@pytest.mark.asyncio
+async def test_caption_a_few_seconds_later_still_merges(settings):
+    from omni.channels.security import add_allowed_external_key
+    from omni.channels.wechat import WeChatChannel
+
+    cfg = settings.paths.channels_dir / "wechat.toml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text('mode = "ilink"\n', encoding="utf-8")
+    add_allowed_external_key(cfg, "user@im.wechat")
+    agent = _DummyAgent()
+    channel = WeChatChannel(settings, agent, client=_FakeIlinkClient())  # type: ignore[arg-type]
+    channel.inbound.quiet_window_s = 0.05
+    channel.inbound.media_hold_s = 0.2
+    channel.inbound.deictic_hold_s = 0.2
+    await channel.admit_ilink_message(
+        {
+            "message_type": 1,
+            "from_user_id": "user@im.wechat",
+            "context_token": "ctx-img",
+            "message_id": 501,
+            "item_list": [{"type": 2, "image_item": {"media": {"encrypt_query_param": "QP"}}}],
+        }
+    )
+    await asyncio.sleep(0.12)
+    await channel.admit_ilink_message(
+        {
+            "message_type": 1,
+            "from_user_id": "user@im.wechat",
+            "context_token": "ctx-txt",
+            "message_id": 502,
+            "item_list": [{"type": 1, "text_item": {"text": "仔细分析这个截图讲的什么"}}],
+        }
+    )
+    await channel.inbound.idle()
+    assert len(agent.turns) == 1
+    assert "仔细分析这个截图讲的什么" in agent.turns[0]["text"]
+    assert "[Image #1]" in agent.turns[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_later_poll_slow_image_still_merges_with_caption(settings):
+    """A later getupdates image must hold the deictic caption while CDN is slow."""
+    from omni.channels.inbound import download_fail_note
+    from omni.channels.security import add_allowed_external_key
+    from omni.channels.wechat import WeChatChannel
+
+    cfg = settings.paths.channels_dir / "wechat.toml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text('mode = "ilink"\n', encoding="utf-8")
+    add_allowed_external_key(cfg, "user@im.wechat")
+
+    class SlowImage(_FakeIlinkClient):
+        async def download_media_from_item(self, item: dict[str, Any], dest_dir: str):
+            await asyncio.sleep(0.12)
+            return await super().download_media_from_item(item, dest_dir)
+
+    agent = _DummyAgent()
+    channel = WeChatChannel(settings, agent, client=SlowImage())  # type: ignore[arg-type]
+    channel.inbound.quiet_window_s = 0.04
+    channel.inbound.media_hold_s = 0.04
+    channel.inbound.deictic_hold_s = 0.04
+    await channel._admit_ilink_batch(
+        [
+            {
+                "message_type": 1,
+                "from_user_id": "user@im.wechat",
+                "context_token": "ctx-t",
+                "message_id": 601,
+                "item_list": [{"type": 1, "text_item": {"text": "分析这张图讲了什么"}}],
+            }
+        ]
+    )
+    await channel._admit_ilink_batch(
+        [
+            {
+                "message_type": 1,
+                "from_user_id": "user@im.wechat",
+                "context_token": "ctx-i",
+                "message_id": 602,
+                "item_list": [{"type": 2, "image_item": {"media": {"encrypt_query_param": "QP"}}}],
+            }
+        ]
+    )
+    await channel.inbound.idle()
+    assert len(agent.turns) == 1
+    assert "分析这张图讲了什么" in agent.turns[0]["text"]
+    assert "[Image #1]" in agent.turns[0]["text"]
+    assert download_fail_note() not in agent.turns[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_ilink_download_error_keeps_caption(settings):
+    from omni.channels.inbound import download_fail_note
+    from omni.channels.security import add_allowed_external_key
+    from omni.channels.wechat import WeChatChannel
+
+    cfg = settings.paths.channels_dir / "wechat.toml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text('mode = "ilink"\n', encoding="utf-8")
+    add_allowed_external_key(cfg, "user@im.wechat")
+
+    class Boom(_FakeIlinkClient):
+        async def download_media_from_item(self, item: dict[str, Any], dest_dir: str):
+            raise RuntimeError("cdn down")
+
+    agent = _DummyAgent()
+    channel = WeChatChannel(settings, agent, client=Boom())  # type: ignore[arg-type]
+    await channel.handle_ilink_message(
+        {
+            "message_type": 1,
+            "from_user_id": "user@im.wechat",
+            "message_id": 701,
+            "item_list": [
+                {"type": 1, "text_item": {"text": "看看这张图"}},
+                {"type": 2, "image_item": {"media": {"encrypt_query_param": "QP"}}},
+            ],
+        }
+    )
+    assert len(agent.turns) == 1
+    assert "看看这张图" in agent.turns[0]["text"]
+    assert download_fail_note() in agent.turns[0]["text"]
+    assert not agent.turns[0].get("file_uris")
+
+
+@requires_crypto
+@pytest.mark.asyncio
+async def test_download_file_name_cannot_escape_inputs(monkeypatch, tmp_path):
+    plaintext = b"%PDF-1.4 escaped"
+    key = bytes(range(16))
+    ciphertext = wi.encrypt_aes_ecb(plaintext, key)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/download"):
+            return httpx.Response(200, content=ciphertext)
+        return httpx.Response(404, json={})
+
+    _install_mock_transport(monkeypatch, handler)
+    client = WeixinIlinkClient(base_url="https://idc.example.com", token="tok")
+    dest = tmp_path / "inputs"
+    dest.mkdir()
+    item = {
+        "type": 4,
+        "file_item": {
+            "file_name": "../pwned.pdf",
+            "media": {
+                "encrypt_query_param": "QPF",
+                "aes_key": base64.b64encode(key.hex().encode()).decode(),
+            },
+        },
+    }
+    saved = await client.download_media_from_item(item, str(dest))
+    assert saved is not None
+    assert Path(saved.path).parent == dest
+    assert not (tmp_path / "pwned.pdf").exists()
+    assert Path(saved.path).read_bytes() == plaintext
 
 
 # ── login persistence (CLI) ────────────────────────────────────────────────

@@ -23,9 +23,10 @@ from omni.runtime.task_recorder import TaskRecorder
 logger = logging.getLogger(__name__)
 
 # Auto-compaction guardrails: fold older turns into a summary once a session's
-# visible transcript exceeds either the message-count guard below or the
-# model-window token budget (``token_budget``), keeping the most recent turns.
-_COMPACT_THRESHOLD = 30  # visible user/assistant/tool-result messages
+# visible transcript exceeds the model-window token budget (``token_budget``),
+# keeping the most recent turns. ``_COMPACT_THRESHOLD`` is a context-report hint,
+# not a trigger — Codex compact is token-budget only.
+_COMPACT_THRESHOLD = 30  # visible user/assistant/tool-result messages (hint)
 _COMPACT_KEEP_LAST = 8
 
 

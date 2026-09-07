@@ -138,6 +138,9 @@ async def test_apply_model_vlm_and_s2_write_same_keys_as_cli(app_client) -> None
     assert settings.vlm.model == "vision-x"
     assert settings.vlm.api_key == "sk-web-vlm"
     assert settings.research.semantic_scholar_api_key == "s2-web-key"
+    assert "omni serve" in vlm["notice"]
+    assert "next turn" in vlm["notice"]
+    assert "Restart an open REPL" not in vlm["notice"]
 
 
 @pytest.mark.asyncio

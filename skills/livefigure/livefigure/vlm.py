@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse, urlsplit, urlunsplit
 from urllib.request import url2pathname
 
 import httpx
@@ -23,6 +23,20 @@ import httpx
 _MAX_REFERENCE_BYTES = 20 * 1024 * 1024
 _PROTOCOL = "openai_compatible_chat"
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+_CHAT_COMPLETIONS_SUFFIX = "/chat/completions"
+_IMAGES_GENERATIONS_SUFFIX = "/images/generations"
+_IMAGE_MODEL_REJECT_HINTS = (
+    "only imagen models",
+    "not supported model for image generation",
+    "not an image generation model",
+    "unsupported model for image generation",
+)
+_PREFERRED_IMAGE_MODELS = (
+    "gpt-image-2",
+    "gpt-image-1",
+    "dall-e-3",
+    "dall-e-2",
+)
 
 
 class VlmError(RuntimeError):
@@ -49,6 +63,7 @@ class VlmConfig:
     model: str
     endpoint: str
     api_key: str = field(repr=False)
+    image_model: str = ""
     timeout_s: float = 180.0
     protocol: str = _PROTOCOL
     # Local references are opt-in. Omni supplies artifact/attachment paths;
@@ -64,6 +79,7 @@ class VlmConfig:
             model=str(values.get("OMNI_VLM_MODEL") or "").strip(),
             endpoint=str(values.get("OMNI_VLM_ENDPOINT") or "").strip(),
             api_key=str(values.get("OMNI_VLM_API_KEY") or "").strip(),
+            image_model=str(values.get("OMNI_VLM_IMAGE_MODEL") or "").strip(),
         )
 
     def missing_env(self) -> tuple[str, ...]:
@@ -160,6 +176,114 @@ class VlmClient:
             )
         return text
 
+    async def generate_image(
+        self,
+        prompt: str,
+        *,
+        size: str = "1536x1024",
+        aspect_ratio: str = "16:9",
+        image_size: str = "",
+    ) -> bytes:
+        """Generate the composition reference on the public contract that fits the model."""
+        self._validate_config()
+        if _should_try_gemini_generate_content(self._config.model, self._config.image_model):
+            try:
+                return await _generate_gemini_native_image(
+                    self._config,
+                    prompt,
+                    aspect_ratio=aspect_ratio,
+                    image_size=image_size,
+                    transport=self._transport,
+                )
+            except VlmError as exc:
+                if exc.code == "vlm_authentication_failed":
+                    raise
+        endpoint = _images_generation_endpoint(self._config.endpoint)
+        headers = {
+            "Authorization": f"Bearer {self._config.api_key}",
+            "Content-Type": "application/json",
+        }
+        models = [_openai_images_start_model(self._config.model, self._config.image_model)]
+        tried: set[str] = set()
+        last_error: VlmError | None = None
+        try:
+            async with httpx.AsyncClient(
+                timeout=self._config.timeout_s,
+                transport=self._transport,
+            ) as client:
+                while models:
+                    model = models.pop(0)
+                    if not model or model in tried:
+                        continue
+                    tried.add(model)
+                    payload = {
+                        "model": model,
+                        "prompt": str(prompt),
+                        "n": 1,
+                        "size": size,
+                    }
+                    if not str(model).lower().startswith("gpt-image"):
+                        payload["response_format"] = "b64_json"
+                    try:
+                        response = await client.post(endpoint, headers=headers, json=payload)
+                    except httpx.HTTPError:
+                        raise VlmError("VLM image network request failed") from None
+                    if response.status_code in {401, 403}:
+                        raise VlmError(
+                            f"VLM image request failed (HTTP {response.status_code})",
+                            code="vlm_authentication_failed",
+                            category="configuration",
+                            retryable=False,
+                        )
+                    if response.status_code >= 400:
+                        rejected = _images_model_rejected(response)
+                        fallback = await _discover_images_model(
+                            client,
+                            images_url=endpoint,
+                            headers=headers,
+                            exclude=tried,
+                        )
+                        if fallback:
+                            models.append(fallback)
+                            continue
+                        if rejected:
+                            raise VlmError(
+                                "OpenAI Images rejected this VLM chat model; it is not an image generator",
+                                code="vlm_http_error",
+                                category="configuration",
+                                retryable=False,
+                            )
+                        status = response.status_code
+                        raise VlmError(
+                            f"VLM image request failed (HTTP {status})",
+                            code="vlm_http_error",
+                            category="configuration" if status in {401, 403} else "network",
+                            retryable=status in {408, 409, 425, 429} or status >= 500,
+                        )
+                    try:
+                        data = response.json()
+                    except ValueError:
+                        data = None
+                    image = _response_image(data)
+                    if image is not None:
+                        return image
+                    last_error = VlmError(
+                        "VLM image response did not contain a base64 image",
+                        code="vlm_invalid_response",
+                        category="generation",
+                        retryable=True,
+                    )
+        except VlmError:
+            raise
+        if last_error is not None:
+            raise last_error
+        raise VlmError(
+            "VLM image response did not contain a base64 image",
+            code="vlm_invalid_response",
+            category="generation",
+            retryable=True,
+        )
+
     def _validate_config(self) -> None:
         missing = self._config.missing_env()
         if missing:
@@ -198,6 +322,256 @@ class VlmClient:
                 category="configuration",
                 retryable=False,
             )
+
+
+def _resolve_chat_url(endpoint: str) -> str:
+    """Expand a site origin the same way Omni's chat client does."""
+    parsed = urlsplit(str(endpoint or "").strip())
+    path = (parsed.path or "").rstrip("/")
+    if path.lower().endswith(_CHAT_COMPLETIONS_SUFFIX):
+        new_path = path
+    elif not path:
+        new_path = "/v1/chat/completions"
+    else:
+        new_path = f"{path}/chat/completions"
+    return urlunsplit((parsed.scheme, parsed.netloc, new_path, parsed.query, ""))
+
+
+def _images_generation_endpoint(chat_endpoint: str) -> str:
+    """Map chat or a site origin to the OpenAI Images sibling URL."""
+    raw = str(chat_endpoint or "").strip()
+    parsed = urlsplit(raw)
+    path = (parsed.path or "").rstrip("/")
+    if path.lower().endswith(_IMAGES_GENERATIONS_SUFFIX):
+        return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+    parsed = urlsplit(_resolve_chat_url(raw))
+    path = (parsed.path or "").rstrip("/")
+    if path.lower().endswith(_CHAT_COMPLETIONS_SUFFIX):
+        path = path[: -len(_CHAT_COMPLETIONS_SUFFIX)] + _IMAGES_GENERATIONS_SUFFIX
+    else:
+        path = f"{path}{_IMAGES_GENERATIONS_SUFFIX}"
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+
+def _looks_images_model(name: str) -> bool:
+    lowered = str(name or "").lower()
+    return (
+        lowered.startswith("gpt-image")
+        or lowered.startswith("dall-e")
+        or "imagen" in lowered
+    )
+
+
+def _looks_gemini_image_model(name: str) -> bool:
+    lowered = str(name or "").lower()
+    return "gemini" in lowered and "image" in lowered
+
+
+def _should_try_gemini_generate_content(model: str, image_model: str) -> bool:
+    pinned = str(image_model or "").strip()
+    if pinned and _looks_images_model(pinned):
+        return False
+    if pinned and _looks_gemini_image_model(pinned):
+        return True
+    return _looks_gemini_image_model(model)
+
+
+def _openai_images_start_model(model: str, image_model: str) -> str:
+    pinned = str(image_model or "").strip()
+    if pinned:
+        return pinned
+    chat = str(model or "").strip()
+    if _looks_gemini_image_model(chat):
+        return _PREFERRED_IMAGE_MODELS[0]
+    return chat
+
+
+def _service_origin(endpoint: str) -> str:
+    parsed = urlsplit(str(endpoint or "").strip())
+    path = (parsed.path or "").rstrip("/")
+    lower = path.lower()
+    for suffix in (
+        "/v1/chat/completions",
+        "/v1/images/generations",
+        "/chat/completions",
+        "/images/generations",
+        "/v1",
+    ):
+        if lower.endswith(suffix):
+            path = path[: -len(suffix)]
+            break
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+
+def _gemini_generate_content_url(endpoint: str, model: str) -> str:
+    origin = _service_origin(endpoint)
+    safe_model = quote(str(model or "").strip(), safe="-._~")
+    return f"{origin}/v1beta/models/{safe_model}:generateContent"
+
+
+async def _generate_gemini_native_image(
+    config: VlmConfig,
+    prompt: str,
+    *,
+    aspect_ratio: str,
+    image_size: str,
+    transport: httpx.AsyncBaseTransport | None,
+) -> bytes:
+    model = str(config.image_model or "").strip() or config.model
+    if not _looks_gemini_image_model(model):
+        model = config.model
+    url = _gemini_generate_content_url(config.endpoint, model)
+    image_config = {"aspectRatio": str(aspect_ratio or "16:9").strip() or "16:9"}
+    raw = str(image_size or "").strip().upper()
+    image_config["imageSize"] = raw if raw in {"1K", "2K", "4K"} else "1K"
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": str(prompt)}]}],
+        "generationConfig": {
+            "responseModalities": ["TEXT", "IMAGE"],
+            "imageConfig": image_config,
+            "image": image_config,
+        },
+    }
+    headers = {
+        "Authorization": f"Bearer {config.api_key}",
+        "Content-Type": "application/json",
+        "x-goog-api-key": str(config.api_key),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=config.timeout_s, transport=transport) as client:
+            response = await client.post(
+                url,
+                headers=headers,
+                params={"key": config.api_key},
+                json=payload,
+            )
+    except httpx.HTTPError:
+        raise VlmError("VLM Gemini image network request failed") from None
+    if response.status_code in {401, 403}:
+        raise VlmError(
+            f"VLM Gemini image request failed (HTTP {response.status_code})",
+            code="vlm_authentication_failed",
+            category="configuration",
+            retryable=False,
+        )
+    if response.status_code >= 400:
+        status = response.status_code
+        raise VlmError(
+            f"VLM Gemini image request failed (HTTP {status})",
+            code="vlm_http_error",
+            category="network",
+            retryable=status in {408, 409, 425, 429} or status >= 500,
+        )
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+    image = _gemini_response_image(data)
+    if image is None:
+        raise VlmError(
+            "VLM Gemini image response did not contain an image",
+            code="vlm_invalid_response",
+            category="generation",
+            retryable=True,
+        )
+    return image
+
+
+def _gemini_response_image(data: Any) -> bytes | None:
+    if not isinstance(data, dict):
+        return None
+    candidates = data.get("candidates")
+    if not isinstance(candidates, list) or not candidates or not isinstance(candidates[0], dict):
+        return None
+    content = candidates[0].get("content")
+    parts = content.get("parts") if isinstance(content, dict) else None
+    if not isinstance(parts, list):
+        return None
+    for part in parts:
+        inline = (part.get("inlineData") or part.get("inline_data")) if isinstance(part, dict) else None
+        encoded = inline.get("data") if isinstance(inline, dict) else ""
+        if not encoded:
+            continue
+        try:
+            image = base64.b64decode(encoded, validate=True)
+        except ValueError:
+            continue
+        if image:
+            return image
+    return None
+
+
+def _images_model_rejected(response: httpx.Response) -> bool:
+    try:
+        data = response.json()
+    except ValueError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    err = data.get("error")
+    if isinstance(err, dict):
+        text = str(err.get("message") or "")
+    elif err:
+        text = str(err)
+    else:
+        text = str(data.get("message") or "")
+    lowered = text.lower()
+    return any(hint in lowered for hint in _IMAGE_MODEL_REJECT_HINTS)
+
+
+async def _discover_images_model(
+    client: httpx.AsyncClient,
+    *,
+    images_url: str,
+    headers: dict[str, str],
+    exclude: set[str],
+) -> str:
+    parsed = urlsplit(images_url)
+    path = (parsed.path or "").rstrip("/")
+    if path.lower().endswith(_IMAGES_GENERATIONS_SUFFIX):
+        models_path = path[: -len(_IMAGES_GENERATIONS_SUFFIX)] + "/models"
+    else:
+        models_path = "/v1/models"
+    models_url = urlunsplit((parsed.scheme, parsed.netloc, models_path, "", ""))
+    try:
+        response = await client.get(models_url, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+    except (httpx.HTTPError, ValueError):
+        return next((name for name in _PREFERRED_IMAGE_MODELS if name not in exclude), "")
+    rows = data.get("data") if isinstance(data, dict) else None
+    names = [
+        str(item.get("id") or "").strip()
+        for item in (rows or [])
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    ]
+    available = {name for name in names if name not in exclude}
+    for preferred in _PREFERRED_IMAGE_MODELS:
+        if preferred in available:
+            return preferred
+    catalog_images = [name for name in names if name not in exclude and _looks_images_model(name)]
+    if catalog_images:
+        return catalog_images[0]
+    if any(_looks_images_model(name) for name in names):
+        return ""
+    return next((name for name in _PREFERRED_IMAGE_MODELS if name not in exclude), "")
+
+
+def _response_image(data: Any) -> bytes | None:
+    """Decode a standard OpenAI Images ``b64_json`` response."""
+    if not isinstance(data, dict):
+        return None
+    items = data.get("data")
+    if not isinstance(items, list) or not items or not isinstance(items[0], dict):
+        return None
+    encoded = str(items[0].get("b64_json") or "")
+    if not encoded:
+        return None
+    try:
+        value = base64.b64decode(encoded, validate=True)
+    except ValueError:
+        return None
+    return value or None
 
 
 def reference_as_data_url(

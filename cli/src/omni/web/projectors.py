@@ -1101,12 +1101,12 @@ async def save_attachment(
     filename: str,
     data: bytes,
 ) -> str:
-    """Write an uploaded file into the store and return its absolute path."""
-    safe = Path(filename).name or "upload.bin"
-    dest_dir = rec.paths.project_dir / "web-uploads"
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / safe
-    if dest.exists():
-        dest = dest_dir / f"{dest.stem}-{len(data)}{dest.suffix}"
-    dest.write_bytes(data)
+    """Write an uploaded file into workspace ``inputs/`` and return its path."""
+    from omni.core.user_inputs import ensure_inputs_dir, write_user_input
+
+    dest = write_user_input(
+        ensure_inputs_dir(rec.paths),
+        data,
+        filename=filename,
+    )
     return str(dest.resolve())

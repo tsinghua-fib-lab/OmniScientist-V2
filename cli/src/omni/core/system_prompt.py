@@ -18,7 +18,7 @@ from omni.core.timefmt import local_time_context
 # Builtin tools that operate on the local working directory. Their presence in
 # the turn catalog switches on the ``[Local environment]`` guidance block.
 _LOCAL_TOOL_NAMES = frozenset(
-    {"bash", "read_file", "write_file", "edit_file", "list_dir", "grep", "glob"}
+    {"bash", "read_file", "write_file", "edit_file", "apply_patch", "list_dir", "grep", "glob"}
 )
 
 _TOOL_GUIDANCE_HEAD = """[Tool use]
@@ -149,9 +149,19 @@ _RESEARCH_WORKFLOW = """[Research workflow]
 - For literature questions, use search_corpus for grounded retrieval and cite returned passages
   inline as [S#]. If the corpus is empty, index sources with openalex-search or use an enabled
   connector (arXiv, OpenAlex, Crossref, or Unpaywall) and record the source.
+- Edit an existing file with apply_patch (unified diff). Use write_file for a new file or an
+  explicit full rewrite.
 - Use light provenance by default: identify sources and uncertainty in the answer.
 - Use full structured provenance (record_claim, cite_source, add_evidence, record_hypothesis) only
   when requested or required by the active plan.
+- Precedent questions ("has anyone done X"): retrieve first, then start the answer with yes, no,
+  or unclear and name the sources. Do not write a survey unless asked.
+- Written surveys: retrieve, call cite_source at least once, outline the sections, then write_file.
+  Do not stop at a title list.
+- Independent review findings are informational cards on the task. They do not mean the task failed.
+  Address them on a later turn if the user asks; do not rewrite the host contract.
+- Natural-language figure edits ("change the retriever to hybrid") use artifact.revise on the
+  focused figure. Do not invent a second figure.
 - Report numerical results only from actual computation. Use log_run to record commands, seeds,
   metrics, and artifacts, then cite the run id.
 - Calibrate confidence. Mark unsupported statements as unverified or uncertain."""

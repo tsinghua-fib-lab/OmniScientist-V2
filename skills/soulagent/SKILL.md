@@ -24,6 +24,7 @@ metadata:
       class: SoulAgentEngine
       method: execute
     execution:
+      effects: [user_files.write]
       max_iterations: 10
       max_tool_calls: 20
       max_seconds: 600

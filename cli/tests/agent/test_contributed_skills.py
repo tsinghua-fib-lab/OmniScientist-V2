@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import io
 import sys
 import threading
 from pathlib import Path
@@ -11,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
+from PIL import Image, ImageDraw
 
 from omni.agent.capabilities import WORKFLOW_CAPABILITIES, deliverables_from_capabilities
 from omni.agent.intent_plan import IntentType
@@ -190,31 +192,29 @@ def test_research_pptx_rejects_removed_export_action() -> None:
     assert result["error_info"]["code"] == "unsupported_action"
 
 
-def test_livefigure_rejects_dynamic_import_escape() -> None:
+def test_livefigure_validation_accepts_dynamic_python_imports() -> None:
     skill_dir = SKILLS_ROOT / "livefigure"
     sys.path.insert(0, str(skill_dir))
     try:
-        from livefigure.pipeline import LiveFigureError, _validate_code
+        from livefigure.pipeline import _validate_code
 
         code = 'getattr(__builtins__, "__import__")("os").system("id")\n'
-        with pytest.raises(LiveFigureError, match="forbidden"):
-            _validate_code(code)
+        _validate_code(code)
     finally:
         sys.path.remove(str(skill_dir))
 
 
-def test_livefigure_rejects_indirect_module_graph_escape() -> None:
+def test_livefigure_validation_accepts_indirect_module_access() -> None:
     skill_dir = SKILLS_ROOT / "livefigure"
     sys.path.insert(0, str(skill_dir))
     try:
-        from livefigure.pipeline import LiveFigureError, _validate_code
+        from livefigure.pipeline import _validate_code
 
         code = (
             "import json\n"
             "json.codecs.sys.modules['os'].remove('outside')\n"
         )
-        with pytest.raises(LiveFigureError, match="forbidden"):
-            _validate_code(code)
+        _validate_code(code)
     finally:
         sys.path.remove(str(skill_dir))
 
@@ -227,14 +227,13 @@ def test_livefigure_rejects_indirect_module_graph_escape() -> None:
         "import pptx.opc.serialized as x\nx.os.remove('outside')\n",
     ],
 )
-def test_livefigure_rejects_internal_pptx_import_escape(code: str) -> None:
+def test_livefigure_validation_accepts_internal_pptx_imports(code: str) -> None:
     skill_dir = SKILLS_ROOT / "livefigure"
     sys.path.insert(0, str(skill_dir))
     try:
-        from livefigure.pipeline import LiveFigureError, _validate_code
+        from livefigure.pipeline import _validate_code
 
-        with pytest.raises(LiveFigureError, match="forbidden"):
-            _validate_code(code)
+        _validate_code(code)
     finally:
         sys.path.remove(str(skill_dir))
 
@@ -289,37 +288,29 @@ async def test_livefigure_execute_code_applies_sandbox_prefix(
         sys.path.remove(str(skill_dir))
 
 
-def test_livefigure_rejects_writes_outside_output_file() -> None:
+def test_livefigure_validation_does_not_restrict_save_paths() -> None:
     skill_dir = SKILLS_ROOT / "livefigure"
     sys.path.insert(0, str(skill_dir))
     try:
-        from livefigure.pipeline import LiveFigureError, _validate_code
+        from livefigure.pipeline import _validate_code
 
         code = (
             "from pptx import Presentation\n"
             "presentation = Presentation()\n"
             'presentation.save("/tmp/outside.pptx")\n'
         )
-        with pytest.raises(LiveFigureError, match="livefigure.pptx"):
-            _validate_code(code)
+        _validate_code(code)
     finally:
         sys.path.remove(str(skill_dir))
 
 
-def test_livefigure_rejects_network_imports() -> None:
-    """Network access is denied statically: ``socket`` is off the import allowlist.
-
-    The old runtime relied on an audit hook to trap ``socket()`` at call time;
-    the code denylist now rejects the import outright, so hostile code never
-    reaches execution regardless of OS-sandbox availability.
-    """
+def test_livefigure_validation_accepts_network_imports() -> None:
     skill_dir = SKILLS_ROOT / "livefigure"
     sys.path.insert(0, str(skill_dir))
     try:
-        from livefigure.pipeline import LiveFigureError, _validate_code
+        from livefigure.pipeline import _validate_code
 
-        with pytest.raises(LiveFigureError, match="forbidden"):
-            _validate_code("import socket\nsocket.socket()\n")
+        _validate_code("import socket\nsocket.socket()\n")
     finally:
         sys.path.remove(str(skill_dir))
 
@@ -351,24 +342,15 @@ def test_livefigure_allows_bundled_tools_helper() -> None:
         sys.path.remove(str(skill_dir))
 
 
-def test_livefigure_tools_helper_import_is_scoped() -> None:
-    """The ``tools`` allowance is narrow: star/helpers only, no reflection.
-
-    ``import tools`` (root) and importing the module's re-exported internals
-    (``os``, ``requests`` …) must stay forbidden so the trusted helper cannot
-    become an escape hatch for network/filesystem access.
-    """
+def test_livefigure_validation_accepts_direct_tools_imports() -> None:
     skill_dir = SKILLS_ROOT / "livefigure"
     sys.path.insert(0, str(skill_dir))
     try:
-        from livefigure.pipeline import LiveFigureError, _validate_code
+        from livefigure.pipeline import _validate_code
 
-        with pytest.raises(LiveFigureError, match="forbidden"):
-            _validate_code("import tools\ntools.add_block()\n")
-        with pytest.raises(LiveFigureError, match="forbidden"):
-            _validate_code("from tools import os\nos.system('id')\n")
-        with pytest.raises(LiveFigureError, match="forbidden"):
-            _validate_code("from tools import requests\nrequests.get('http://x')\n")
+        _validate_code("import tools\ntools.add_block()\n")
+        _validate_code("from tools import os\nos.system('id')\n")
+        _validate_code("from tools import requests\nrequests.get('http://x')\n")
     finally:
         sys.path.remove(str(skill_dir))
 
@@ -405,16 +387,7 @@ def test_livefigure_bundled_tools_exports_only_drawing_helpers() -> None:
     assert {"os", "requests", "Image", "json", "base64", "io"}.isdisjoint(exported)
 
 
-def test_livefigure_vendored_security_contract_is_intact() -> None:
-    """Canary against a vendor re-sync silently regressing the code executor.
-
-    LiveFigure's generated-code path is only safe because of two invariants:
-    (1) a static import/call denylist gates the source before execution, and
-    (2) an OS ``sandbox_prefix`` seam lets the host add kernel write-confinement.
-    The abandoned in-process audit hook (``sandbox_runner.py``) must stay gone.
-    A future ``scy`` merge that drops any of these should fail loudly here
-    rather than ship an ungated executor.
-    """
+def test_livefigure_keeps_host_sandbox_without_static_code_restrictions() -> None:
     import dataclasses
 
     skill_dir = SKILLS_ROOT / "livefigure"
@@ -422,19 +395,201 @@ def test_livefigure_vendored_security_contract_is_intact() -> None:
     sys.path.insert(0, str(skill_dir))
     try:
         from livefigure.pipeline import (
-            _ALLOWED_IMPORT_ROOTS,
-            _BLOCKED_CALLS,
-            LiveFigureError,
             PipelineConfig,
             _validate_code,
         )
 
-        assert "pptx" in _ALLOWED_IMPORT_ROOTS and "os" not in _ALLOWED_IMPORT_ROOTS
-        assert {"eval", "exec", "getattr", "open"} <= _BLOCKED_CALLS
-        with pytest.raises(LiveFigureError, match="forbidden"):
-            _validate_code("import os\nos.system('id')\n")
-
+        _validate_code("import os\nimport sys\n")
         assert "sandbox_prefix" in {f.name for f in dataclasses.fields(PipelineConfig)}
+    finally:
+        sys.path.remove(str(skill_dir))
+
+
+@pytest.mark.asyncio
+async def test_livefigure_preserves_generated_jpeg_reference_format(tmp_path: Path) -> None:
+    """A provider may return JPEG bytes even when the requested format is unspecified."""
+    skill_dir = SKILLS_ROOT / "livefigure"
+    sys.path.insert(0, str(skill_dir))
+    try:
+        from livefigure.pipeline import PipelineConfig, generate_pptx
+
+        image = Image.new("RGB", (64, 32), "white")
+        encoded = io.BytesIO()
+        image.save(encoded, format="JPEG")
+        progress_events: list[tuple[str, float, dict[str, object]]] = []
+
+        async def progress(stage: str, pct: float, **data: object) -> None:
+            progress_events.append((stage, pct, data))
+
+        class FakeVlm:
+            async def generate_image(self, _prompt: str, **_kwargs: object) -> bytes:
+                return encoded.getvalue()
+
+            async def generate_text(
+                self, _prompt: str, *, reference_image_uri: str | None = None
+            ) -> str:
+                assert reference_image_uri is not None
+                assert reference_image_uri.startswith("data:image/jpeg;base64,")
+                return (
+                    "from pptx import Presentation\n"
+                    "from pptx.util import Inches\n"
+                    "presentation = Presentation()\n"
+                    "slide = presentation.slides.add_slide(presentation.slide_layouts[6])\n"
+                    'slide.shapes.add_textbox(Inches(1), Inches(1), Inches(2), Inches(1)).text = "RAG"\n'
+                    'presentation.save("livefigure.pptx")\n'
+                )
+
+        result = await generate_pptx(
+            "draw a RAG architecture figure",
+            title="RAG",
+            output_dir=tmp_path,
+            config=PipelineConfig(vlm=FakeVlm(), enable_icon_pipeline=False),
+            progress=progress,
+        )
+
+        assert result.reference_path == tmp_path / "reference.jpg"
+        assert result.reference_path.read_bytes() == encoded.getvalue()
+        assert result.pptx_path.is_file()
+        assert [event[2].get("stage_id") for event in progress_events] == [
+            "livefigure.start",
+            "livefigure.reference",
+            "livefigure.generate",
+            "livefigure.build",
+            "livefigure.done",
+        ]
+        assert "5–10 分钟" in progress_events[0][0]
+        assert "1–2 分钟" in progress_events[1][0]
+        assert "1–3 分钟" in progress_events[2][0]
+        assert progress_events[-1][2]["milestone"] == (
+            "LiveFigure 已生成，可编辑 PPTX 准备好了"
+        )
+    finally:
+        sys.path.remove(str(skill_dir))
+
+
+@pytest.mark.asyncio
+async def test_livefigure_reports_automatic_repair_progress(tmp_path: Path) -> None:
+    skill_dir = SKILLS_ROOT / "livefigure"
+    sys.path.insert(0, str(skill_dir))
+    try:
+        from livefigure.pipeline import PipelineConfig, generate_pptx
+
+        progress_events: list[tuple[str, dict[str, object]]] = []
+
+        async def progress(stage: str, _pct: float, **data: object) -> None:
+            progress_events.append((stage, data))
+
+        class FakeVlm:
+            async def generate_text(
+                self, prompt: str, *, reference_image_uri: str | None = None
+            ) -> str:
+                del reference_image_uri
+                if "expert Python developer and debugger" not in prompt:
+                    return "raise RuntimeError('first build fails')\n"
+                return (
+                    "from pptx import Presentation\n"
+                    "from pptx.util import Inches\n"
+                    "presentation = Presentation()\n"
+                    "slide = presentation.slides.add_slide(presentation.slide_layouts[6])\n"
+                    'slide.shapes.add_textbox(Inches(1), Inches(1), Inches(2), Inches(1)).text = "fixed"\n'
+                    'presentation.save("livefigure.pptx")\n'
+                )
+
+        result = await generate_pptx(
+            "draw a repairable figure",
+            title="Repair",
+            output_dir=tmp_path,
+            config=PipelineConfig(
+                vlm=FakeVlm(),
+                generate_reference=False,
+                enable_icon_pipeline=False,
+            ),
+            progress=progress,
+        )
+
+        assert result.attempts == 2
+        repair = next(
+            event for event in progress_events if event[1].get("stage_id") == "livefigure.repair"
+        )
+        assert "正在自动修复" in repair[0]
+        assert "1–2 分钟" in repair[0]
+        build_events = [
+            event for event in progress_events if event[1].get("stage_id") == "livefigure.build"
+        ]
+        assert [event[1]["stats"]["attempt"] for event in build_events] == [1, 2]
+    finally:
+        sys.path.remove(str(skill_dir))
+
+
+@pytest.mark.asyncio
+async def test_livefigure_prepares_and_injects_legacy_icon_assets(tmp_path: Path) -> None:
+    """The restored old flow supplies processed icon paths to PPTX code generation."""
+    skill_dir = SKILLS_ROOT / "livefigure"
+    sys.path.insert(0, str(skill_dir))
+    try:
+        from livefigure.pipeline import PipelineConfig, generate_pptx
+
+        def image_bytes(*, sprite: bool) -> bytes:
+            image = Image.new("RGBA", (1600, 800), "white")
+            if sprite:
+                canvas = ImageDraw.Draw(image)
+                canvas.ellipse((220, 180, 580, 540), fill="#3B82F6", outline="#111827", width=12)
+                canvas.rectangle((1020, 200, 1380, 520), fill="#F97316", outline="#111827", width=12)
+            output = io.BytesIO()
+            image.convert("RGB").save(output, format="JPEG" if sprite else "PNG")
+            return output.getvalue()
+
+        class FakeVlm:
+            def __init__(self) -> None:
+                self.prompts: list[str] = []
+
+            async def generate_image(self, prompt: str, **_kwargs: object) -> bytes:
+                return image_bytes(sprite="Sprite Sheet" in prompt)
+
+            async def generate_text(
+                self, prompt: str, *, reference_image_uri: str | None = None
+            ) -> str:
+                assert reference_image_uri is not None
+                self.prompts.append(prompt)
+                if "Meaningful Visual Icons" in prompt:
+                    return '["Database Cylinder", "User Avatar"]'
+                if "Extract visual descriptions" in prompt:
+                    return (
+                        '{"Database Cylinder": "blue cylinder with dark outline", '
+                        '"User Avatar": "orange user silhouette with dark outline"}'
+                    )
+                asset_line = next(
+                    line for line in prompt.splitlines() if '"Database Cylinder"' in line
+                )
+                icon_path = asset_line.split('"')[3]
+                return (
+                    "from pptx import Presentation\n"
+                    "from pptx.util import Inches\n\n"
+                    "presentation = Presentation()\n"
+                    "slide = presentation.slides.add_slide(presentation.slide_layouts[6])\n"
+                    f"slide.shapes.add_picture(r'{icon_path}', Inches(1), Inches(1), width=Inches(1))\n"
+                    'slide.shapes.add_textbox(Inches(2.2), Inches(1), Inches(3), Inches(0.5)).text = "Database"\n'
+                    'presentation.save("livefigure.pptx")\n'
+                )
+
+        fake_vlm = FakeVlm()
+        result = await generate_pptx(
+            "draw a scientific workflow with a database and a user",
+            title="Workflow",
+            output_dir=tmp_path,
+            config=PipelineConfig(vlm=fake_vlm),
+        )
+
+        assert set(result.icon_assets.asset_map) == {"Database Cylinder", "User Avatar"}
+        assert result.icon_assets.sheet_path is not None
+        assert result.icon_assets.sheet_path.suffix == ".jpg"
+        assert result.icon_assets.sheet_path.is_file()
+        assert all(path.is_file() for path in result.icon_assets.asset_map.values())
+        source = result.code_path.read_text(encoding="utf-8")
+        assert "slide.shapes.add_picture" in source
+        generation_prompt = fake_vlm.prompts[-1]
+        assert "AVAILABLE PRE-GENERATED ICONS (USE THESE!)" in generation_prompt
+        assert all(str(path) in generation_prompt for path in result.icon_assets.asset_map.values())
     finally:
         sys.path.remove(str(skill_dir))
 

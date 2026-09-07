@@ -846,22 +846,30 @@ class WeixinIlinkClient:
             logger.warning("WeChat inbound %s download/decrypt failed: %s", kind, exc)
             return None
 
+        from omni.core.image_files import mime_for_bytes
+        from omni.core.user_inputs import safe_input_filename, write_user_input
+
         file_name = str(sub.get("file_name") or "")
         if file_name:
-            ext = Path(file_name).suffix.lower() or default_ext
+            ext = Path(safe_input_filename(file_name)).suffix.lower() or default_ext
+            out_name = safe_input_filename(file_name, fallback=f"{default_name}{ext}")
+            if not Path(out_name).suffix:
+                out_name = f"{out_name}{ext}"
         else:
             ext = default_ext
-        mime = _EXT_TO_MIME.get(ext, "application/octet-stream")
-        out_name = file_name or f"{default_name}-{uuid.uuid4().hex[:8]}{ext}"
+            out_name = f"{default_name}-{uuid.uuid4().hex[:8]}{ext}"
+        mime = mime_for_bytes(data) or _EXT_TO_MIME.get(ext, "application/octet-stream")
         dest = Path(dest_dir)
-        dest.mkdir(parents=True, exist_ok=True)
-        out_path = dest / out_name
         try:
-            out_path.write_bytes(data)
+            out_path = write_user_input(dest, data, filename=out_name)
         except OSError as exc:
             logger.warning("WeChat inbound %s save failed: %s", kind, exc)
             return None
-        return InboundMedia(path=str(out_path), kind=kind, mime=mime, file_name=out_name)
+        if not out_path.resolve().is_relative_to(dest.resolve()):
+            out_path.unlink(missing_ok=True)
+            logger.warning("WeChat inbound %s escaped inputs/: %s", kind, out_path)
+            return None
+        return InboundMedia(path=str(out_path), kind=kind, mime=mime, file_name=out_path.name)
 
     async def notify_start(self) -> None:
         try:

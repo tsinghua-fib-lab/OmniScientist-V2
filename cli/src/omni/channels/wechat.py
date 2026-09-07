@@ -21,8 +21,19 @@ from typing import Any
 
 from omni.channels.base import Channel
 from omni.channels.config import load_channel_config
+from omni.channels.inbound import (
+    InboundFragment,
+    MediaRef,
+    SealedJob,
+    download_fail_note,
+)
 from omni.channels.outbound import WeixinIlinkOutbound, send_presentation
-from omni.channels.security import claim_inbound_message
+from omni.channels.security import (
+    UNPAIRED_MEDIA_PLACEHOLDER,
+    claim_inbound_message,
+    inbound_event_seen,
+    inbound_media_allowed,
+)
 from omni.channels.weixin_ilink import (
     SESSION_TIMEOUT_ERRCODE,
     TYPING_STATUS_CANCEL,
@@ -130,15 +141,88 @@ class WeChatChannel(Channel):
                     failures = 0
                 continue
             failures = 0
+            msgs = [msg for msg in (resp.get("msgs") or []) if isinstance(msg, dict)]
+            await self._admit_ilink_batch(msgs)
+            # Cursor moves only after the batch is in the mailbox. The mailbox
+            # is at-most-once: a crash after this save and before the worker
+            # finishes can drop the turn. That is known debt, not exactly-once.
             new_buf = resp.get("get_updates_buf")
             if new_buf:
                 buf = str(new_buf)
                 self._save_sync_buf(buf)
-            for msg in resp.get("msgs") or []:
-                if isinstance(msg, dict):
-                    await self.handle_ilink_message(msg)
 
     async def handle_ilink_message(self, msg: dict[str, Any]) -> TurnPresentation | None:
+        """Admit one event and wait for its peer worker (tests / single-shot)."""
+        fragment = await self.admit_ilink_message(msg)
+        if fragment is None:
+            return None
+        await self.inbound.flush_peer(fragment.peer_key())
+        return await self.inbound.wait_peer(fragment.peer_key())
+
+    async def admit_ilink_message(self, msg: dict[str, Any]) -> InboundFragment | None:
+        """Parse, download, and enqueue. Does not wait for the agent."""
+        preview = self._ilink_preview(msg)
+        if preview is None:
+            return None
+        if inbound_event_seen(
+            self.settings,
+            self.name,
+            preview.conversation,
+            message_id=preview.message_id,
+        ):
+            return None
+        if preview.has_media() and any(not ref.path for ref in preview.media):
+            fragment = await self.inbound.materialize_and_admit(
+                preview, lambda: self._materialize_ilink(msg, preview)
+            )
+            if fragment is None:
+                return None
+            claim_inbound_message(
+                self.settings,
+                self.name,
+                fragment.conversation,
+                message_id=fragment.message_id,
+            )
+            return fragment
+        return await self._admit_parsed_ilink(preview)
+
+    async def _admit_ilink_batch(self, msgs: list[dict[str, Any]]) -> None:
+        """Admit one getupdates batch, then arm timers.
+
+        Each event goes through ``materialize_and_admit`` so a slow image in a
+        later poll can hold a pending caption. Same-poll items stay one unit
+        because ``batch()`` does not start quiet timers until the end.
+        """
+        if not msgs:
+            return
+        with self.inbound.batch():
+            for msg in msgs:
+                try:
+                    await self.admit_ilink_message(msg)
+                except Exception:
+                    logger.exception("WeChat inbound parse failed")
+
+    async def _admit_parsed_ilink(self, fragment: InboundFragment | None) -> InboundFragment | None:
+        if fragment is None:
+            return None
+        if inbound_event_seen(
+            self.settings,
+            self.name,
+            fragment.conversation,
+            message_id=fragment.message_id,
+        ):
+            return None
+        if not await self.inbound.admit(fragment):
+            return None
+        claim_inbound_message(
+            self.settings,
+            self.name,
+            fragment.conversation,
+            message_id=fragment.message_id,
+        )
+        return fragment
+
+    def _ilink_preview(self, msg: dict[str, Any]) -> InboundFragment | None:
         if is_bot_message(msg):
             return None
         external_key = str(msg.get("from_user_id") or "")
@@ -148,46 +232,107 @@ class WeChatChannel(Channel):
         media = media_items(msg)
         if not text and not media:
             return None
-        context_token = str(msg.get("context_token") or "")
-        if context_token:
-            self._ctx_tokens[external_key] = context_token
         message_id = str(msg.get("message_id") or msg.get("seq") or "")
-        # Claim before downloading media so a duplicate delivery never re-fetches.
-        if not claim_inbound_message(
-            self.settings, self.name, external_key, message_id=message_id
-        ):
-            return None
-        combined = await self._compose_inbound_text(text, media)
-        if not combined:
-            return None
-        return await self._run_with_typing(
-            external_key, context_token, self.handle_inbound_and_send(combined, external_key)
+        seq = msg.get("seq")
+        sequence = int(seq) if isinstance(seq, int) else None
+        token = str(msg.get("context_token") or "")
+        context = {"context_token": token} if token else {}
+        if media and not inbound_media_allowed(self.settings, self.name, external_key):
+            return InboundFragment(
+                channel=self.name,
+                conversation=external_key,
+                sender=external_key,
+                message_id=message_id,
+                sequence=sequence,
+                text=text or UNPAIRED_MEDIA_PLACEHOLDER,
+                media=(),
+                reply_context=context,
+            )
+        placeholders = tuple(MediaRef(path="", kind="image") for _ in media)
+        return InboundFragment(
+            channel=self.name,
+            conversation=external_key,
+            sender=external_key,
+            message_id=message_id,
+            sequence=sequence,
+            text=text,
+            media=placeholders,
+            reply_context=context,
         )
 
-    async def _compose_inbound_text(self, text: str, media: list[dict[str, Any]]) -> str:
-        """Augment inbound text with downloaded media references.
+    async def _materialize_ilink(
+        self, msg: dict[str, Any], preview: InboundFragment
+    ) -> InboundFragment | None:
+        try:
+            refs, notes = await self._download_ilink_media(media_items(msg))
+        except Exception as exc:  # noqa: BLE001 - keep caption if CDN/decrypt blows up
+            logger.warning("WeChat inbound media download failed: %s", exc)
+            refs, notes = [], [download_fail_note()]
+        body = "\n".join(filter(None, [preview.text, *notes]))
+        if not body and not refs:
+            return None
+        return InboundFragment(
+            channel=preview.channel,
+            conversation=preview.conversation,
+            sender=preview.sender,
+            message_id=preview.message_id,
+            sequence=preview.sequence,
+            text=body,
+            media=tuple(refs),
+            reply_context=dict(preview.reply_context),
+        )
 
-        Each image/file/video is decrypted to the local media dir; the agent sees
-        a short note with the saved path. Falls back to a generic note when the
-        download/decrypt fails (e.g. ``cryptography`` not installed).
-        """
+    async def _download_ilink_media(
+        self, media: list[dict[str, Any]]
+    ) -> tuple[list[MediaRef], list[str]]:
         if not media:
-            return text
+            return [], []
+        from omni.core.user_inputs import ensure_inputs_dir
+
         notes: list[str] = []
-        dest = str(self.settings.paths.cache_dir / "wechat_media")
+        refs: list[MediaRef] = []
+        dest = str(ensure_inputs_dir(self.settings.paths))
+        downloader = getattr(self._client, "download_media_from_item", None)
         for item in media:
             saved = None
-            downloader = getattr(self._client, "download_media_from_item", None)
-            if callable(downloader):
-                saved = await downloader(item, dest)
+            try:
+                if callable(downloader):
+                    saved = await downloader(item, dest)
+            except Exception as exc:  # noqa: BLE001 - one failed file must not drop the caption
+                logger.warning("WeChat inbound media item failed: %s", exc)
+                saved = None
             if saved is not None:
-                label = {"image": "image", "file": "file", "video": "video"}.get(saved.kind, "media")
-                name = f" ({saved.file_name})" if saved.file_name else ""
-                notes.append(f"[The user sent a {label}{name}; saved locally at {saved.path}.]")
+                refs.append(
+                    MediaRef(
+                        path=saved.path,
+                        kind=str(getattr(saved, "kind", "") or ""),
+                        mime=str(getattr(saved, "mime", "") or ""),
+                        file_name=str(getattr(saved, "file_name", "") or ""),
+                    )
+                )
             else:
-                notes.append("[The user sent media that could not be downloaded or decrypted.]")
-        body = "\n".join(filter(None, [text, *notes]))
-        return body.strip()
+                notes.append(download_fail_note())
+        return refs, notes
+
+    def apply_sealed_reply(self, job: SealedJob) -> None:
+        token = str(job.reply_context.get("context_token") or "")
+        if not token:
+            return
+        self._ctx_tokens[job.conversation] = token
+        if self._ilink_outbound is not None:
+            self._ilink_outbound.seal(job.conversation, token)
+
+    def clear_sealed_reply(self, job: SealedJob) -> None:
+        if self._ilink_outbound is not None:
+            self._ilink_outbound.unseal(job.conversation)
+
+    async def dispatch_inbound_job(self, job: SealedJob) -> TurnPresentation:
+        token = str(job.reply_context.get("context_token") or "")
+        return await self._run_with_typing(
+            job.conversation,
+            token,
+            super().dispatch_inbound_job(job),
+        )
 
     # ── typing indicator ──────────────────────────────────────────────────────
     async def _run_with_typing(self, external_key: str, context_token: str, coro):  # noqa: ANN001
@@ -275,6 +420,7 @@ class WeChatChannel(Channel):
         await self.send_task_notification(note)
 
     async def stop(self) -> None:
+        await super().stop()
         notify_stop = getattr(self._client, "notify_stop", None)
         if callable(notify_stop):
             try:

@@ -1,8 +1,9 @@
 """Contracts for LiveFigure's portable OpenAI-compatible VLM adapter.
 
 These tests deliberately exercise only an offline ``httpx.MockTransport`` and
-temporary local files.  The VLM credential is owner-controlled input and must
-never cross the generated-code sandbox boundary or appear in a skill result.
+temporary local files. Owner credentials never appear in skill results; an
+explicit one-run image-helper environment is the only supported child-process
+credential path.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -27,6 +29,7 @@ if str(SKILL_DIR) not in sys.path:
 
 _VLM_ENV_KEYS = (
     "OMNI_VLM_MODEL",
+    "OMNI_VLM_IMAGE_MODEL",
     "OMNI_VLM_ENDPOINT",
     "OMNI_VLM_API_KEY",
 )
@@ -92,6 +95,19 @@ class _FakeVlmHost:
         self.calls.append((prompt, reference_image_uri))
         return "generated-code"
 
+    async def generate_image(
+        self,
+        _prompt: str,
+        *,
+        size: str = "1536x1024",
+        aspect_ratio: str = "16:9",
+        image_size: str = "",
+    ) -> bytes:
+        assert size == "1536x1024"
+        assert aspect_ratio == "16:9"
+        assert image_size == ""
+        return b"reference-image"
+
 
 def _context(
     tmp_path: Path,
@@ -127,6 +143,7 @@ async def _fake_pipeline_result(requirement: str, **kwargs: Any) -> SimpleNamesp
         code_path=code_path,
         input_path=input_path,
         reference_path=None,
+        icon_assets=SimpleNamespace(asset_map={}, sheet_path=None),
         attempts=1,
     )
 
@@ -155,6 +172,55 @@ def test_vlm_config_reads_generic_omni_environment(
     assert config.model == "vision-test-model"
     assert config.endpoint == "https://vlm.invalid/v1/chat/completions"
     assert config.api_key == "generic-vlm-secret"
+    assert config.image_model == ""
+
+
+def test_vlm_maps_a_site_origin_to_the_openai_images_v1_sibling() -> None:
+    module = _vlm_module()
+    assert (
+        module._images_generation_endpoint("https://zgc.apihy.com")
+        == "https://zgc.apihy.com/v1/images/generations"
+    )
+    assert (
+        module._images_generation_endpoint("https://vlm.invalid/v1/chat/completions")
+        == "https://vlm.invalid/v1/images/generations"
+    )
+    assert module._images_generation_endpoint("https://zgc.apihy.com") != (
+        "https://zgc.apihy.com/images/generations"
+    )
+
+
+def test_icon_helper_uses_legacy_gemini_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LIVEFIGURE_GEMINI_IMAGE_URL", "https://images.invalid/v1beta/models/test:generateContent")
+    monkeypatch.setenv("LIVEFIGURE_GEMINI_API_KEY", "icon-secret")
+    tools = importlib.reload(importlib.import_module("livefigure.tools"))
+    requests: list[dict[str, Any]] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {
+                "candidates": [
+                    {"content": {"parts": [{"inlineData": {"data": base64.b64encode(b"icon-png").decode()}}]}}
+                ]
+            }
+
+    def fake_post(*_args: Any, **kwargs: Any) -> Response:
+        requests.append(kwargs)
+        return Response()
+
+    monkeypatch.setattr(tools.requests, "post", fake_post)
+
+    icon = tools._call_gemini_strict("a microscope icon")
+
+    assert icon is not None
+    assert icon.read() == b"icon-png"
+    payload = json.loads(requests[0]["data"])
+    assert payload["generationConfig"]["responseModalities"] == ["IMAGE"]
+    assert payload["generationConfig"]["imageConfig"]["aspectRatio"] == "1:1"
+    assert "isolated" in payload["contents"][0]["parts"][0]["text"]
 
 
 def test_vlm_recognizes_windows_drive_paths_as_local_references() -> None:
@@ -203,6 +269,97 @@ async def test_vlm_client_uses_fixed_openai_multimodal_contract_without_referenc
         item == {"type": "text", "text": "Create an editable RAG diagram"} for item in content
     )
     assert not any(item.get("type") == "image_url" for item in content)
+
+
+@pytest.mark.asyncio
+async def test_vlm_client_generates_images_through_openai_images_v1() -> None:
+    module = _vlm_module()
+    image = b"portable-reference"
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        payload = json.loads(request.content)
+        assert payload["model"] == "vision-test-model"
+        assert payload["response_format"] == "b64_json"
+        return httpx.Response(
+            200, json={"data": [{"b64_json": base64.b64encode(image).decode("ascii")}]}
+        )
+
+    client = module.VlmClient(
+        module.VlmConfig(
+            model="vision-test-model",
+            endpoint="https://zgc.apihy.com",
+            api_key="vlm-secret-value",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    assert await client.generate_image("compose") == image
+    assert [str(item.url) for item in requests] == [
+        "https://zgc.apihy.com/v1/images/generations"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_vlm_client_falls_back_when_chat_model_is_not_an_images_model() -> None:
+    module = _vlm_module()
+    image = b"fallback-reference"
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if "generateContent" in str(request.url):
+            return httpx.Response(404, json={"error": {"message": "not mounted"}})
+        payload = json.loads(request.content)
+        assert payload["model"] == "gpt-image-2"
+        return httpx.Response(
+            200, json={"data": [{"b64_json": base64.b64encode(image).decode("ascii")}]}
+        )
+
+    client = module.VlmClient(
+        module.VlmConfig(
+            model="gemini-3-pro-image-preview",
+            endpoint="https://zgc.apihy.com",
+            api_key="vlm-secret-value",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    assert await client.generate_image("compose") == image
+    assert [urlsplit(str(item.url)).path for item in requests] == [
+        "/v1beta/models/gemini-3-pro-image-preview:generateContent",
+        "/v1/images/generations",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_vlm_client_falls_back_when_chat_model_returns_http_503() -> None:
+    module = _vlm_module()
+    image = b"fallback-503-reference"
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if "generateContent" in str(request.url):
+            return httpx.Response(503, text="no available channel")
+        payload = json.loads(request.content)
+        assert payload["model"] == "gpt-image-2"
+        return httpx.Response(
+            200, json={"data": [{"b64_json": base64.b64encode(image).decode("ascii")}]}
+        )
+
+    client = module.VlmClient(
+        module.VlmConfig(
+            model="gemini-3-pro-image-preview",
+            endpoint="https://zgc.apihy.com",
+            api_key="vlm-secret-value",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    assert await client.generate_image("compose") == image
+    assert [urlsplit(str(item.url)).path for item in requests] == [
+        "/v1beta/models/gemini-3-pro-image-preview:generateContent",
+        "/v1/images/generations",
+    ]
 
 
 @pytest.mark.asyncio
@@ -394,7 +551,7 @@ async def test_engine_reports_internal_invariant_when_vlm_port_is_missing(
 
 
 @pytest.mark.asyncio
-async def test_engine_never_requests_generated_reference(
+async def test_engine_uses_the_pipeline_default_for_legacy_reference_generation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -465,7 +622,10 @@ def test_livefigure_manifest_has_portable_runtime_contract_without_gemini() -> N
     requirements = helixforge["runtime_requirements"]
 
     assert "generate_reference" not in properties
-    assert "gemini" not in text.lower()
+    # SKILL.md is model-facing config text and may name a Gemini image model.
+    # The portable helixforge contract itself must stay provider-neutral.
+    contract = yaml.safe_dump(helixforge, allow_unicode=True).lower()
+    assert "gemini" not in contract
     assert requirements["python_modules"] == ["pptx"]
     assert "livefigure" in requirements["dependency_setup_command"]
 
@@ -578,3 +738,45 @@ async def test_generated_code_process_does_not_inherit_vlm_api_key(
 
     assert "OMNI_VLM_API_KEY" not in captured_env
     assert secret not in captured_env.values()
+
+
+@pytest.mark.asyncio
+async def test_generated_code_process_receives_only_explicit_icon_helper_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from livefigure.pipeline import _execute_code
+
+    code_path = tmp_path / "livefigure.py"
+    pptx_path = tmp_path / "livefigure.pptx"
+    code_path.write_text("# execution is replaced by the offline process double\n", encoding="utf-8")
+    captured_env: dict[str, str] = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b""
+
+    async def fake_create_subprocess_exec(*_args: Any, **kwargs: Any) -> FakeProcess:
+        captured_env.update(kwargs["env"])
+        pptx_path.write_bytes(b"offline-test-pptx")
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    await _execute_code(
+        code_path,
+        tmp_path,
+        pptx_path,
+        image_environment={
+            "LIVEFIGURE_IMAGE_ENDPOINT": "https://vision.invalid/v1/images/generations",
+            "LIVEFIGURE_IMAGE_MODEL": "icon-model",
+            "LIVEFIGURE_IMAGE_API_KEY": "icon-secret",
+            "UNRELATED": "not-forwarded",
+        },
+    )
+
+    assert captured_env["LIVEFIGURE_IMAGE_MODEL"] == "icon-model"
+    assert captured_env["LIVEFIGURE_IMAGE_API_KEY"] == "icon-secret"
+    assert "UNRELATED" not in captured_env

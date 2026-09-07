@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import os
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 from omni.skills_runtime.builtin_tools import shell
 from omni.skills_runtime.exec_io import (
     compute_dir_key,
+    compute_env,
     durable_output_dir,
     harvestable_output,
 )
@@ -36,6 +40,22 @@ def test_harvestable_output_skips_venv_license_and_unknown_suffixes(
     assert harvestable_output(csv, root) is True
     assert harvestable_output(svg, root) is True
     assert harvestable_output(pptx, root) is True
+
+
+def test_compute_env_puts_omni_python_ahead_of_homebrew(tmp_path) -> None:
+    ctx = SimpleNamespace(
+        paths=SimpleNamespace(
+            artifacts_dir=tmp_path / "artifacts",
+            project_dir=tmp_path / "project",
+        ),
+        task_id="t" * 32,
+        session_id="",
+        skill_root=None,
+    )
+    env = compute_env(ctx, base={"PATH": "/opt/homebrew/bin:/usr/bin"})
+    bindir = str(Path(sys.executable).resolve().parent)
+    assert env["PATH"].split(os.pathsep)[0] == bindir
+    assert "/opt/homebrew/bin" in env["PATH"]
 
 
 def test_compute_dir_key_replaces_windows_forbidden_characters() -> None:

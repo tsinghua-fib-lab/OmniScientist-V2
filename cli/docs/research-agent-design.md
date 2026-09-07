@@ -102,6 +102,7 @@ Stable runtime concepts are capabilities and deliverables, not built-in skill
 names. The active built-in Skill providers expose:
 
 - `literature.search`
+- `literature.precedent`
 - `paper.fetch.arxiv`
 - `artifact.figure`
 - `figure.editable.pptx`
@@ -234,8 +235,33 @@ providers must enter through the same permission and run-record boundary.
 
 `omni verify` audits the recorded claim/evidence graph on demand: unsupported
 claims, contradicted claims, overconfident-yet-thin claims, and memory findings
-that were never anchored to a source, claim, or run. It does not re-run the
-model and it does not grade a deliverable — it reports what the record supports.
+that were never anchored to a source, claim, or run. Citation support is a
+**warning** tier (`weak` / lexical unsupported) printed under
+`Citation support (warning only — does not change task status)`. It does not
+re-run the model and it does not grade a deliverable — it reports what the
+record supports.
+
+### Informational research cards
+
+`/task show` can print four extra sections after a survey, figure, or deck.
+They are events, not a second settlement:
+
+- **Review findings** (`research.review`) — Codex-style cards from a
+  structural pass plus an optional fail-open LLM judge. A `revise` / `reject`
+  on the event must not paint Partial success. Only a real dangling `[S#]`
+  sets an audit `blocks_success` flag.
+- **Survey stages** (`research.stages`) — STORM-like retrieve → evidence →
+  outline → write marks. A missing outline is visible and is not Partial
+  success.
+- **Plan gate** (`research.plan_gate`) — names expensive producers (deck,
+  LiveFigure, poster, paper-review). Auto mode still ran; this is not
+  `awaiting_approval`.
+- **Figure package** (`artifact.provenance`) — `name ← script` or an honest
+  “no source script on record”. The host does not invent a `.dot`.
+
+Owl-style “has anyone done X?” binds `literature.precedent`. The first
+non-empty line of the answer is yes / no / unclear, then sources. That is
+not a related-work manuscript.
 
 ### Memory
 

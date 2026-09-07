@@ -413,7 +413,10 @@ class PlanningLLM(CapturingLLM):
         from omni.runtime.final_synthesis import SYNTHESIS_SYSTEM_PROMPT
 
         if system == SYNTHESIS_SYSTEM_PROMPT:
-            return "# Draft\n\n" + "Grounded synthesis of the upstream workflow results. " * 6
+            return (
+                "# Draft\n\n"
+                + "Grounded synthesis of the upstream workflow results [S1]. " * 6
+            )
         if self._planner_gated and "semantic intent planner" not in system.lower():
             return await super().chat(system, user, **kwargs)
         self.plan_calls += 1

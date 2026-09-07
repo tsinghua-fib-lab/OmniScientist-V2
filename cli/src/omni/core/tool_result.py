@@ -17,6 +17,7 @@ _SIDE_EFFECT_TOOLS = frozenset(
     {
         "write_file",
         "edit_file",
+        "apply_patch",
         "bash",
         "run_compute",
         "search_literature",

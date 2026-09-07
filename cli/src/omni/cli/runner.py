@@ -368,7 +368,7 @@ def _artifact_format(target: str) -> str:
     return suffix.upper() if suffix else ""
 
 
-_PRODUCE_TRACE_TOOLS = frozenset({"write_file", "edit_file", "run_skill", "run_workflow"})
+_PRODUCE_TRACE_TOOLS = frozenset({"write_file", "edit_file", "apply_patch", "run_skill", "run_workflow"})
 
 
 def _format_turn_artifact(artifact: Any) -> dict[str, str]:
@@ -598,6 +598,34 @@ def _command_note(text: str) -> str:
     return f" ({note})" if note else ""
 
 
+def _print_citation_support(report) -> None:  # noqa: ANN001
+    """Warning-only lexical support. Never changes task status."""
+    support = getattr(report, "citation_support", None)
+    if support is None:
+        info("Citation support (warning only — does not change task status): not scored.")
+        return
+    info(
+        "Citation support (warning only — does not change task status): "
+        f"{getattr(support, 'supported', 0)}/{getattr(support, 'checked', 0)} "
+        f"supported · weak {len(getattr(support, 'weak', []) or [])} · "
+        f"unsupported {len(getattr(support, 'unsupported', []) or [])}"
+    )
+    if getattr(support, "checked", 0):
+        for claim_id, text, score in [
+            *getattr(support, "weak", []),
+            *getattr(support, "unsupported", []),
+        ][:8]:
+            console.print(
+                f"   [yellow]·[/yellow] {text[:80]} "
+                f"[dim](claim {claim_id[:8]}, score {score:.2f})[/dim]"
+            )
+    elif getattr(report, "total_claims", 0):
+        console.print(
+            "   [dim]No cited passages were compared yet. Bind evidence text "
+            "with `omni evidence add` after retrieval.[/dim]"
+        )
+
+
 def render_verify(report) -> None:  # noqa: ANN001
     """Render a :class:`omni.research.verify.VerifyReport` for ``--verify``."""
     console.rule("[bold magenta]Verification (--verify)", style="magenta")
@@ -610,6 +638,7 @@ def render_verify(report) -> None:  # noqa: ANN001
                 f"ROM inventory: {source_count} sources · 0 claims · {run_count} runs. "
                 "Inspect runs with `omni run list`."
             )
+        _print_citation_support(report)
         return
     if report.total_claims:
         info(
@@ -641,6 +670,7 @@ def render_verify(report) -> None:  # noqa: ANN001
             warn(f"Memory claims without sources: {len(report.memory_unsupported)}")
             for m in report.memory_unsupported[:8]:
                 console.print(f"   [yellow]·[/yellow] {m.summary[:90]} [dim](mem {m.id[:8]})[/dim]")
+    _print_citation_support(report)
     if report.issues == 0:
         from omni.cli.render import success
 

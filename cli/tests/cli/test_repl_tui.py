@@ -239,6 +239,62 @@ async def test_tui_ctrl_d_requests_shutdown_even_while_busy() -> None:
         await tui.read_submission_async()
 
 
+@pytest.mark.asyncio
+async def test_tui_ctrl_v_attaches_clipboard_image(monkeypatch, tmp_path) -> None:
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    from omni.cli.clipboard_paste import EncodedImageFormat, PastedImageInfo
+    from omni.core.file_mentions import format_mention
+
+    png = tmp_path / "clip.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+    notices: list[str] = []
+    monkeypatch.setattr(
+        "omni.cli.composer_images.paste_image_to_temp_png",
+        lambda _dest_dir: (png, PastedImageInfo(12, 8, EncodedImageFormat.PNG)),
+    )
+    with create_pipe_input() as pipe_input:
+        tui = ReplTui(commands=(), input=pipe_input, output=DummyOutput())
+        monkeypatch.setattr(
+            tui, "_report_copy_notice", lambda message, ok: notices.append(message)
+        )
+        await tui.start()
+        try:
+            binding = tui._app.key_bindings.get_bindings_for_keys((Keys.ControlV,))[-1]
+            binding.handler(SimpleNamespace(current_buffer=tui._input_buffer))
+            assert tui._input_buffer.text.startswith("[Image #1] ")
+            assert tui._composer_images.items[0][1] == png
+            assert tui.accept_text("look at [Image #1]")
+            submitted = tui._submissions.get_nowait()
+            assert format_mention(png) in submitted.text
+            assert submitted.text.startswith("look at [Image #1]")
+            assert tui._composer_images.items == []
+            assert notices == []
+        finally:
+            await tui.close()
+
+
+def test_tui_ctrl_v_reports_codex_error_when_clipboard_is_empty(monkeypatch) -> None:
+    from omni.cli.clipboard_paste import PasteImageError
+
+    tui = ReplTui(commands=())
+    notices: list[tuple[str, bool]] = []
+
+    def _empty(_dest_dir):
+        raise PasteImageError.no_image("empty clipboard")
+
+    monkeypatch.setattr("omni.cli.composer_images.paste_image_to_temp_png", _empty)
+    monkeypatch.setattr(
+        tui, "_report_copy_notice", lambda message, ok: notices.append((message, ok))
+    )
+    binding = tui._app.key_bindings.get_bindings_for_keys((Keys.ControlV,))[-1]
+    binding.handler(SimpleNamespace(current_buffer=tui._input_buffer))
+
+    assert tui._input_buffer.text == ""
+    assert notices == [("Failed to paste image: no image on clipboard: empty clipboard", False)]
+
+
 def test_tui_ctrl_l_redraws_without_deleting_transcript(monkeypatch) -> None:
     tui = ReplTui(commands=())
     tui.append_output("kept research history\n")
@@ -597,7 +653,10 @@ async def test_busy_footer_shows_animated_spinner_and_shimmer():
     assert tui._spinner_task is None
     idle = tui.footer_fragments()
     assert all(style != "class:dock.spinner" for style, _text in idle)
-    assert "".join(text for _style, text in idle).strip() == tui.footer_text()
+    columns = tui.terminal_size()[1]
+    assert "".join(text for _style, text in idle).strip() == tui.footer_text(
+        width=max(0, columns - 1)
+    )
 
 
 def test_dock_styles_resolve_to_visible_attributes():
@@ -646,7 +705,7 @@ async def test_idle_footer_colours_the_keys_not_the_whole_strip():
     fragments = tui.footer_fragments()
     keyed = {text for style, text in fragments if style == "class:dock.key"}
 
-    assert {"Enter", "Ctrl+J", "Ctrl+D"} <= keyed
+    assert {"Enter", "Ctrl+J", "Ctrl+V", "Ctrl+D"} <= keyed
     # Labels and the mode indicator stay out of the accent colour.
     assert "auto mode" in [text for style, text in fragments if style == "class:dock.mode"]
     assert all(" send" != text or style != "class:dock.key" for style, text in fragments)

@@ -15,7 +15,8 @@ from omni.cli import theme
         "Enter send",
         " · Enter send · Ctrl+C cancel ",
         "working · 12s · Enter steer · Tab queue · Esc stop · Ctrl+D exit",
-        "auto mode · Enter send · Ctrl+J newline · select to copy · Ctrl+D exit",
+        "auto mode · Enter send · Ctrl+J newline · Ctrl+V paste image · select to copy · Ctrl+D exit",
+        "Ctrl+Alt+V paste image",
     ],
 )
 def test_hint_fragments_reproduce_their_input_exactly(text: str) -> None:
@@ -52,6 +53,8 @@ def test_hint_fragments_colour_keys_and_not_labels() -> None:
         ("Shift+Enter newline", "Shift+Enter"),
         ("Esc stop", "Esc"),
         ("Tab queue", "Tab"),
+        ("Ctrl+V paste image", "Ctrl+V"),
+        ("Ctrl+Alt+V paste image", "Ctrl+Alt+V"),
         ("auto mode", ""),
         ("select to copy", ""),
         ("last 1.2s", ""),

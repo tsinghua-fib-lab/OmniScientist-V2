@@ -20,6 +20,7 @@ metadata:
     kind: prompt_only
     delivery_mode: async_task
     execution:
+      effects: [user_files.write]
       max_iterations: 24
       max_tool_calls: 48
       # Bounded by the turn / workflow envelope this runs inside; asking for more

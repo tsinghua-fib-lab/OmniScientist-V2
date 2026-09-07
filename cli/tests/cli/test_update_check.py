@@ -252,6 +252,38 @@ def test_startup_update_action_uses_the_parameterless_public_command(monkeypatch
     ]
 
 
+def test_startup_update_menu_matches_codex_copy():
+    from omni.cli import main as cli_main
+
+    plain = cli_main._update_menu_text("9.9.9").plain
+    assert "Update available!" in plain
+    assert f"{__version__} -> 9.9.9" in plain
+    assert update_check.RELEASE_NOTES_URL in plain
+    assert "Update now (runs `omni update`)" in plain
+    assert "Skip until next version" in plain
+    assert "Press Enter to continue" in plain
+
+
+def test_startup_update_success_asks_the_user_to_restart(monkeypatch):
+    from types import SimpleNamespace
+
+    from omni.cli import main as cli_main
+
+    printed: list[str] = []
+    monkeypatch.setattr(
+        cli_main.subprocess,
+        "run",
+        lambda argv, **_kwargs: SimpleNamespace(returncode=0),
+    )
+    monkeypatch.setattr(
+        cli_main.console,
+        "print",
+        lambda *args, **_kwargs: printed.append(str(args[0]) if args else ""),
+    )
+    assert cli_main._run_update_now() is True
+    assert any("Please restart Omni" in line and "🎉" in line for line in printed)
+
+
 def test_update_child_reuses_the_exact_installed_launcher(monkeypatch, tmp_path):
     from omni.cli import main as cli_main
 

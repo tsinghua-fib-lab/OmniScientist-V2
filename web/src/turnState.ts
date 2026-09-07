@@ -42,7 +42,7 @@ export function bucketKey(workspaceKey: string, sessionId: string): string {
 }
 
 export function emptyDraft(mode: Mode = "auto"): DraftState {
-  return { composer: "", mode, attachments: [] };
+  return { composer: "", mode, attachments: [], submitting: false };
 }
 
 export function emptyTurn(input: {

@@ -140,10 +140,22 @@ export type TurnState = {
   error: string;
 };
 
+export type AttachmentStatus = "pending" | "ready" | "failed";
+
+export type ComposerAttachment = {
+  id: string;
+  name: string;
+  uri: string;
+  status: AttachmentStatus;
+  ownerWorkspace: string;
+  ownerSession: string;
+};
+
 export type DraftState = {
   composer: string;
   mode: Mode;
-  attachments: { name: string; uri: string }[];
+  attachments: ComposerAttachment[];
+  submitting: boolean;
 };
 
 export type TaskSummary = {

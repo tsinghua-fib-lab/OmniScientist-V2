@@ -364,12 +364,12 @@ async def _store_method(  # noqa: C901 — thin method switch
         )
     if method == "turn.start":
         text = str(params.get("text") or params.get("message") or "").strip()
-        if not text:
-            raise RpcError("invalid_params", "turn.start requires text")
         mode = params.get("interaction_mode") or params.get("mode")
         file_uris = params.get("file_uris") or []
         if not isinstance(file_uris, list):
             raise RpcError("invalid_params", "file_uris must be a list")
+        if not text and not file_uris:
+            raise RpcError("invalid_params", "turn.start requires text")
         session_id = str(params.get("session_id") or "") or None
         return ok(
             **await turns.start_turn(

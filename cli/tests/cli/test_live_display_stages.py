@@ -57,6 +57,43 @@ def test_a_native_milestone_renders_its_stats_inline() -> None:
     assert "Literature search complete · found 126 · kept 20" in out
 
 
+def test_livefigure_native_progress_shows_wait_guidance_and_repair() -> None:
+    display = TurnDisplay(verbosity="normal", status_line=False)
+    out = _capture(
+        display,
+        [
+            ("task_progress", {
+                "subtask_id": "s",
+                "skill": "livefigure",
+                "stage": "正在生成整体参考图 · 视觉模型在认真构图，约 1–2 分钟",
+                "stage_id": "livefigure.reference",
+                "pct": 0.15,
+            }),
+            ("task_progress", {
+                "subtask_id": "s",
+                "skill": "livefigure",
+                "stage": "首轮构建遇到一点小问题 · 正在自动修复，约 1–2 分钟",
+                "stage_id": "livefigure.repair",
+                "pct": 0.70,
+            }),
+            ("task_progress", {
+                "subtask_id": "s",
+                "skill": "livefigure",
+                "stage": "LiveFigure 已生成",
+                "stage_id": "livefigure.done",
+                "milestone": "LiveFigure 已生成，可编辑 PPTX 准备好了",
+                "stats": {"attempts": 2},
+                "pct": 1.0,
+            }),
+        ],
+    )
+
+    assert "视觉模型在认真构图" in out
+    assert "正在自动修复" in out
+    assert "1–2 分钟" in out
+    assert "✓ LiveFigure 已生成，可编辑 PPTX 准备好了 · attempts 2" in out
+
+
 def test_the_status_region_shows_the_item_under_work() -> None:
     display = TurnDisplay(verbosity="normal", status_line=False)
     display.begin("planning")

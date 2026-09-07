@@ -203,6 +203,8 @@ export const api = {
       channel: string;
       kind: string;
       markdown?: string;
+      text?: string;
+      file_uris?: string[];
     }>("turn.start", params, workspace);
   },
   steer(workspace: string, sessionId: string, instruction: string, taskId = "") {

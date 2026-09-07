@@ -116,6 +116,7 @@ class OpenedWorkspace:
             "writable": self.writable,
             "open_path": self.open_path,
             "artifacts_dir": str(self.paths.artifacts_dir),
+            "inputs_dir": str(self.paths.inputs_dir),
             "db": str(self.paths.project_db),
         }
 

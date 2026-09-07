@@ -55,8 +55,9 @@ def test_final_synthesis_carries_provenance_objects():
         },
     )
 
-    assert result["status"] == "ok"
+    assert result["status"] == "partial"
     assert result["evidence_level"] == "grounded"
+    assert result["citation_anchors"]["uncovered"] is True
     assert result["provenance"]["source_ids"] == ["source123456"]
     assert result["provenance"]["claim_ids"] == ["claim123456"]
     assert result["provenance"]["evidence_ids"] == ["evidence123456"]

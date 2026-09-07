@@ -43,6 +43,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _PYPI_URL = f"https://pypi.org/pypi/{DIST_NORMALIZED}/json"
+RELEASE_NOTES_URL = (
+    "https://github.com/tsinghua-fib-lab/OmniScientist-V2/releases/latest"
+)
 _VERSION_RE = re.compile(r"""__version__\s*=\s*["']([^"']+)["']""")
 _CACHE_NAME = "update-check.json"
 _DISABLE_ENV = "OMNI_UPDATE_CHECK"

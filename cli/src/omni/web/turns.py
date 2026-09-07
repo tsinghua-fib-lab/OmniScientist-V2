@@ -73,6 +73,7 @@ async def start_turn(
                 "channel": channel,
                 "kind": "command",
                 "markdown": presentation.to_markdown(),
+                "text": text,
             }
 
     text, file_uris = bind_web_attachments(
@@ -167,6 +168,8 @@ async def start_turn(
         "client_run_id": handle.client_run_id,
         "channel": channel,
         "kind": "turn",
+        "text": text,
+        "file_uris": file_uris or [],
     }
 
 

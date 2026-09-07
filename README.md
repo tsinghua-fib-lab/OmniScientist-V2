@@ -19,7 +19,7 @@ for software and paper citation metadata.
 For the full design and how it compares to Claude Code/Codex and other open-source research
 agents, see [`cli/docs/research-agent-design.md`](cli/docs/research-agent-design.md).
 
-The current repository metadata reports package version `2.0.0rc7` (Git tag `v2.0.0rc7`). This is
+The current repository metadata reports package version `2.0.0rc8` (Git tag `v2.0.0rc8`). This is
 a temporary prerelease identity, not the stable release line: the first stable V2 release will be
 `2.0.0`, followed by compatible `2.0.x` patch releases. Once the stable release is published,
 normal installations and updates should not pin a version; the package manager resolves the latest
@@ -745,6 +745,7 @@ The explicit active inventory is `arxiv-fetch`, `openalex-search`,
 - `review.paper` → `paper-review` → a venue-aware complete review pipeline that starts MinerU immediately, begins full-manuscript structured understanding when text is ready, overlaps that work and Semantic Scholar retrieval with visual analysis, and validates the full conference form
 - `review.response` → `review-response` → reviewer/editor revision correspondence
 - `research.ideation` → `research-ideation` → pressure-tested research directions
+- `literature.precedent` → native → first-line yes / no / unclear, then sources
 
 Paper sections are delivered by the native evidence-aware `synthesis.final`
 capability rather than a separate writing skill.

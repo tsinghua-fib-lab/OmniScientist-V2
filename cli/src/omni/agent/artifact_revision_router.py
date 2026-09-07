@@ -380,7 +380,7 @@ class ArtifactRevisionRouter:
     ) -> ArtifactRevisionResult | None:
         dirty: list[Path] = []
         for record in result.tool_trace:
-            if record.name not in {"write_file", "edit_file"}:
+            if record.name not in {"write_file", "edit_file", "apply_patch"}:
                 continue
             path = Path(str(record.arguments.get("path") or "")).expanduser()
             if path.suffix.lower() == ".dot":

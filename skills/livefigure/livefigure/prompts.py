@@ -7,10 +7,17 @@ legacy services that do not exist in the portable LiveFigure runtime.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from .legacy_prompts import PPTX_BEST_PRACTICES, TOOLS_SPECIFICATION
 
 
-def build_generation_prompt(requirement: str, title: str) -> str:
+def build_generation_prompt(
+    requirement: str,
+    title: str,
+    *,
+    asset_map: dict[str, Path] | None = None,
+) -> str:
     """Build the legacy-equivalent code-generation prompt for one editable slide."""
     return f"""
 You are an expert Python developer specialized in `python-pptx`.
@@ -33,6 +40,8 @@ Technical Specifications:
 3. **Available helper**: A local ``tools.py`` file is present beside your generated script. Use
    ``from tools import *`` and its documented helpers whenever they fit the diagram.
 
+{_asset_prompt_section(asset_map or {})}
+
 {PPTX_BEST_PRACTICES}
 
 {TOOLS_SPECIFICATION}
@@ -42,6 +51,26 @@ Technical Specifications:
 2. Do NOT use Markdown code blocks.
 3. Do NOT write an introduction, explanation, or summary.
 4. Start directly with imports and end with the save command.
+""".strip()
+
+
+def _asset_prompt_section(asset_map: dict[str, Path]) -> str:
+    """Return the legacy pre-generated-icon contract without altering paths."""
+    if not asset_map:
+        return ""
+    asset_info = "\n".join(f'- "{name}": "{path}"' for name, path in asset_map.items())
+    example_path = next(iter(asset_map.values()))
+    return f"""
+*** AVAILABLE PRE-GENERATED ICONS (USE THESE!) ***
+The following complex icons have been pre-generated and saved locally.
+You MUST use `slide.shapes.add_picture(path, ...)` to insert them instead of drawing them manually.
+
+Registry:
+{asset_info}
+
+Example Usage:
+# Inserting a pre-generated icon
+slide.shapes.add_picture("{example_path}", Inches(1), Inches(1), width=Inches(1))
 """.strip()
 
 

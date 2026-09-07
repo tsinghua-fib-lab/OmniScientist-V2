@@ -14,8 +14,8 @@ _SKILL_DIR = Path(__file__).resolve().parent
 if str(_SKILL_DIR) not in sys.path:
     sys.path.insert(0, str(_SKILL_DIR))
 
-from livefigure.pipeline import LiveFigureError, PipelineConfig, generate_pptx  # noqa: E402
-from livefigure.vlm import VlmError  # noqa: E402
+from livefigure.pipeline import LiveFigureError, PipelineConfig, generate_pptx
+from livefigure.vlm import VlmError
 
 
 class LiveFigureEngine:
@@ -91,6 +91,27 @@ class LiveFigureEngine:
                     "figure",
                 )
             )
+        if result.icon_assets.sheet_path is not None:
+            sheet_format, sheet_mime = _image_metadata(result.icon_assets.sheet_path)
+            artifact_specs.append(
+                (
+                    result.icon_assets.sheet_path,
+                    f"{title} Icon Sprite Sheet",
+                    sheet_format,
+                    sheet_mime,
+                    "figure",
+                )
+            )
+        for icon_name, icon_path in result.icon_assets.asset_map.items():
+            artifact_specs.append(
+                (
+                    icon_path,
+                    f"{title} Icon: {icon_name}",
+                    "png",
+                    "image/png",
+                    "figure",
+                )
+            )
 
         artifacts = []
         for path, artifact_title, fmt, mime, kind in artifact_specs:
@@ -115,6 +136,7 @@ class LiveFigureEngine:
                 "attempts": result.attempts,
                 "renderer": "python-pptx",
                 "visual_critique": False,
+                "prepared_icon_count": len(result.icon_assets.asset_map),
             },
         }
 
@@ -144,18 +166,46 @@ class _OmniVlmAdapter:
                 retryable=bool(getattr(exc, "retryable", True)),
             ) from None
 
+    async def generate_image(
+        self,
+        prompt: str,
+        *,
+        size: str = "1536x1024",
+        aspect_ratio: str = "16:9",
+        image_size: str = "",
+    ) -> bytes:
+        """Expose the host's reference-image generation port to the pipeline."""
+        try:
+            return await self._host.generate_image(
+                prompt,
+                size=size,
+                aspect_ratio=aspect_ratio,
+                image_size=image_size,
+            )
+        except Exception as exc:  # noqa: BLE001 - host errors cross a narrow port
+            raise VlmError(
+                str(getattr(exc, "safe_message", "VLM image request failed")),
+                code=str(getattr(exc, "code", "vlm_request_failed")),
+                category=str(getattr(exc, "category", "network")),
+                retryable=bool(getattr(exc, "retryable", True)),
+            ) from None
+
 
 def _pipeline_config(ctx: Any) -> PipelineConfig | None:
     """Build one run from Omni's injected VLM host service only."""
     host = getattr(ctx, "vlm", None)
-    if not callable(getattr(host, "generate_text", None)):
+    if not callable(getattr(host, "generate_text", None)) or not callable(
+        getattr(host, "generate_image", None)
+    ):
         return None
     reference_roots, reference_files = _reference_policy(ctx)
+    image_environment = getattr(host, "image_generation_environment", dict)()
     return PipelineConfig(
         vlm=_OmniVlmAdapter(host),
         reference_roots=reference_roots,
         reference_files=reference_files,
         sandbox_prefix=_sandbox_prefix(ctx),
+        image_environment={str(key): str(value) for key, value in image_environment.items()},
     )
 
 
@@ -246,7 +296,7 @@ def _host_run_root(ctx: Any) -> Path | None:
     for attr in ("scratch_dir", "output_dir"):
         try:
             raw = getattr(ctx, attr, None)
-        except Exception:  # noqa: BLE001 - missing host I/O must fall through
+        except Exception:  # noqa: BLE001, S112 - missing host I/O must fall through
             continue
         path = _try_dir(raw)
         if path is None or _under_artifacts_dir(path, ctx):

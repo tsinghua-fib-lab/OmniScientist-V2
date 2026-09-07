@@ -593,15 +593,15 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
         payload["artifacts"] = artifacts
         return payload
 
-    def _refuse_in_flight(run: TaskORM) -> dict[str, Any] | None:
+    async def _maybe_mark_in_flight(run: TaskORM, payload: dict[str, Any]) -> dict[str, Any]:
         current = str(getattr(ctx, "task_id", "") or "")
         if current and run.id == current:
-            return {
-                "error": "cannot inspect the in-flight task",
-                "hint": "get_task is for a prior task_id; this turn is still running",
-                "task_id": run.id,
-            }
-        return None
+            payload["in_flight"] = True
+            payload["hint"] = (
+                "This is the current in-flight task. Status is not settlement; "
+                "use remaining artifacts and submitted children from this snapshot."
+            )
+        return payload
 
     async def get_task(args: dict) -> Any:
         raw = str(args.get("task_id") or args.get("id") or args.get("ref") or "").strip()
@@ -611,10 +611,10 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
         async with ctx.db.session() as session:
             exact = await session.get(TaskORM, task_id)
             if exact is not None and exact.project == ctx.project:
-                refused = _refuse_in_flight(exact)
-                if refused is not None:
-                    return refused
-                return await _detail(exact, ctx.db, store, workspace=ctx.project)
+                return await _maybe_mark_in_flight(
+                    exact,
+                    await _detail(exact, ctx.db, store, workspace=ctx.project),
+                )
             matches = list(
                 (
                     await session.execute(
@@ -628,10 +628,10 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
                 ).scalars().all()
             )
         if len(matches) == 1:
-            refused = _refuse_in_flight(matches[0])
-            if refused is not None:
-                return refused
-            return await _detail(matches[0], ctx.db, store, workspace=ctx.project)
+            return await _maybe_mark_in_flight(
+                matches[0],
+                await _detail(matches[0], ctx.db, store, workspace=ctx.project),
+            )
         if len(matches) > 1:
             return {"error": "task id prefix is ambiguous", "task_id": task_id}
         # Cross-workspace fallback: an id absent from this workspace is routed to
@@ -641,14 +641,14 @@ def build_recall_tools(ctx: ExecContext) -> list[Tool]:
         foreign = await _resolve_foreign_task(ctx, task_id)
         if foreign is not None:
             run, owner = foreign
-            refused = _refuse_in_flight(run)
-            if refused is not None:
-                return refused
             foreign_db = get_database(owner.paths.project_db)
             await foreign_db.init()
             foreign_store = ArtifactStore(owner.paths, foreign_db)
-            return await _detail(
-                run, foreign_db, foreign_store, workspace=owner.paths.project_name
+            return await _maybe_mark_in_flight(
+                run,
+                await _detail(
+                    run, foreign_db, foreign_store, workspace=owner.paths.project_name
+                ),
             )
         return {
             "error": f"task {task_id} not found in this workspace or any registered workspace"

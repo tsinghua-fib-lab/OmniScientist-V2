@@ -64,9 +64,15 @@ from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import Frame
 
 from omni.cli import theme
+from omni.cli.clipboard_paste import paste_image_hint
+from omni.cli.composer_images import ComposerImages
 from omni.cli.repl_command_policy import redact_repl_command
 from omni.cli.repl_commands import CommandCatalog
-from omni.cli.repl_composer import cancel_completion, install_multiline_bindings
+from omni.cli.repl_composer import (
+    cancel_completion,
+    install_multiline_bindings,
+    install_paste_image_bindings,
+)
 from omni.cli.repl_input import ReplCommandHistory, build_repl_completer
 from omni.cli.repl_layout import (
     COMPOSER_PLACEHOLDER,
@@ -345,6 +351,7 @@ class ReplTui:
         diagnostic_backup_count: int | None = None,
         diagnostic_files: int | None = None,
         output_base: Path | None = None,
+        inputs_dir: Path | None = None,
         shift_enter_ready: bool = False,
     ) -> None:
         self.enabled = True
@@ -366,6 +373,7 @@ class ReplTui:
         self._modal: _ApprovalModal | None = None
         self._submissions: asyncio.Queue[ReplSubmission | Exception] = asyncio.Queue()
         self._turn_inputs: dict[str, str] = {}
+        self._composer_images = ComposerImages(dest_dir=inputs_dir)
         self._app_task: asyncio.Task[object] | None = None
         self._sink_context = None
         self._diagnostic_log_path = diagnostic_log_path
@@ -567,6 +575,11 @@ class ReplTui:
             self.accept_text(text, disposition=disposition)
 
         install_multiline_bindings(bindings, submit=submit, active=editable)
+        install_paste_image_bindings(
+            bindings,
+            handler=self._on_paste_image,
+            active=focused & ~modal_active,
+        )
 
         # ``~has_completions``: Tab is the conventional accept/cycle key, so while
         # a menu is open it must reach prompt_toolkit's ``menu-complete`` instead
@@ -603,6 +616,7 @@ class ReplTui:
                 return
             if event.current_buffer is self._input_buffer and event.current_buffer.text:
                 event.current_buffer.reset()
+                self._composer_images.clear()
                 self.set_status("draft cleared")
                 return
             self._submissions.put_nowait(ReplInterrupt())
@@ -625,6 +639,15 @@ class ReplTui:
             self.toggle_transcript_folding()
 
         return bindings
+
+    def _on_paste_image(self, event) -> None:  # noqa: ANN001
+        """Ctrl+V / Ctrl+Alt+V: attach a system-clipboard image (Codex)."""
+        buffer = event.current_buffer
+        self._composer_images.paste_into(
+            buffer,
+            on_error=lambda message: self._report_copy_notice(message, ok=False),
+            on_status=self.set_status,
+        )
 
     def accept_text(self, text: str, *, disposition: str | None = None) -> bool:
         """Submit meaningful text with an explicit active-turn destination.
@@ -651,8 +674,11 @@ class ReplTui:
             )
         if disposition not in {"submit", "steer", "queue", "control"}:
             raise ValueError(f"unsupported REPL submission disposition: {disposition}")
-        turn_id = uuid.uuid4().hex
         display_text = redact_repl_command(value)
+        if disposition in {"submit", "steer", "queue"}:
+            value = self._composer_images.expand(value)
+            self._composer_images.clear()
+        turn_id = uuid.uuid4().hex
         self._turn_inputs[turn_id] = display_text
         state = {
             "submit": "planning",
@@ -1512,6 +1538,7 @@ class ReplTui:
                 f"{self._mode} mode",
                 "Enter send",
                 newline_hint(self._shift_enter_ready),
+                paste_image_hint(),
                 "select to copy",
                 "Ctrl+D exit",
             ]
@@ -1529,6 +1556,7 @@ class ReplTui:
             return ("Tab queue", "Enter steer", *extras, "Ctrl+D exit")
         return (
             "select to copy",
+            paste_image_hint(),
             newline_hint(self._shift_enter_ready),
             *extras,
             "Ctrl+D exit",

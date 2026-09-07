@@ -1,6 +1,6 @@
 ---
 name: livefigure
-description: One editable single-slide PPTX figure. Use when the user names livefigure or asks for an editable PowerPoint figure. Requires owner VLM (`omni config vlm`). Ordinary architecture / system diagrams are scientific-figure (SVG/PNG). Do not use for complete multi-slide decks (research-pptx).
+description: One editable single-slide PPTX figure. Use when the user names livefigure or asks for an editable PowerPoint figure. Requires an owner-configured MLLM with image input and image output (`omni config vlm`). Ordinary architecture / system diagrams are scientific-figure (SVG/PNG). Do not use for complete multi-slide decks (research-pptx).
 license: Apache-2.0
 metadata:
   helixforge:
@@ -15,6 +15,7 @@ metadata:
     delivery_mode: async_task
     kind: python_engine
     execution:
+      effects: [user_files.write]
       max_seconds: 600
     runtime_requirements:
       python_modules: [pptx]
@@ -83,7 +84,7 @@ metadata:
         - single editable PPTX
         - editable PPTX scientific figure
         - one-slide editable scientific figure
-      when_to_use: "Use for a user-named livefigure or an editable single-slide PPTX. Requires configured VLM (`omni config vlm`). Ordinary figures and architecture diagrams are scientific-figure."
+      when_to_use: "Use for a user-named livefigure or an editable single-slide PPTX. Requires an MLLM with image input and image output (`omni config vlm`). Ordinary figures and architecture diagrams are scientific-figure."
       when_not_to_use: "Ordinary figure, architecture, flowchart, or schematic (scientific-figure). Multi-slide decks (research-pptx). If this skill is named and VLM is missing, stop — do not switch to Graphviz."
     notification:
       display_label: "LiveFigure PPTX"
@@ -99,8 +100,10 @@ metadata:
 Editable single-slide PPTX figure. Use this skill when the user names
 `livefigure` or asks for an editable PowerPoint / one-slide PPTX figure.
 
-The deliverable is one editable single-slide PPTX. A configured owner VLM is
-required (`omni config vlm`). A successful PPTX can pay `artifact.figure`, but
+The deliverable is one editable single-slide PPTX. An owner-configured
+multimodal large language model (MLLM) that supports both image input and image
+output is required (`omni config vlm`). A successful PPTX can pay
+`artifact.figure`, but
 this is not the default drawing skill — ordinary architecture and system
 diagrams are `scientific-figure` (SVG/PNG). Pass natural-language input only.
 
@@ -110,19 +113,25 @@ user named this skill and VLM is missing, stop and configure VLM; do not
 silently switch to Graphviz.
 
 Generate one editable PPTX figure from a research requirement. The default
-one-pass workflow asks an OpenAI-compatible multimodal model for constrained
-`python-pptx` source. It never generates a reference image implicitly, renders
-the PPTX to PNG, or performs a visual critic/actor revision loop.
+workflow creates a whole-figure composition reference, asks the VLM to identify
+and describe complex visual objects, generates an icon sprite sheet, then
+splits it into transparent tightly-cropped PNG assets. Their paths are injected
+into the constrained `python-pptx` source prompt, which explicitly requires
+`slide.shapes.add_picture(...)` instead of redrawing those icons manually.
+It retains syntax/execution repair, but does not render the PPTX to PNG or run
+the old post-generation visual critic/actor revision loop.
 
-A configured owner-controlled VLM is required. If it is missing, Omni stops
-before the engine runs and asks the owner to run `omni config vlm` — do not
-silently switch providers. Configure it once:
+An owner-controlled MLLM with image input and image output is required. If it
+is missing, Omni stops before the engine runs and asks the owner to run
+`omni config vlm` — do not silently switch providers. Configure it once:
 
 ```toml
 # ~/.omni/config.toml
 [vlm]
 enabled = true
 model = "your-vision-model"
+# optional: pin Images (gpt-image-2) or a Gemini image model
+# image_model = "gpt-image-2"
 endpoint = "https://provider.example/v1/chat/completions"
 protocol = "openai_compatible_chat"
 
@@ -179,8 +188,15 @@ python3 scripts/run.py --json '{"input":"Draw an editable RAG architecture PPTX"
 ```
 
 Set `OMNI_VLM_MODEL`, `OMNI_VLM_ENDPOINT`, and `OMNI_VLM_API_KEY` in the
-runner's environment. `OMNI_VLM_ENDPOINT` must be the complete
-chat-completions endpoint. The runner has a network-free `--self-test` mode.
+runner's environment. `OMNI_VLM_ENDPOINT` may be a site origin or the
+complete chat-completions URL. Image *output* routes by model: a Gemini
+image chat or pin (`gemini` + `image` in the name) uses
+`/v1beta/models/{model}:generateContent`; GPT Image / DALL·E use the OpenAI
+Images sibling `/v1/images/generations`. A Gemini miss falls through to
+Images. Optional `OMNI_VLM_IMAGE_MODEL` pins `gpt-image-2` (Images only) or
+another Gemini image model. A chat-only `omni config vlm --test` / image-input
+probe does not prove this generation path. The runner has a network-free
+`--self-test` mode.
 Prefer invoking LiveFigure through Omni MCP from Claude Code, Codex, or
 OpenClaw so the external agent does not need direct access to the VLM key.
 Configure Omni with `omni config vlm`, then register the stdio server with

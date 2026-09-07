@@ -287,6 +287,7 @@ def test_survey_pair_is_literature_plus_writing_only() -> None:
 
     assert is_survey_pair(["literature.search", "synthesis.final"])
     assert is_survey_pair(["literature.search"], ["draft.section"])
+    assert is_survey_pair(["literature.survey"])
     assert not is_survey_pair(["literature.search"])
     assert not is_survey_pair(["literature.search", "research.ideation"])
     assert not is_survey_pair(["literature.search", "synthesis.final", "artifact.figure"])
@@ -310,6 +311,7 @@ def test_survey_with_search_and_write_still_owes_a_draft() -> None:
     assert plan.tool_policy.allows("write_file")
     assert plan_owes_scientific_outputs(plan)
     assert "draft.section" in plan.verification_plan.required_outputs
+    assert "cite_source" in plan.verification_plan.required_events
 
 
 def test_offline_survey_does_not_invent_a_draft_debt() -> None:
@@ -344,6 +346,63 @@ def test_literature_only_stays_on_the_native_search_tool() -> None:
     assert plan.tool_policy.allows("search_literature")
     assert not plan.tool_policy.allows("run_skill")
     assert plan_owes_scientific_outputs(plan) is False
+
+
+def test_latent_space_survey_prompt_keeps_write_file() -> None:
+    """A-SUR-01 / task 85088236: writing debt must not become a skill slot."""
+    plan = _planner().plan_from_proposal(
+        SURVEY,
+        ModelPlanProposal(
+            intent_type="single_skill_task",
+            required_capabilities=["literature.search", "synthesis.final"],
+            outputs=["sources", "draft.section"],
+            confidence=0.88,
+            rationale="written survey",
+        ),
+        task_id="walk-asur01",
+    )
+    assert plan.intent_type is IntentType.REACT_FALLBACK
+    assert plan.tool_policy.allows("write_file")
+    assert plan.tool_policy.allows("search_literature")
+    assert "draft.section" in plan.verification_plan.required_outputs
+
+
+def test_rag_survey_pack_keeps_write_file_for_the_paper() -> None:
+    """P-01 / P-03 / P-05: paper debt stays on write_file, not a live judge."""
+    for task_id, message, caps, outputs in (
+        (
+            "walk-p01",
+            "为 RAG 系统综述准备材料：获取 Attention Is All You Need 摘要，并生成包含 query、retriever、reranker、LLM 的科研架构图。并输出一篇论文和 ppt 发给我",
+            ["paper.fetch.arxiv", "artifact.figure", "synthesis.final", "slides.generate"],
+            ["draft.manuscript", "artifact.figure", "artifact.slides"],
+        ),
+        (
+            "walk-p05",
+            "为 RAG 系统综述准备材料：获取Attention Is All You Need摘要，并生成包含query、retriever、reranker、LLM的可编辑的PPT格式的科研架构图。并输出一篇论文和ppt发给我",
+            [
+                "paper.fetch.arxiv",
+                "figure.editable.pptx",
+                "synthesis.final",
+                "slides.generate",
+            ],
+            ["draft.manuscript", "artifact.pptx", "artifact.slides"],
+        ),
+    ):
+        plan = _planner().plan_from_proposal(
+            message,
+            ModelPlanProposal(
+                intent_type="workflow",
+                required_capabilities=caps,
+                outputs=outputs,
+                confidence=0.9,
+                rationale="survey pack",
+            ),
+            task_id=task_id,
+        )
+        assert plan.intent_type is IntentType.REACT_FALLBACK
+        assert plan.tool_policy.allows("write_file")
+        assert plan.tool_policy.allows("run_skill")
+        assert "draft.manuscript" in plan.verification_plan.required_outputs
 
 
 def test_figure_and_draft_request_still_owes_both() -> None:

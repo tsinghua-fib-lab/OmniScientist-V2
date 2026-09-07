@@ -52,6 +52,7 @@ def timeout_failure_result(
         "subtask_id": subtask_id,
         "task_id": task_id,
         "error": err,
+        "error_class": "skill_failed_partial",
     }
 
 

@@ -686,6 +686,14 @@ class TurnCompletion:
                 task_id=task_id,
             )
         )
+        fill_warnings.extend(
+            await self._honest_research_contract(
+                plan,
+                loop_result,
+                result.drained_results,
+                task_id=task_id,
+            )
+        )
         result.text = loop_result.content
         result.tool_trace = loop_result.tool_trace
         result.degraded_warnings = list(
@@ -697,11 +705,12 @@ class TurnCompletion:
             result.drained_results,
         )
         unpaid = [note for note in fill_warnings if "still owes" in note]
+        citation_uncovered = any("model-visible citation" in note for note in fill_warnings)
         present_status = (
             result.terminated_reason
             if result.terminated_reason in {"cancelled", "interrupted"}
             else "degraded"
-            if unpaid
+            if unpaid or citation_uncovered
             else ""
         )
         await self._hooks.emit(
@@ -860,9 +869,18 @@ class TurnCompletion:
                 task_id=task_id,
             )
         )
+        fill_warnings.extend(
+            await self._honest_research_contract(
+                plan,
+                result,
+                drained,
+                task_id=task_id,
+            )
+        )
         unpaid = [note for note in fill_warnings if "still owes" in note]
+        research_degraded = any("model-visible citation" in note for note in fill_warnings)
         present_status = final_status
-        if unpaid and present_status not in {
+        if (unpaid or research_degraded) and present_status not in {
             "failed",
             "needs_input",
             "cancelled",
@@ -1038,6 +1056,317 @@ class TurnCompletion:
         text = (result.content or "").rstrip()
         result.content = f"{text}\n\n{notice}" if text else notice
         return [notice]
+
+    async def _honest_research_contract(
+        self,
+        plan: IntentPlan,
+        result: AgentLoopResult,
+        drained: list[dict[str, Any]],
+        *,
+        task_id: str,
+    ) -> list[str]:
+        """B0 citation gate + B1 structural review. Host does not rewrite the draft."""
+        if result.kind in {"error", "needs_input"} or result.terminated_reason in {
+            "cancelled",
+            "interrupted",
+        }:
+            return []
+        if not task_id:
+            return []
+        notes: list[str] = []
+        notes.extend(await self._record_lit_diagnostics(result, drained, task_id=task_id))
+        notes.extend(
+            await self._honest_citation_anchors(plan, result, drained, task_id=task_id)
+        )
+        notes.extend(await self._honest_research_review(plan, result, drained, task_id=task_id))
+        notes.extend(await self._record_survey_stages(plan, result, drained, task_id=task_id))
+        notes.extend(await self._record_plan_gate(plan, task_id=task_id))
+        notes.extend(await self._record_figure_provenance(result, drained, task_id=task_id))
+        return notes
+
+    async def _honest_citation_anchors(
+        self,
+        plan: IntentPlan,
+        result: AgentLoopResult,
+        drained: list[dict[str, Any]],
+        *,
+        task_id: str,
+    ) -> list[str]:
+        from omni.research.citation_anchors import (
+            CITATION_ANCHORS_EVENT,
+            citation_anchor_gate,
+            collect_citation_keys,
+            collect_source_ids,
+            collect_turn_draft_text,
+        )
+        from omni.research.literature_modes import plan_has_writing, plan_is_grounded_qa
+
+        rows: list[Any] = []
+        if self._artifacts is not None:
+            rows = await self._artifacts.list_by_task(task_id)
+        draft = collect_turn_draft_text(
+            tool_trace=result.tool_trace,
+            drained=drained,
+            artifacts=rows,
+            extra_text=result.content if plan_is_grounded_qa(plan) else "",
+        )
+        produced_writing = bool(draft.strip())
+        if not produced_writing and not plan_has_writing(plan):
+            return []
+        if not produced_writing:
+            return []
+        getter = getattr(self._tasks, "get_task", None)
+        task = await getter(task_id) if callable(getter) else None
+        sources = collect_source_ids(
+            getattr(task, "source_ids", None) or [],
+            *[getattr(record, "result", None) for record in result.tool_trace],
+            *drained,
+        )
+        keys = collect_citation_keys(
+            *[getattr(record, "arguments", None) for record in result.tool_trace],
+            *[getattr(record, "result", None) for record in result.tool_trace],
+            *drained,
+        )
+        report = citation_anchor_gate(draft, sources, citation_keys=keys)
+        try:
+            await self._tasks.append_event(
+                task_id,
+                event_type=CITATION_ANCHORS_EVENT,
+                status="degraded" if report.uncovered else "succeeded",
+                name=CITATION_ANCHORS_EVENT,
+                output_json=report.to_dict(),
+                summary=report.notice or f"citation anchors {report.anchor_count}",
+            )
+        except Exception:  # noqa: BLE001 - settlement still has other facts
+            pass
+        if not report.uncovered:
+            return []
+        text = (result.content or "").rstrip()
+        result.content = f"{text}\n\n{report.notice}" if text else report.notice
+        return [report.notice]
+
+    async def _honest_research_review(
+        self,
+        plan: IntentPlan,
+        result: AgentLoopResult,
+        drained: list[dict[str, Any]],
+        *,
+        task_id: str,
+    ) -> list[str]:
+        from omni.agent.reviewer import review_research_deliverable
+        from omni.research.citation_anchors import (
+            collect_citation_keys,
+            collect_s_index_map,
+            collect_source_ids,
+            collect_turn_draft_text,
+        )
+        from omni.research.literature_modes import (
+            is_precedent_mode,
+            plan_capabilities_of,
+            plan_has_writing,
+            plan_is_grounded_qa,
+            precedent_verdict,
+        )
+
+        if not (plan_has_writing(plan) or plan_is_grounded_qa(plan)):
+            caps = plan_capabilities_of(plan)
+            if not is_precedent_mode(caps, list(plan.outputs or [])):
+                return []
+        rows: list[Any] = []
+        if self._artifacts is not None:
+            rows = await self._artifacts.list_by_task(task_id)
+        draft = collect_turn_draft_text(
+            tool_trace=result.tool_trace,
+            drained=drained,
+            artifacts=rows,
+            extra_text=result.content or "",
+        )
+        if not draft.strip():
+            return []
+        getter = getattr(self._tasks, "get_task", None)
+        task = await getter(task_id) if callable(getter) else None
+        sources = collect_source_ids(
+            getattr(task, "source_ids", None) or [],
+            *[getattr(record, "result", None) for record in result.tool_trace],
+            *drained,
+        )
+        s_map = collect_s_index_map(
+            *[getattr(record, "result", None) for record in result.tool_trace],
+            *drained,
+        )
+        keys = collect_citation_keys(
+            *[getattr(record, "arguments", None) for record in result.tool_trace],
+            *[getattr(record, "result", None) for record in result.tool_trace],
+            *drained,
+        )
+        verdict = await review_research_deliverable(
+            llm=self._llm,
+            goal=str(getattr(plan, "user_message", "") or ""),
+            draft=draft,
+            source_ids=sources,
+            s_index_map=s_map,
+            citation_keys=keys,
+            artifacts=rows,
+            tool_trace=result.tool_trace,
+            grounded=bool(sources),
+        )
+        try:
+            await self._tasks.append_event(
+                task_id,
+                event_type="research.review",
+                status="degraded" if verdict.blocks_success else "succeeded",
+                name="research.review",
+                output_json=verdict.to_dict(),
+                summary=(
+                    f"review {verdict.verdict} findings={len(verdict.findings)}"
+                    if verdict.findings
+                    else (verdict.notes[:240] if verdict.notes else f"review {verdict.verdict}")
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        caps = plan_capabilities_of(plan)
+        if is_precedent_mode(caps, list(plan.outputs or [])) and not precedent_verdict(draft):
+            notice = (
+                "Precedent mode requires a yes/no/unclear conclusion plus sources; "
+                "the draft did not state one."
+            )
+            text = (result.content or "").rstrip()
+            result.content = f"{text}\n\n{notice}" if text else notice
+            return [notice]
+        # Review is an event, not a display/settlement contract. B0 already
+        # owns "has sources but zero visible anchors".
+        return []
+
+    async def _record_survey_stages(
+        self,
+        plan: IntentPlan,
+        result: AgentLoopResult,
+        drained: list[dict[str, Any]],
+        *,
+        task_id: str,
+    ) -> list[str]:
+        from omni.research.citation_anchors import collect_turn_draft_text
+        from omni.research.literature_modes import (
+            is_survey_mode,
+            plan_capabilities_of,
+            plan_has_writing,
+        )
+        from omni.research.survey_stages import SURVEY_STAGES_EVENT, detect_survey_stages
+
+        caps = plan_capabilities_of(plan)
+        if not (plan_has_writing(plan) or is_survey_mode(caps, list(plan.outputs or []))):
+            return []
+        rows: list[Any] = []
+        if self._artifacts is not None:
+            rows = await self._artifacts.list_by_task(task_id)
+        draft = collect_turn_draft_text(
+            tool_trace=result.tool_trace,
+            drained=drained,
+            artifacts=rows,
+            extra_text=result.content or "",
+        )
+        report = detect_survey_stages(
+            tool_trace=result.tool_trace,
+            drained=drained,
+            draft=draft,
+        )
+        if not report.get("present"):
+            return []
+        try:
+            await self._tasks.append_event(
+                task_id,
+                event_type=SURVEY_STAGES_EVENT,
+                status="succeeded",
+                name=SURVEY_STAGES_EVENT,
+                output_json=report,
+                summary="survey stages " + ", ".join(report.get("present") or []),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return []
+
+    async def _record_plan_gate(self, plan: IntentPlan, *, task_id: str) -> list[str]:
+        from omni.research.plan_gate import PLAN_GATE_EVENT, expensive_work_from_plan
+
+        items = expensive_work_from_plan(plan)
+        if not items:
+            return []
+        try:
+            await self._tasks.append_event(
+                task_id,
+                event_type=PLAN_GATE_EVENT,
+                status="succeeded",
+                name=PLAN_GATE_EVENT,
+                output_json={"items": items, "auto_ran": True},
+                summary="expensive work: " + ", ".join(item["label"] for item in items),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return []
+
+    async def _record_lit_diagnostics(
+        self,
+        result: AgentLoopResult,
+        drained: list[dict[str, Any]],
+        *,
+        task_id: str,
+    ) -> list[str]:
+        from omni.research.lit_diagnostics import (
+            LIT_DIAGNOSTICS_EVENT,
+            lit_diagnostics_from_sources,
+        )
+
+        items = lit_diagnostics_from_sources(result.tool_trace, drained)
+        if not items:
+            return []
+        try:
+            await self._tasks.append_event(
+                task_id,
+                event_type=LIT_DIAGNOSTICS_EVENT,
+                status="succeeded",
+                name=LIT_DIAGNOSTICS_EVENT,
+                output_json={"searches": items},
+                summary=f"{len(items)} literature search(es) recorded",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return []
+
+    async def _record_figure_provenance(
+        self,
+        result: AgentLoopResult,
+        drained: list[dict[str, Any]],
+        *,
+        task_id: str,
+    ) -> list[str]:
+        from omni.research.figure_provenance import (
+            FIGURE_PROVENANCE_EVENT,
+            figure_provenance,
+        )
+
+        if self._artifacts is None:
+            return []
+        rows = await self._artifacts.list_by_task(task_id)
+        reports = [
+            figure_provenance(row, tool_trace=result.tool_trace)
+            for row in rows
+            if str(getattr(row, "kind", "") or "").lower() == "figure"
+        ]
+        if not reports:
+            return []
+        try:
+            await self._tasks.append_event(
+                task_id,
+                event_type=FIGURE_PROVENANCE_EVENT,
+                status="succeeded" if all(item.get("has_provenance") for item in reports) else "degraded",
+                name=FIGURE_PROVENANCE_EVENT,
+                output_json={"figures": reports},
+                summary=f"{len(reports)} figure provenance record(s)",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return []
 
     async def _fill_remaining_figure(
         self,

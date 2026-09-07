@@ -307,7 +307,7 @@ def test_bare_omni_first_launch_fails_fast_without_tty(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_repl_relaunches_immediately_after_startup_update(monkeypatch, settings):
+async def test_repl_exits_after_startup_update_without_relaunch(monkeypatch, settings):
     from omni.cli import main as main_module
 
     events: list[str] = []
@@ -326,7 +326,7 @@ async def test_repl_relaunches_immediately_after_startup_update(monkeypatch, set
 
     await main_module._repl_async(state)
 
-    assert events == ["relaunch"]
+    assert events == []
 
 
 def test_relaunch_after_interactive_update_continues_latest_session(monkeypatch):

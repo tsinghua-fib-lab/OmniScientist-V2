@@ -84,7 +84,7 @@ def _set_shape_alpha(shape, alpha):
             alpha_int = int(alpha * 100000)
             alpha_elem = parse_xml(f'<a:alpha {nsdecls("a")} val="{alpha_int}"/>')
             srgb_clr.append(alpha_elem)
-    except Exception:
+    except Exception:  # noqa: BLE001 - malformed optional alpha must not block drawing
         return
 
 
@@ -106,7 +106,7 @@ def _call_gemini_strict(prompt, aspect_ratio="1:1"):
     response = requests.post(GEMINI_API_URL, headers=headers, data=payload)
     response.raise_for_status()
     response_json = response.json()
-    if "candidates" in response_json and response_json["candidates"]:
+    if response_json.get("candidates"):
         for part in response_json["candidates"][0]["content"]["parts"]:
             if "inlineData" in part:
                 return io.BytesIO(base64.b64decode(part["inlineData"]["data"]))

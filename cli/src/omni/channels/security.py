@@ -82,6 +82,31 @@ def completion_notify_channel(notify_channel: str, parent_channel: str = "") -> 
     return str(notify_channel or "").strip()
 
 
+def inbound_media_allowed(
+    settings: OmniSettings,
+    channel: str,
+    external_key: str,
+) -> bool:
+    """Whether this peer may spend CDN/disk on inbound media.
+
+    Authorization still runs in ``handle_inbound``. This gate only skips
+    downloads for conversations that cannot reach the agent yet.
+    """
+    channel = canonical_im_channel(channel) or ""
+    if channel not in IM_CHANNELS:
+        return True
+    cfg = with_security_defaults(load_channel_config(settings, channel))
+    if not bool(cfg.get("allowlist_enabled", True)):
+        return True
+    allowed = {str(v) for v in cfg.get("allowed_external_keys") or []}
+    return external_key in allowed
+
+
+# Non-empty so the mailbox will admit a media-only unpaired event and the
+# pairing reply can still go out. ``str.strip()`` treats a space as empty.
+UNPAIRED_MEDIA_PLACEHOLDER = "\u200b"
+
+
 def authorize_channel_message(
     settings: OmniSettings,
     channel: str,
@@ -163,6 +188,23 @@ def channel_requires_sensitive_confirm(settings: OmniSettings, channel: str) -> 
     return bool(cfg.get("require_sensitive_confirm", True))
 
 
+def inbound_event_seen(
+    settings: OmniSettings,
+    channel: str,
+    external_key: str,
+    *,
+    message_id: str = "",
+    event_id: str = "",
+) -> bool:
+    """True when this provider event was already claimed on disk."""
+    key = _inbound_event_key(channel, external_key, message_id=message_id, event_id=event_id)
+    if key is None:
+        return False
+    now = datetime.now(UTC)
+    path = settings.paths.project_dir / "channel_inbound_seen.json"
+    return key in _read_seen_store(path, now)
+
+
 def claim_inbound_message(
     settings: OmniSettings,
     channel: str,
@@ -184,14 +226,14 @@ def claim_inbound_message(
     from the network delivering one question twice — and the second ask was
     dropped in silence. A repeat is a request, not a retransmission; without an
     id there is nothing to recognise, so the message is answered.
+
+    Call this after mailbox admission, not before download. Claiming first used
+    to mark an event seen and then lose it when the process exited mid-turn.
     """
-    if not is_im_channel(channel):
-        return True
-    event = (message_id or event_id or "").strip()
-    if not event:
+    key = _inbound_event_key(channel, external_key, message_id=message_id, event_id=event_id)
+    if key is None:
         return True
     now = datetime.now(UTC)
-    key = "event:" + sha256_hex(f"{channel}:{external_key}:{event}")
     ttl = _INBOUND_DEDUPE_TTL_SECONDS
     path = settings.paths.project_dir / "channel_inbound_seen.json"
     store = _read_seen_store(path, now)
@@ -204,6 +246,21 @@ def claim_inbound_message(
     }
     _write_seen_store(path, store)
     return True
+
+
+def _inbound_event_key(
+    channel: str,
+    external_key: str,
+    *,
+    message_id: str = "",
+    event_id: str = "",
+) -> str | None:
+    if not is_im_channel(channel):
+        return None
+    event = (message_id or event_id or "").strip()
+    if not event:
+        return None
+    return "event:" + sha256_hex(f"{channel}:{external_key}:{event}")
 
 
 def _pairing_code_valid(cfg: dict[str, Any], code: str) -> bool:

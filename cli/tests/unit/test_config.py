@@ -232,7 +232,7 @@ def test_user_can_configure_local_specter2_runtime():
     assert settings.memory.embedding_specter2_device == "cuda:0"
 
 
-def test_unpublished_livefigure_config_is_not_part_of_settings():
+def test_project_cannot_override_owner_livefigure_configuration():
     paths = get_paths()
     _write_toml(paths.project_config, {
         "livefigure": {
@@ -247,7 +247,10 @@ def test_unpublished_livefigure_config_is_not_part_of_settings():
 
     settings = load_settings()
 
-    assert not hasattr(settings, "livefigure")
+    assert settings.livefigure.gemini.enabled is False
+    assert settings.livefigure.gemini.base_url == ""
+    assert settings.livefigure.gemini.api_key == ""
+    assert settings.livefigure.gemini.image_model == ""
 
 
 def test_project_cannot_raise_subagent_execution_defaults():

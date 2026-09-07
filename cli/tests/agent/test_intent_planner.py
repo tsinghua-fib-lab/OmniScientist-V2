@@ -726,6 +726,52 @@ def test_model_memory_update_proposal_becomes_no_tool_plan() -> None:
     assert plan.capability_inputs["memory.update"]["content"].startswith("Project studies")
 
 
+def test_stacked_memory_update_keeps_sibling_work_on_capable_react() -> None:
+    planner = _builtin_planner()
+    proposal = ModelPlanProposal(
+        intent_type="memory_update",
+        required_capabilities=["memory.update", "literature.search"],
+        outputs=["memory", "sources"],
+        capability_inputs={
+            "memory.update": {"content": "Prefer Vancouver."},
+            "literature.search": {"query": "RAG evaluation 2024"},
+        },
+        confidence=0.9,
+        rationale="remember a preference and retrieve papers",
+    )
+    plan = planner.plan_from_proposal(
+        "Remember I only want Vancouver. Search RAG evaluation papers.",
+        proposal,
+        task_id="run-mem-stack",
+    )
+
+    assert plan.intent_type == IntentType.REACT_FALLBACK
+    assert plan.tool_policy.allows("search_literature")
+    assert plan.capability_inputs["memory.update"]["content"] == "Prefer Vancouver."
+    assert plan.capability_inputs["literature.search"]["query"] == "RAG evaluation 2024"
+
+
+def test_lone_synthesis_final_stays_capable_react_with_write_file() -> None:
+    planner = _builtin_planner()
+    proposal = ModelPlanProposal(
+        intent_type="single_skill_task",
+        required_capabilities=["synthesis.final"],
+        outputs=["draft.section"],
+        confidence=0.86,
+        rationale="write the related-work section",
+    )
+    plan = planner.plan_from_proposal(
+        "Write a related-work section on latent-space intervention.",
+        proposal,
+        task_id="run-synth",
+    )
+
+    assert plan.intent_type == IntentType.REACT_FALLBACK
+    assert plan.selected_skills == []
+    assert plan.tool_policy.allows("write_file")
+    assert "draft.section" in plan.verification_plan.required_outputs
+
+
 @pytest.mark.parametrize(
     "prompt",
     [
@@ -1011,3 +1057,42 @@ def test_explicit_third_party_skill_with_no_contract_is_allowed_but_degraded():
     assert validation.ok
     assert validation.status == "degraded"
     assert any("contract is none" in warning for warning in validation.degraded_warnings)
+
+
+def test_has_anyone_utterance_compiles_to_precedent_mode() -> None:
+    planner = _builtin_planner()
+    proposal = ModelPlanProposal(
+        intent_type="react_fallback",
+        required_capabilities=["literature.search"],
+        outputs=["sources"],
+        capability_inputs={"literature.search": {"query": "activation steering tool-use agents"}},
+        confidence=0.8,
+        rationale="retrieve papers",
+    )
+    prompt = "Has anyone used activation steering for tool-use agents? Answer yes/no/unclear with sources."
+    plan = planner.plan_from_proposal(prompt, proposal, task_id="run-precedent")
+
+    assert "literature.precedent" in (plan.capability_inputs or {})
+    assert "cite_source" in plan.verification_plan.required_events
+    assert any("yes, no, or unclear" in note for note in plan.user_notices)
+    assert str(plan.capability_inputs["literature.search"].get("query") or "").strip()
+
+
+def test_written_survey_is_not_stolen_by_precedent_heuristic() -> None:
+    planner = _builtin_planner()
+    proposal = ModelPlanProposal(
+        intent_type="workflow",
+        required_capabilities=["literature.search", "literature.survey"],
+        outputs=["draft.section", "sources"],
+        capability_inputs={"literature.search": {"query": "latent-space intervention"}},
+        confidence=0.86,
+        rationale="written survey",
+    )
+    plan = planner.plan_from_proposal(
+        "Has anyone studied latent-space intervention? Survey the field and write a related-work section.",
+        proposal,
+        task_id="run-survey-not-precedent",
+    )
+
+    assert "literature.precedent" not in (plan.capability_inputs or {})
+    assert "draft.section" in plan.outputs or "draft.section" in plan.verification_plan.required_outputs

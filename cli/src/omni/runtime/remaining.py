@@ -25,7 +25,7 @@ from omni.agent.capabilities import (
 )
 from omni.runtime.task_results import is_dot_artifact
 
-_CONTRACT_WRITE_TOOLS = ("write_file", "edit_file")
+_CONTRACT_WRITE_TOOLS = ("write_file", "edit_file", "apply_patch")
 _WRITING_FILE_DEBTS = WRITING_DELIVERABLES | {"review", "response_letter"}
 
 # A request that names both a figure and a paper is a multi-deliverable contract
@@ -421,7 +421,7 @@ def bind_contract_outputs(plan: Any, proposal: Any | None = None) -> Any:
 
 
 def grant_contract_write_tools(plan: Any) -> Any:
-    """Unblock ``write_file`` / ``edit_file`` when this turn owes a manuscript.
+    """Unblock ``write_file`` / ``edit_file`` / ``apply_patch`` when this turn owes a manuscript.
 
     The default capable floor blocks those as irreversible mutations. A named
     writing debt is the produce path — the model writes the file. ``bash`` and

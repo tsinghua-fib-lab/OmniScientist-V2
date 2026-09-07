@@ -9,6 +9,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -345,25 +346,39 @@ class WeixinIlinkOutbound(MarkdownOutbound):
     """Adapt :class:`~omni.channels.weixin_ilink.WeixinIlinkClient` to the outbound
     protocol so ``send_presentation`` works for the WeChat iLink channel.
 
-    The iLink ``sendmessage`` API must echo the per-peer ``context_token`` last
-    seen on inbound, so the channel passes its live ``{external_key: token}`` map
-    here (by reference). Image/file artifacts are encrypted and uploaded to the
-    Weixin CDN via the client (``send_image``/``send_file``); the shared delivery
-    helpers fall back to a text link if upload fails or ``cryptography`` is absent.
+    The iLink ``sendmessage`` API must echo the inbound ``context_token``. A
+    sealed token on the current job wins over the last-known per-peer map so a
+    later fragment cannot rewrite the token of an in-flight reply. Image/file
+    artifacts are encrypted and uploaded to the Weixin CDN via the client
+    (``send_image``/``send_file``); the shared delivery helpers fall back to a
+    text link if upload fails or ``cryptography`` is absent.
     """
 
     def __init__(self, client: Any, context_tokens: dict[str, str]) -> None:
         self._client = client
         self._context_tokens = context_tokens
+        self._sealed: dict[str, str] = {}
+
+    def seal(self, target: str, token: str) -> None:
+        if token:
+            self._sealed[target] = token
+
+    def unseal(self, target: str) -> None:
+        self._sealed.pop(target, None)
+
+    def _token(self, target: str) -> str | None:
+        if target in self._sealed:
+            return self._sealed[target]
+        return self._context_tokens.get(target)
 
     async def send_markdown(self, target: str, markdown: str) -> None:
         await self._client.send_message(
-            target, markdown, context_token=self._context_tokens.get(target)
+            target, markdown, context_token=self._token(target)
         )
 
     async def send_image(self, target: str, path: str, *, file_name: str | None = None) -> None:
         await self._client.send_image(
-            target, path, context_token=self._context_tokens.get(target)
+            target, path, context_token=self._token(target)
         )
 
     async def send_file(self, target: str, path: str, *, file_name: str | None = None) -> None:
@@ -371,7 +386,7 @@ class WeixinIlinkOutbound(MarkdownOutbound):
             target,
             path,
             file_name=file_name or Path(path).name,
-            context_token=self._context_tokens.get(target),
+            context_token=self._token(target),
         )
 
 
@@ -492,6 +507,45 @@ class FeishuClient(MarkdownOutbound):
             raise OutboundError("Feishu image upload did not return image_key")
         return key
 
+    async def download_image(self, image_key: str, *, message_id: str = "") -> bytes:
+        if message_id:
+            return await self.download_message_resource(message_id, image_key, resource_type="image")
+        return await self._download_resource("images", image_key)
+
+    async def download_file(self, file_key: str, *, message_id: str = "") -> bytes:
+        if message_id:
+            return await self.download_message_resource(message_id, file_key, resource_type="file")
+        return await self._download_resource("files", file_key)
+
+    async def download_message_resource(
+        self,
+        message_id: str,
+        file_key: str,
+        *,
+        resource_type: str,
+    ) -> bytes:
+        """User-message image/file. Bot-uploaded keys use ``_download_resource``."""
+        token = await self._token()
+        kind = "image" if resource_type == "image" else "file"
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            res = await client.get(
+                f"{self.base_url}/open-apis/im/v1/messages/{message_id}/resources/{file_key}",
+                params={"type": kind},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            _raise_for_status(res, "Feishu message resource download")
+            return res.content
+
+    async def _download_resource(self, kind: str, key: str) -> bytes:
+        token = await self._token()
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            res = await client.get(
+                f"{self.base_url}/open-apis/im/v1/{kind}/{key}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            _raise_for_status(res, f"Feishu {kind} download")
+            return res.content
+
 
 # A DingTalk robot webhook carries text, markdown, link and cards — there is no
 # media call on it, so a file needs the configured gateway. Printing the server
@@ -507,6 +561,7 @@ class DingTalkClient(MarkdownOutbound):
     def __init__(self, cfg: dict[str, Any]) -> None:
         self.cfg = cfg
         self.timeout = float(cfg.get("timeout_s") or 15.0)
+        self._access_token = ""
 
     async def send_markdown(self, target: str, markdown: str) -> None:
         if _prefer_plain_text(markdown):
@@ -562,6 +617,48 @@ class DingTalkClient(MarkdownOutbound):
     @property
     def _gateway_enabled(self) -> bool:
         return bool(self.cfg.get("base_url") or self.cfg.get("gateway_url"))
+
+    async def download_robot_media(self, download_code: str) -> bytes:
+        token = await self._dingtalk_access_token()
+        robot_code = str(self.cfg.get("robot_code") or self.cfg.get("client_id") or "")
+        async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=False) as client:
+            res = await client.post(
+                "https://api.dingtalk.com/v1.0/robot/messageFiles/download",
+                json={"downloadCode": download_code, "robotCode": robot_code},
+                headers={
+                    "x-acs-dingtalk-access-token": token,
+                    "Content-Type": "application/json",
+                },
+            )
+            res.raise_for_status()
+            try:
+                payload = res.json()
+            except ValueError as exc:
+                raise OutboundError("DingTalk media API did not return JSON") from exc
+            url = _dingtalk_download_url(payload)
+            if not url:
+                raise OutboundError(f"DingTalk media API missing downloadUrl: {payload}")
+            return await _get_allowed_url(client, url, _dingtalk_media_host_allowed)
+
+    async def _dingtalk_access_token(self) -> str:
+        if self._access_token:
+            return self._access_token
+        client_id = str(self.cfg.get("client_id") or "")
+        client_secret = str(self.cfg.get("client_secret") or "")
+        if not client_id or not client_secret:
+            raise OutboundError("DingTalk media download requires client_id/client_secret")
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            res = await client.post(
+                "https://api.dingtalk.com/v1.0/oauth2/accessToken",
+                json={"appKey": client_id, "appSecret": client_secret},
+            )
+            res.raise_for_status()
+            data = res.json()
+        token = str(data.get("accessToken") or data.get("access_token") or "")
+        if not token:
+            raise OutboundError(f"DingTalk token response missing accessToken: {data}")
+        self._access_token = token
+        return token
 
     async def _post_gateway(self, payload: dict[str, Any]) -> None:
         base_url = str(self.cfg.get("base_url") or self.cfg.get("gateway_url") or "").rstrip("/")
@@ -762,6 +859,65 @@ def _guess_mime(path: str, *, kind: str) -> str:
     if suffix in {".txt", ".md", ".mmd", ".dot", ".tex", ".bib"}:
         return "text/plain"
     return "application/octet-stream" if kind == "file" else "image/*"
+
+
+_DINGTALK_MEDIA_HOST_SUFFIXES = (
+    "dingtalk.com",
+    "dingtalkapps.com",
+    "alicdn.com",
+    "aliyuncs.com",
+    "aliapp.org",
+)
+
+
+def _dingtalk_download_url(payload: dict[str, Any]) -> str:
+    url = str(payload.get("downloadUrl") or payload.get("download_url") or "").strip()
+    data = payload.get("data")
+    if not url and isinstance(data, dict):
+        url = str(data.get("downloadUrl") or data.get("download_url") or "").strip()
+    return url
+
+
+def _hostname_allowed(host: str, suffixes: tuple[str, ...]) -> bool:
+    name = (host or "").lower().rstrip(".")
+    labels = name.split(".")
+    if not name or ":" in name:
+        return False
+    if len(labels) == 4 and all(part.isdigit() for part in labels):
+        return False
+    return any(name == suffix or name.endswith(f".{suffix}") for suffix in suffixes)
+
+
+def _dingtalk_media_host_allowed(url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"https", "http"}:
+        return False
+    if parsed.username or parsed.password:
+        return False
+    return _hostname_allowed(parsed.hostname or "", _DINGTALK_MEDIA_HOST_SUFFIXES)
+
+
+async def _get_allowed_url(
+    client: httpx.AsyncClient,
+    url: str,
+    allowed: Any,
+    *,
+    max_redirects: int = 3,
+) -> bytes:
+    current = url
+    for _ in range(max_redirects + 1):
+        if not allowed(current):
+            raise OutboundError(f"refusing media download from {current}")
+        res = await client.get(current, follow_redirects=False)
+        if res.is_redirect:
+            location = str(res.headers.get("location") or "").strip()
+            if not location:
+                raise OutboundError(f"media redirect missing Location: {current}")
+            current = urljoin(current, location)
+            continue
+        res.raise_for_status()
+        return res.content
+    raise OutboundError(f"too many media redirects from {url}")
 
 
 def _raise_for_status(res: httpx.Response, action: str) -> None:

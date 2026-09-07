@@ -14,7 +14,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
 
-from omni.core.file_mentions import format_mention, parse_mentions
+from omni.core.user_inputs import bind_input_mentions
 
 
 def normalize_web_file_uri(uri: str, *, cwd: Path | None = None) -> str | None:
@@ -54,10 +54,11 @@ def bind_web_attachments(
     *,
     cwd: Path | None = None,
 ) -> tuple[str, list[str] | None]:
-    """Merge uploaded files into the text the way the CLI composer does.
+    """Merge uploaded files through backend ``bind_input_mentions``.
 
-    Already-mentioned paths are left alone so a retry or a frontend that
-    already appended ``@`` does not duplicate the line.
+    The SPA submits raw text + ``file_uris``. ``[Image #N]`` and ``@path``
+    are added here so a frontend that already appended ``@`` does not skip
+    the image placeholder.
     """
     extras: list[str] = []
     seen: set[str] = set()
@@ -68,12 +69,5 @@ def bind_web_attachments(
         seen.add(path)
         extras.append(path)
 
-    mentioned = {str(m.path) for m in parse_mentions(text, cwd=cwd) if m.exists}
-    to_inject = [path for path in extras if path not in mentioned]
-    if not to_inject:
-        return text, extras or None
-
-    mentions = "\n".join(format_mention(path) for path in to_inject)
-    body = text.rstrip()
-    merged = f"{body}\n\n{mentions}" if body else mentions
+    merged = bind_input_mentions(text, extras, cwd=cwd)
     return merged, extras or None

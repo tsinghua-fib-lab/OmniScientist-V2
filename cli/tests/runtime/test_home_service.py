@@ -72,6 +72,8 @@ async def test_schedule_in_other_workspace_fires_from_anchor(tmp_path):
         info = service_state.service_runtime_info(service.paths)
         assert info is not None and info["ready"] is True
         assert any(w["dir"] == ws_b_key for w in info.get("workspaces", []))
+        assert "vlm_enabled" in info
+        assert "model_provider" in info
     finally:
         await service.stop()
 

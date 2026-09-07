@@ -228,6 +228,19 @@ def _artifact_abs_path(row: ArtifactORM, paths: OmniPaths | None) -> str:
     return str((paths.project_dir / rel).resolve())
 
 
+class _ResolvedTaskArtifacts(list[tuple[str, str, str]]):
+    """Display rows carrying the durable inventory used for verification.
+
+    It remains a normal list of three-tuples for existing renderers and callers;
+    task-show verification can additionally consume the ORM metadata that must
+    not be discarded while resolving user-facing paths.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.durable_artifacts: list[ArtifactORM] | None = None
+
+
 async def _resolve_task_artifacts(
     *,
     task_id: str,
@@ -242,7 +255,7 @@ async def _resolve_task_artifacts(
     durable ``ArtifactORM`` row. A stale task cache cannot override a different
     canonical producer.
     """
-    out: list[tuple[str, str, str]] = []
+    out = _ResolvedTaskArtifacts()
     seen: set[str] = set()
 
     def push(title: str, path: str, uri: str) -> None:
@@ -292,6 +305,7 @@ async def _resolve_task_artifacts(
                 )
             if belongs:
                 owned[row.id] = row
+        out.durable_artifacts = list(owned.values())
 
     for title, path, uri in result_artifacts:
         row: ArtifactORM | None = None
@@ -324,6 +338,38 @@ def _print_artifacts(rows: Sequence[tuple[str, str, str]], *, limit: int = 24) -
     console.print(f"\n[{theme.STRONG} {theme.ACCENT}]artifacts[/]")
     for title, path, uri in list(rows)[:limit]:
         artifact_line(title or "artifact", path, uri)
+
+
+def _last_event_payload(events: Sequence[Any], event_type: str) -> dict[str, Any]:
+    last: Any = None
+    for event in events or []:
+        if str(getattr(event, "event_type", "") or "") == event_type:
+            last = event
+    if last is None:
+        return {}
+    payload = getattr(last, "output_json", None) or {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _print_research_intelligence(events: Sequence[Any]) -> None:
+    """Findings, survey stages, expensive-work gate, figure packages."""
+    from omni.research.figure_provenance import FIGURE_PROVENANCE_EVENT, format_figure_packages
+    from omni.research.plan_gate import PLAN_GATE_EVENT, format_plan_gate
+    from omni.research.review_findings import format_review_findings
+    from omni.research.survey_stages import SURVEY_STAGES_EVENT, format_survey_stages
+
+    sections = (
+        ("research review findings", format_review_findings(_last_event_payload(events, "research.review"))),
+        ("research stages", format_survey_stages(_last_event_payload(events, SURVEY_STAGES_EVENT))),
+        ("plan gate", format_plan_gate(_last_event_payload(events, PLAN_GATE_EVENT))),
+        ("figure package", format_figure_packages(_last_event_payload(events, FIGURE_PROVENANCE_EVENT))),
+    )
+    for title, lines in sections:
+        if not lines:
+            continue
+        console.print(f"\n[bold cyan]{title}[/bold cyan]")
+        for line in lines:
+            console.print(f"- {line}")
 
 
 def _subtask_summary(task: SubtaskORM) -> str:
@@ -586,8 +632,8 @@ def _kind_from_display_path(path: str) -> str:
     """Infer a store-like kind from the filesystem path the user can open.
 
     ``_resolve_task_artifacts`` returns ``(title, path, uri)``. Using the title
-    as ``kind`` made remaining look unpaid after a paid P-01 pack: titles are
-    captions, and ``artifact://`` URIs have no suffix.
+    as ``kind`` made a completed multi-deliverable task look unpaid: titles
+    are captions, and ``artifact://`` URIs have no suffix.
     """
     suffix = Path(path).suffix.lower().lstrip(".")
     if suffix in {"png", "svg", "jpg", "jpeg", "webp", "gif"}:
@@ -606,19 +652,23 @@ def _host_remaining_summary(plan_json: dict[str, Any], artifact_rows: Sequence[t
 
     declared = plan_json.get("verification_plan") if isinstance(plan_json.get("verification_plan"), dict) else {}
     required = list(declared.get("required_outputs") or plan_json.get("outputs") or [])
-    artifacts = []
-    for title, path, uri in artifact_rows or []:
-        disk = path or ""
-        artifacts.append(
-            SimpleNamespace(
-                kind=_kind_from_display_path(disk),
-                title=title,
-                path=disk,
-                rel_path=disk,
-                uri=uri,
-                mime="",
+    durable_artifacts = getattr(artifact_rows, "durable_artifacts", None)
+    if durable_artifacts is not None:
+        artifacts = list(durable_artifacts)
+    else:
+        artifacts = []
+        for title, path, uri in artifact_rows or []:
+            disk = path or ""
+            artifacts.append(
+                SimpleNamespace(
+                    kind=_kind_from_display_path(disk),
+                    title=title,
+                    path=disk,
+                    rel_path=disk,
+                    uri=uri,
+                    mime="",
+                )
             )
-        )
     remaining = remaining_deliverables([str(x) for x in required], artifacts)
     if not remaining:
         return "all named deliverables present" if required else "-"
@@ -1572,6 +1622,14 @@ def render_task_detail(
     console.print(f"\n[bold cyan]user input[/bold cyan]\n{task.user_input or '-'}")
     if task.summary:
         console.print(f"\n[bold cyan]summary[/bold cyan]\n{task.summary}")
+    from omni.research.lit_diagnostics import format_lit_diagnostics, lit_diagnostics_from_sources
+
+    lit_lines = format_lit_diagnostics(lit_diagnostics_from_sources(events))
+    if lit_lines:
+        console.print("\n[bold cyan]literature search[/bold cyan]")
+        for line in lit_lines:
+            console.print(f"- {line}")
+    _print_research_intelligence(events)
     plan_json = getattr(task, "plan_json", {}) or {}
     if isinstance(plan_json, dict) and plan_json:
         selected = plan_json.get("selected_skills") if isinstance(plan_json.get("selected_skills"), list) else []

@@ -86,6 +86,7 @@ def status(ctx: typer.Context) -> None:
         ["Trusted dir", "yes" if state.trusted else "no (read-only; run `omni trust`)"],
         ["Approval", _approval_status(settings, state.trusted)],
         ["Output files", mirror_dir if mirror_dir else "(durable store only)"],
+        ["Input files", str(paths.inputs_dir)],
         ["Daemon", daemon_txt],
         ["Schedules", schedules_txt],
         ["Sessions", str(len(sessions))],

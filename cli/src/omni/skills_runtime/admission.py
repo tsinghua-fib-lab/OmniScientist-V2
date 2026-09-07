@@ -31,7 +31,9 @@ _CONSTRAINT_TOKEN = re.compile(r"^[a-z][a-z0-9._-]*$")
 _INTERPRETER_ALIASES = frozenset({"python", "python3"})
 
 _SERVICE_LABELS = {
-    "vlm": "vision model (VLM)",
+    "vlm": (
+        "multimodal large language model (MLLM) with image input and image output"
+    ),
 }
 _SERVICE_SETUP = {
     "vlm": "omni config vlm",

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from omni.agent import OmniAgent
+from omni.channels.inbound import InboundCoordinator, SealedJob, bind_job_text
 from omni.channels.outbound import uploadable_roots
 from omni.config.settings import OmniSettings
 from omni.runtime.notifications import TaskNotification, delivery_key
@@ -75,13 +76,33 @@ class Channel(ABC):
         self.settings = settings
         self.agent = agent
         self._outbound_locks: dict[str, asyncio.Lock] = {}
+        self.inbound = InboundCoordinator(self)
 
     @abstractmethod
     async def start(self) -> None:
         """Run the inbound loop (long-running). Return to stop."""
 
-    async def stop(self) -> None:  # pragma: no cover - trivial
-        return None
+    async def stop(self) -> None:
+        await self.inbound.shutdown()
+
+    async def dispatch_inbound_job(self, job: SealedJob) -> TurnPresentation:
+        """Run one sealed logical input. Reply tokens stay on ``job``."""
+        self.apply_sealed_reply(job)
+        try:
+            text, file_uris = bind_job_text(job, cwd=self.settings.paths.project_dir)
+            return await self.handle_inbound_and_send(
+                text, job.conversation, file_uris=file_uris
+            )
+        finally:
+            self.clear_sealed_reply(job)
+
+    def apply_sealed_reply(self, job: SealedJob) -> None:
+        """Install job-scoped reply routing for the duration of one send."""
+        _ = job
+
+    def clear_sealed_reply(self, job: SealedJob) -> None:
+        """Drop job-scoped reply routing after the send finishes."""
+        _ = job
 
     def uploadable_roots(self) -> list[Path]:
         """Directories this channel may send a file from.
@@ -109,6 +130,7 @@ class Channel(ABC):
         external_key: str,
         *,
         on_task_ack=None,  # noqa: ANN001
+        file_uris: list[str] | None = None,
     ) -> TurnPresentation:
         """Run one inbound message through the shared agent and format it.
 
@@ -134,10 +156,18 @@ class Channel(ABC):
             command_presentation = await handle_channel_command(self.agent, text, session_id)
             if command_presentation is not None:
                 return command_presentation
+        from omni.core.file_mentions import resolve_turn_attachments
+
+        attachments = resolve_turn_attachments(
+            request,
+            cwd=self.settings.paths.project_dir,
+            extra=file_uris,
+        )
         turn = await self.agent.handle_turn(
             request,
             session_id=session_id,
             channel=self.name,
+            file_uris=attachments.file_uris,
             drain_tasks=False,
             on_task_ack=on_task_ack,
             interaction_mode=interaction_mode,
@@ -148,7 +178,13 @@ class Channel(ABC):
             output_roots=self.uploadable_roots(),
         )
 
-    async def handle_inbound_and_send(self, text: str, external_key: str) -> TurnPresentation:
+    async def handle_inbound_and_send(
+        self,
+        text: str,
+        external_key: str,
+        *,
+        file_uris: list[str] | None = None,
+    ) -> TurnPresentation:
         """Handle one inbound message and send its ACK before later notifications.
 
         Background tasks can finish while the agent is still turning the submit
@@ -178,7 +214,9 @@ class Channel(ABC):
                 )
 
             try:
-                presentation = await self.handle_inbound(text, external_key, on_task_ack=send_ack)
+                presentation = await self.handle_inbound(
+                    text, external_key, on_task_ack=send_ack, file_uris=file_uris
+                )
             except Exception as exc:  # noqa: BLE001 - convert an acknowledged turn to a terminal result
                 logger.exception(
                     "[%s] inbound turn failed after task acknowledgement task=%s",

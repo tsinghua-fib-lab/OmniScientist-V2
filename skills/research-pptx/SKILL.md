@@ -28,6 +28,7 @@ metadata:
     kind: python_engine
     priority: 100
     execution:
+      effects: [user_files.write]
       # Own wall clock: a full deck (PDF/topic → outline → Node render) routinely
       # exceeds the undeclared 600s fallback. 15 minutes stays under the
       # python_engine ceiling; do not inherit skills.default_seconds.

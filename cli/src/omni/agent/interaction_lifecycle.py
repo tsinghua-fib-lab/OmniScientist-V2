@@ -29,6 +29,7 @@ _REVIEW_BLOCKED_TOOLS = {
     "bash",
     "write_file",
     "edit_file",
+    "apply_patch",
     "run_compute",
     "run_skill",
     "run_workflow",
@@ -258,7 +259,7 @@ def unblock_produce_tools(policy: ToolPolicy, plan: IntentPlan) -> ToolPolicy:
     remaining = [
         name
         for name in (policy.blocked_tools or [])
-        if name not in {"write_file", "edit_file"}
+        if name not in {"write_file", "edit_file", "apply_patch"}
     ]
     if remaining == list(policy.blocked_tools or []):
         return policy

@@ -59,6 +59,7 @@ metadata:
         error_info: {type: object}
       required: ["status"]
     execution:
+      effects: [user_files.write]
       # The pipeline reports progress at six coarse stages, so silence — not
       # elapsed time — is what distinguishes a stuck run from a slow one. The
       # wall clock is only the runaway backstop.

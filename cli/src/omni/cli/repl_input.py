@@ -25,6 +25,8 @@ from prompt_toolkit.shortcuts import print_formatted_text
 from prompt_toolkit.styles import Style
 
 from omni.cli import theme
+from omni.cli.clipboard_paste import paste_image_hint
+from omni.cli.composer_images import ComposerImages
 from omni.cli.file_search import (
     DEFAULT_LIMIT,
     FileCandidate,
@@ -33,7 +35,7 @@ from omni.cli.file_search import (
 )
 from omni.cli.repl_command_policy import command_contains_sensitive_data
 from omni.cli.repl_commands import CommandCatalog, SlashCommand
-from omni.cli.repl_composer import install_multiline_bindings
+from omni.cli.repl_composer import install_multiline_bindings, install_paste_image_bindings
 from omni.cli.repl_layout import clip_display as _clip_display
 from omni.cli.repl_layout import compact_number as _compact_number
 from omni.cli.repl_layout import display_width as _display_width
@@ -277,6 +279,7 @@ class ReplInputBox:
         enabled: bool | None = None,
         commands: CommandCatalog | Sequence[str] = (),
         output_base: Path | None = None,
+        inputs_dir: Path | None = None,
         shift_enter_ready: bool = False,
     ) -> None:
         self._enabled = _interactive_terminal() if enabled is None else enabled
@@ -289,6 +292,7 @@ class ReplInputBox:
         self._clearable_tokens = 0
         self._last_elapsed_seconds: float | None = None
         self._completer = build_repl_completer(commands, output_base=output_base)
+        self._composer_images = ComposerImages(dest_dir=inputs_dir)
         self._key_bindings = self._create_key_bindings()
         self._session: PromptSession[str] | None = None
 
@@ -367,14 +371,32 @@ class ReplInputBox:
         bindings = KeyBindings()
 
         def submit(event) -> None:  # noqa: ANN001
-            if not event.current_buffer.text.strip():
+            text = event.current_buffer.text
+            expanded = self._composer_images.expand(text)
+            self._composer_images.clear()
+            if not expanded.strip():
                 event.current_buffer.reset()
                 return
+            if expanded != text:
+                event.current_buffer.text = expanded
             event.current_buffer.validate_and_handle()
 
         install_multiline_bindings(bindings, submit=submit)
+        install_paste_image_bindings(bindings, handler=self._on_paste_image)
 
         return bindings
+
+    def _on_paste_image(self, event) -> None:  # noqa: ANN001
+        self._composer_images.paste_into(
+            event.current_buffer,
+            on_error=self._report_paste_image,
+        )
+
+    def _report_paste_image(self, message: str) -> None:
+        print_formatted_text(
+            FormattedText([("class:omni.hint", message)]),
+            style=_STYLE,
+        )
 
     def _prompt_message(self) -> FormattedText:
         return FormattedText(
@@ -403,8 +425,13 @@ class ReplInputBox:
         if width >= 58 and self._last_elapsed_seconds is not None:
             details.append(f"last {_format_elapsed(self._last_elapsed_seconds)}")
         newline = _newline_hint(self._shift_enter_ready)
-        if width >= 112:
-            details.append(f"Enter send · {newline} · Ctrl+C cancel · Ctrl+L redraw")
+        paste = paste_image_hint()
+        if width >= 132:
+            details.append(
+                f"Enter send · {newline} · {paste} · Ctrl+C cancel · Ctrl+L redraw"
+            )
+        elif width >= 112:
+            details.append(f"Enter send · {newline} · {paste} · Ctrl+C cancel")
         elif width >= 88:
             details.append(f"Enter send · {newline} · Ctrl+C cancel")
         elif width >= 60:

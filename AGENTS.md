@@ -71,5 +71,6 @@ its path and stamped version.
 Workspaces are path-keyed by absolute working directory (like Claude Code): a `-P <name>` project
 lives under `~/.omni/projects/<name>/`, otherwise the auto workspace is `~/.omni/workspaces/<slug>-<hash8>/`
 (keyed to the VCS root, else CWD; `~/.omni` is never itself a project). Generated artifacts go under
-`<workspace>/artifacts/`; the lab notebook is `NOTEBOOK.md`. `omni status` shows the active store.
+`<workspace>/artifacts/`; user-provided files (clipboard paste, web upload, WeChat
+media) go under `<workspace>/inputs/`; the lab notebook is `NOTEBOOK.md`. `omni status` shows the active store.
 Prefer citing sources (arXiv id / DOI / URL).

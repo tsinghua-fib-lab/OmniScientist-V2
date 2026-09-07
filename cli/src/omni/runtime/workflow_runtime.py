@@ -434,7 +434,7 @@ class WorkflowRuntime:
             ):
                 step_id = str(step["id"])
                 record = outcome["record"]
-                result = outcome["result"]
+                result = _with_error_class(outcome["result"])
                 step_records.append(record)
                 results_by_id[step_id] = result
                 terminal_ids.add(step_id)
@@ -692,6 +692,25 @@ class WorkflowRuntime:
         if self._task_recorder is None:
             return
         await self._task_recorder.mark_controls_applied(control_ids)
+
+
+def _with_error_class(result: Any) -> Any:
+    """Stamp the host error class so synthesis can see an upstream failure."""
+    if not isinstance(result, dict) or result.get("error_class"):
+        return result
+    from omni.core.tool_errors import classify_tool_error
+
+    error_class = classify_tool_error(
+        status=str(result.get("status") or ""),
+        error_code=str(result.get("error_code") or result.get("reason") or ""),
+        result=result,
+        error=str(result.get("error") or ""),
+    )
+    if not error_class:
+        return result
+    stamped = dict(result)
+    stamped["error_class"] = error_class
+    return stamped
 
 
 __all__ = ["WorkflowExecutionError", "WorkflowRuntime"]

@@ -55,12 +55,12 @@ from omni.skills_runtime.builtin_tools.shell import (
 ToolInvoker = Callable[[str, dict[str, Any]], Awaitable[Any]]
 
 # Mutating / executing tools that leave the read-only "just look" envelope.
-SENSITIVE_TOOLS = frozenset({"bash", "write_file", "edit_file", "run_compute"})
+SENSITIVE_TOOLS = frozenset({"bash", "write_file", "edit_file", "apply_patch", "run_compute"})
 
 # The subset whose risk is fully described by an argument: these name the file
 # they will change, so the gate can rule on them from the destination alone. A
 # shell command names nothing, which is why bash and run_compute are excluded.
-PATH_ASSESSED_TOOLS = frozenset({"write_file", "edit_file"})
+PATH_ASSESSED_TOOLS = frozenset({"write_file", "edit_file", "apply_patch"})
 
 @dataclass(frozen=True)
 class ApprovalChoice:
@@ -182,7 +182,10 @@ def _call_detail(name: str, args: dict[str, Any]) -> str:
     if name == "bash" or name == "run_compute":
         blob = str(args.get("command", "") or args.get("code", "") or "")
         return blob.strip()[:200]
-    if name in ("write_file", "edit_file"):
+    if name in ("write_file", "edit_file", "apply_patch"):
+        if name == "apply_patch":
+            patch = str(args.get("patch") or args.get("diff") or "")
+            return patch.splitlines()[0][:200] if patch else "apply_patch"
         return str(args.get("path", "") or "")
     return ", ".join(f"{k}={str(v)[:40]}" for k, v in list(args.items())[:3])
 
@@ -201,14 +204,27 @@ def classify_tool_call(name: str, args: dict[str, Any]) -> ApprovalRequest | Non
         risk = "destructive" if command_is_destructive(cmd) else "exec"
     elif name == "run_compute":
         risk = "exec"
-    else:  # write_file / edit_file
+    else:  # write_file / edit_file / apply_patch
         risk = "write"
     return ApprovalRequest(tool_name=name, arguments=args, risk=risk, detail=_call_detail(name, args))
 
 
 def write_target(name: str, args: dict[str, Any]) -> str:
     """The path a write-risk call would land on, or "" if the call has none."""
-    if name not in ("write_file", "edit_file"):
+    if name not in ("write_file", "edit_file", "apply_patch"):
+        return ""
+    if name == "apply_patch":
+        patch = str((args or {}).get("patch") or (args or {}).get("diff") or "")
+        for line in patch.splitlines():
+            stripped = line.strip()
+            if stripped.startswith(("*** Update File:", "*** Add File:", "*** Delete File:")):
+                return stripped.split(":", 1)[-1].strip()
+            if stripped.startswith(("--- ", "+++ ")):
+                path = stripped[4:].split("\t", 1)[0].strip()
+                if path.startswith(("a/", "b/")):
+                    path = path[2:]
+                if path and path != "/dev/null":
+                    return path
         return ""
     return str((args or {}).get("path", "") or "")
 

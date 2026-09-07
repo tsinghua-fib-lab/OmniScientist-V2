@@ -725,9 +725,23 @@ async def test_context_rollover_continues_the_same_run_without_spending_an_itera
     llm = ScriptedLLM(
         [
             ChatWithToolsResult(tool_calls=[ToolCall("c1", "echo", {"x": "one"})]),
-            ChatWithToolsResult(content="Completed: first check. Open: second check."),
+            ChatWithToolsResult(
+                content=(
+                    '{"objective":"finish both checks",'
+                    '"verified_findings":[{"tool":"echo","text":"first check"}],'
+                    '"unpaid_deliverables":["second check"],'
+                    '"next_action":"run the second check"}'
+                )
+            ),
             ChatWithToolsResult(tool_calls=[ToolCall("c2", "echo", {"x": "two"})]),
-            ChatWithToolsResult(content="Completed: both checks. Open: none."),
+            ChatWithToolsResult(
+                content=(
+                    '{"objective":"finish both checks",'
+                    '"verified_findings":[{"tool":"echo","text":"both checks"}],'
+                    '"unpaid_deliverables":[],'
+                    '"next_action":"answer the user"}'
+                )
+            ),
             ChatWithToolsResult(content="all requested checks are complete"),
         ]
     )
@@ -812,7 +826,14 @@ async def test_rollover_preserves_steering_without_promoting_tool_text_to_assist
                     ChatWithToolsResult(
                         tool_calls=[ToolCall("c1", "echo", {"x": "one"})]
                     ),
-                    ChatWithToolsResult(content="checkpoint"),
+                    ChatWithToolsResult(
+                        content=(
+                            '{"objective":"finish the review",'
+                            '"verified_findings":[{"tool":"echo","text":"review evidence"}],'
+                            '"unpaid_deliverables":[],'
+                            '"next_action":"apply the new constraint"}'
+                        )
+                    ),
                     ChatWithToolsResult(content="finished with the new constraint"),
                 ]
             )

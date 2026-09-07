@@ -20,12 +20,15 @@ from omni.agent.capabilities import (
     CAPABILITY_ARTIFACT_REVISE,
     CAPABILITY_FIGURE,
     CAPABILITY_GROUNDED_QA,
+    CAPABILITY_LITERATURE_PRECEDENT,
     CAPABILITY_LITERATURE_SEARCH,
+    CAPABILITY_LITERATURE_SURVEY,
     CAPABILITY_TASK_INSPECT,
     CAPABILITY_TASK_REVIEW,
     contract_outputs,
     contract_outputs_from_capabilities,
     deliverables_from_capabilities,
+    is_native_synthesis_capability,
     is_qa_figure_pair,
     is_survey_pair,
     native_tool_for_capability,
@@ -45,8 +48,11 @@ from omni.agent.plan_factory import (
     build_schedule_plan,
     build_task_inspect_plan,
     build_task_review_plan,
+    capable_writing_plan,
     carry_capability_inputs,
+    carry_proposal_inputs,
     needs_input_plan,
+    pure_memory_request,
 )
 from omni.agent.plan_runner_utils import gap_default, gap_question
 from omni.agent.skill_arbitrator import SkillArbitrator
@@ -199,10 +205,15 @@ class IntentPlanner:
         caps = list(proposal.required_capabilities)
         step_caps = [str(step.get("capability") or "") for step in proposal.workflow_steps]
         all_caps = [cap for cap in [*caps, *step_caps] if cap]
+        writing_from_outputs = any(
+            is_native_synthesis_capability(str(item))
+            for item in (proposal.outputs or [])
+        )
         wants_artifact = CAPABILITY_FIGURE in all_caps or "artifact" in proposal.outputs
         wants_answer = CAPABILITY_GROUNDED_QA in all_caps or "answer" in proposal.outputs
 
-        if proposal.intent_type == "memory_update" or "memory.update" in all_caps:
+        memory_requested = proposal.intent_type == "memory_update" or "memory.update" in all_caps
+        if memory_requested and pure_memory_request(proposal, all_caps):
             plan = self._utility_plan(
                 text,
                 task_id=task_id,
@@ -212,6 +223,16 @@ class IntentPlanner:
                 rationale=rationale,
             )
             return carry_capability_inputs(plan, proposal, "memory.update")
+        if memory_requested:
+            plan = build_assistant_plan(
+                text,
+                task_id=task_id,
+                rationale=rationale or "memory update sequenced with sibling work",
+            )
+            plan.confidence = proposal.confidence or plan.confidence
+            plan.provenance_mode = proposal.provenance_mode
+            plan.outputs = list(proposal.outputs) or plan.outputs
+            return carry_proposal_inputs(plan, proposal)
 
         # In-place edit of an existing figure. The runtime grounds the edit
         # target against the active artifact and runs the deterministic patch;
@@ -257,7 +278,40 @@ class IntentPlanner:
             caps = [cap for cap in caps if cap != CAPABILITY_TASK_INSPECT]
 
         figure_and_paper = bool(infer_figure_and_paper_outputs(text))
-        if is_survey_pair(all_caps, proposal.outputs) and not figure_and_paper:
+        from omni.research.literature_modes import utterance_asks_precedent
+
+        if (
+            utterance_asks_precedent(text)
+            and CAPABILITY_LITERATURE_PRECEDENT not in all_caps
+            and not figure_and_paper
+            and not utterance_asks_written_survey(text)
+        ):
+            all_caps = [CAPABILITY_LITERATURE_PRECEDENT, *all_caps]
+        if CAPABILITY_LITERATURE_PRECEDENT in all_caps and not figure_and_paper:
+            plan = build_assistant_plan(
+                text,
+                task_id=task_id,
+                rationale=rationale
+                or "precedent search: high-recall retrieve, then yes/no/unclear plus sources",
+            )
+            plan.confidence = proposal.confidence or 0.86
+            plan.provenance_mode = proposal.provenance_mode
+            plan.outputs = list(dict.fromkeys([*(proposal.outputs or []), "answer", "sources"]))
+            plan.user_notices = list(
+                dict.fromkeys(
+                    [
+                        *plan.user_notices,
+                        "Precedent mode: start with yes, no, or unclear, then name sources.",
+                    ]
+                )
+            )
+            plan = _require_survey_cite_source(plan)
+            plan = _carry_survey_retrieve(plan, proposal, text)
+            return _stamp_precedent_contract(plan, text)
+        if (
+            CAPABILITY_LITERATURE_SURVEY in all_caps
+            or is_survey_pair(all_caps, proposal.outputs)
+        ) and not figure_and_paper:
             # A written survey owes a manuscript. SINGLE_SKILL retrieve has no
             # write_file; host fill is not the produce path. Sequence search
             # then write_file against live results (same floor as figure+paper).
@@ -270,6 +324,7 @@ class IntentPlanner:
             plan.confidence = proposal.confidence or 0.86
             plan.provenance_mode = proposal.provenance_mode
             plan.outputs = list(proposal.outputs) or plan.outputs
+            plan = _require_survey_cite_source(plan)
             return _carry_survey_retrieve(plan, proposal, text)
         if figure_and_paper:
             # The user named both a figure and a paper. A literature+write
@@ -349,6 +404,18 @@ class IntentPlanner:
                     outputs=outputs,
                 )
                 return carry_capability_inputs(plan, proposal, capability)
+            if is_native_synthesis_capability(capability):
+                return _carry_survey_retrieve(
+                    capable_writing_plan(
+                        text,
+                        task_id=task_id,
+                        proposal=proposal,
+                        rationale=rationale,
+                        outputs=list(outputs),
+                    ),
+                    proposal,
+                    text,
+                )
             mode = proposal.execution_mode if proposal.execution_mode in {"background", "foreground"} else "background"
             plan = self._single_capability(
                 text,
@@ -360,6 +427,17 @@ class IntentPlanner:
                 confidence=proposal.confidence or 0.72,
             )
             return carry_capability_inputs(plan, proposal, capability)
+        if writing_from_outputs and not all_caps:
+            return _carry_survey_retrieve(
+                capable_writing_plan(
+                    text,
+                    task_id=task_id,
+                    proposal=proposal,
+                    rationale=rationale,
+                ),
+                proposal,
+                text,
+            )
         if inspect_misapplied and utterance_asks_written_survey(text) and not all_caps:
             plan = build_assistant_plan(
                 text,
@@ -682,6 +760,34 @@ def _live_sequence_required(
     if "artifact" in (proposal.outputs or []) and not covered:
         requested.add(CAPABILITY_FIGURE)
     return bool(requested - covered)
+
+
+def _stamp_precedent_contract(plan: IntentPlan, text: str) -> IntentPlan:
+    """Owl always retrieves; keep literature.precedent visible to review."""
+    inputs = dict(plan.capability_inputs or {})
+    inputs.setdefault(CAPABILITY_LITERATURE_PRECEDENT, {})
+    search = inputs.get(CAPABILITY_LITERATURE_SEARCH)
+    if not (
+        isinstance(search, dict)
+        and str(search.get("query") or search.get("topic") or "").strip()
+    ):
+        inputs[CAPABILITY_LITERATURE_SEARCH] = {"query": text}
+    plan.capability_inputs = inputs
+    return plan
+
+
+def _require_survey_cite_source(plan: IntentPlan) -> IntentPlan:
+    """Survey contract: at least one cite_source event, or settlement degrades."""
+    from omni.research.literature_modes import survey_required_events
+
+    events = survey_required_events(plan.verification_plan.required_events)
+    if events == list(plan.verification_plan.required_events):
+        return plan
+    plan.verification_plan = VerificationPlan(
+        required_outputs=list(plan.verification_plan.required_outputs),
+        required_events=events,
+    )
+    return plan
 
 
 def _carry_survey_retrieve(

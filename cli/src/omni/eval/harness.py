@@ -98,7 +98,10 @@ class ScenarioLLM(LLMClient):
         from omni.runtime.final_synthesis import SYNTHESIS_SYSTEM_PROMPT
 
         if system == SYNTHESIS_SYSTEM_PROMPT:
-            return "# Draft\n\n" + "Grounded synthesis of the upstream workflow results. " * 6
+            return (
+                "# Draft\n\n"
+                + "Grounded synthesis of the upstream workflow results [S1]. " * 6
+            )
         return f"summary:{user[:40]}"
 
     async def chat_with_tools(self, messages, tools, **kwargs: Any) -> ChatWithToolsResult:  # noqa: ANN001

@@ -53,7 +53,7 @@ from omni.skills_runtime.context import ExecContext
 # Privileged, side-effecting tools a specialist does NOT get by default: a
 # read-only-ish coordinator must not silently gain write/exec via fan-out. A
 # spec may re-grant them explicitly through ``SubagentSpec.tools``.
-_MUTATION_TOOLS = frozenset({"write_file", "edit_file", "bash", "run_compute"})
+_MUTATION_TOOLS = frozenset({"write_file", "edit_file", "apply_patch", "bash", "run_compute"})
 _MAX_SUMMARY_CHARS = 6000
 
 

@@ -33,6 +33,8 @@ metadata:
       - 示意图
     delivery_mode: async_task
     kind: python_engine
+    execution:
+      effects: [user_files.write]
     workflow:
       failure_policy: continue_with_partial
       allow_failed_dependencies: true

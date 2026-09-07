@@ -46,6 +46,7 @@ RESEARCH_PRODUCE_TOOLS = frozenset(
         "web_fetch",
         "write_file",
         "edit_file",
+        "apply_patch",
         "arxiv-fetch",
         "arxiv_search",
         "openalex-search",

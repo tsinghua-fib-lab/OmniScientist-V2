@@ -17,6 +17,11 @@ import typer
 from omni import __version__
 from omni.cli.render import banner, data_table, info, success, warn
 from omni.cli.state import AppState, make_agent
+from omni.config.live_settings import (
+    format_model_identity,
+    format_vlm_identity,
+    public_connection_identity,
+)
 from omni.config.paths import OmniPaths
 from omni.runtime.daemon import (
     daemon_info,
@@ -538,9 +543,7 @@ async def _run_service(state: AppState, *, channels: str, workers: int, task_onl
             # provider/base_url the *running* daemon resolved — the quickest way to
             # spot a daemon still on stale config after a config change (never the
             # api_key).
-            "model_provider": agent.settings.model.provider,
-            "model_name": agent.settings.model.model,
-            "model_base_url": agent.settings.model.base_url,
+            **public_connection_identity(agent.settings),
         }
         write_pidfile(agent.paths, metadata=metadata)
         pidfile_written = True
@@ -887,6 +890,20 @@ def status_cmd(
         ["Workspaces", str(len(rt.get("workspaces") or []))],
         ["Channels", ", ".join(rt.get("channels") or []) or "-"],
     ]
+    if "model_provider" in rt or "vlm_enabled" in rt:
+        rows.extend(
+            [
+                ["Model", format_model_identity(rt.get("model_provider"), rt.get("model_name"))],
+                [
+                    "VLM",
+                    format_vlm_identity(
+                        rt.get("vlm_enabled"),
+                        rt.get("vlm_model"),
+                        rt.get("vlm_endpoint"),
+                    ),
+                ],
+            ]
+        )
     if snap.get("last_error"):
         rows.append(["Last error", str(snap["last_error"])])
     data_table("omni serve (home service)", ["field", "value"], rows)

@@ -37,6 +37,18 @@ _EXTENDED_NEWLINE_SEQUENCES = (
 )
 
 _EXTENDED_ENTER_SEQUENCES = ("\x1b[13u", "\x1b[13;1u")
+# Alt+V and Ctrl+Alt+V under modifyOtherKeys / Kitty CSI-u. Mapped onto
+# ControlV so one eager binding matches Codex (Ctrl / Alt / Ctrl+Alt + V).
+# Ctrl+Shift+V (modifier 6) is left alone — that is the usual Linux paste.
+_PASTE_IMAGE_ALT_SEQUENCES = (
+    "\x1b[27;3;118~",
+    "\x1b[118;3u",
+    "\x1b[118;3:1u",
+    "\x1b[27;7;118~",
+    "\x1b[118;7u",
+    "\x1b[118;7:1u",
+)
+
 _EXTENDED_CONTROL_J_SEQUENCES = (
     "\x1b[106;5u",
     "\x1b[106;5:1u",
@@ -81,9 +93,30 @@ def _register_extended_key_sequences() -> None:
     for key, code in _emacs_control_chords():
         for sequence in _control_chord_sequences(code):
             ANSI_SEQUENCES[sequence] = key
+    for sequence in _PASTE_IMAGE_ALT_SEQUENCES:
+        ANSI_SEQUENCES[sequence] = Keys.ControlV
 
 
 _register_extended_key_sequences()
+
+
+def install_paste_image_bindings(
+    bindings: KeyBindings,
+    *,
+    handler: Callable[[KeyPressEvent], object | None],
+    active: FilterOrBool = True,
+) -> None:
+    """Reserve Ctrl+V / Alt+V / Ctrl+Alt+V for clipboard image paste.
+
+    Same chords as Codex ``fixed.paste_image``. ``Cmd+V`` is Super/Meta and
+    is not bound — the terminal keeps it as text paste on macOS.
+    """
+
+    @bindings.add("c-v", filter=active, eager=True)
+    @bindings.add("escape", "c-v", filter=active, eager=True)
+    @bindings.add("escape", "v", filter=active, eager=True)
+    def paste_image(event: KeyPressEvent) -> object | None:
+        return handler(event)
 
 
 def install_multiline_bindings(

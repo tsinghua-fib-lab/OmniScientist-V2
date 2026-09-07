@@ -61,6 +61,7 @@ _PROJECT_FORBIDDEN_PREFIXES = (
     # namespace so a cloned project cannot redirect image data or pair an owner
     # token with a project-selected provider/model.
     "vlm.",
+    "livefigure.gemini.",
     # Workspace trust is a *global* user decision; a cloned repo must never be
     # able to declare itself trusted or redirect where generated files land.
     "trust.",
@@ -101,10 +102,31 @@ class VlmCfg(BaseModel):
 
     enabled: bool = False
     model: str = ""
+    # OpenAI Images model for ``/v1/images/generations``. Chat VLMs such as
+    # Gemini preview often accept image *input* but are not Images generators.
+    image_model: str = ""
     endpoint: str = ""
     api_key: str = ""
     protocol: str = "openai_compatible_chat"
     timeout_s: float = 180.0
+
+
+class LiveFigureGeminiCfg(BaseModel):
+    """Native Gemini image route retained for the legacy LiveFigure pipeline."""
+
+    enabled: bool = False
+    base_url: str = ""
+    api_key: str = ""
+    auth_mode: str = "bearer"
+    image_model: str = ""
+    vision_model: str = ""
+    timeout_s: float = 180.0
+
+
+class LiveFigureCfg(BaseModel):
+    """Owner-only configuration for LiveFigure's native image generator."""
+
+    gemini: LiveFigureGeminiCfg = Field(default_factory=LiveFigureGeminiCfg)
 
 
 class ReactCfg(BaseModel):
@@ -891,6 +913,7 @@ class OmniSettings(BaseModel):
     role: str = ""  # path or inline override of the system role
     model: ModelCfg = Field(default_factory=ModelCfg)
     vlm: VlmCfg = Field(default_factory=VlmCfg)
+    livefigure: LiveFigureCfg = Field(default_factory=LiveFigureCfg)
     react: ReactCfg = Field(default_factory=ReactCfg)
     display: DisplayCfg = Field(default_factory=DisplayCfg)
     planner: PlannerCfg = Field(default_factory=PlannerCfg)
@@ -986,6 +1009,8 @@ def _env_layer() -> dict[str, Any]:
     vlm: dict[str, Any] = {}
     if (v := pick("OMNI_VLM_MODEL")):
         vlm["model"] = v
+    if (v := pick("OMNI_VLM_IMAGE_MODEL")):
+        vlm["image_model"] = v
     if (v := pick("OMNI_VLM_ENDPOINT")):
         vlm["endpoint"] = v
     if (v := pick("OMNI_VLM_API_KEY")):

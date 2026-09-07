@@ -89,7 +89,8 @@ def test_service_admission_names_the_setup_command() -> None:
     assert result["action_required"]["kind"] == "configure"
     assert result["action_required"]["service"] == "vlm"
     assert result["do_not_retry"] is True
-    assert "vision model (VLM)" in result["summary"]
+    assert "multimodal large language model (MLLM)" in result["summary"]
+    assert "image input and image output" in result["summary"]
     assert "omni config vlm" in result["error"]
     assert "Do not retry livefigure" in result["error"]
     assert skill_admission_rejection(entry, services={"vlm": gateway}) == result

@@ -514,6 +514,15 @@ Skill engines may still emit a `deliverable_assessment` object in their own outp
 synthesis). That is provider-local self-reporting for the *model* to read. There is no declared
 `quality_contract` for the host to match it against, and no host-driven quality retry.
 
+Research review findings (`research.review`), STORM-like survey stages
+(`research.stages`), the expensive-work plan gate (`research.plan_gate`), and
+figure provenance (`artifact.provenance`) are the same kind of object: events
+the host writes so `/task show` can print cards. A reviewer `revise` / `reject`
+must not flip settlement or paint Partial success by itself. Only a real
+structural `[S#]` miss sets an audit `blocks_success` flag; that flag is not a
+second settlement contract. Auto mode still runs decks and LiveFigure — the
+plan gate names expensive work, it does not wait for approval.
+
 #### Execution gate and replay authority
 
 `ToolGateway` remains the final shared boundary for coordinator tools, skills, workflow steps,
@@ -1028,15 +1037,29 @@ it the ordinary way — the engine returns a structured `action_required` (e.g. 
 presentation boundary to a friendly `needs_input`, while durable background tasks, workflows, and MCP
 preserve the same action in their result.
 
-VLM is an owner-controlled Host Service. The LiveFigure adapter uses the narrow
-`generate_text` port and Omni's MCP response never serializes the endpoint or API
-key, so Claude Code, Codex, and OpenClaw use LiveFigure through Omni MCP by
-default. This is a transport and API boundary, not a sandbox for trusted
-in-process Python Skills: their engine receives `ExecContext`, which includes
-host settings and services, and trusted code could inspect those objects. Hard
-secret isolation would require a sanitized out-of-process execution context.
-The explicit standalone runner is the only supported path that reads
-`OMNI_VLM_*` variables.
+VLM is an owner-controlled Host Service with two public contracts. Chat vision
+(`generate_text`, paper-review crops, poster review) uses OpenAI-compatible
+`/v1/chat/completions` plus an `image_url` part. Image *output* for LiveFigure
+(`generate_image`) routes by model: a Gemini image chat or pin
+(`gemini` + `image` in the name) POSTs
+`/v1beta/models/{model}:generateContent` (Google + compatible gateways; payload
+carries both `imageConfig` and `image`); GPT Image / DALL·E stay on
+`/v1/images/generations`. A Gemini miss falls through to Images so a catalog
+`gpt-image-2` can still pay the figure. Pinning `gpt-image-*` / `dall-e-*` on
+`vlm.image_model` skips Gemini. The chat VLM is often not an Images generator —
+`omni config vlm --image-model gpt-image-2` (or `OMNI_VLM_IMAGE_MODEL`) pins
+the Images model without changing the chat endpoint. `omni config test` and
+`omni config vlm --test` report two rows: `vlm` (1×1 image-*input* chat probe)
+and `vlm_images` (tiny generateContent / Images call). A passing chat row does
+not prove LiveFigure. A gateway HTTP 503 on Images is `retryable_io`, not
+`vlm_not_configured`. The LiveFigure adapter uses the same routing. Omni's MCP
+response never serializes the endpoint or API key, so Claude Code, Codex, and
+OpenClaw use LiveFigure through Omni MCP by default. This is a transport and
+API boundary, not a sandbox for trusted in-process Python Skills: their engine
+receives `ExecContext`, which includes host settings and services, and trusted
+code could inspect those objects. Hard secret isolation would require a
+sanitized out-of-process execution context. The explicit standalone runner is
+the only supported path that reads `OMNI_VLM_*` variables.
 
 Every user input from CLI, REPL, WeChat, Feishu, or DingTalk creates a **Task** (`tasks`, one row per
 user request) before the first tool call. ReAct tools such as `search_corpus`, `record_claim`,
@@ -1064,10 +1087,21 @@ startup, every ~10 minutes on its poller, and once per `omni task drain`):
   artifact files are never touched.
 
 `omni task show <id>` defaults to the readable view for a Task, WorkflowRun, WorkflowStep, Skill
-Execution, or Child Task id;
+ Execution, or Child Task id;
 `omni task show <id> --json` keeps the full machine-readable payload. In the REPL, `/task show <id>`
 and `/task show <id> --json` mirror the same behavior, while `/task attach <id>` brings the selected
-result boundary back into the active session.
+result boundary back into the active session. After a survey, figure, or deck,
+the readable view also lists **research review findings**, **research stages**,
+**plan gate**, and **figure package** when those events exist.
+
+`get_task` / `get_subtask` may return the current in-flight task as a snapshot
+(`in_flight: true`, with a hint that status is not settlement). That object's
+`status` / `artifacts` are inspect facts, not a tool failure. Codex lets the
+agent read cwd mid-turn; Omni used to refuse "cannot inspect the in-flight
+task". Host tool-error classes treat a 503 / retryable Images miss as
+`retryable_io` even when the message contains "vlm", and they do not classify
+an inspect record as `skill_failed_partial` just because the *object* is
+`failed`.
 
 Tool event lifecycle and domain outcomes are deliberately separate. For example, the Bash handler
 can execute correctly while the requested process exits non-zero. That event remains
@@ -1223,7 +1257,10 @@ context lists their absolute paths next to the working directory (Codex
 `<environment_context>` / `<cwd>`). A compute process can `from omni_io import
 output_path` — the host copies that helper into `$TMPDIR` and prepends it to
 `PYTHONPATH`, the same idea as Codex injecting `apply_patch` into the child
-environment. If a command fails with `FileNotFoundError` / `ENOENT` and the
+environment. `compute_env` also prepends `Path(sys.executable).parent` to
+`PATH` so bash `python3` / `pip` resolve to Omni's interpreter (where
+`python-pptx` is installed) instead of Homebrew or a login conda. If a command
+fails with `FileNotFoundError` / `ENOENT` and the
 path still contains a literal `$VAR` that the process exported, the observation
 adds an `[unexpanded-env]` hint with the resolved path. The host does not
 rewrite the script. The host

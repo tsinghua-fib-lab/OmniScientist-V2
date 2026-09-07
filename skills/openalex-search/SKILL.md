@@ -7,6 +7,8 @@ metadata:
     version: "1.0"
     dependencies: ["python>=3.11", "httpx"]
     allowed_tools: [bash, write_file]
+    execution:
+      effects: []
     tier: research
     role: support
     research_contract: portable_provenance_v1

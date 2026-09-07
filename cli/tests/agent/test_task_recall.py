@@ -57,7 +57,7 @@ async def test_search_and_get_task_return_typed_linked_outputs() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_task_refuses_the_in_flight_task() -> None:
+async def test_get_task_snapshots_the_in_flight_task() -> None:
     agent = await OmniAgent.create(load_settings())
     run = await _historical_run(agent)
     session_id = await agent.ensure_session(channel="cli")
@@ -69,8 +69,12 @@ async def test_get_task_refuses_the_in_flight_task() -> None:
     finally:
         await agent.aclose()
 
-    assert detail["error"] == "cannot inspect the in-flight task"
-    assert prefix["error"] == "cannot inspect the in-flight task"
+    assert detail["ref"] == f"task:{run.id}"
+    assert detail["in_flight"] is True
+    assert "not settlement" in detail["hint"]
+    assert "error" not in detail
+    assert prefix["in_flight"] is True
+    assert prefix["title"] == detail["title"]
 
 
 @pytest.mark.asyncio

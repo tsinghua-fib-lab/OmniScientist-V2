@@ -21,7 +21,7 @@ try:
 except ImportError:  # pragma: no cover - platform dependent
     _msvcrt = None  # type: ignore[assignment]
 
-_FILESYSTEM_MUTATIONS = frozenset({"write_file", "edit_file"})
+_FILESYSTEM_MUTATIONS = frozenset({"write_file", "edit_file", "apply_patch"})
 _EXECUTION_TOOLS = frozenset({"bash", "run_compute"})
 _STORE_MUTATIONS = frozenset({
     "add_evidence",

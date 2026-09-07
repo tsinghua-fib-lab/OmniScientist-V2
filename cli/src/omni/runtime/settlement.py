@@ -45,6 +45,7 @@ from omni.core.funnel_facts import (
     is_empty_literature_funnel,
 )
 from omni.core.termination import OutcomeStatus, aggregate_outcome_status, base_termination_reason
+from omni.research.citation_anchors import uncovered_citation_event
 from omni.runtime.remaining import remaining_deliverables, remaining_typed_refs
 from omni.storage.models import SubtaskORM, TaskEventORM, TaskORM, WorkflowRunORM
 
@@ -232,7 +233,14 @@ async def settlement_for(
     status = aggregate_outcome_status(
         execution,
         "failed" if (missing or lost or unfounded) else "succeeded",
-        "degraded" if (degraded or undelivered or _failed_presentation(run, events)) else "succeeded",
+        "degraded"
+        if (
+            degraded
+            or undelivered
+            or _failed_presentation(run, events)
+            or uncovered_citation_event(events)
+        )
+        else "succeeded",
     )
     detail: dict[str, Any] = {}
     for key, values in (
@@ -245,6 +253,8 @@ async def settlement_for(
     ):
         if values:
             detail[key] = values
+    if uncovered_citation_event(events):
+        detail["uncovered_citation_anchors"] = True
     return Settlement(status, detail)
 
 
@@ -369,6 +379,8 @@ def _unfounded_claims(run: TaskORM, events: list[TaskEventORM]) -> list[str]:
     if not required:
         return []
     seen = {event.event_type for event in events}
+    seen.update(str(getattr(event, "name", "") or "") for event in events)
+    seen.update(str(getattr(event, "tool_name", "") or "") for event in events)
     return [name for name in required if name not in seen]
 
 

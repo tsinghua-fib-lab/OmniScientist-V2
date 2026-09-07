@@ -1867,10 +1867,11 @@ async def test_feishu_ws_isolates_sdk_module_loop(monkeypatch, settings):
     assert fake_ws.loop is not asyncio.get_running_loop()
     assert "message" in FakeLarkChannel.instance.handlers
     await FakeLarkChannel.instance.emit_message(f"/pair {code}")
-    for _ in range(10):
+    for _ in range(50):
         if fake_outbound.sent:
             break
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.01)
+    await channel.inbound.idle()
     assert fake_outbound.sent
     assert fake_outbound.sent[0][0] == "chat-feishu"
     assert "Pairing complete" in fake_outbound.sent[0][1]
@@ -2310,7 +2311,511 @@ async def test_dingtalk_stream_registers_current_chatbot_topic():
     }))
 
     assert (code, message) == (200, "OK")
+    await asyncio.sleep(0)
     assert received == [{"text": "你好", "target": "conversation-1"}]
+
+
+_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
+
+
+@pytest.mark.asyncio
+async def test_feishu_post_and_image_become_one_bound_turn(settings):
+    from omni.channels.feishu import FeishuChannel
+    from omni.channels.security import add_allowed_external_key
+
+    cfg = settings.paths.channels_dir / "feishu.toml"
+    add_allowed_external_key(cfg, "chat-feishu")
+
+    class MediaOutbound(_FakeOutbound):
+        def __init__(self) -> None:
+            super().__init__()
+            self.image_calls: list[tuple[str, str]] = []
+
+        async def download_image(self, image_key: str, *, message_id: str = "") -> bytes:
+            self.image_calls.append((image_key, message_id))
+            assert image_key == "img_1"
+            return _PNG
+
+        async def download_message_resource(
+            self, message_id: str, file_key: str, *, resource_type: str
+        ) -> bytes:
+            self.image_calls.append((file_key, message_id))
+            assert (message_id, file_key, resource_type) == ("om_post", "img_1", "image")
+            return _PNG
+
+    agent = _DummyAgent()
+    fake = MediaOutbound()
+    channel = FeishuChannel(settings, agent, client=fake)  # type: ignore[arg-type]
+    await channel.handle_feishu_message(
+        {
+            "event": {
+                "message": {
+                    "chat_id": "chat-feishu",
+                    "message_id": "om_post",
+                    "message_type": "post",
+                    "content": json.dumps(
+                        {
+                            "title": "",
+                            "content": [
+                                [
+                                    {"tag": "text", "text": "看这张图"},
+                                    {"tag": "img", "image_key": "img_1"},
+                                ]
+                            ],
+                        }
+                    ),
+                }
+            }
+        }
+    )
+    assert len(agent.turns) == 1
+    assert "看这张图" in agent.turns[0]["text"]
+    assert "[Image #1]" in agent.turns[0]["text"]
+    assert agent.turns[0]["file_uris"]
+    assert fake.image_calls == [("img_1", "om_post")]
+
+
+@pytest.mark.asyncio
+async def test_dingtalk_picture_and_fast_provider_ack(settings):
+    from types import SimpleNamespace
+
+    from omni.channels.dingtalk import DingTalkChannel, _build_dingtalk_chatbot_handler
+    from omni.channels.security import add_allowed_external_key
+
+    cfg = settings.paths.channels_dir / "dingtalk.toml"
+    add_allowed_external_key(cfg, "conversation-1")
+
+    class SlowAgent(_DummyAgent):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def handle_turn(self, text, **kwargs):  # noqa: ANN001
+            self.entered.set()
+            await self.release.wait()
+            return await super().handle_turn(text, **kwargs)
+
+    class MediaOutbound(_FakeOutbound):
+        async def download_robot_media(self, download_code: str) -> bytes:
+            assert download_code == "dc-1"
+            await asyncio.sleep(0.25)
+            return _PNG
+
+    agent = SlowAgent()
+    fake = MediaOutbound()
+    channel = DingTalkChannel(settings, agent, client=fake)  # type: ignore[arg-type]
+
+    class FakeAckMessage:
+        STATUS_OK = 200
+        STATUS_SYSTEM_EXCEPTION = 500
+
+    class FakeSDK:
+        AckMessage = FakeAckMessage
+        ChatbotHandler = object
+        ChatbotMessage = None
+
+    handler = _build_dingtalk_chatbot_handler(FakeSDK, channel.admit_dingtalk_event)
+    started = asyncio.get_running_loop().time()
+    code, message = await handler.process(
+        SimpleNamespace(
+            data={
+                "msgtype": "richText",
+                "conversationId": "conversation-1",
+                "msgId": "dt-1",
+                "sessionWebhook": "https://oapi.dingtalk.com/robot/sendBySession?session=s",
+                "content": {
+                    "richText": [
+                        {"text": "分析这张图"},
+                        {"pictureDownloadCode": "dc-1"},
+                    ]
+                },
+            }
+        )
+    )
+    elapsed = asyncio.get_running_loop().time() - started
+    assert (code, message) == (200, "OK")
+    assert elapsed < 0.15
+    await asyncio.wait_for(agent.entered.wait(), timeout=2)
+    assert agent.turns == []
+    agent.release.set()
+    await channel.inbound.idle()
+    assert len(agent.turns) == 1
+    assert "分析这张图" in agent.turns[0]["text"]
+    assert "[Image #1]" in agent.turns[0]["text"]
+
+
+def test_feishu_sdk_object_keeps_resources_sender_and_thread():
+    from types import SimpleNamespace
+
+    from omni.channels.feishu import _normalize_feishu_event
+
+    event = SimpleNamespace(
+        chat_id="oc_chat",
+        content_text="看这张图",
+        message_id="om_sdk",
+        raw={
+            "header": {"event_id": "ev_sdk"},
+            "event": {
+                "sender": {"sender_id": {"open_id": "ou_user"}},
+                "message": {
+                    "message_id": "om_sdk",
+                    "chat_id": "oc_chat",
+                    "message_type": "post",
+                    "parent_id": "om_parent",
+                    "content": json.dumps(
+                        {
+                            "title": "",
+                            "content": [
+                                [
+                                    {"tag": "text", "text": "看这张图"},
+                                    {"tag": "img", "image_key": "img_sdk"},
+                                ]
+                            ],
+                        }
+                    ),
+                    "resources": [{"type": "image", "file_key": "img_sdk"}],
+                },
+            },
+        },
+    )
+    msg = _normalize_feishu_event(event)
+    assert msg["chat_id"] == "oc_chat"
+    assert msg["text"] == "看这张图"
+    assert msg["message_id"] == "om_sdk"
+    assert msg["event_id"] == "ev_sdk"
+    assert msg["sender"] == "ou_user"
+    assert msg["thread"] == "om_parent"
+    assert "img_sdk" in msg["_media"]
+
+
+def test_feishu_resource_objects_keep_media_and_drop_placeholder_text():
+    from types import SimpleNamespace
+
+    from omni.channels.feishu import _normalize_feishu_event
+
+    event = SimpleNamespace(
+        chat_id="oc-group",
+        content_text="![image](img_real)",
+        message_id="om-real",
+        sender_id="ou_alice",
+        conversation=SimpleNamespace(chat_id="oc-group", thread_id="om_thread"),
+        sender=SimpleNamespace(open_id="ou_alice"),
+        content=SimpleNamespace(image_key="img_real", text=""),
+        resources=[SimpleNamespace(type="image", file_key="img_real", file_name="")],
+        raw={},
+    )
+    msg = _normalize_feishu_event(event)
+    assert msg["chat_id"] == "oc-group"
+    assert msg["text"] == ""
+    assert msg["message_id"] == "om-real"
+    assert msg["sender"] == "ou_alice"
+    assert msg["thread"] == "om_thread"
+    assert "img_real" in msg["_media"]
+
+
+def test_feishu_real_sdk_inbound_message_keeps_resource_and_sender():
+    lark_types = pytest.importorskip("lark_oapi.channel.types")
+
+    from omni.channels.feishu import _normalize_feishu_event
+
+    event = lark_types.InboundMessage(
+        id="om-real",
+        create_time=1,
+        conversation=lark_types.Conversation(
+            chat_id="oc-group", chat_type="group", thread_id="om_thread"
+        ),
+        sender=lark_types.Identity(open_id="ou_alice"),
+        content=lark_types.ImageContent(image_key="img_real"),
+        raw={},
+        content_text="![image](img_real)",
+        resources=[lark_types.ResourceDescriptor(type="image", file_key="img_real")],
+    )
+    msg = _normalize_feishu_event(event)
+    assert msg["chat_id"] == "oc-group"
+    assert msg["text"] == ""
+    assert msg["message_id"] == "om-real"
+    assert msg["sender"] == "ou_alice"
+    assert msg["thread"] == "om_thread"
+    assert "img_real" in msg["_media"]
+
+
+def test_dingtalk_picture_content_dict_is_not_user_text():
+    from omni.channels.dingtalk import _normalize_dingtalk_event
+
+    msg = _normalize_dingtalk_event(
+        {
+            "msgtype": "picture",
+            "conversationId": "c1",
+            "senderStaffId": "staff-1",
+            "content": {"downloadCode": "dc-secret", "pictureDownloadCode": "pic-1"},
+        }
+    )
+    assert msg["text"] == ""
+    assert "downloadCode" not in msg["text"]
+    assert "{" not in msg["text"]
+    assert "dc-secret" in msg["downloadCodes"]
+    assert "pic-1" in msg["downloadCodes"]
+
+
+@pytest.mark.asyncio
+async def test_feishu_sdk_object_downloads_via_message_resource(settings):
+    from types import SimpleNamespace
+
+    from omni.channels.feishu import FeishuChannel
+    from omni.channels.security import add_allowed_external_key
+
+    cfg = settings.paths.channels_dir / "feishu.toml"
+    add_allowed_external_key(cfg, "oc_chat")
+
+    class MediaOutbound(_FakeOutbound):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[tuple[str, str, str]] = []
+
+        async def download_message_resource(
+            self, message_id: str, file_key: str, *, resource_type: str
+        ) -> bytes:
+            self.calls.append((message_id, file_key, resource_type))
+            return _PNG
+
+    agent = _DummyAgent()
+    fake = MediaOutbound()
+    channel = FeishuChannel(settings, agent, client=fake)  # type: ignore[arg-type]
+    await channel.handle_feishu_message(
+        SimpleNamespace(
+            chat_id="oc_chat",
+            content_text="看这张图",
+            message_id="om_sdk",
+            raw={
+                "event": {
+                    "message": {
+                        "chat_id": "oc_chat",
+                        "message_id": "om_sdk",
+                        "content": json.dumps({"image_key": "img_sdk"}),
+                    }
+                }
+            },
+        )
+    )
+    assert fake.calls == [("om_sdk", "img_sdk", "image")]
+    assert len(agent.turns) == 1
+    assert "[Image #1]" in agent.turns[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_feishu_unpaired_media_does_not_download(settings):
+    from omni.channels.feishu import FeishuChannel
+
+    class MediaOutbound(_FakeOutbound):
+        async def download_message_resource(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            raise AssertionError("unpaired media must not hit the CDN")
+
+    agent = _DummyAgent()
+    channel = FeishuChannel(settings, agent, client=MediaOutbound())  # type: ignore[arg-type]
+    presentation = await channel.handle_feishu_message(
+        {
+            "event": {
+                "message": {
+                    "chat_id": "oc-stranger",
+                    "message_id": "om_x",
+                    "content": json.dumps({"image_key": "img_x"}),
+                }
+            }
+        }
+    )
+    assert presentation is not None
+    assert "not paired" in presentation.assistant_text
+    assert agent.turns == []
+
+
+@pytest.mark.asyncio
+async def test_feishu_late_image_stays_one_turn_during_slow_download(settings):
+    from omni.channels.feishu import FeishuChannel
+    from omni.channels.security import add_allowed_external_key
+
+    cfg = settings.paths.channels_dir / "feishu.toml"
+    add_allowed_external_key(cfg, "oc_chat")
+
+    class SlowMedia(_FakeOutbound):
+        async def download_message_resource(
+            self, message_id: str, file_key: str, *, resource_type: str
+        ) -> bytes:
+            await asyncio.sleep(0.12)
+            return _PNG
+
+    agent = _DummyAgent()
+    channel = FeishuChannel(settings, agent, client=SlowMedia())  # type: ignore[arg-type]
+    channel.inbound.quiet_window_s = 0.04
+    channel.inbound.deictic_hold_s = 0.04
+    channel.inbound.media_hold_s = 0.04
+    await channel.admit_feishu_event(
+        {"chat_id": "oc_chat", "text": "分析这张图", "message_id": "om_t"}
+    )
+    await channel.admit_feishu_event(
+        {
+            "event": {
+                "message": {
+                    "chat_id": "oc_chat",
+                    "message_id": "om_i",
+                    "content": json.dumps({"image_key": "img_late"}),
+                }
+            }
+        }
+    )
+    await channel.inbound.idle()
+    assert len(agent.turns) == 1
+    assert "分析这张图" in agent.turns[0]["text"]
+    assert "[Image #1]" in agent.turns[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_feishu_sdk_image_placeholder_stays_media_only_and_merges(settings):
+    from types import SimpleNamespace
+
+    from omni.channels.feishu import FeishuChannel
+    from omni.channels.security import add_allowed_external_key
+
+    cfg = settings.paths.channels_dir / "feishu.toml"
+    add_allowed_external_key(cfg, "oc-group")
+
+    class MediaOutbound(_FakeOutbound):
+        async def download_message_resource(
+            self, message_id: str, file_key: str, *, resource_type: str
+        ) -> bytes:
+            return _PNG
+
+    agent = _DummyAgent()
+    channel = FeishuChannel(settings, agent, client=MediaOutbound())  # type: ignore[arg-type]
+    await channel.admit_feishu_event(
+        SimpleNamespace(
+            chat_id="oc-group",
+            content_text="![image](img_real)",
+            message_id="om-real",
+            sender_id="ou_alice",
+            sender=SimpleNamespace(open_id="ou_alice"),
+            content=SimpleNamespace(image_key="img_real", text=""),
+            resources=[SimpleNamespace(type="image", file_key="img_real")],
+            raw={},
+        )
+    )
+    await channel.admit_feishu_event(
+        {
+            "chat_id": "oc-group",
+            "text": "分析这张图",
+            "message_id": "om-caption",
+            "sender": "ou_alice",
+        }
+    )
+    await channel.inbound.idle()
+    assert len(agent.turns) == 1
+    assert "分析这张图" in agent.turns[0]["text"]
+    assert "[Image #1]" in agent.turns[0]["text"]
+    assert "![image]" not in agent.turns[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_feishu_client_uses_message_resource_api():
+    import httpx
+
+    from omni.channels.outbound import FeishuClient
+
+    seen: list[str] = []
+
+    class _Transport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            seen.append(str(request.url))
+            if request.url.path.endswith("/tenant_access_token/internal"):
+                return httpx.Response(200, json={"tenant_access_token": "tok"})
+            if "/messages/om_1/resources/img_1" in str(request.url):
+                assert request.url.params.get("type") == "image"
+                return httpx.Response(200, content=_PNG)
+            return httpx.Response(404, json={"code": 1})
+
+    real = httpx.AsyncClient
+
+    def _patched(*args, **kwargs):  # noqa: ANN002, ANN003
+        kwargs["transport"] = _Transport()
+        return real(*args, **kwargs)
+
+    client = FeishuClient({"app_id": "app", "app_secret": "secret"})
+    httpx.AsyncClient = _patched  # type: ignore[assignment]
+    try:
+        data = await client.download_image("img_1", message_id="om_1")
+    finally:
+        httpx.AsyncClient = real  # type: ignore[assignment]
+    assert data == _PNG
+    assert any("/messages/om_1/resources/img_1" in url for url in seen)
+
+
+@pytest.mark.asyncio
+async def test_dingtalk_client_posts_then_downloads_url():
+    import httpx
+
+    from omni.channels.outbound import DingTalkClient
+
+    seen: list[tuple[str, str]] = []
+
+    class _Transport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            seen.append((request.method, str(request.url)))
+            path = request.url.path
+            if path.endswith("/oauth2/accessToken"):
+                return httpx.Response(200, json={"accessToken": "tok"})
+            if path.endswith("/robot/messageFiles/download"):
+                assert request.method == "POST"
+                body = json.loads(request.content.decode())
+                assert body == {"downloadCode": "dc-1", "robotCode": "robot-1"}
+                return httpx.Response(
+                    200, json={"downloadUrl": "https://static.dingtalk.com/media/a.png"}
+                )
+            if request.url.host == "static.dingtalk.com":
+                return httpx.Response(200, content=_PNG)
+            return httpx.Response(404)
+
+    real = httpx.AsyncClient
+
+    def _patched(*args, **kwargs):  # noqa: ANN002, ANN003
+        kwargs["transport"] = _Transport()
+        return real(*args, **kwargs)
+
+    client = DingTalkClient({"client_id": "robot-1", "client_secret": "sec"})
+    httpx.AsyncClient = _patched  # type: ignore[assignment]
+    try:
+        data = await client.download_robot_media("dc-1")
+    finally:
+        httpx.AsyncClient = real  # type: ignore[assignment]
+    assert data == _PNG
+    assert any(method == "POST" and "messageFiles/download" in url for method, url in seen)
+
+
+@pytest.mark.asyncio
+async def test_dingtalk_rejects_localhost_download_url():
+    import httpx
+
+    from omni.channels.outbound import DingTalkClient, OutboundError
+
+    class _Transport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/oauth2/accessToken"):
+                return httpx.Response(200, json={"accessToken": "tok"})
+            if request.url.path.endswith("/robot/messageFiles/download"):
+                return httpx.Response(200, json={"downloadUrl": "http://127.0.0.1/secret"})
+            raise AssertionError(f"must not fetch {request.url}")
+
+    real = httpx.AsyncClient
+
+    def _patched(*args, **kwargs):  # noqa: ANN002, ANN003
+        kwargs["transport"] = _Transport()
+        return real(*args, **kwargs)
+
+    client = DingTalkClient({"client_id": "robot-1", "client_secret": "sec"})
+    httpx.AsyncClient = _patched  # type: ignore[assignment]
+    try:
+        with pytest.raises(OutboundError, match="refusing media download"):
+            await client.download_robot_media("dc-1")
+    finally:
+        httpx.AsyncClient = real  # type: ignore[assignment]
 
 
 @pytest.mark.asyncio

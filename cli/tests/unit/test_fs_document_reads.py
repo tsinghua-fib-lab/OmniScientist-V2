@@ -46,6 +46,52 @@ async def test_pdf_is_extracted_as_text_not_noise(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_raster_image_is_described_not_decoded(tmp_path: Path) -> None:
+    import base64
+
+    png = tmp_path / "shot.png"
+    png.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+    )
+
+    out = await _tool(build_fs_tools(_ctx([str(png)])), "read_file")({"path": str(png)})
+
+    assert "PNG image" in out
+    assert "1×1" in out
+    assert "binary file" not in out
+    assert "\ufffd" not in out
+
+
+@pytest.mark.asyncio
+async def test_raster_image_appends_vlm_description_when_available(tmp_path: Path) -> None:
+    import base64
+
+    png = tmp_path / "ui.png"
+    png.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+    )
+
+    class _Vlm:
+        available = True
+
+        async def generate_text(self, prompt: str, *, reference_image_uri: str | None = None) -> str:
+            assert "image" in prompt.lower()
+            assert reference_image_uri and reference_image_uri.startswith("data:image/png")
+            return "A one-pixel probe image."
+
+    ctx = _ctx([str(png)])
+    ctx.vlm = _Vlm()
+    out = await _tool(build_fs_tools(ctx), "read_file")({"path": str(png)})
+
+    assert "Visual description:" in out
+    assert "one-pixel probe" in out
+
+
+@pytest.mark.asyncio
 async def test_binary_file_is_described_not_decoded(tmp_path: Path) -> None:
     blob = tmp_path / "model.bin"
     blob.write_bytes(b"\x00\x01\x02\x03" * 512)

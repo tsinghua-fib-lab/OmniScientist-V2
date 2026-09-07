@@ -235,6 +235,7 @@ class TaskPresentation:
     artifacts: list[ArtifactRef] = field(default_factory=list)
     research: ResearchRefs = field(default_factory=ResearchRefs)
     next_actions: list[str] = field(default_factory=list)
+    lit_diagnostics: list[str] = field(default_factory=list)
     trace: list[dict[str, Any]] = field(default_factory=list)
     error: str = ""
     contract_level: str = ""
@@ -292,6 +293,8 @@ class TaskPresentation:
             lines += ["", self.summary]
         if self.details:
             lines += ["", "**Result summary**", *[f"- {item}" for item in self.details]]
+        if self.lit_diagnostics:
+            lines += ["", "**Literature search**", *[f"- {item}" for item in self.lit_diagnostics]]
         if self.error:
             lines += ["", f"Error: {self.error}"]
         if self.contract_level or self.settlement_status:
@@ -441,6 +444,7 @@ class TurnPresentation:
     user_notices: list[str] = field(default_factory=list)
     settlement_status: str = ""
     next_actions: list[str] = field(default_factory=list)
+    lit_diagnostics: list[str] = field(default_factory=list)
 
     def to_markdown(self, *, include_local_paths: bool = True) -> str:
         lines: list[str] = []
@@ -493,6 +497,8 @@ class TurnPresentation:
         for task in self.tasks:
             rendered_task = replace(task, artifacts=[]) if visible_outputs else task
             lines += ["", rendered_task.to_markdown(include_local_paths=include_local_paths)]
+        if self.lit_diagnostics:
+            lines += ["", "**Literature search**", *[f"- {item}" for item in self.lit_diagnostics]]
         if self.user_notices:
             lines += ["", *self.user_notices]
         if self.degraded_warnings:
@@ -973,6 +979,14 @@ def turn_presentation_from_result(
         chat=chat,
         echoed=_is_observation_echo(text, turn),
     )
+    from omni.research.lit_diagnostics import format_lit_diagnostics, lit_diagnostics_from_sources
+
+    lit_lines = format_lit_diagnostics(
+        lit_diagnostics_from_sources(
+            getattr(turn, "tool_trace", None) or [],
+            getattr(turn, "drained_results", None) or [],
+        )
+    )
     presentation = TurnPresentation(
         assistant_text=text,
         session_id=str(getattr(turn, "session_id", "") or ""),
@@ -986,6 +1000,7 @@ def turn_presentation_from_result(
         user_notices=user_notices,
         settlement_status=settlement_status,
         next_actions=actions,
+        lit_diagnostics=lit_lines,
     )
     return _chat_shaped(presentation) if _is_im_channel(channel) else presentation
 

@@ -26,11 +26,27 @@ def test_autonomy_tools_maps_modes_and_falls_back_to_standard():
     settings.schedules.autonomy = "off"
     assert autonomy_tools(settings) == []
     settings.schedules.autonomy = "standard"
-    assert autonomy_tools(settings) == ["write_file", "edit_file", "run_compute"]
+    assert autonomy_tools(settings) == [
+        "write_file",
+        "edit_file",
+        "apply_patch",
+        "run_compute",
+    ]
     settings.schedules.autonomy = "full"
-    assert autonomy_tools(settings) == ["write_file", "edit_file", "run_compute", "bash"]
+    assert autonomy_tools(settings) == [
+        "write_file",
+        "edit_file",
+        "apply_patch",
+        "run_compute",
+        "bash",
+    ]
     settings.schedules.autonomy = "not-a-mode"  # unknown → safe standard grant
-    assert autonomy_tools(settings) == ["write_file", "edit_file", "run_compute"]
+    assert autonomy_tools(settings) == [
+        "write_file",
+        "edit_file",
+        "apply_patch",
+        "run_compute",
+    ]
 
 
 def test_schema_exposes_scheduling_columns():
@@ -46,7 +62,12 @@ async def test_add_seeds_autonomy_default_and_honours_explicit_grant():
     try:
         sid = await agent.scheduler.add("agent-goal", {"input": "x"}, kind="interval", interval_s=3600)
         sched = await agent.scheduler.get(sid)
-        assert set(sched.approved_tools) == {"write_file", "edit_file", "run_compute"}
+        assert set(sched.approved_tools) == {
+            "write_file",
+            "edit_file",
+            "apply_patch",
+            "run_compute",
+        }
 
         # An explicit list overrides the default…
         sid2 = await agent.scheduler.add(
@@ -90,7 +111,12 @@ async def test_run_due_materialises_owning_task_with_grant_and_schedule_link():
 
         task = await agent.tasks.get_task(sub.task_id)
         assert task is not None
-        assert set(task.approved_tools) == {"write_file", "edit_file", "run_compute"}
+        assert set(task.approved_tools) == {
+            "write_file",
+            "edit_file",
+            "apply_patch",
+            "run_compute",
+        }
 
         # run history surfaces the fired run for `/schedule show`.
         runs = await agent.scheduler.runs(sid)

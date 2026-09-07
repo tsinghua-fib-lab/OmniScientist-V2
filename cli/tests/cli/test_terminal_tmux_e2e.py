@@ -27,6 +27,40 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _subprocess_env(**overrides: str) -> dict[str, str]:
+    """Build the smallest useful PTY environment without forwarding secrets.
+
+    ``subprocess.run(..., check=True)`` includes ``env`` in a failing exception.
+    Passing the whole developer or CI environment would therefore publish API
+    keys in pytest output. These tests need terminal identity, locale, a home,
+    and the source tree only.
+    """
+    inherited = {
+        key: value
+        for key in (
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "LOGNAME",
+            "PATH",
+            "SHELL",
+            "TMPDIR",
+            "USER",
+        )
+        if (value := os.environ.get(key))
+    }
+    inherited.update(
+        {
+            "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src"),
+            "TERM": "xterm-256color",
+            "TMUX_TMPDIR": "/tmp",
+            **overrides,
+        }
+    )
+    return inherited
+
+
 def _tmux_config_text() -> str:
     """Build a tmux.conf compatible with old and new tmux versions.
 
@@ -89,7 +123,7 @@ def test_shift_enter_survives_a_real_pty_and_nested_tmux(tmp_path: Path) -> None
     # Unix-domain sockets have a small path limit (104 bytes on macOS), while
     # pytest's per-test directory can be much longer. The socket name is unique,
     # so the conventional short POSIX temp root is both isolated and portable.
-    tmux_env = {**os.environ, "TMUX_TMPDIR": "/tmp", "TERM": "xterm-256color"}
+    tmux_env = _subprocess_env()
     subprocess.run(
         [
             "tmux", "-L", socket_name, "-f", str(config),
@@ -168,13 +202,7 @@ def test_ctrl_t_repeatedly_folds_one_clean_tmux_pane_and_preserves_draft(
     command = f"{shlex_quote(sys.executable)} -c {shlex_quote(code)}"
     config = tmp_path / "tmux.conf"
     config.write_text("set -g remain-on-exit on\n", encoding="utf-8")
-    source_root = Path(__file__).resolve().parents[2] / "src"
-    env = {
-        **os.environ,
-        "PYTHONPATH": str(source_root),
-        "TMUX_TMPDIR": "/tmp",
-        "TERM": "xterm-256color",
-    }
+    env = _subprocess_env()
     subprocess.run(
         [
             "tmux", "-L", socket_name, "-f", str(config), "new-session", "-d",
@@ -283,13 +311,7 @@ def test_full_screen_tui_keeps_auth_diagnostics_out_of_input_dock(tmp_path: Path
         "asyncio.run(main())\n"
     )
     command = f"{shlex_quote(sys.executable)} -c {shlex_quote(code)}"
-    source_root = Path(__file__).resolve().parents[2] / "src"
-    env = {
-        **os.environ,
-        "TMUX_TMPDIR": "/tmp",
-        "TERM": "xterm-256color",
-        "PYTHONPATH": str(source_root),
-    }
+    env = _subprocess_env()
     subprocess.run(
         [
             "tmux", "-L", socket_name, "new-session", "-d",
@@ -416,17 +438,15 @@ def test_real_cli_auth_failure_is_actionable_and_keeps_composer_usable(tmp_path:
         "[model]\napi_key = \"invalid\"\n",
         encoding="utf-8",
     )
+    # This test targets the authentication/composer path, not first-launch
+    # package convergence. Mark the throwaway home ready so runtime setup cannot
+    # consume the interaction timeout or start unrelated renderer preparation.
+    from tests.conftest import prepare_isolated_omni_home
+
+    prepare_isolated_omni_home(omni_home, write_model_config=False)
 
     socket_name = f"omni-real-auth-{uuid.uuid4().hex}"
-    source_root = Path(__file__).resolve().parents[2] / "src"
-    env = {
-        **os.environ,
-        "HOME": str(user_home),
-        "OMNI_HOME": str(omni_home),
-        "PYTHONPATH": str(source_root),
-        "TMUX_TMPDIR": "/tmp",
-        "TERM": "xterm-256color",
-    }
+    env = _subprocess_env(HOME=str(user_home), OMNI_HOME=str(omni_home))
     command = f"{shlex_quote(sys.executable)} -m omni.cli.main --ui tui"
     subprocess.run(
         [
@@ -494,6 +514,7 @@ def test_real_cli_auth_failure_is_actionable_and_keeps_composer_usable(tmp_path:
                 break
             time.sleep(0.1)
 
+        print("CAPTURED_START", repr(captured), "CALLS", calls, "CAPTURED_END")
         assert captured.lower().count("model authentication failed") == 1
         assert "/config test" in captured
         assert "/config model" in captured

@@ -40,6 +40,15 @@ def test_normalize_drops_missing_and_remote_uris(tmp_path: Path) -> None:
     assert normalize_web_file_uri("artifact://paper") is None
 
 
+def test_bind_adds_image_placeholder_for_rasters(tmp_path: Path) -> None:
+    shot = tmp_path / "shot.png"
+    shot.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 24)
+    text, uris = bind_web_attachments("看图", [str(shot.resolve())])
+    assert uris == [str(shot.resolve())]
+    assert "[Image #1]" in text
+    assert format_mention(str(shot.resolve())) in text
+
+
 def test_bind_injects_at_mention_without_duplicating(tmp_path: Path) -> None:
     paper = tmp_path / "OmniScientist Cli.pdf"
     paper.write_bytes(b"%PDF-1.4")
@@ -79,6 +88,7 @@ async def test_upload_returns_absolute_path(tmp_path: Path) -> None:
         assert body["ok"] is True
         dest = Path(body["uri"])
         assert dest.is_file()
+        assert dest.parent.name == "inputs"
         assert not str(body["uri"]).startswith("file:")
         assert dest.name.startswith("OmniScientist")
         assert " " in dest.name

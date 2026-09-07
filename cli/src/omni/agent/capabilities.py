@@ -4,6 +4,9 @@ from __future__ import annotations
 
 CAPABILITY_LITERATURE_SEARCH = "literature.search"
 CAPABILITY_GROUNDED_QA = "qa.grounded"
+CAPABILITY_LITERATURE_QA = "literature.qa"
+CAPABILITY_LITERATURE_SURVEY = "literature.survey"
+CAPABILITY_LITERATURE_PRECEDENT = "literature.precedent"
 # Format-neutral figure object. Default producer is scientific-figure
 # (SVG/PNG). A livefigure PPTX can also pay it. Only ``figure.editable.pptx``
 # requires the editable single-slide PPTX.
@@ -68,6 +71,8 @@ def native_tool_for_capability(capability: str) -> str:
     """
     if capability == CAPABILITY_LITERATURE_SEARCH:
         return "search_literature"
+    if capability == CAPABILITY_CONTRADICTION:
+        return "scan_contradictions"
     return ""
 
 
@@ -95,10 +100,16 @@ def deliverables_from_capabilities(capabilities: list[str]) -> list[str]:
             out.append("artifact.pptx")
         elif capability == CAPABILITY_SLIDES_GENERATE:
             out.append("artifact.slides")
-        elif capability == CAPABILITY_GROUNDED_QA:
+        elif capability == CAPABILITY_GROUNDED_QA or capability == CAPABILITY_LITERATURE_QA:
+            out.append("answer")
+        elif capability == CAPABILITY_LITERATURE_PRECEDENT:
+            out.append("sources")
             out.append("answer")
         elif capability == CAPABILITY_LITERATURE_SEARCH:
             out.append("sources")
+        elif capability == CAPABILITY_LITERATURE_SURVEY:
+            out.append("sources")
+            out.append(DELIVERABLE_DRAFT_MANUSCRIPT)
         elif is_native_synthesis_capability(capability):
             out.append(DELIVERABLE_DRAFT_SECTION)
         elif capability == CAPABILITY_REVIEW:
@@ -185,12 +196,13 @@ def writing_outputs(outputs: list[str]) -> list[str]:
     return [name for name in outputs if name in WRITING_DELIVERABLES]
 
 
-_SURVEY_RETRIEVAL = frozenset({CAPABILITY_LITERATURE_SEARCH})
+_SURVEY_RETRIEVAL = frozenset({CAPABILITY_LITERATURE_SEARCH, CAPABILITY_LITERATURE_SURVEY})
 _SURVEY_WRITING = frozenset(
     {
         CAPABILITY_SYNTHESIS_FINAL,
         DELIVERABLE_DRAFT_SECTION,
         DELIVERABLE_DRAFT_MANUSCRIPT,
+        CAPABILITY_LITERATURE_SURVEY,
     }
 )
 _SURVEY_IGNORABLE = frozenset({"sources", "answer", "workflow"})

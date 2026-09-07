@@ -4,6 +4,76 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) and semanti
 
 ## Unreleased
 
+## [2.0.0rc8] - 2026-09-07
+
+### Added
+
+- ``/task show`` prints informational research cards when the turn left the
+  matching events: review findings, STORM-like survey stages (retrieve →
+  evidence → outline → write), an expensive-work plan gate, and a figure
+  package (``name ← script`` or an honest missing script). The planner binds
+  ``literature.precedent`` for Owl-style “has anyone done X?” questions
+  (first line yes / no / unclear, then sources). ``omni verify`` adds a
+  citation-support warning tier that does not change task status. Reviewer
+  verdicts stay events, not a second settlement.
+
+- VLM image output now has a real generation path next to chat vision.
+  Gemini image chat/pin models use ``generateContent``; GPT Image / DALL·E
+  use OpenAI ``/v1/images/generations``. Optional ``vlm.image_model`` /
+  ``OMNI_VLM_IMAGE_MODEL`` / ``omni config vlm --image-model`` pins the
+  Images (or Gemini) generator when the chat VLM is not one.
+  ``omni config test`` and ``omni config vlm --test`` report a second
+  ``vlm_images`` health row. The chat image-input probe does not prove
+  LiveFigure image generation.
+
+- Dock and classic REPL paste a system-clipboard image with Codex's chords:
+  ``Ctrl+V`` and ``Ctrl+Alt+V`` on macOS, Linux, and Windows (footer shows
+  ``Ctrl+Alt+V`` under WSL). ``Cmd+V`` stays the terminal's text paste.
+  A successful paste inserts ``[Image #N]`` and writes a PNG under the
+  workspace ``inputs/`` folder (same store as ``artifacts/``). Web paperclip
+  uploads and WeChat inbound images/files use that folder and the same
+  ``@path`` + ``file_uris`` contract. Failures use Codex's
+  ``Failed to paste image: clipboard unavailable|no image on
+  clipboard|could not encode image|io error: …`` strings. ``read_file`` on a
+  raster image returns dimensions (and a VLM description when configured).
+
+### Changed
+
+- Bumped the release candidate to `2.0.0rc8` (Git tag `v2.0.0rc8`).
+- Bare ``omni`` uses a Codex-shaped update menu (Update now / Skip / Skip
+  until next version). After a successful ``omni update`` it prints
+  ``Please restart Omni`` and exits; type ``omni`` again to load the new
+  package. It no longer ``execv``-relaunches the old process.
+
+### Fixed
+
+- A gateway HTTP 503 on the VLM Images path is ``retryable_io``, not
+  ``unpayable`` / “VLM is not configured”. ``get_task`` returns an
+  in-flight snapshot (``in_flight: true``) instead of refusing the current
+  task. Inspect records that carry the object's ``status: failed`` are not
+  treated as tool failures. Sandboxed ``bash`` prepends Omni's interpreter
+  directory to ``PATH`` so ``python3`` / ``pip`` match the host (where
+  ``python-pptx`` is installed) instead of Homebrew or a login conda.
+
+- A lone ``synthesis.final`` proposal no longer compiles into an empty
+  skill slot and then asks the owner to configure a producer that does
+  not exist (``draft.section has no admitted producer this turn``).
+  That capability maps to ``draft.section`` and stays on capable ReAct
+  with ``write_file``. An unresolved capability still seals an empty
+  ``SINGLE_SKILL_TASK`` so recovery can inject the re-derive constraint.
+  Hallucinated outputs do not unlock writes, and an explicit deny-all
+  ``allowed_tools`` remains deny-all. ``memory.update`` short-circuits
+  only when remembering is the whole request.
+
+- Owner model/VLM writes take effect on the next WeChat, web, or REPL turn
+  without restarting ``omni serve``. The home service no longer freezes
+  ``VlmGateway`` at process boot; it re-reads ``config.toml`` and
+  ``secrets.toml`` together when those files change, keeps last-good on a
+  bad parse, and leaves an in-flight turn on the clients it started with.
+  ``enabled=false`` is no longer reported as missing ``model`` / ``endpoint``
+  / ``api_key``. ``omni serve status`` and ``omni doctor`` show disk vs the
+  running process.
+
 ## [2.0.0rc7] - 2026-08-28
 
 ### Fixed

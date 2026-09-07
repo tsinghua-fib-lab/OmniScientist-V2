@@ -245,6 +245,7 @@ class ToolInvocationRecord:
     error: str | None = None
     status: Literal["succeeded", "failed", "rejected", "cancelled", "timed_out"] = "succeeded"
     error_code: str = ""
+    error_class: str = ""
     attempts: int = 0
     duration_ms: float = 0.0
     retryable: bool = False
@@ -259,6 +260,8 @@ class ToolInvocationRecord:
                 "reason": self.error_code or "tool_error",
                 "retryable": self.retryable,
             }
+            if self.error_class:
+                payload["error_class"] = self.error_class
             # A bare "input failed contract validation" string leaves the model no
             # signal to self-correct; the gateway already recorded *which* field
             # failed and why (e.g. path ``when.trigger_kind``, an enum violation), so
@@ -267,6 +270,7 @@ class ToolInvocationRecord:
             fields = _contract_violation_fields(self.result)
             if fields:
                 payload["field_errors"] = fields
+                payload["error_class"] = payload.get("error_class") or "invalid_args"
             return json.dumps(payload, ensure_ascii=False)
         if self.observation is not None:
             return self.observation
@@ -1550,11 +1554,12 @@ class ReActLoopAgent:
         before = window.pressure(messages, tool_specs)
         directive = (
             "[System] Create a continuation checkpoint for the same agent run. "
-            "Do not answer the user. Preserve: the exact objective and constraints; "
-            "verified findings with their tool provenance; completed checks; current "
-            "plan/progress; unresolved checks and the next best actions. Never turn an "
-            "unverified claim into a fact. Raw tool events remain available outside "
-            "this prompt, so prefer a concise, operational checkpoint."
+            "Do not answer the user. Return one JSON object and no other prose:\n"
+            '{"objective":"...","verified_findings":[{"tool":"...","source_id":"",'
+            '"text":"..."}],"unpaid_deliverables":["..."],"next_action":"..."}\n'
+            "verified_findings must cite the tool and source_id when one exists. "
+            "Never turn an unverified claim into a fact. If you cannot fill this "
+            "schema, return nothing."
         )
         checkpoint = ""
         source = "model"
@@ -1601,7 +1606,15 @@ class ReActLoopAgent:
                 )
         else:
             source = "objective_only"
-        if not checkpoint:
+        if checkpoint:
+            from omni.memory.compaction import format_rollover_checkpoint, parse_rollover_checkpoint
+
+            parsed = parse_rollover_checkpoint(checkpoint)
+            if parsed is None:
+                logger.info("[react] context checkpoint schema invalid; skipping fold")
+                return messages
+            checkpoint = format_rollover_checkpoint(parsed)
+        else:
             if source != "objective_only":
                 source = "evidence_ledger"
             checkpoint = evidence_checkpoint(
@@ -1765,18 +1778,39 @@ class ReActLoopAgent:
                     raise
             return records
 
-        tasks = [
-            asyncio.create_task(self._dispatch_tool(call, tools_by_name))
-            for call in calls
-        ]
+        # Read-only tools may run together; writes stay serial so one patch
+        # cannot race another. Consecutive read-only calls are one gather.
+        records: list[ToolInvocationRecord | None] = [None] * len(calls)
+        index = 0
         try:
-            return list(await asyncio.gather(*tasks))
+            while index < len(calls):
+                if _is_parallel_safe(calls[index].name):
+                    end = index + 1
+                    while end < len(calls) and _is_parallel_safe(calls[end].name):
+                        end += 1
+                    tasks = [
+                        asyncio.create_task(self._dispatch_tool(call, tools_by_name))
+                        for call in calls[index:end]
+                    ]
+                    try:
+                        batch = list(await asyncio.gather(*tasks))
+                    except asyncio.CancelledError:
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                        raise
+                    for offset, record in enumerate(batch):
+                        records[index + offset] = record
+                    index = end
+                    continue
+                task = asyncio.create_task(self._dispatch_tool(calls[index], tools_by_name))
+                try:
+                    records[index] = await task
+                except asyncio.CancelledError:
+                    await asyncio.gather(task, return_exceptions=True)
+                    raise
+                index += 1
         except asyncio.CancelledError:
-            # Cancelling the await on gather has already propagated one
-            # cancellation into every unfinished child.  A second cancel here
-            # can interrupt the child's own checkpoint/finalization handler.
-            await asyncio.gather(*tasks, return_exceptions=True)
             raise
+        return [item for item in records if item is not None]
 
     def _preflight_rejection(
         self,
@@ -1796,6 +1830,7 @@ class ReActLoopAgent:
             record.error_code = "unknown_tool"
             record.lifecycle_status = "blocked"
             record.result_success = None
+            _apply_error_class(record)
             self._note_unexecuted_call(record.error_code)
             return record
 
@@ -1838,6 +1873,7 @@ class ReActLoopAgent:
             digest,
         )
         self._note_unexecuted_call(record.error_code)
+        _apply_error_class(record)
         return record
 
     async def _dispatch_tool(
@@ -1854,6 +1890,7 @@ class ReActLoopAgent:
             record.error_code = "tool_circuit_open"
             record.lifecycle_status = "blocked"
             record.result_success = None
+            _apply_error_class(record)
             return record
 
         started_at = time.monotonic()
@@ -1946,6 +1983,8 @@ class ReActLoopAgent:
             # model can address this tool surface correctly.
             self._unexecuted_calls.clear()
         record.duration_ms = (time.monotonic() - started_at) * 1000
+        _apply_error_class(record)
+        _shorten_skill_observation(record)
         return record
 
     def _note_unexecuted_call(self, code: str) -> None:
@@ -2066,6 +2105,8 @@ def _stall_outcome(record: ToolInvocationRecord, observation: str) -> str:
     plainly going nowhere reads as a first occurrence forever. The failure's
     ``error_code`` is the stable identity of "this went wrong the same way".
     """
+    if record.error_class:
+        return f"class:{record.error_class}:code:{record.error_code}"
     if record.error_code:
         return f"code:{record.error_code}"
     return observation
@@ -2224,6 +2265,65 @@ def _has_productive_observation(trace: list[ToolInvocationRecord]) -> bool:
 
 
 _MAX_CONTRACT_FIELD_ERRORS = 8
+
+
+_SERIAL_TOOLS = frozenset(
+    {
+        "write_file",
+        "edit_file",
+        "apply_patch",
+        "bash",
+        "run_compute",
+        "run_skill",
+        "run_workflow",
+        "livefigure",
+        "research-pptx",
+        "scientific-figure",
+        "paper-review",
+        "research-poster",
+        "cite_source",
+        "add_evidence",
+        "record_claim",
+        "package_artifact",
+    }
+)
+
+
+def _is_parallel_safe(name: str) -> bool:
+    """Read-only tools may share a batch; filesystem/ROM mutations stay serial."""
+    return str(name or "") not in _SERIAL_TOOLS
+
+
+def _apply_error_class(record: ToolInvocationRecord) -> None:
+    from omni.core.tool_errors import classify_tool_error
+
+    record.error_class = classify_tool_error(
+        name=record.name,
+        error_code=record.error_code,
+        status=record.status,
+        result=record.result,
+        error=record.error or "",
+        retryable=record.retryable,
+    )
+
+
+def _shorten_skill_observation(record: ToolInvocationRecord) -> None:
+    from omni.core.tool_errors import short_skill_observation
+
+    payload = short_skill_observation(
+        record.name,
+        result=record.result,
+        error=record.error or "",
+        error_class=record.error_class,
+        status=record.status,
+    )
+    if payload is None:
+        return
+    record.observation = json.dumps(payload, ensure_ascii=False)
+    if payload.get("error"):
+        record.error = str(payload["error"])
+    if payload.get("error_class"):
+        record.error_class = str(payload["error_class"])
 
 
 def _contract_violation_fields(result: Any) -> list[dict[str, str]]:

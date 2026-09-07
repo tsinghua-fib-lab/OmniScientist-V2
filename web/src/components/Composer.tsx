@@ -8,6 +8,8 @@ import {
   IconSteer,
   IconStop,
 } from "../icons";
+import { canSendComposer } from "../attachments";
+import { clipboardHasImage, clipboardPlainText, insertTextAtSelection } from "../composerPaste";
 import { handleComposerKeyDown } from "../composerInput";
 import { actions, useAppState } from "../store";
 import type { Mode } from "../types";
@@ -25,7 +27,7 @@ export function Composer({
   blocked?: boolean;
   blockedReason?: string;
 }) {
-  const { workspace, composer, mode, streaming, attachments, sessionId, tasks } = useAppState();
+  const { workspace, composer, mode, streaming, attachments, composerSubmitting, sessionId, tasks } = useAppState();
   const area = useRef<HTMLTextAreaElement>(null);
   const composing = useRef(false);
   const compositionEndTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -48,8 +50,9 @@ export function Composer({
   );
 
   if (!workspace) return null;
-  const interactionBlocked = streaming || blocked;
-  const canSend = workspace.writable && !interactionBlocked && Boolean(composer.trim());
+  const interactionBlocked = streaming || blocked || composerSubmitting;
+  const canSend =
+    workspace.writable && !interactionBlocked && canSendComposer(composer, attachments);
   const disabledReason = !workspace.writable
     ? "此工作区只读，请先在 CLI 中信任该目录。"
     : blocked
@@ -63,14 +66,14 @@ export function Composer({
           <div className="chips" aria-label="已附加文件">
             {attachments.map((a) => (
               <button
-                key={a.uri}
+                key={a.id}
                 type="button"
                 className="chip"
                 aria-label={`移除附件 ${a.name}`}
-                onClick={() => actions.removeAttachment(a.uri)}
+                onClick={() => actions.removeAttachment(a.id)}
               >
                 <IconPaperclip size={13} />
-                <span>{a.name}</span>
+                <span>{a.status === "pending" ? `${a.name}…` : a.status === "failed" ? `${a.name} 失败` : a.name}</span>
                 <IconClose size={13} />
               </button>
             ))}
@@ -113,6 +116,26 @@ export function Composer({
               legacyKeyCode: e.nativeEvent.keyCode,
               send: () => actions.send(),
             });
+          }}
+          onPaste={(e) => {
+            const data = e.clipboardData;
+            if (!clipboardHasImage(data)) return;
+            e.preventDefault();
+            const plain = clipboardPlainText(data);
+            const el = area.current;
+            if (plain && el) {
+              const next = insertTextAtSelection(
+                el.value,
+                el.selectionStart ?? el.value.length,
+                el.selectionEnd ?? el.value.length,
+                plain,
+              );
+              actions.setComposer(next.value);
+              requestAnimationFrame(() => {
+                el.selectionStart = el.selectionEnd = next.caret;
+              });
+            }
+            void actions.pasteImages(data);
           }}
         />
         <div className="composer-bar">
@@ -195,7 +218,8 @@ export function Composer({
           {workspace.label}
         </span>
         <span className="hint">
-          {disabledReason || "Enter 发送 · Shift + Enter 换行 · 内容保存在本机工作区"}
+          {disabledReason ||
+            "Enter 发送 · Shift + Enter 换行 · Ctrl+V / ⌘V 粘贴图片 · 内容保存在本机工作区"}
         </span>
       </div>
     </div>

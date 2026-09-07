@@ -11,6 +11,7 @@ deterministic heuristic otherwise); the DB mechanics live in the orchestrator.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -27,8 +28,15 @@ logger = logging.getLogger(__name__)
 
 _ARTIFACT_RE = re.compile(r"artifact://[A-Za-z0-9]+")
 _TASK_RE = re.compile(r"task[`\s]+([A-Za-z0-9]{6,40})", re.IGNORECASE)
+_SOURCE_ID_RE = re.compile(r"\b(?:source_id|source)[`\"=\s:]+([A-Za-z0-9]{6,40})", re.IGNORECASE)
+_S_ANCHOR_RE = re.compile(r"\[S\d+\]")
+_FAILED_OBS_RE = re.compile(
+    r'"status"\s*:\s*"(failed|error|rejected|timed_out)"|"error_class"\s*:',
+    re.IGNORECASE,
+)
 
 _MICROCOMPACT_PLACEHOLDER = "...[older tool result compacted; full input/output remains in run events]"
+_PRESERVE_FOOTER = "preserved:"
 
 # Lazily-loaded real tokenizer. ``tiktoken`` is an *optional* dependency (extra
 # ``tok``): if it (and its BPE vocab) load, we count real tokens; otherwise we
@@ -165,11 +173,117 @@ def microcompact_tool_results(
         content = str(messages[i].get("content") or "")
         if len(content) <= max_chars or content.rstrip().endswith(_MICROCOMPACT_PLACEHOLDER):
             continue
+        if _keep_failed_observation(content):
+            continue
+        preserved = _preserved_research_tokens(content)
+        extra = f"\n{_PRESERVE_FOOTER} {', '.join(preserved)}" if preserved else ""
         messages[i]["content"] = formatted_truncate_text(
-            content, max_chars + len(footer), footer=footer
+            content, max_chars + len(footer) + len(extra), footer=footer + extra
         )
         trimmed += 1
     return trimmed
+
+
+def _keep_failed_observation(content: str) -> bool:
+    """Failed observations stay verbatim so the model can change arguments."""
+    body = str(content or "")
+    if _FAILED_OBS_RE.search(body):
+        return True
+    if body.lstrip().startswith("ERROR:"):
+        return True
+    return False
+
+
+def _preserved_research_tokens(content: str) -> list[str]:
+    tokens: list[str] = []
+    tokens.extend(_S_ANCHOR_RE.findall(content))
+    tokens.extend(f"source_id={item}" for item in _SOURCE_ID_RE.findall(content))
+    tokens.extend(_ARTIFACT_RE.findall(content))
+    tokens.extend(f"task_id={item}" for item in _TASK_RE.findall(content))
+    return list(dict.fromkeys(tokens))[:16]
+
+
+def parse_rollover_checkpoint(text: str) -> dict[str, Any] | None:
+    """Parse a rollover checkpoint. Invalid schema → ``None`` (do not fold)."""
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    payload = _extract_json_object(raw)
+    if payload is None:
+        return None
+    objective = str(payload.get("objective") or "").strip()
+    next_action = str(payload.get("next_action") or "").strip()
+    findings = payload.get("verified_findings")
+    unpaid = payload.get("unpaid_deliverables")
+    if not objective or not next_action:
+        return None
+    if not isinstance(findings, list):
+        return None
+    cleaned: list[dict[str, Any]] = []
+    for item in findings:
+        if isinstance(item, dict):
+            cleaned.append(
+                {
+                    "tool": str(item.get("tool") or ""),
+                    "source_id": str(item.get("source_id") or ""),
+                    "text": str(item.get("text") or item.get("finding") or "")[:300],
+                }
+            )
+        elif isinstance(item, str) and item.strip():
+            cleaned.append({"tool": "", "source_id": "", "text": item.strip()[:300]})
+    if isinstance(unpaid, str):
+        unpaid_list = [part.strip() for part in unpaid.split(",") if part.strip()]
+    elif isinstance(unpaid, list):
+        unpaid_list = [str(item).strip() for item in unpaid if str(item).strip()]
+    else:
+        unpaid_list = []
+    return {
+        "objective": objective,
+        "verified_findings": cleaned,
+        "unpaid_deliverables": unpaid_list,
+        "next_action": next_action,
+    }
+
+
+def format_rollover_checkpoint(payload: dict[str, Any]) -> str:
+    """Render a validated checkpoint as the continuation note."""
+    lines = [
+        "Continuation checkpoint:",
+        f"objective: {payload.get('objective')}",
+        "verified_findings:",
+    ]
+    findings = payload.get("verified_findings") or []
+    if not findings:
+        lines.append("- (none)")
+    for item in findings:
+        if not isinstance(item, dict):
+            continue
+        tool = str(item.get("tool") or "tool")
+        source = str(item.get("source_id") or "")
+        text = str(item.get("text") or "")
+        suffix = f" source_id={source}" if source else ""
+        lines.append(f"- {tool}{suffix}: {text}")
+    unpaid = payload.get("unpaid_deliverables") or []
+    lines.append("unpaid_deliverables: " + (", ".join(unpaid) if unpaid else "(none)"))
+    lines.append(f"next_action: {payload.get('next_action')}")
+    return "\n".join(lines)
+
+
+def _extract_json_object(text: str) -> dict[str, Any] | None:
+    raw = text.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[-1]
+        if raw.endswith("```"):
+            raw = raw[: raw.rfind("```")]
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        payload = json.loads(raw[start : end + 1])
+    except (ValueError, TypeError):
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 async def summarize_messages(
@@ -262,6 +376,8 @@ def _heuristic_summary(convo: list[dict[str, Any]]) -> str:
         text = str(m.get("content") or "")
         refs.extend(_ARTIFACT_RE.findall(text))
         tasks.extend(_TASK_RE.findall(text))
+        refs.extend(_S_ANCHOR_RE.findall(text))
+        refs.extend(_SOURCE_ID_RE.findall(text))
     lines = ["Earlier conversation summary (automatic compaction):"]
     if user_asks:
         lines.append("User requests:")

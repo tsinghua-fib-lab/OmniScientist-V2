@@ -1212,7 +1212,7 @@ class TurnDisplay:
 
 # File-edit tools whose arguments carry enough to reconstruct a diff for a
 # coloured cell — derived at the render layer only (no tool-side changes).
-_DIFF_TOOLS = ("edit_file", "write_file")
+_DIFF_TOOLS = ("edit_file", "write_file", "apply_patch")
 _DIFF_MAX_LINES = 24  # cap the body so a huge write does not flood the transcript
 _DIFF_VERBOSE_MAX_LINES = 120
 _WRITE_INLINE_MAX_LINES = 12
@@ -1239,6 +1239,18 @@ def _diff_cell(name: str, arguments: Any, verbosity: str) -> tuple[str, bool, bo
         new = str(arguments.get("new_string", "")).splitlines()
         if old == new:
             return None
+    elif name == "apply_patch":
+        patch = str(arguments.get("patch") or arguments.get("diff") or "")
+        if not patch:
+            return None
+        rows = ["    [bold]±[/bold] apply_patch"]
+        preview = patch.splitlines()[:_DIFF_MAX_LINES]
+        for line in preview:
+            rows.append(_diff_row(line if line.startswith(("+", "-", "@")) else f" {line}"))
+        hidden = len(patch.splitlines()) - len(preview)
+        if hidden > 0:
+            rows.append(f"    [dim]… +{hidden} more patch line(s)[/dim]")
+        return "\n".join(rows), False, False
     else:  # write_file: render new content as an all-added block.
         contents = str(arguments.get("contents", ""))
         if not contents:

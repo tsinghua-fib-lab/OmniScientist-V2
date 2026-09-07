@@ -304,7 +304,7 @@ def _partial_outputs_are_deliverable(value: Any) -> bool:
             continue
         tool = str(item.get("tool") or "")
         path = str(item.get("path") or "").strip()
-        if tool in {"write_file", "edit_file"} and path:
+        if tool in {"write_file", "edit_file", "apply_patch"} and path:
             return True
         if path and tool not in {"bash", "read_file"}:
             return True

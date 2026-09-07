@@ -263,6 +263,7 @@ inline dock and classic prompt:
 | trailing `\` then `Enter` | Remove the backslash and insert a portable continuation newline |
 | `Ctrl+O` | Compatibility alias for newline |
 | `Ctrl+X Ctrl+E` | Edit the draft in `$VISUAL` or `$EDITOR`, then return without submitting |
+| `Ctrl+V` / `Ctrl+Alt+V` | Paste an image from the **system** clipboard (same chords on macOS, Linux, and Windows). Inserts `[Image #N]` and writes a PNG under the workspace `inputs/` folder (shared with web uploads and WeChat media). On macOS `Cmd+V` stays the terminal's text paste. Under WSL the footer advertises `Ctrl+Alt+V` because many terminals steal plain `Ctrl+V`. A missing image prints `Failed to paste image: no image on clipboard: …` |
 
 During active work, **Enter** steers an active semantic turn, **Tab** queues the draft, and
 `/queue <message>` queues an explicit next turn. **Esc** or `/stop` first requests cooperative
@@ -418,9 +419,9 @@ Ollama, vLLM, …). The API key is masked in all command output (even `omni conf
 
 ### Configure the optional VLM for LiveFigure
 
-LiveFigure needs a multimodal OpenAI-compatible chat endpoint. Configure and
-probe it with `omni config vlm` (or `omni model vision`); `omni init` does not
-accept VLM flags:
+LiveFigure needs a multimodal chat endpoint **and** an image-generation path.
+Configure and probe both with `omni config vlm` (or `omni model vision`);
+`omni init` does not accept VLM flags:
 
 ```bash
 omni config vlm \
@@ -428,8 +429,17 @@ omni config vlm \
   --model vision-model \
   --api-key sk-... \
   --test
+# Optional: pin an OpenAI Images generator when the chat VLM cannot draw.
+omni config vlm --image-model gpt-image-2
 omni doctor
 ```
+
+`--test` (and `omni config test`) reports two rows when a VLM is set: `vlm`
+is a 1×1 **image-input** chat probe; `vlm_images` is a tiny image-generation
+call. A passing chat row does not prove LiveFigure. Gemini image chat models
+(`gemini` + `image` in the name) use `generateContent`; GPT Image / DALL·E
+use `/v1/images/generations`. A Gemini miss falls through to Images. A
+gateway HTTP 503 on Images is retryable, not “VLM is not configured”.
 
 Remote VLM endpoints must use HTTPS; plain HTTP is allowed only for
 `localhost`, `127.0.0.1`, or `::1`. The token is stored in
@@ -498,18 +508,22 @@ omni update status   # diagnostics only
 When you launch `omni` interactively and a newer release exists, it shows a Codex-style menu:
 
 ```text
-New version available: 2.0.0 -> 2.0.1
-  Update with `omni update` or reinstall through your package manager
-> 1. Update now (run omni update)
-  2. Skip
-  3. Skip this version
+  ✨ Update available!  2.0.0 -> 2.0.1
+
+  Release notes: https://github.com/tsinghua-fib-lab/OmniScientist-V2/releases/latest
+
+  › 1. Update now (runs `omni update`)
+    2. Skip
+    3. Skip until next version
+
+  Press Enter to continue
 ```
 
 The network check runs in the background and caches its result in
 `<OMNI_HOME>/update-check.json` (default TTL 24h). Startup reads only that local cache, so it never
 blocks on the network and remains silent offline. The prompt appears only on an interactive TTY.
-Choosing **Update now** runs the parameterless `omni update` transaction and automatically
-relaunches the foreground CLI on success. Choosing **Ignore this version** suppresses only that
+Choosing **Update now** runs the parameterless `omni update` transaction, then exits so you type
+`omni` again on the new package. Choosing **Skip until next version** suppresses only that
 version.
 
 ### 2) `omni update`
@@ -962,7 +976,8 @@ omni channel login wechat --start   # the one command; identical on Linux, macOS
   rebind. There is no automatic re-scan yet.
 - **Images, files & typing**: replies that carry artifacts (plots, PDFs) are AES-128-ECB encrypted and
   uploaded to WeChat's CDN, then sent as native image/file messages; inbound images/files/videos are
-  downloaded, decrypted, and handed to the agent as a local path. A "typing…" indicator shows while
+  downloaded, decrypted, saved under the workspace `inputs/` folder, and handed to the
+  agent as the same `@path` attachment the CLI and web use. A "typing…" indicator shows while
   the agent works. These need the optional `cryptography` backend (`pip install "OmniScientist-V2[channels]"`);
   without it, media gracefully falls back to a text link. Disable typing with `typing_indicator = false`
   in `<OMNI_HOME>/channels/wechat.toml`.

@@ -35,7 +35,7 @@ _IDENTIFIER_LOOKUP_MIN_ITERATIONS = 8
 # default capable assistant turn. Everything else (read, search, recall,
 # research-capture, skill/workflow invocation, escalation) stays available so
 # the model can behave like a real agent instead of a 1-tool fallback.
-ASSISTANT_BLOCKED_TOOLS: tuple[str, ...] = ("write_file", "edit_file", "bash", "run_compute")
+ASSISTANT_BLOCKED_TOOLS: tuple[str, ...] = ("write_file", "edit_file", "apply_patch", "bash", "run_compute")
 
 # Retrieve-only literature: the native search tool stays reachable; skill
 # dispatch and filesystem/shell mutations do not. This is a host policy for
@@ -311,6 +311,66 @@ def carry_capability_inputs(plan: IntentPlan, proposal: object, capability: str)
     raw = getattr(proposal, "capability_inputs", None)
     payload = raw.get(capability) if isinstance(raw, dict) else None
     plan.capability_inputs = {capability: dict(payload or {})}
+    return plan
+
+
+def pure_memory_request(proposal: object, all_caps: list[str]) -> bool:
+    """True only when remembering is the whole request."""
+    sibling_caps = {
+        str(item).strip()
+        for item in all_caps
+        if str(item).strip() and str(item).strip() != "memory.update"
+    }
+    sibling_outputs = {
+        str(item).strip()
+        for item in (getattr(proposal, "outputs", None) or [])
+        if str(item).strip() not in {"", "memory", "answer"}
+    }
+    return not sibling_caps and not sibling_outputs
+
+
+def carry_proposal_inputs(plan: IntentPlan, proposal: object) -> IntentPlan:
+    """Keep every consumer input when memory is one part of a capable turn."""
+    raw_inputs = getattr(proposal, "capability_inputs", None) or {}
+    inputs = {
+        str(capability): dict(value)
+        for capability, value in raw_inputs.items()
+        if isinstance(value, dict) and value
+    }
+    for step in getattr(proposal, "workflow_steps", None) or []:
+        if not isinstance(step, dict):
+            continue
+        capability = str(step.get("capability") or "").strip()
+        raw = (
+            step.get("input")
+            if isinstance(step.get("input"), dict)
+            else step.get("parameters")
+        )
+        if capability and isinstance(raw, dict) and raw:
+            inputs.setdefault(capability, dict(raw))
+    plan.capability_inputs = {**inputs, **plan.capability_inputs}
+    return plan
+
+
+def capable_writing_plan(
+    text: str,
+    *,
+    task_id: str,
+    proposal: object,
+    rationale: str,
+    outputs: list[str] | None = None,
+) -> IntentPlan:
+    """Capable ReAct plus write_file for a host-native writing debt."""
+    plan = build_assistant_plan(
+        text,
+        task_id=task_id,
+        rationale=rationale
+        or "native manuscript sequenced by the model against live results",
+    )
+    plan.confidence = getattr(proposal, "confidence", None) or 0.86
+    plan.provenance_mode = getattr(proposal, "provenance_mode", None) or plan.provenance_mode
+    declared = [str(item) for item in (getattr(proposal, "outputs", None) or []) if item]
+    plan.outputs = declared or list(outputs or []) or plan.outputs
     return plan
 
 

@@ -14,10 +14,21 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 from omni.agent.cost import usage_budget_exhausted
+from omni.research.citation_anchors import (
+    extract_visible_anchors,
+    is_scholarly_citation_key,
+)
+from omni.research.figure_provenance import figures_missing_script, slide_artifact_paths
+from omni.research.review_findings import (
+    ReviewFinding,
+    finding_from_judge_notes,
+    findings_from_structural,
+)
 
 _REVIEW_SYSTEM = (
     "You are a rigorous research reviewer. Evaluate an output against its subtask goal. "
@@ -38,10 +49,28 @@ class ReviewVerdict:
     parsed: bool = True     # False when the judge's reply couldn't be parsed
     metering_input: str = ""
     metering_output: str = ""
+    structural: bool = False
+    dangling_anchors: list[str] = field(default_factory=list)
+    unanchored_absolutes: list[str] = field(default_factory=list)
+    figure_gaps: list[str] = field(default_factory=list)
+    blocks_success: bool = False
+    findings: list[ReviewFinding] = field(default_factory=list)
+    slide_paths: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"verdict": self.verdict, "score": round(self.score, 3),
-                "notes": self.notes, "parsed": self.parsed}
+        return {
+            "verdict": self.verdict,
+            "score": round(self.score, 3),
+            "notes": self.notes,
+            "parsed": self.parsed,
+            "structural": self.structural,
+            "dangling_anchors": list(self.dangling_anchors),
+            "unanchored_absolutes": list(self.unanchored_absolutes),
+            "figure_gaps": list(self.figure_gaps),
+            "blocks_success": self.blocks_success,
+            "findings": [item.to_dict() for item in self.findings],
+            "slide_paths": list(self.slide_paths),
+        }
 
 
 def _clamp(x: float) -> float:
@@ -247,4 +276,175 @@ async def _record_review_cost(
     )
 
 
-__all__ = ["ReviewVerdict", "review_and_correct", "review_output", "parse_verdict", "gate"]
+_ABSOLUTE_RE = re.compile(
+    r"(首次|第一次|state-of-the-art|sota|首次提出|\bfirst\b|\bnovel\b)",
+    re.IGNORECASE,
+)
+
+
+def structural_review(
+    *,
+    draft: str,
+    source_ids: Sequence[str] = (),
+    s_index_map: dict[str, str] | None = None,
+    citation_keys: Sequence[str] = (),
+    artifacts: Sequence[Any] = (),
+    tool_trace: Sequence[Any] = (),
+    grounded: bool = False,
+) -> ReviewVerdict:
+    """LLM-free checks: dangling [S#], unanchored absolutes, figure vs script.
+
+    Scholarly keys (arXiv / DOI / recorded titles) are B0 language. They are
+    added to ``known`` and never compared to hash ``source_id``s.
+    """
+    mapping = dict(s_index_map or {})
+    keys = [str(item).strip() for item in citation_keys if str(item).strip()]
+    source_known = {str(item).strip() for item in source_ids if str(item).strip()}
+    source_known.update(value for value in mapping.values() if value)
+    known = set(source_known)
+    known.update(keys)
+    s_bound = max(len(mapping), len(source_known))
+    anchors = extract_visible_anchors(
+        draft, source_ids=list(known), citation_keys=keys
+    )
+    dangling: list[str] = []
+    for anchor in anchors:
+        if is_scholarly_citation_key(anchor):
+            continue
+        if anchor.startswith("[S"):
+            mapped = mapping.get(anchor, "")
+            if mapped and mapped not in known and known:
+                dangling.append(anchor)
+            elif not mapped and known:
+                # [S#] without a recoverable mapping is still a visible anchor for B0;
+                # B1 only rejects when the index cannot exist in this task's
+                # sources (S99 vs 2 ids), not when it exceeds the first result page.
+                try:
+                    index = int(anchor[2:-1])
+                except ValueError:
+                    continue
+                if index > s_bound:
+                    dangling.append(anchor)
+            continue
+        if known and anchor not in known and len(anchor) >= 8:
+            if not any(anchor.startswith(item[:8]) or item.startswith(anchor[:8]) for item in known):
+                dangling.append(anchor)
+    unanchored = []
+    for match in _ABSOLUTE_RE.finditer(draft or ""):
+        window = (draft or "")[max(0, match.start() - 80) : match.end() + 80]
+        if extract_visible_anchors(window, source_ids=list(known)):
+            continue
+        unanchored.append(match.group(0))
+    figure_gaps = figures_missing_script(artifacts, tool_trace=tool_trace)
+    notes: list[str] = []
+    if dangling:
+        notes.append(f"dangling anchors: {', '.join(dangling[:6])}")
+    if unanchored:
+        notes.append(f"unanchored absolute claims: {', '.join(unanchored[:6])}")
+    if figure_gaps:
+        notes.append(f"figures without source script: {', '.join(figure_gaps[:4])}")
+    if dangling and grounded:
+        verdict = "reject"
+        score = 0.2
+    elif notes:
+        verdict = "revise"
+        score = 0.55
+    else:
+        verdict = "pass"
+        score = 1.0
+    slides = slide_artifact_paths(artifacts)
+    findings = findings_from_structural(
+        dangling_anchors=dangling,
+        unanchored_absolutes=unanchored,
+        figure_gaps=figure_gaps,
+    )
+    return ReviewVerdict(
+        verdict=verdict,
+        score=score,
+        notes="; ".join(notes),
+        parsed=True,
+        structural=True,
+        dangling_anchors=dangling,
+        unanchored_absolutes=unanchored,
+        figure_gaps=list(figure_gaps),
+        blocks_success=verdict == "reject" and grounded,
+        findings=findings,
+        slide_paths=slides,
+    )
+
+
+async def review_research_deliverable(
+    *,
+    llm: Any = None,
+    goal: str,
+    draft: str,
+    source_ids: Sequence[str] = (),
+    s_index_map: dict[str, str] | None = None,
+    citation_keys: Sequence[str] = (),
+    artifacts: Sequence[Any] = (),
+    tool_trace: Sequence[Any] = (),
+    grounded: bool = False,
+) -> ReviewVerdict:
+    """Structural review first; optional LLM judge is fail-open and never rewrites.
+
+    The LLM may still ``reject`` on the event for ``/task show``. Only a real
+    structural [S#] miss sets ``blocks_success``; that flag is audit, not a
+    second settlement contract.
+    """
+    structural = structural_review(
+        draft=draft,
+        source_ids=source_ids,
+        s_index_map=s_index_map,
+        citation_keys=citation_keys,
+        artifacts=artifacts,
+        tool_trace=tool_trace,
+        grounded=grounded,
+    )
+    if llm is None or not (draft or "").strip():
+        return structural
+    judged = await review_output(
+        llm,
+        goal=goal or "review the research deliverable",
+        output=draft,
+        criteria=(
+            "Check that each visible [S#] points at a mapped source, "
+            "treat arXiv ids and DOIs as valid citation keys, "
+            "flag unanchored numbers or first/SOTA claims, and note figure/code mismatch. "
+            "Do not rewrite the draft. Do not treat a markdown draft as a missing "
+            "slide deck when the task also produced PPTX files."
+        ),
+    )
+    if not judged.parsed:
+        return structural
+    notes = "; ".join(part for part in (structural.notes, judged.notes) if part)
+    verdict = judged.verdict
+    if structural.verdict == "reject":
+        verdict = "reject"
+    findings = list(structural.findings)
+    judge_card = finding_from_judge_notes(judged.notes)
+    if judge_card is not None:
+        findings.append(judge_card)
+    return ReviewVerdict(
+        verdict=verdict,
+        score=min(structural.score, judged.score),
+        notes=notes,
+        parsed=judged.parsed,
+        structural=True,
+        dangling_anchors=structural.dangling_anchors,
+        unanchored_absolutes=structural.unanchored_absolutes,
+        figure_gaps=structural.figure_gaps,
+        blocks_success=structural.blocks_success,
+        findings=findings,
+        slide_paths=list(structural.slide_paths),
+    )
+
+
+__all__ = [
+    "ReviewVerdict",
+    "gate",
+    "parse_verdict",
+    "review_and_correct",
+    "review_output",
+    "review_research_deliverable",
+    "structural_review",
+]

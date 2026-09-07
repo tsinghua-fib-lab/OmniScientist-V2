@@ -34,7 +34,7 @@ async def test_tools_present_only_when_db_available():
     names = {t.spec.name for t in build_builtin_tools(ctx)}
     assert {"record_hypothesis", "record_claim", "cite_source",
             "add_evidence", "search_corpus", "log_run",
-            "build_research_artifact"} <= names
+            "build_research_artifact", "scan_contradictions"} <= names
     # DB-free context → no research tools (but baseline still there).
     bare = ExecContext(settings=ctx.settings, paths=ctx.paths, db=None)
     bare_names = {t.spec.name for t in build_builtin_tools(bare)}
