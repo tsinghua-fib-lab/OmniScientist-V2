@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 from omni.eval.diff_coverage_gate import (
@@ -82,6 +83,13 @@ def main() -> int:
         )
         return 2
     write_report(args.report, report)
+    if not report.passed:
+        print(
+            f"changed-code coverage {report.coverage_percent}% "
+            f"({report.covered_changed_lines}/{report.changed_executable_lines} "
+            f"executable lines) < {report.minimum_percent}% vs {report.base_ref}",
+            file=sys.stderr,
+        )
     return 0 if report.passed else 1
 
 
