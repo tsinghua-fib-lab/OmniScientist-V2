@@ -317,9 +317,12 @@ def test_linux_uri_list_type_and_windows_dump(monkeypatch, tmp_path: Path) -> No
     monkeypatch.setattr(
         mod,
         "_linux_clipboard_type",
-        lambda mime: f"file://{img}\n# skip\n".encode() if mime == "text/uri-list" else b"",
+        lambda mime: f"{img.resolve().as_uri()}\n# skip\n".encode()
+        if mime == "text/uri-list"
+        else b"",
     )
-    assert img in mod._linux_uri_list()
+    listed = [path.resolve() for path in mod._linux_uri_list()]
+    assert img.resolve() in listed
     monkeypatch.setattr(mod, "_linux_clipboard_type", lambda _mime: b"")
     assert mod._linux_uri_list() == []
     monkeypatch.undo()
@@ -360,6 +363,8 @@ def test_wsl_fallback_and_linux_retry(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(mod, "_dump_windows_clipboard_image", lambda: None)
     assert mod._try_wsl_clipboard_fallback(PasteImageError.unavailable("arboard")) is None
     monkeypatch.setattr(mod, "_dump_windows_clipboard_image", lambda: img)
+    # Keep the dumped tempfile path; do not remap C:\… to /mnt/c on Windows.
+    monkeypatch.setattr(mod, "_convert_windows_path_to_wsl", lambda _text: None)
     path, info = mod._try_wsl_clipboard_fallback(PasteImageError.no_image("empty"))
     assert path == img
     assert info.width == 1
