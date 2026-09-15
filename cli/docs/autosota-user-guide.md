@@ -1,14 +1,8 @@
 # AutoSOTA user guide through OmniScientist
 
-This guide covers a clean installation, validation, and production-oriented use
-of AutoSOTA through `omni autosota`. Omni only downloads the external CLI,
-stores launcher configuration, and starts it in the foreground. AutoSOTA
-continues to own experiment environments, GPU allocation, repository changes,
-evaluation, iteration, and result export.
+This guide covers a clean installation, validation, and production-oriented use of AutoSOTA through `omni autosota`. Omni only downloads the external CLI, stores launcher configuration, and starts it in the foreground. AutoSOTA continues to own experiment environments, GPU allocation, repository changes, evaluation, iteration, and result export.
 
-The currently validated release is AutoSOTA `v0.3.1`. Use CPython 3.11 for its
-protected Python optimizer runtime. The validation environment used Node.js 20
-and four NVIDIA A100 GPUs.
+The currently validated release is AutoSOTA `v0.3.1`. Use CPython 3.11 for its protected Python optimizer runtime. The validation environment used Node.js 20 and four NVIDIA A100 GPUs.
 
 ## 1. Responsibility boundary
 
@@ -18,9 +12,7 @@ and four NVIDIA A100 GPUs.
 | AutoSOTA | Optimizer environment, model-agent loop, Git checkpoints, GPU selection, evaluation, resume, reports, and optimized-code export |
 | Project owner | A reproducible repository, evaluation command, protected paths, metric direction, baseline, data, GPU capacity, and provider-side budget limits |
 
-AutoSOTA uses a text code agent, not Omni's VLM. A working VLM configuration
-does not configure the Anthropic-compatible endpoint required by the AutoSOTA
-code agent.
+AutoSOTA uses a text code agent, not Omni's VLM. A working VLM configuration does not configure the Anthropic-compatible endpoint required by the AutoSOTA code agent.
 
 ## 2. Prerequisites
 
@@ -34,8 +26,7 @@ bash --version
 python3.11 --version
 ```
 
-Node.js must be at least version 18; Node.js 20 is recommended. If Python 3.11
-is not installed, `uv` can provide a user-local interpreter:
+Node.js must be at least version 18; Node.js 20 is recommended. If Python 3.11 is not installed, `uv` can provide a user-local interpreter:
 
 ```bash
 uv python install 3.11
@@ -64,8 +55,7 @@ uv pip install --python .venv/bin/python -e "./cli[dev,mcp,vec]"
 .venv/bin/omni --version
 ```
 
-Run `omni init` once and configure the normal Omni text model. Prefer hidden
-interactive input or environment expansion over a literal key in shell history.
+Run `omni init` once and configure the normal Omni text model. Prefer hidden interactive input or environment expansion over a literal key in shell history.
 
 ## 4. Install the latest AutoSOTA release
 
@@ -76,14 +66,9 @@ omni autosota get --version latest
 omni autosota info
 ```
 
-The runtime is installed in Omni's versioned private cache rather than with a
-global `npm install -g`. `info` reports the resolved release, runtime directory,
-executable, and ownership boundary. For the release validated with this guide,
-the reported version is `v0.3.1`.
+The runtime is installed in Omni's versioned private cache rather than with a global `npm install -g`. `info` reports the resolved release, runtime directory, executable, and ownership boundary. For the release validated with this guide, the reported version is `v0.3.1`.
 
-Release `v0.3.1` fixes repeated `[session] model=?` output. It prints one
-deduplicated init event while preserving retry and error messages and the full
-raw log.
+Release `v0.3.1` fixes repeated `[session] model=?` output. It prints one deduplicated init event while preserving retry and error messages and the full raw log.
 
 ## 5. Prepare the workspace and Python 3.11 toolchain
 
@@ -97,8 +82,7 @@ export PATH="$WS/.toolchain/bin:$PATH"
 python3 --version
 ```
 
-The final command must report Python 3.11. AutoSOTA creates its own environment
-under `$WS/.autosota/venv` on first use.
+The final command must report Python 3.11. AutoSOTA creates its own environment under `$WS/.autosota/venv` on first use.
 
 Before giving the repository to an optimizer, verify all of the following:
 
@@ -129,9 +113,7 @@ omni autosota config \
   --force
 ```
 
-For DeepSeek, Omni narrowly translates its normal OpenAI-compatible `/v1`
-endpoint to the `/anthropic` code-agent endpoint. The research endpoint remains
-the configured `/v1` endpoint.
+For DeepSeek, Omni narrowly translates its normal OpenAI-compatible `/v1` endpoint to the `/anthropic` code-agent endpoint. The research endpoint remains the configured `/v1` endpoint.
 
 To use separate providers, prompt for secrets in a trusted terminal:
 
@@ -152,8 +134,7 @@ omni autosota config \
   --force
 ```
 
-Provider keys are stored in Omni's owner-only `secrets.toml`. The public
-`.omni-autosota.toml` and normal workspace `config.yaml` do not retain them.
+Provider keys are stored in Omni's owner-only `secrets.toml`. The public `.omni-autosota.toml` and normal workspace `config.yaml` do not retain them.
 
 ## 7. Prepare one safe paper configuration
 
@@ -164,18 +145,13 @@ PAPER=<STABLE_PAPER_NAME>
 omni autosota prepare "$PAPER" --workspace "$WS"
 ```
 
-`prepare` transfers the repository, evaluation command, metric, baseline,
-budget, GPU list, and every protected path into:
+`prepare` transfers the repository, evaluation command, metric, baseline, budget, GPU list, and every protected path into:
 
 ```text
 $WS/.autosota/papers/<paper>/config.yaml
 ```
 
-The file contains no provider key. Real runs must use `--skip-onboard`.
-Model-driven native onboarding is not a substitute: it cannot reliably inherit
-Omni's protected paths and may write supplied credentials into native files or
-logs. Omni refuses that unsafe path when stored secrets or protected paths are
-present.
+The file contains no provider key. Real runs must use `--skip-onboard`. Model-driven native onboarding is not a substitute: it cannot reliably inherit Omni's protected paths and may write supplied credentials into native files or logs. Omni refuses that unsafe path when stored secrets or protected paths are present.
 
 ## 8. Validate before spending model budget
 
@@ -192,8 +168,7 @@ Then run a no-model dry run:
 omni autosota exec --workspace "$WS" -- "$PAPER" --repo "$REPO" --devices 0 --skip-onboard --skip-research --skip-eval --max-iter 1 --max-total-minutes 6 --dry-run
 ```
 
-The dry run should create a run directory, effective configuration, and master
-prompt without sending a model request.
+The dry run should create a run directory, effective configuration, and master prompt without sending a model request.
 
 ## 9. Start a bounded real run
 
@@ -201,10 +176,7 @@ prompt without sending a model request.
 omni autosota exec --workspace "$WS" -- "$PAPER" --repo "$REPO" --devices 0 --skip-onboard --skip-research --skip-eval --max-iter 1 --max-total-minutes 6
 ```
 
-Begin with one iteration, a short wall-clock limit, and `--skip-research`.
-Remove `--skip-research` and `--skip-eval` only after the repository and cost
-envelope are validated. AutoSOTA has iteration and time limits but no hard
-dollar limit; configure provider-side budget caps and alerts.
+Begin with one iteration, a short wall-clock limit, and `--skip-research`. Remove `--skip-research` and `--skip-eval` only after the repository and cost envelope are validated. AutoSOTA has iteration and time limits but no hard dollar limit; configure provider-side budget caps and alerts.
 
 For a single-node multi-GPU recording where InfiniBand is not used:
 
@@ -224,8 +196,7 @@ omni autosota steer "Prioritize lower latency without sacrificing the primary me
 omni autosota resume --workspace "$WS"
 ```
 
-AutoSOTA stays in the foreground; Omni does not convert it into an Omni
-background task. Typical outputs are under:
+AutoSOTA stays in the foreground; Omni does not convert it into an Omni background task. Typical outputs are under:
 
 ```text
 $WS/
@@ -246,16 +217,10 @@ git -C "$REPO" diff _baseline _best --stat
 
 ## 11. Security and operational notes
 
-1. Do not pass provider keys as literal command-line values. Prefer
-   `--prompt-secrets` or `--use-omni-model`.
-2. Native AutoSOTA components may pass a temporarily materialized key to a
-   child process. Avoid process-list commands that print complete arguments on
-   shared hosts, use a dedicated account, and rotate any exposed key.
-3. Omni restores the non-secret workspace configuration after the native
-   process exits and scrubs per-paper secret fields. This does not replace host
-   isolation or provider-side key controls.
-4. Use a clean Git baseline and make evaluation code, tests, metrics, and data
-   splits protected paths.
+1. Do not pass provider keys as literal command-line values. Prefer `--prompt-secrets` or `--use-omni-model`.
+2. Native AutoSOTA components may pass a temporarily materialized key to a child process. Avoid process-list commands that print complete arguments on shared hosts, use a dedicated account, and rotate any exposed key.
+3. Omni restores the non-secret workspace configuration after the native process exits and scrubs per-paper secret fields. This does not replace host isolation or provider-side key controls.
+4. Use a clean Git baseline and make evaluation code, tests, metrics, and data splits protected paths.
 5. A successful mock or dry run validates plumbing, not scientific improvement.
 
 ## 12. Troubleshooting

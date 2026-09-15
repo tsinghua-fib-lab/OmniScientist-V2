@@ -705,7 +705,7 @@ Skills are wired into the whole agent loop, not just a flat tool list:
   durable background tasks (`submit_task`) in a SQLite-backed runtime with crash recovery, progress
   traces, and completion notifications — drained inline for one-shot CLI, or owned by the `omni serve`
   daemon (DB poller + heartbeat + atomic claim) so tasks run once even with several terminals open.
-- **Local memory** — a 7-layer store (session → task → episodic/semantic/artifact) recalls relevant
+- **Local memory** — a 5-layer store (M1 session → M2 task → M3 episodic → M4 semantic → M5 artifact) recalls relevant
   context (keyword + recency + importance by default; opt into vector recall with
   `memory.embeddings_enabled`) into the prompt; task results are recorded back as memories. All
   local: SQLite + files under the active data directory (`~/.omni` by default).

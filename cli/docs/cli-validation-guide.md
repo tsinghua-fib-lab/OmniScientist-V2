@@ -1,7 +1,6 @@
 # CLI Validation Guide
 
-This guide gives copy-pasteable validation scenarios for OmniScientist's command-line
-surface. Every scenario has two trigger forms:
+This guide gives copy-pasteable validation scenarios for OmniScientist's command-line surface. Every scenario has two trigger forms:
 
 - **Shell command**: run from a terminal with `omni ...`.
 - **Interactive CLI**: start `omni -P skill-verify`, then type the shown prompt or slash command.
@@ -14,20 +13,11 @@ omni -P skill-verify skills list --no-pager
 omni -P skill-verify skills examples
 ```
 
-> Real multi-step intent recognition and workflow planning require a real model. The `mock`
-> provider is useful for deterministic tool tests, but it is not a full planner.
+> Real multi-step intent recognition and workflow planning require a real model. The `mock` provider is useful for deterministic tool tests, but it is not a full planner.
 >
-> `omni exec` in these scenarios is workspace-auto: in-workspace writes and sandboxed
-> `bash` / `run_compute` run without a TTY prompt. Use `omni exec --ask` when you want
-> to exercise the approval loop.
+> `omni exec` in these scenarios is workspace-auto: in-workspace writes and sandboxed `bash` / `run_compute` run without a TTY prompt. Use `omni exec --ask` when you want to exercise the approval loop.
 >
-> Numbered user-facing prompts (including stacked 3–8 capability utterances,
-> survey packs, one-shot `--at` schedules, third-party skill add/trust/invoke,
-> long-horizon campaigns, one-task-many-executions, execution-level degrade,
-> `task all`, `memory link`/`graph`, and in-process REPL inspect) live in the
-> [User Walkthrough Catalog](user-walkthrough-cases.md). That catalog is the
-> source of truth for later user-perspective walkthroughs, their output
-> formats, and the coverage inventory of user-facing CLI groups (not every leaf action).
+> Numbered user-facing prompts (including stacked 3–8 capability utterances, survey packs, one-shot `--at` schedules, third-party skill add/trust/invoke, long-horizon campaigns, one-task-many-executions, execution-level degrade, `task all`, `memory link`/`graph`, and in-process REPL inspect) live in the [User Walkthrough Catalog](user-walkthrough-cases.md). That catalog is the source of truth for later user-perspective walkthroughs, their output formats, and the coverage inventory of user-facing CLI groups (not every leaf action).
 
 ## Core Validation Loop
 
@@ -52,22 +42,17 @@ Expected result:
 
 - `task show <id>` renders a readable step/artifact view.
 - `task show <id> --json` preserves the full machine-readable trace.
-- Bash events distinguish transport `status` from
-  `output_json.command_status`/`exit_code`; consumers never parse `[exit=N]` text.
+- Bash events distinguish transport `status` from `output_json.command_status`/`exit_code`; consumers never parse `[exit=N]` text.
 - Completed steps keep their structured results even if a later step fails.
 - Recoverable failures include `status`, `error`, `summary`, and partial outputs.
 
 ## Objective Provider Binding and Settlement
 
-This suite validates the boundary between model planning and execution without a central semantic
-preference interpreter. The host decides only objective legality, provenance, policy, and replay
-safety. The model chooses semantics from exact provider schemas and judges its own results; the host
-settles the turn against what the durable record shows.
+This suite validates the boundary between model planning and execution without a central semantic preference interpreter. The host decides only objective legality, provenance, policy, and replay safety. The model chooses semantics from exact provider schemas and judges its own results; the host settles the turn against what the durable record shows.
 
 ### Runtime controls
 
-Objective JSON Schema and resolver-evidence validation are always fail-closed, and neither is
-configurable.
+Objective JSON Schema and resolver-evidence validation are always fail-closed, and neither is configurable.
 
 ### Revision truth and exact provider binding
 
@@ -94,16 +79,10 @@ task.<succeeded|degraded|failed|needs_input|cancelled|interrupted>
 
 Check the JSON rather than display text:
 
-- Every accepted revision has a monotonic revision number, content hash, parent hash, finding ids,
-  and deterministic diff. Only the final accepted revision is dispatched.
-- Every workflow consumer has one exact provider binding: consumer/step id, capability, provider
-  name, source, version, and contract hash. Same-named providers from different sources are not
-  interchangeable.
-- `plan.validated.output_json.revision_hash`,
-  `plan.execution.bound.output_json.revision_hash`, the final accepted content hash, and the
-  persisted plan revision hash are identical.
-- A final bind rematerializes the provider and resolver evidence. Source/version/contract drift
-  fails closed instead of silently acquiring new code.
+- Every accepted revision has a monotonic revision number, content hash, parent hash, finding ids, and deterministic diff. Only the final accepted revision is dispatched.
+- Every workflow consumer has one exact provider binding: consumer/step id, capability, provider name, source, version, and contract hash. Same-named providers from different sources are not interchangeable.
+- `plan.validated.output_json.revision_hash`, `plan.execution.bound.output_json.revision_hash`, the final accepted content hash, and the persisted plan revision hash are identical.
+- A final bind rematerializes the provider and resolver evidence. Source/version/contract drift fails closed instead of silently acquiring new code.
 
 Repeat in plan mode:
 
@@ -114,8 +93,7 @@ omni -P skill-verify task show <task_id> --json
 omni -P skill-verify task approve <task_id>
 ```
 
-Expected result: approval binds the exact reviewed plan, catalog, provider contracts, and
-prospective sensitive grants. Any persisted-plan, catalog, contract, or grant drift fails closed.
+Expected result: approval binds the exact reviewed plan, catalog, provider contracts, and prospective sensitive grants. Any persisted-plan, catalog, contract, or grant drift fails closed.
 
 Automated checks:
 
@@ -128,15 +106,9 @@ Automated checks:
 
 ### Objective schema and ResolverEvidence
 
-The planner receives the complete input schema for each shortlisted exact provider, including
-nested properties, enum values, descriptions, and `x-omni` guidance. The accepted candidate is
-then compiled against that same schema. Unknown properties, missing values, nested type/enum/
-format errors, and invalid additional properties are rejected before execution.
+The planner receives the complete input schema for each shortlisted exact provider, including nested properties, enum values, descriptions, and `x-omni` guidance. The accepted candidate is then compiled against that same schema. Unknown properties, missing values, nested type/enum/ format errors, and invalid additional properties are rejected before execution.
 
-A resolver-owned field has a separate proof obligation derived from its exact provider contract.
-An explicit normalized id may be `user_exact`; an existing path may be `local_exists`; an id
-derived from a title needs matching `grounded_search` evidence. A plausible format alone is not
-proof, and the model cannot patch or manufacture resolver evidence.
+A resolver-owned field has a separate proof obligation derived from its exact provider contract. An explicit normalized id may be `user_exact`; an existing path may be `local_exists`; an id derived from a title needs matching `grounded_search` evidence. A plausible format alone is not proof, and the model cannot patch or manufacture resolver evidence.
 
 ```bash
 .venv/bin/pytest -q \
@@ -153,32 +125,24 @@ Required assertions:
 - resolver evidence is scoped to provider binding + field + value and is rechecked before dispatch;
 - stale, mismatched, missing, or insufficient evidence blocks provider execution.
 
-There is no pre-execution repair rung: a rejected plan goes to the deterministic recovery ladder
-(safety hard stop, `needs_input` for one user-suppliable field, otherwise the ReAct floor), never
-back to the model for a patch. A schema-valid semantic preference never opens a finding at all.
+There is no pre-execution repair rung: a rejected plan goes to the deterministic recovery ladder (safety hard stop, `needs_input` for one user-suppliable field, otherwise the ReAct floor), never back to the model for a patch. A schema-valid semantic preference never opens a finding at all.
 
 ### Settlement, not deliverable grading
 
-The host does not grade the produced output. `runtime/settlement.py` reads durable rows and decides
-a terminal status; the model, which can see the tool results, owns everything about quality.
+The host does not grade the produced output. `runtime/settlement.py` reads durable rows and decides a terminal status; the model, which can see the tool results, owns everything about quality.
 
 Settlement rules are intentionally narrow:
 
 - submitted subtasks or workflow runs still active ⇒ `pending`, and the task stays running;
 - on an outbound channel, no `presentation.sent|degraded|failed` event yet ⇒ `pending`;
 - a `VerificationPlan.required_events` name with no matching event is an unfounded claim ⇒ `failed`;
-- lost, cancelled, interrupted, or unaccounted-for children ⇒ `failed`; `degraded` children ⇒
-  `degraded`;
+- lost, cancelled, interrupted, or unaccounted-for children ⇒ `failed`; `degraded` children ⇒ `degraded`;
 - a budget-bounded stop on `execution.finished`/`react.finished` ⇒ `degraded`;
-- after the turn ends, a `VerificationPlan.required_outputs` name with no matching artifact on
-  *this* task ⇒ `degraded` (`undelivered_outputs`). A sidecar `.dot`/`.json` does not satisfy
-  `artifact.figure`.
+- after the turn ends, a `VerificationPlan.required_outputs` name with no matching artifact on *this* task ⇒ `degraded` (`undelivered_outputs`). A sidecar `.dot`/`.json` does not satisfy `artifact.figure`.
 
-A skill engine may still put a `deliverable_assessment` block in its own result. It is provider
-self-reporting for the model to read; nothing in the host matches it against a contract.
+A skill engine may still put a `deliverable_assessment` block in its own result. It is provider self-reporting for the model to read; nothing in the host matches it against a contract.
 
-Check `task show <id> --json`: the terminal outcome is the `task.<status>` event plus the task row
-status. There are no `verification.*` events.
+Check `task show <id> --json`: the terminal outcome is the `task.<status>` event plus the task row status. There are no `verification.*` events.
 
 ```bash
 .venv/bin/pytest -q \
@@ -189,9 +153,7 @@ status. There are no `verification.*` events.
 
 ### Model-owned plan checklist
 
-`update_plan` is the model's own step list, not a host contract. Run a multi-step request with
-`--verbose` and watch the `☐ / ▸ / ✔` checklist appear and update in place; the model replaces it
-wholesale each call, and a single-step request should produce no checklist at all.
+`update_plan` is the model's own step list, not a host contract. Run a multi-step request with `--verbose` and watch the `☐ / ▸ / ✔` checklist appear and update in place; the model replaces it wholesale each call, and a single-step request should produce no checklist at all.
 
 ```bash
 .venv/bin/pytest -q cli/tests/agent/test_update_plan_tool.py
@@ -199,11 +161,7 @@ wholesale each call, and a single-step request should produce no checklist at al
 
 ### Legacy persisted-plan compatibility
 
-Old task snapshots may contain the retired `requested_constraints` and `binding_records` arrays.
-Validate by loading an old fixture and inspecting `task show --json`: the historical bytes/hash
-remain readable, but the arrays are opaque. They must not create resolver evidence, provider
-identity, recovery behavior, or a settled status. New plan-schema-v2 snapshots keep the
-compatibility arrays empty and never populate them.
+Old task snapshots may contain the retired `requested_constraints` and `binding_records` arrays. Validate by loading an old fixture and inspecting `task show --json`: the historical bytes/hash remain readable, but the arrays are opaque. They must not create resolver evidence, provider identity, recovery behavior, or a settled status. New plan-schema-v2 snapshots keep the compatibility arrays empty and never populate them.
 
 ### Execution gateway and replay safety
 
@@ -214,10 +172,7 @@ compatibility arrays empty and never populate them.
   cli/tests/agent/test_replay_safety_contract.py
 ```
 
-Expected result: unknown tools and invalid schemas fail before handler start; policy, hooks,
-approval, resource locks, and output validation share one gateway; invalid output schemas cannot
-reach provider code; and non-replay-safe operations execute once. Replay authority is host metadata
-and is absent from model-facing schemas.
+Expected result: unknown tools and invalid schemas fail before handler start; policy, hooks, approval, resource locks, and output validation share one gateway; invalid output schemas cannot reach provider code; and non-replay-safe operations execute once. Replay authority is host metadata and is absent from model-facing schemas.
 
 ### Codex-style busy input and low-noise display
 
@@ -227,12 +182,9 @@ Start a long-running turn in the interactive CLI. While it is active:
 2. Press Tab or enter `/queue <prompt>` to queue exactly one next turn.
 3. Press Esc or enter `/stop`; a repeat in the same turn force-cancels it.
 4. Race a steer with completion; it must apply to the current task or queue once, never both/neither.
-5. During a deterministic workflow, Enter becomes one next-turn item; detached steering creates no
-   orphan control.
+5. During a deterministic workflow, Enter becomes one next-turn item; detached steering creates no orphan control.
 
-Normal verbosity shows planning, executing, and the terminal result. A finding a recovery rung
-absorbed must not expose internal finding codes or a failure-looking warning. Use verbose
-mode or task JSON for revision and finding details.
+Normal verbosity shows planning, executing, and the terminal result. A finding a recovery rung absorbed must not expose internal finding codes or a failure-looking warning. Use verbose mode or task JSON for revision and finding details.
 
 ```bash
 .venv/bin/pytest -q \
@@ -253,15 +205,11 @@ Run the migrated end-to-end corpus and focused contracts:
   cli/tests/agent/test_turn_completion.py
 ```
 
-The corpus must include non-vacuous cases for exact-source collisions, nested objective errors,
-ungrounded resolver values, schema-valid semantic preferences that must *not* block execution, and
-legacy read-only plans. It also requires accepted/persisted/execution-bound hash equality and zero
-duplicate non-replay-safe executions.
+The corpus must include non-vacuous cases for exact-source collisions, nested objective errors, ungrounded resolver values, schema-valid semantic preferences that must *not* block execution, and legacy read-only plans. It also requires accepted/persisted/execution-bound hash equality and zero duplicate non-replay-safe executions.
 
 ## Under-Specified Workflow Check
 
-This prompt should create the user-request Task immediately, ask a follow-up, and avoid creating a
-WorkflowRun or Skill Execution until the missing context is supplied:
+This prompt should create the user-request Task immediately, ask a follow-up, and avoid creating a WorkflowRun or Skill Execution until the missing context is supplied:
 
 ```bash
 omni -P skill-verify exec "Prepare a submission section with search, fetch, ideation, editable figure, complete slides, and writing."
@@ -274,16 +222,12 @@ Expected result:
 
 - The assistant asks for the research topic, target paper, figure/deck type, and writing goal.
 - The first turn is visible in `/task` as `needs_input`, but has no WorkflowRun or Skill Execution.
-- After you provide the missing details, the workflow should plan only active providers from
-  `arxiv-fetch`, `openalex-search`, `scientific-figure`, `livefigure`,
-  `research-ideation`, and `research-pptx`, plus native synthesis when requested.
-- If a planned step is missing a required schema field, `run_workflow` returns `needs_input` instead
-  of creating a half-failed task.
+- After you provide the missing details, the workflow should plan only active providers from `arxiv-fetch`, `openalex-search`, `scientific-figure`, `livefigure`, `research-ideation`, and `research-pptx`, plus native synthesis when requested.
+- If a planned step is missing a required schema field, `run_workflow` returns `needs_input` instead of creating a half-failed task.
 
 ## 1 to 7 Workflow Capability Triggers
 
-These examples are research-shaped prompts, not artificial skill names. The count includes real
-skills plus native workflow deliverables such as `draft.section`. They are also exposed by:
+These examples are research-shaped prompts, not artificial skill names. The count includes real skills plus native workflow deliverables such as `draft.section`. They are also exposed by:
 
 ```bash
 omni skills examples
@@ -334,11 +278,7 @@ Expected result:
 
 ## Channel Login and Daemon Checks
 
-These checks validate local config, QR/pairing generation, credential handling, and daemon
-management. Full IM round-trips still require real platform apps/gateways and should be run as a
-manual platform test. They run the same on macOS, Linux, and Windows. Real usage needs no storage
-flag; `--credential-store file` is pinned below only so a validation run never writes to the
-tester's Keychain. On Windows run the same commands in PowerShell (`$env:FEISHU_APP_SECRET`).
+These checks validate local config, QR/pairing generation, credential handling, and daemon management. Full IM round-trips still require real platform apps/gateways and should be run as a manual platform test. They run the same on macOS, Linux, and Windows. Real usage needs no storage flag; `--credential-store file` is pinned below only so a validation run never writes to the tester's Keychain. On Windows run the same commands in PowerShell (`$env:FEISHU_APP_SECRET`).
 
 ```bash
 omni -P skill-verify channel add feishu
@@ -356,13 +296,9 @@ omni -P skill-verify serve stop
 
 Expected result:
 
-- `channel login` writes `<OMNI_HOME>/channels/feishu.toml`, stores only a credential reference in the
-  channel config, and creates a short-lived `/pair <code>`.
-- `channel test` confirms required config fields and SDK availability; it is not a live platform
-  message round-trip.
-- `serve start/status/stop` manages the single home service for this `OMNI_HOME` (not a
-  per-workspace daemon) and writes logs under `<OMNI_HOME>/logs/`;
-  enabled channel adapters are reconciled dynamically from channel config.
+- `channel login` writes `<OMNI_HOME>/channels/feishu.toml`, stores only a credential reference in the channel config, and creates a short-lived `/pair <code>`.
+- `channel test` confirms required config fields and SDK availability; it is not a live platform message round-trip.
+- `serve start/status/stop` manages the single home service for this `OMNI_HOME` (not a per-workspace daemon) and writes logs under `<OMNI_HOME>/logs/`; enabled channel adapters are reconciled dynamically from channel config.
 
 ## Research Object Model Checks
 
@@ -477,9 +413,7 @@ cd ../research-pptx
 python3 scripts/run.py --self-test
 ```
 
-On Windows PowerShell, write the payload as UTF-8 and pass `--json-file`. Do not
-use `--json '{"..."}'` — PowerShell strips the inner quotes, and a legacy
-console code page rewrites Chinese `output_dir` values to `????`.
+On Windows PowerShell, write the payload as UTF-8 and pass `--json-file`. Do not use `--json '{"..."}'` — PowerShell strips the inner quotes, and a legacy console code page rewrites Chinese `output_dir` values to `????`.
 
 ```powershell
 python3 scripts/run.py --json-file payload.json
@@ -495,39 +429,20 @@ Expected result:
 
 ## Final Acceptance Checklist
 
-- The objective-provider offline corpus exercises exact schema, ResolverEvidence, exact provider
-  sealing, and legacy-read compatibility without network access.
-- Changed executable Python lines under `cli/src/omni/**/*.py` meet the independent 80% coverage
-  gate with resolved baseline/candidate provenance and a complete uploaded report.
+- The objective-provider offline corpus exercises exact schema, ResolverEvidence, exact provider sealing, and legacy-read compatibility without network access.
+- Changed executable Python lines under `cli/src/omni/**/*.py` meet the independent 80% coverage gate with resolved baseline/candidate provenance and a complete uploaded report.
 - Accepted, persisted, approval-bound, and execution-bound plan hashes agree.
-- Every consumer is bound to the exact provider source/version/contract hash, and the final binding
-  must match it.
-- Planning adds no repair call; a rejected plan is handled by the deterministic recovery ladder, and
-  resolver facts are never model-repairable.
-- A turn that claims a side effect without the matching event settles `failed`; an active child
-  keeps the task running instead of publishing an unearned status.
-- Gateway contract and replay-safety tests prove malformed output schemas cannot reach
-  authorization/hooks/provider execution, external references are never fetched, and
-  non-replay-safe operations are never duplicated.
-- Provider root/nested/renewal/latest authority, runtime closure, recovery continuity, and retry
-  idempotency all meet their non-zero case floors with zero errors.
-- Legacy persisted arrays are readable only; they create no evidence, binding, recovery authority,
-  or settled status, and new plan-schema-v2 snapshots keep them empty.
-- Revocable gateway leases prevent copied contexts from retaining authority; delegated authority is
-  exact-target and one-shot.
-- Busy Enter/Tab/Esc behavior and 10,000 independent finish/insert interleavings have no lost or
-  duplicated input.
-- Real SQLite controls prove exclusive terminal requeue ownership, live-PID lease protection, dead-
-  PID immediate recovery, and legacy lease recovery; crash recovery is explicitly at-least-once,
-  with no replay after durable acknowledgement.
-- Failing-turn queue/steer fallback is exactly-once; deterministic workflows do not falsely apply
-  steering; detached deterministic steering is rejected without creating a control; transient
-  acknowledgement recovery neither loses nor duplicates delivered steering; generic skill wrappers
-  preserve concrete approval, output contracts, and explicit domain-failure status; provider data
-  cannot forge host rejection authority; native synthesis cannot bypass its typed output contract;
-  durable domain failures cannot become successful subtasks.
-- Final steering boundaries are monotonic: late audit/cost/plan writes cannot reopen a sealed task,
-  and the SQL insert gate leaves zero orphan controls.
+- Every consumer is bound to the exact provider source/version/contract hash, and the final binding must match it.
+- Planning adds no repair call; a rejected plan is handled by the deterministic recovery ladder, and resolver facts are never model-repairable.
+- A turn that claims a side effect without the matching event settles `failed`; an active child keeps the task running instead of publishing an unearned status.
+- Gateway contract and replay-safety tests prove malformed output schemas cannot reach authorization/hooks/provider execution, external references are never fetched, and non-replay-safe operations are never duplicated.
+- Provider root/nested/renewal/latest authority, runtime closure, recovery continuity, and retry idempotency all meet their non-zero case floors with zero errors.
+- Legacy persisted arrays are readable only; they create no evidence, binding, recovery authority, or settled status, and new plan-schema-v2 snapshots keep them empty.
+- Revocable gateway leases prevent copied contexts from retaining authority; delegated authority is exact-target and one-shot.
+- Busy Enter/Tab/Esc behavior and 10,000 independent finish/insert interleavings have no lost or duplicated input.
+- Real SQLite controls prove exclusive terminal requeue ownership, live-PID lease protection, dead- PID immediate recovery, and legacy lease recovery; crash recovery is explicitly at-least-once, with no replay after durable acknowledgement.
+- Failing-turn queue/steer fallback is exactly-once; deterministic workflows do not falsely apply steering; detached deterministic steering is rejected without creating a control; transient acknowledgement recovery neither loses nor duplicates delivered steering; generic skill wrappers preserve concrete approval, output contracts, and explicit domain-failure status; provider data cannot forge host rejection authority; native synthesis cannot bypass its typed output contract; durable domain failures cannot become successful subtasks.
+- Final steering boundaries are monotonic: late audit/cost/plan writes cannot reopen a sealed task, and the SQL insert gate leaves zero orphan controls.
 - Successful self-heal leaves no normal-mode warning; full revision/finding details remain auditable.
 - `omni skills examples` shows 1 to 7 workflow capability prompts and validation commands.
 - `/skills examples` shows the same content inside the interactive CLI.

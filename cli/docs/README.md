@@ -15,6 +15,10 @@
 | [testing-and-evaluation.md](testing-and-evaluation.md) | Pytest, `omni eval`, coverage, research-quality checks, and black-box harness |
 | [external-benchmarks.md](external-benchmarks.md) | Natural-language black-box reliability, AstaBench, BioMysteryBench, and scoring boundaries |
 | [agent-runtime-harness.md](agent-runtime-harness.md) | Runtime invariants, Plan/Review modes, hooks, steer, DAG recovery, isolation, quality eval, and domain packs |
+| [harness-dimensions.md](harness-dimensions.md) ([中文](harness-dimensions_cn.md)) | Nine-dimension technical analysis of the agent harness: main loop, tool layer, context manager, permissions/sandbox, subagent dispatch, session/state, observability, hooks, error recovery — with `file:line` citations into `cli/src/omni/` |
+| [harness-architecture.md](harness-architecture.md) ([中文](harness-architecture_cn.md)) | Macro view of the same nine responsibilities: what each one is, the design space, the choices the harness makes within each, and the cross-cutting properties (model-is-not-authority, reach vs exposure, host-owned analog, durable cancel, grant-shaped approvals, fail-closed, M1 isolation) that hold the system together |
+| [request-lifecycle.md](request-lifecycle.md) ([中文](request-lifecycle_cn.md)) | Longitudinal view: one user request through six phases (Intake → Plan → Execute → Settle → Render → Persist), what state crosses each boundary, how the harness keeps the system consistent under failure |
+| [agent-evaluation-survey.md](agent-evaluation-survey.md) ([中文](agent-evaluation-survey_cn.md)) | Supplementary survey of general-purpose and scientific agent evaluation techniques — outcome / process / efficiency / safety layers, general and domain benchmarks, harness evaluation, memory evaluation, the Eval Flywheel, and current ecosystem limitations |
 | [architecture.md](architecture.md) | As-built architecture, request flow, storage model, research subsystem |
 | [research-agent-design.md](research-agent-design.md) | **Product + architecture design & positioning**: capabilities, vs Claude Code/Codex, why it fits research, and a comparison with other open-source research agents |
 | [../../skills/docs/authoring.md](../../skills/docs/authoring.md) | How to write skills (prompt / python / cli-exec / async) |
@@ -25,3 +29,14 @@ skill lifecycle, then read **research-agent-design.md** for the big picture
 (and **compatibility.md** if you use Claude Code/Codex). Contributors should read
 **architecture.md**, **agent-runtime-harness.md**, and
 [`../CONTRIBUTING.md`](../CONTRIBUTING.md).
+
+### Document naming convention
+
+- `xxx.md` is the English (canonical) version.
+- `xxx_cn.md` is the Chinese version, kept next to its English counterpart so
+  readers can pick the language they prefer. Translations preserve code
+  references (`file:line`), arXiv ids, benchmark names, and technical
+  vocabulary in English; only the surrounding prose is translated.
+- When a new translatable document lands, the second-language version should
+  follow within the same commit (or in a paired follow-up commit) so the
+  index above never lists a one-sided pair.

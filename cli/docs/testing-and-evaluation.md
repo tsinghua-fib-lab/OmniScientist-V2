@@ -5,30 +5,23 @@ OmniScientist needs two kinds of confidence:
 1. deterministic confidence that storage, policy, lifecycle, and provenance contracts are correct;
 2. empirical confidence that real models complete realistic research work reliably and efficiently.
 
-No single framework supplies both. The recommended stack keeps Omni's native pytest and scenario
-harnesses as the release source of truth, and uses **Inspect AI** as the external orchestration,
-sandbox, trajectory, and benchmark interoperability layer.
+No single framework supplies both. The recommended stack keeps Omni's native pytest and scenario harnesses as the release source of truth, and uses **Inspect AI** as the external orchestration, sandbox, trajectory, and benchmark interoperability layer.
 
 ## Decision
 
 **Selected external orchestrator: [Inspect AI](https://inspect.aisi.org.uk/).**
 
-This selection does not replace `pytest`, `omni eval`, or benchmark-owned scorers. Inspect should be
-an optional development/evaluation dependency, not part of the normal `omni` runtime installation.
-The integration boundary is an Omni solver/agent adapter that calls the same public
-`OmniAgent.handle_turn` path as CLI and IM channels.
+This selection does not replace `pytest`, `omni eval`, or benchmark-owned scorers. Inspect should be an optional development/evaluation dependency, not part of the normal `omni` runtime installation. The integration boundary is an Omni solver/agent adapter that calls the same public `OmniAgent.handle_turn` path as CLI and IM channels.
 
 Why it is the best fit:
 
 - Python-native tasks, datasets, custom solvers/agents, tools, and scorers fit the existing codebase.
-- Agent evaluation includes tool use, custom/external agents, checkpointing, intervention, and
-  token/message/time limits.
+- Agent evaluation includes tool use, custom/external agents, checkpointing, intervention, and token/message/time limits.
 - Eval sets provide parallelism, retry/resume, error handling, and early stopping.
 - Logs preserve sample-level transcripts, events, scores, model usage, and reproducibility metadata.
 - Sandboxes and tool approval preserve benchmark-owned execution boundaries.
 - AstaBench already builds on Inspect, and Omni already contains an AstaBench solver adapter.
-- Hugging Face LightEval itself identifies Inspect as its preferred `eval` backend, reducing the
-  value of introducing a second general orchestration layer.
+- Hugging Face LightEval itself identifies Inspect as its preferred `eval` backend, reducing the value of introducing a second general orchestration layer.
 
 ## What exists today
 
@@ -40,10 +33,7 @@ uv run --project cli ruff check cli/src cli/tests
 uv run --project cli pytest -q
 ```
 
-The pytest suite covers storage migrations, sessions, memory, task/subtask lifecycle, ReAct transcript
-normalization, bounded termination, policy and approval, skill contracts, workflow recovery,
-scientific artifacts, channel presentation/idempotency, CLI/REPL parity, and distribution checks.
-Tests use `mock`/`ScriptedLLM` and do not call a network model.
+The pytest suite covers storage migrations, sessions, memory, task/subtask lifecycle, ReAct transcript normalization, bounded termination, policy and approval, skill contracts, workflow recovery, scientific artifacts, channel presentation/idempotency, CLI/REPL parity, and distribution checks. Tests use `mock`/`ScriptedLLM` and do not call a network model.
 
 ### 2. Native deterministic agent scenarios
 
@@ -53,9 +43,7 @@ uv run --project cli omni eval --coverage
 uv run --project cli omni eval --record --gate --json
 ```
 
-These persona and capability scenarios are fast CI regressions. They may script planner/model
-proposals, so they prove that Omni handles a declared trajectory correctly; they do not prove that
-a real model will discover that trajectory from natural language.
+These persona and capability scenarios are fast CI regressions. They may script planner/model proposals, so they prove that Omni handles a declared trajectory correctly; they do not prove that a real model will discover that trajectory from natural language.
 
 ### 3. Research-quality invariants
 
@@ -64,8 +52,7 @@ uv run --project cli omni eval --research-quality
 uv run --project cli omni eval --quality-input quality.json --json
 ```
 
-These checks score citation fidelity, statistical invariants/tolerances, and reproducibility
-manifests without an LLM judge. They should remain hard release gates.
+These checks score citation fidelity, statistical invariants/tolerances, and reproducibility manifests without an LLM judge. They should remain hard release gates.
 
 ### 4. Natural-language black-box journeys
 
@@ -77,25 +64,16 @@ uv run --project cli omni eval --black-box --repeats 5 --concurrency 4 --json
 uv run --project cli omni eval --black-box --repeats 5 --concurrency 2 --live --json
 ```
 
-The [User Walkthrough Catalog](user-walkthrough-cases.md) lists named native
-tools, stacked prompts, and CLI groups for a configured checkout.
-Those cases are not a substitute for `omni eval --black-box`; they are the
-operator script for a configured checkout.
+The [User Walkthrough Catalog](user-walkthrough-cases.md) lists named native tools, stacked prompts, and CLI groups for a configured checkout. Those cases are not a substitute for `omni eval --black-box`; they are the operator script for a configured checkout.
 
-A black-box scenario contains user turns and observable expectations only. The loader rejects
-planner answers, model outputs, tool scripts, seeded memories/tasks, and reviewer verdicts. Every
-attempt receives a fresh workspace and enters through `OmniAgent.handle_turn`; IM scenarios also
-exercise the common channel command/presentation/delivery boundary in memory.
+A black-box scenario contains user turns and observable expectations only. The loader rejects planner answers, model outputs, tool scripts, seeded memories/tasks, and reviewer verdicts. Every attempt receives a fresh workspace and enters through `OmniAgent.handle_turn`; IM scenarios also exercise the common channel command/presentation/delivery boundary in memory.
 
-The report includes repeated-run success rate, provenance accuracy, manual rework, duration, token
-use, and estimated cost.
+The report includes repeated-run success rate, provenance accuracy, manual rework, duration, token use, and estimated cost.
 
 ### 5. External scientific benchmarks
 
-- `omni.eval.asta_solver` adapts official Inspect/AstaBench tools to Omni while leaving AstaBench in
-  charge of task data, sandboxing, scoring, logs, and aggregation.
-- `omni.eval.external_benchmarks` loads and runs BioMysteryBench cases in an attested sandbox, omits
-  evaluator rubrics from prompts/exports, and leaves official scoring to the benchmark owner.
+- `omni.eval.asta_solver` adapts official Inspect/AstaBench tools to Omni while leaving AstaBench in charge of task data, sandboxing, scoring, logs, and aggregation.
+- `omni.eval.external_benchmarks` loads and runs BioMysteryBench cases in an attested sandbox, omits evaluator rubrics from prompts/exports, and leaves official scoring to the benchmark owner.
 
 See [external-benchmarks.md](external-benchmarks.md) for governed setup and commands.
 
@@ -103,17 +81,12 @@ See [external-benchmarks.md](external-benchmarks.md) for governed setup and comm
 
 The existing suite is substantial, but it is not a complete product certification:
 
-- Most PR tests use a scripted or mock model. They cannot measure real model planning variance,
-  provider-specific tool-call behavior, or repeated-run success probability.
-- Offline IM tests exercise Omni's channel boundary, not a real WeChat/Feishu/DingTalk login,
-  network reconnect, platform retry, media upload, or provider acknowledgement.
-- Live black-box results are not yet emitted in a widely interoperable trajectory format with a
-  standard viewer, resumable eval-set execution, and benchmark-level sandbox metadata.
+- Most PR tests use a scripted or mock model. They cannot measure real model planning variance, provider-specific tool-call behavior, or repeated-run success probability.
+- Offline IM tests exercise Omni's channel boundary, not a real WeChat/Feishu/DingTalk login, network reconnect, platform retry, media upload, or provider acknowledgement.
+- Live black-box results are not yet emitted in a widely interoperable trajectory format with a standard viewer, resumable eval-set execution, and benchmark-level sandbox metadata.
 - Semantic answer quality still needs calibrated domain rubrics and periodic expert review.
-- Model/provider matrices, long-duration soak runs, rate-limit recovery, and real cost ceilings
-  should run outside the fast PR gate.
-- External benchmark scores cover selected scientific abilities; they do not validate Omni's own
-  memory, task recovery, channel, storage, or approval semantics.
+- Model/provider matrices, long-duration soak runs, rate-limit recovery, and real cost ceilings should run outside the fast PR gate.
+- External benchmark scores cover selected scientific abilities; they do not validate Omni's own memory, task recovery, channel, storage, or approval semantics.
 
 ## Tool comparison
 
@@ -144,8 +117,7 @@ retrieval/answer records -> optional Ragas ----> semantic diagnostics
 
 - Python contracts stay in `cli/tests/`.
 - Product journeys stay in `cli/src/omni/data/blackbox_scenarios/`.
-- Omni behavior is observed from public results plus persisted runs/events/artifacts, never from a
-  test-only planner injection.
+- Omni behavior is observed from public results plus persisted runs/events/artifacts, never from a test-only planner injection.
 - AstaBench and BioMysteryBench retain their own datasets, tools, sandboxes, licenses, and scorers.
 - LLM-judge scores are diagnostics unless calibrated against a versioned human-labelled set.
 
@@ -156,8 +128,7 @@ Each scenario attempt should:
 1. create an isolated `OMNI_HOME` and workspace;
 2. start from user-visible input only;
 3. call `OmniAgent.handle_turn` or the real subprocess/channel boundary selected by the scenario;
-4. preserve parent/child runs, events, tool calls/results, artifacts, provenance, tokens, cost, and
-   termination reason in the Inspect sample log;
+4. preserve parent/child runs, events, tool calls/results, artifacts, provenance, tokens, cost, and termination reason in the Inspect sample log;
 5. let deterministic scorers check status/events/policy/artifacts before any semantic judge runs;
 6. support repeated epochs without sharing memory or artifacts between attempts.
 
@@ -171,8 +142,7 @@ Each scenario attempt should:
 | Release candidate | Per release | Cross-platform install smoke, wheel validation, ≥80% changed executable-line coverage under `cli/src/omni/**/*.py` since the previous tag (or verified first-release bootstrap), reactive-binding/authority evidence, live core journeys, AstaBench validation subset | All hard gates and artifacts pass; no statistically material core-journey regression |
 | Published benchmark | Milestone | Official AstaBench suite and governed BioMysteryBench runs | Publish official score, version, model, tools, cost, and run count together |
 
-Do not put real platform credentials or unrestricted live-model tests in forked pull-request jobs.
-Use protected scheduled environments and sanitize trajectories before uploading CI artifacts.
+Do not put real platform credentials or unrestricted live-model tests in forked pull-request jobs. Use protected scheduled environments and sanitize trajectories before uploading CI artifacts.
 
 ## Metrics to publish
 
@@ -190,13 +160,11 @@ For each model/provider/version combination, publish more than one aggregate sco
 ## Implementation sequence
 
 1. Add an optional Inspect development/eval dependency and a general Omni black-box solver adapter.
-2. Convert the native black-box scenario schema into Inspect datasets without creating a second
-   scenario source of truth.
+2. Convert the native black-box scenario schema into Inspect datasets without creating a second scenario source of truth.
 3. Map Omni hard expectations to deterministic Inspect scorers and store the full run/event trace.
 4. Publish `.eval` logs as protected CI artifacts and add a nightly provider matrix.
 5. Add optional Ragas scorers for grounded-answer diagnostics, calibrated against expert labels.
-6. Keep AstaBench and BioMysteryBench execution in their official environments and report official
-   scores separately from Omni product-quality gates.
+6. Keep AstaBench and BioMysteryBench execution in their official environments and report official scores separately from Omni product-quality gates.
 
 ## Primary references
 

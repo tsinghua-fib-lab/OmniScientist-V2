@@ -1,8 +1,6 @@
 # Agent and Skill Validation Guide
 
-This guide validates OmniScientist as a research agent, not just as a generic CLI wrapper.
-It focuses on intent recognition, skill planning, durable workflows, research provenance,
-memory, sessions, storage, and external-agent compatibility.
+This guide validates OmniScientist as a research agent, not just as a generic CLI wrapper. It focuses on intent recognition, skill planning, durable workflows, research provenance, memory, sessions, storage, and external-agent compatibility.
 
 Use this guide with a real model for planner validation:
 
@@ -11,18 +9,9 @@ omni -P skill-verify config list
 omni -P skill-verify config test
 ```
 
-The offline `mock` provider is intentionally limited; it is useful for deterministic unit tests and
-tool smoke tests, but it does not validate real model-side workflow planning.
+The offline `mock` provider is intentionally limited; it is useful for deterministic unit tests and tool smoke tests, but it does not validate real model-side workflow planning.
 
-Copy-pasteable user prompts for named `search_literature`, retrieve-only host
-policy, contradiction scan, stacked 3–8 capability utterances, survey packs
-(P-01 is the Attention-abstract + four-box figure + manuscript + PPT shape),
-long-horizon campaigns, one-task-many-executions, execution-level degrade,
-third-party skill add/trust/invoke, `memory link` / `graph`, and `task all`
-are in the [User Walkthrough Catalog](user-walkthrough-cases.md). That catalog
-is the source of truth for later user-perspective walkthroughs, including the
-user-visible output format and the coverage inventory of every CLI group and
-built-in skill.
+Copy-pasteable user prompts for named `search_literature`, retrieve-only host policy, contradiction scan, stacked 3–8 capability utterances, survey packs (P-01 is the Attention-abstract + four-box figure + manuscript + PPT shape), long-horizon campaigns, one-task-many-executions, execution-level degrade, third-party skill add/trust/invoke, `memory link` / `graph`, and `task all` are in the [User Walkthrough Catalog](user-walkthrough-cases.md). That catalog is the source of truth for later user-perspective walkthroughs, including the user-visible output format and the coverage inventory of every CLI group and built-in skill.
 
 ## What Must Be Validated
 
@@ -54,23 +43,11 @@ Use natural prompts rather than skill names. The agent should infer the skill:
 | `Make this one editable scientific figure in PowerPoint.` | Plan `figure.editable.pptx`. | The provider is `livefigure`; output is a single-slide PPTX. |
 | `Turn this study into a complete thesis-defense deck.` | Plan `slides.generate`. | The provider is `research-pptx`; output is a multi-slide PPTX. |
 
-Copy-pasteable **VLM on / VLM off** cases for `livefigure`, `paper-review`,
-and `scientific-poster` (probe `omni config vlm`, then branch) live in the
-[User Walkthrough Catalog](user-walkthrough-cases.md#vlm-driven-skills).
+Copy-pasteable **VLM on / VLM off** cases for `livefigure`, `paper-review`, and `scientific-poster` (probe `omni config vlm`, then branch) live in the [User Walkthrough Catalog](user-walkthrough-cases.md#vlm-driven-skills).
 
 ### LiveFigure VLM admission
 
-Before configuring a VLM, run the editable-figure prompt above and inspect the
-result with `/task show <id> --json`. Admission occurs at actual execution:
-the gateway returns one configuration action with error code
-`vlm_not_configured`, a redacted list of missing fields, and
-`omni config vlm`; the LiveFigure engine is not loaded. An inline Agent call
-presents the action as `kind: needs_input`. A background task or workflow may
-already have a durable execution record, but that record must contain the same
-action instead of a generic provider failure. It must not silently substitute
-`scientific-figure`, because SVG/PNG is a different deliverable from an editable
-single-slide PPTX. Host figure fill covers only a still-owed `artifact.figure` on
-*this* task; it never substitutes LiveFigure or `research-pptx`.
+Before configuring a VLM, run the editable-figure prompt above and inspect the result with `/task show <id> --json`. Admission occurs at actual execution: the gateway returns one configuration action with error code `vlm_not_configured`, a redacted list of missing fields, and `omni config vlm`; the LiveFigure engine is not loaded. An inline Agent call presents the action as `kind: needs_input`. A background task or workflow may already have a durable execution record, but that record must contain the same action instead of a generic provider failure. It must not silently substitute `scientific-figure`, because SVG/PNG is a different deliverable from an editable single-slide PPTX. Host figure fill covers only a still-owed `artifact.figure` on *this* task; it never substitutes LiveFigure or `research-pptx`.
 
 After configuring the owner profile, validate without exposing the key:
 
@@ -79,9 +56,7 @@ omni config vlm --endpoint <BASE_OR_CHAT_URL> --model <MODEL> --api-key <KEY> --
 omni doctor
 ```
 
-Repeat the prompt and confirm that LiveFigure creates exactly one editable
-PPTX slide. Task output, logs, generated code, and provenance must not contain
-the API key.
+Repeat the prompt and confirm that LiveFigure creates exactly one editable PPTX slide. Task output, logs, generated code, and provenance must not contain the API key.
 
 ## Workflow Capability Matrix
 
@@ -129,11 +104,8 @@ Prepare a submission section with search, fetch, ideation, an editable figure, a
 Expected result:
 
 - The assistant asks for missing research context instead of launching a workflow.
-- The user-request Task is visible immediately and settles as `needs_input`; no WorkflowRun or Skill
-  Execution is created until the required context is supplied.
-- After the user supplies a topic, paper/arXiv id, figure format, deck purpose, and writing target,
-  the workflow should use the relevant providers from the six-skill activity list and native
-  `draft.section` synthesis.
+- The user-request Task is visible immediately and settles as `needs_input`; no WorkflowRun or Skill Execution is created until the required context is supplied.
+- After the user supplies a topic, paper/arXiv id, figure format, deck purpose, and writing target, the workflow should use the relevant providers from the six-skill activity list and native `draft.section` synthesis.
 
 ### Conservative Resolver Behavior
 
@@ -146,10 +118,8 @@ Write a Transformer/RAG research section: search the literature, fetch arXiv 170
 Expected result:
 
 - The model should plan `artifact.figure` for the figure deliverable.
-- Plan arbitration must select a provider before validation. An invalid provider is rejected or
-  resolved there; the executor must not silently replace it after validation.
-- Valid capabilities such as corpus indexing, ideation, PPTX generation, and native synthesis must not be
-  overwritten merely because the global goal mentions search or literature.
+- Plan arbitration must select a provider before validation. An invalid provider is rejected or resolved there; the executor must not silently replace it after validation.
+- Valid capabilities such as corpus indexing, ideation, PPTX generation, and native synthesis must not be overwritten merely because the global goal mentions search or literature.
 
 ## Research Provenance Scenarios
 
@@ -283,11 +253,8 @@ omni -P skill-verify task approve <run_id>
 Expected result:
 
 - The acknowledgement returns a `run_id` before planning finishes.
-- The run is `awaiting_approval`, contains a structured plan and selection reasons, and has no
-  execution events before approval.
-- Approval reuses the same task id and appends `plan.approved`. The approval CAS already performs
-  the sole `awaiting_approval → running` transition, so execution does not append a fictitious
-  `task.resumed` event whose previous status is also `running`.
+- The run is `awaiting_approval`, contains a structured plan and selection reasons, and has no execution events before approval.
+- Approval reuses the same task id and appends `plan.approved`. The approval CAS already performs the sole `awaiting_approval → running` transition, so execution does not append a fictitious `task.resumed` event whose previous status is also `running`.
 
 Review, steer, and cancellation:
 
@@ -316,8 +283,7 @@ Expected result:
 
 - Dependency-ready steps only overlap when their contracts declare `concurrent_safe=true`.
 - A checkpoint contains completed step ids and pending work.
-- Retry creates a linked child attempt; resume keeps the child id and reuses successful upstream
-  results.
+- Retry creates a linked child attempt; resume keeps the child id and reuses successful upstream results.
 
 Research-quality and domain extension smoke tests:
 
@@ -331,8 +297,7 @@ Expected result:
 
 - Citation fidelity, statistical correctness, and reproducibility are individually scored.
 - The bundled baseline passes offline.
-- Enabled domain packs add guidance and connector/artifact recommendations but do not bypass
-  connector enablement, permissions, or tool budgets.
+- Enabled domain packs add guidance and connector/artifact recommendations but do not bypass connector enablement, permissions, or tool budgets.
 
 ## Black-box Reliability and External Benchmarks
 
@@ -342,12 +307,9 @@ Run repeated natural-language scenarios without planner or answer injection:
 .venv/bin/omni eval --black-box --repeats 5 --concurrency 4 --json
 ```
 
-The bundled suite covers CLI, WeChat, Feishu, and DingTalk journeys, including memory,
-self-knowledge, needs-input, multi-skill research, specialized PPTX routing, and artifact revision.
-Model/network scenarios are skipped offline and run only with `--live`.
+The bundled suite covers CLI, WeChat, Feishu, and DingTalk journeys, including memory, self-knowledge, needs-input, multi-skill research, specialized PPTX routing, and artifact revision. Model/network scenarios are skipped offline and run only with `--live`.
 
-For AstaBench and BioMysteryBench setup, isolation rules, and official-scoring boundaries, see
-[Black-box and External Benchmark Validation](external-benchmarks.md).
+For AstaBench and BioMysteryBench setup, isolation rules, and official-scoring boundaries, see [Black-box and External Benchmark Validation](external-benchmarks.md).
 
 ## Compatibility and Portable Skill Validation
 
@@ -370,8 +332,7 @@ Expected result:
 
 - Every runner returns `{"status": "ok", "portable_runner": true}`.
 - The runner scripts do not import Omni.
-- Copying a skill folder to Claude Code, Codex, or OpenClaw leaves `SKILL.md` readable and
-  `scripts/run.py` executable where present.
+- Copying a skill folder to Claude Code, Codex, or OpenClaw leaves `SKILL.md` readable and `scripts/run.py` executable where present.
 
 Validate Omni enhanced mode:
 
@@ -425,5 +386,4 @@ OmniScientist passes agent validation when:
 2. Multi-step workflow tasks are durable, inspectable, and recoverable.
 3. Research outputs can be audited through sources, claims, evidence, hypotheses, runs, and artifacts.
 4. Memory and session state persist across turns and terminals.
-5. Copy-only and portable-runner modes work without Omni; Omni enhanced mode adds tasks, provenance,
-   corpus, artifacts, and MCP.
+5. Copy-only and portable-runner modes work without Omni; Omni enhanced mode adds tasks, provenance, corpus, artifacts, and MCP.
