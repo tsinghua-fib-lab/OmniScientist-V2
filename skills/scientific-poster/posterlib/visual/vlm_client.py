@@ -26,11 +26,14 @@ _API_KEY_ENV = "OMNI_VLM_API_KEY"
 _HOST_MODEL = "host-configured"
 _LABELED_IMAGE_MAX_WIDTH = 4_096
 _LABELED_IMAGE_MAX_HEIGHT = 4_096
+_SINGLE_IMAGE_MAX_BYTES = 2 * 1024 * 1024
+_SINGLE_IMAGE_MIN_DIMENSION = 640
 _MONTAGE_PANEL_WIDTH = 1_920
 _MONTAGE_MAX_IMAGE_HEIGHT = 2_160
 _MONTAGE_GAP = 32
 _MONTAGE_LABEL_HEIGHT = 88
 _DEFAULT_RESPONSE_EXCERPT_CHARS = 8_000
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 class VlmError(RuntimeError):
@@ -68,8 +71,24 @@ class VlmConfig:
         model = str(self.model).strip()
         api_key = str(self.api_key).strip()
         parsed = urlparse(endpoint)
-        if parsed.scheme != "https" or not parsed.netloc:
-            raise VlmError("OMNI_VLM_ENDPOINT must be a complete HTTPS URL")
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or not parsed.hostname
+        ):
+            raise VlmError("OMNI_VLM_ENDPOINT must be a complete HTTP(S) URL")
+        if parsed.username or parsed.password:
+            raise VlmError("OMNI_VLM_ENDPOINT must not contain embedded credentials")
+        if parsed.fragment:
+            raise VlmError("OMNI_VLM_ENDPOINT must not contain a URL fragment")
+        if (
+            parsed.scheme == "http"
+            and parsed.hostname.lower() not in _LOOPBACK_HOSTS
+        ):
+            raise VlmError(
+                "OMNI_VLM_ENDPOINT must use HTTPS; plain HTTP is allowed only for "
+                "loopback"
+            )
         if not model:
             raise VlmError("OMNI_VLM_MODEL is required")
         if not api_key or any(ord(char) < 32 or ord(char) == 127 for char in api_key):
@@ -186,14 +205,15 @@ class VlmClient:
                         {"type": "text", "text": image.label},
                         {
                             "type": "image_url",
-                            "image_url": {"url": _image_data_url(image)},
+                            "image_url": {
+                                "url": _bounded_single_image_data_url(image)
+                            },
                         },
                     ]
                 )
         payload = {
             "model": self._config.model,
             "messages": [{"role": "user", "content": content}],
-            "response_format": {"type": "json_object"},
             "temperature": 0,
         }
         headers = {
@@ -266,18 +286,15 @@ class HostVlmClient:
 
         reference_image_uri: str | None = None
         if len(normalized_images) == 1:
-            reference_image_uri = _image_data_url(normalized_images[0])
+            reference_image_uri = _bounded_single_image_data_url(
+                normalized_images[0]
+            )
         elif len(normalized_images) >= 2:
             reference_image_uri = _labeled_montage_data_url(normalized_images)
-            normalized_prompt = "\n".join(
-                [
-                    (
-                        "The single attached image is a deterministic labeled montage. "
-                        "Read each pane by its embedded label and preserve the original "
-                        "left-to-right image order."
-                    ),
-                    normalized_prompt,
-                ]
+            normalized_prompt = (
+                "The single attached image is a deterministic labeled montage. "
+                "Read each pane by its embedded label and preserve the original "
+                f"left-to-right image order.\n{normalized_prompt}"
             )
 
         try:
@@ -320,7 +337,7 @@ def configuration_present(
         return True
     try:
         host_error_code = str(getattr(service, "error_code", "") or "").strip()
-    except Exception:
+    except Exception:  # noqa: BLE001 - an injected host property may be arbitrary
         return service is not None
     if host_error_code and host_error_code != "vlm_not_configured":
         return True
@@ -336,18 +353,96 @@ def _host_service_available(service: Any) -> bool:
         return False
     try:
         return bool(getattr(service, "available", False))
-    except Exception:
+    except Exception:  # noqa: BLE001 - an injected host property may be arbitrary
         return False
 
 
 def _image_data_url(image: VlmImage) -> str:
     mime_type = str(image.mime_type).strip().lower()
     if not mime_type.startswith("image/") or any(
-        character in mime_type for character in {";", ",", "\r", "\n"}
+        character in mime_type for character in (";", ",", "\r", "\n")
     ):
         raise VlmError(f"{image.label} has an invalid image type")
     encoded = base64.b64encode(image.image_bytes).decode("ascii")
     return f"data:{mime_type};base64,{encoded}"
+
+
+def _bounded_single_image_data_url(source: VlmImage) -> str:
+    """Bound raster dimensions and transport bytes without changing source identity."""
+
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        return _image_data_url(source)
+    try:
+        with Image.open(io.BytesIO(source.image_bytes)) as opened:
+            raster = ImageOps.exif_transpose(opened)
+            raster.load()
+            if (
+                raster.width <= _LABELED_IMAGE_MAX_WIDTH
+                and raster.height <= _LABELED_IMAGE_MAX_HEIGHT
+                and len(source.image_bytes) <= _SINGLE_IMAGE_MAX_BYTES
+            ):
+                return _image_data_url(source)
+            raster = _flatten_image(raster, Image)
+    except (OSError, ValueError):
+        return _image_data_url(source)
+    raster = _fit_montage_image(
+        raster,
+        panel_width=_LABELED_IMAGE_MAX_WIDTH,
+        max_height=_LABELED_IMAGE_MAX_HEIGHT,
+        image_module=Image,
+    )
+    return _bounded_raster_data_url(
+        raster,
+        label=source.label,
+        image_module=Image,
+    )
+
+
+def _bounded_raster_data_url(
+    raster: Any,
+    *,
+    label: str,
+    image_module: Any,
+) -> str:
+    """Encode one visual reference under the endpoint transport budget."""
+
+    lossless = io.BytesIO()
+    raster.save(lossless, format="PNG", compress_level=9, optimize=True)
+    if len(lossless.getvalue()) <= _SINGLE_IMAGE_MAX_BYTES:
+        return _image_data_url(
+            VlmImage(
+                label=label,
+                image_bytes=lossless.getvalue(),
+                mime_type="image/png",
+            )
+        )
+
+    encoded = b""
+    while True:
+        output = io.BytesIO()
+        raster.save(output, format="JPEG", quality=90, optimize=True)
+        encoded = output.getvalue()
+        if (
+            len(encoded) <= _SINGLE_IMAGE_MAX_BYTES
+            or min(raster.size) <= _SINGLE_IMAGE_MIN_DIMENSION
+        ):
+            break
+        scale = max(
+            0.5,
+            min(0.9, math.sqrt(_SINGLE_IMAGE_MAX_BYTES / len(encoded)) * 0.95),
+        )
+        raster = raster.resize(
+            (
+                max(_SINGLE_IMAGE_MIN_DIMENSION, round(raster.width * scale)),
+                max(_SINGLE_IMAGE_MIN_DIMENSION, round(raster.height * scale)),
+            ),
+            image_module.Resampling.LANCZOS,
+        )
+    return _image_data_url(
+        VlmImage(label=label, image_bytes=encoded, mime_type="image/jpeg")
+    )
 
 
 def _labeled_montage_data_url(images: Sequence[VlmImage]) -> str:
@@ -531,6 +626,6 @@ __all__ = [
     "VlmError",
     "VlmImage",
     "client_from_context",
-    "configuration_present",
     "config_from_env",
+    "configuration_present",
 ]

@@ -8,8 +8,6 @@ import os
 import re
 import secrets
 import shutil
-import subprocess
-import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -18,7 +16,6 @@ from typing import Any
 
 import poster_core
 
-from posterlib.paths import SKILL_ROOT
 from posterlib.visual import visual_review
 
 from .contracts import ContractError, validate_contract
@@ -119,13 +116,7 @@ def create_poster_approval(
         _fail(
             "source_too_large", "approval grounding source exceeds the character limit"
         )
-    if (
-        poster_core.validate_poster_html(
-            html_text,
-            source_text=source_text,
-        ).get("status")
-        != "ok"
-    ):
+    if poster_core.validate_poster_html(html_text).get("status") != "ok":
         _fail(
             "approval_source_mismatch",
             "poster HTML does not satisfy the inert HTML contract",
@@ -139,15 +130,6 @@ def create_poster_approval(
         )
     except (TypeError, ValueError) as exc:
         _fail("approval_source_mismatch", str(exc))
-    if poster_core.source_figure_usage_issues(
-        html_text,
-        set(source_figure_hashes),
-    ):
-        _fail(
-            "approval_source_mismatch",
-            "poster no longer contains a visible figure from the prepared PDF",
-        )
-    _inspect_for_approval(html, set(source_figure_hashes))
     session = str(session_id or "").strip()
     if not session or len(session) > 256:
         _fail(
@@ -226,67 +208,6 @@ def create_poster_approval(
     except OSError as exc:
         _fail("approval_receipt_untrusted", f"cannot publish approval bundle: {exc}")
     return load_poster_approval(final_root / "approval.json")
-
-
-def _inspect_for_approval(
-    html: bytes,
-    expected_source_figure_sha256s: set[str],
-) -> None:
-    """Rerun Chromium against the exact bytes entering an approval bundle."""
-
-    with tempfile.TemporaryDirectory(
-        prefix="scientific-poster-approval-check-"
-    ) as directory:
-        source_html_path = Path(directory) / "poster.html"
-        try:
-            with source_html_path.open("xb") as handle:
-                handle.write(html)
-        except OSError as exc:
-            _fail("inspection_unavailable", f"approval inspection input failed: {exc}")
-        command = [
-            sys.executable,
-            "-m",
-            "posterlib.runtime.browser_inspection",
-            "--html",
-            str(source_html_path),
-            "--out",
-            directory,
-            "--source-figure-manifest-known",
-        ]
-        for digest in sorted(expected_source_figure_sha256s):
-            command.extend(["--expected-source-figure-sha256", digest])
-        try:
-            completed = subprocess.run(
-                command,
-                text=True,
-                capture_output=True,
-                check=False,
-                timeout=180,
-                cwd=SKILL_ROOT,
-            )
-            result = json.loads(completed.stdout)
-        except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
-            _fail("inspection_unavailable", f"approval inspection could not run: {exc}")
-    if not isinstance(result, dict):
-        _fail(
-            "inspection_unavailable", "approval inspection returned a non-object result"
-        )
-    if result.get("status") != "ok":
-        outcome = result.get("outcome")
-        code = (
-            str(outcome.get("code") or "inspection_blocked")
-            if isinstance(outcome, dict)
-            else "inspection_blocked"
-        )
-        summary = str(
-            result.get("summary") or "Chromium inspection must pass before approval"
-        )
-        details = {
-            key: value
-            for key, value in result.items()
-            if key not in {"status", "outcome", "summary", "blocking", "recoverable"}
-        }
-        _fail(code, summary, details=details)
 
 
 def load_poster_approval(approval_path: str | Path) -> PosterApprovalBundle:

@@ -4,6 +4,14 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) and semanti
 
 ## Unreleased
 
+### Changed
+
+- ``scientific-poster`` now lands the ``zgy/poster`` workflow: the first HTML
+  draft is rendered from the verified content budget, repair/workflow budgets
+  are configurable, and the defaults match a 1800s host wall (workflow 1790s,
+  authoring 900s, 3 validation repairs, 600s VLM review). The leftover
+  visual-loop cap that starved automatic revision after a long draft is gone.
+
 ## [2.0.0rc8] - 2026-09-07
 
 ### Added

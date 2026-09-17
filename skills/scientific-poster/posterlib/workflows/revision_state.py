@@ -14,8 +14,6 @@ from posterlib.visual import visual_review
 
 from . import draft_checkpoint
 
-MAX_INSPECTION_REPAIR_ATTEMPTS = 2
-
 
 class SelectionStateError(ValueError):
     """A live-preview selection does not identify the source HTML."""
@@ -40,15 +38,6 @@ def visual_iteration(value: Any) -> int:
             f"visual_iteration must be between 0 and {visual_review.MAX_VISUAL_REVISIONS}",
         )
     return value
-
-
-def inspection_repair_attempt(value: Any) -> int:
-    """Read resumable deterministic-repair progress without trusting host input."""
-
-    raw = value.get("inspection_repair_attempt", 0) if isinstance(value, dict) else 0
-    if isinstance(raw, bool) or not isinstance(raw, int):
-        return 0
-    return raw if 0 <= raw <= MAX_INSPECTION_REPAIR_ATTEMPTS else 0
 
 
 def revision_checkpoint_state(
@@ -129,8 +118,6 @@ def revision_checkpoint_payload(
     html_template: str,
     page_plan: dict[str, Any],
     visual_iteration: int,
-    inspection_repair_attempt: int = 0,
-    preserve_pending_visual_revision: bool = False,
 ) -> dict[str, Any] | None:
     """Carry durable grounding and content-structure state into each revision workspace."""
 
@@ -163,263 +150,8 @@ def revision_checkpoint_payload(
         "page_plan": page_plan,
         "html_template": html_template,
         "visual_iteration": visual_iteration,
-        "inspection_repair_attempt": inspection_repair_attempt,
     }
-    pending = state.get("pending_visual_revision")
-    if preserve_pending_visual_revision and isinstance(pending, dict):
-        payload["pending_visual_revision"] = dict(pending)
     return payload
-
-
-def persist_pending_visual_revision(
-    result: dict[str, Any],
-    *,
-    receipt_path: str,
-) -> dict[str, Any]:
-    """Bind one revision-required receipt to the active author checkpoint."""
-
-    workspace = _result_workspace(result)
-    checkpoint = draft_checkpoint.load(workspace)
-    if checkpoint is None or checkpoint.get("stage") != "author-ready":
-        raise visual_review.VisualReviewError(
-            "visual_review_invalid",
-            "A validated author checkpoint is required before visual revision.",
-        )
-    parent_html_sha256 = _result_html_sha256(result)
-    reference = checkpoint.get("design_reference")
-    reference_image_sha256 = (
-        str(reference.get("image_sha256") or "").strip()
-        if isinstance(reference, dict)
-        else ""
-    )
-    path = _workspace_receipt_path(workspace, receipt_path)
-    receipt = visual_review.load_receipt(
-        path,
-        expected_html_sha256=parent_html_sha256,
-        expected_reference_image_sha256=reference_image_sha256,
-    )
-    if receipt.get("quality_state") != "revision-required":
-        raise visual_review.VisualReviewError(
-            "visual_review_invalid",
-            "Only a revision-required receipt can be checkpointed for retry.",
-        )
-    next_iteration = int(receipt["iteration"]) + 1
-    if int(checkpoint["visual_iteration"]) != int(receipt["iteration"]):
-        raise visual_review.VisualReviewError(
-            "visual_review_invalid",
-            "Visual review iteration does not match the active author checkpoint.",
-        )
-    if next_iteration > visual_review.MAX_VISUAL_REVISIONS:
-        raise visual_review.VisualReviewError(
-            "visual_review_failed", "visual revision limit has been reached"
-        )
-    pending = {
-        "parent_html_sha256": parent_html_sha256,
-        "visual_review_path": str(path),
-        "receipt_sha256": str(receipt["receipt_sha256"]),
-        "reference_image_sha256": str(receipt["reference_image_sha256"]),
-        "screenshot_sha256": str(receipt["screenshot_sha256"]),
-        "visual_evidence_sha256": str(receipt["visual_evidence_sha256"]),
-        "next_iteration": next_iteration,
-        "operations": sorted(
-            {str(issue["operation"]) for issue in receipt["critical_issues"]}
-        ),
-    }
-    draft_checkpoint.save(
-        workspace,
-        stage="author-ready",
-        state={**checkpoint, "pending_visual_revision": pending},
-    )
-    return pending
-
-
-def resume_pending_visual_revision(
-    result: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any]] | None:
-    """Load one exact pending receipt without invoking the visual reviewer again."""
-
-    workspace_value = str(result.get("workspace") or "").strip()
-    if not workspace_value:
-        return None
-    workspace = Path(workspace_value)
-    checkpoint = draft_checkpoint.load(workspace)
-    if checkpoint is None or checkpoint.get("stage") != "author-ready":
-        return None
-    raw_pending = checkpoint.get("pending_visual_revision")
-    if not isinstance(raw_pending, dict):
-        return None
-    pending = dict(raw_pending)
-    parent_html_sha256 = _result_html_sha256(result)
-    if pending["parent_html_sha256"] != parent_html_sha256:
-        raise visual_review.VisualReviewError(
-            "visual_review_invalid",
-            "Pending visual revision belongs to different HTML bytes.",
-        )
-    path = _workspace_receipt_path(workspace, str(pending["visual_review_path"]))
-    reference = checkpoint.get("design_reference")
-    reference_image_sha256 = (
-        str(reference.get("image_sha256") or "").strip()
-        if isinstance(reference, dict)
-        else ""
-    )
-    if not reference_image_sha256:
-        raise visual_review.VisualReviewError(
-            "visual_review_invalid",
-            "Pending visual revision has no bound design reference.",
-        )
-    receipt = visual_review.load_receipt(
-        path,
-        expected_html_sha256=parent_html_sha256,
-        expected_reference_image_sha256=reference_image_sha256,
-    )
-    expected = {
-        "receipt_sha256": receipt["receipt_sha256"],
-        "reference_image_sha256": receipt["reference_image_sha256"],
-        "screenshot_sha256": receipt["screenshot_sha256"],
-        "visual_evidence_sha256": receipt["visual_evidence_sha256"],
-        "next_iteration": int(receipt["iteration"]) + 1,
-        "operations": sorted(
-            {str(issue["operation"]) for issue in receipt["critical_issues"]}
-        ),
-    }
-    if receipt.get("quality_state") != "revision-required" or any(
-        pending[field] != value for field, value in expected.items()
-    ):
-        raise visual_review.VisualReviewError(
-            "visual_review_invalid",
-            "Pending visual revision no longer matches its bound receipt.",
-        )
-    return pending, receipt
-
-
-def pending_visual_regression_feedback(pending: dict[str, Any]) -> list[str]:
-    """Return measured feedback captured from the latest rejected revision."""
-
-    raw_feedback = pending.get("regressed_inspection_feedback")
-    if not isinstance(raw_feedback, list):
-        return []
-    return [
-        str(item).strip()
-        for item in raw_feedback
-        if isinstance(item, str) and item.strip()
-    ]
-
-
-def persist_pending_visual_regression(
-    result: dict[str, Any],
-    *,
-    inspection_feedback: list[str],
-) -> None:
-    """Keep rejected-candidate geometry beside its still-pending VLM receipt."""
-
-    feedback = [
-        str(item).strip()
-        for item in inspection_feedback
-        if isinstance(item, str) and item.strip()
-    ]
-    if not feedback:
-        return
-    workspace = _result_workspace(result)
-    checkpoint = draft_checkpoint.load(workspace)
-    if checkpoint is None or checkpoint.get("stage") != "author-ready":
-        raise visual_review.VisualReviewError(
-            "visual_review_invalid",
-            "A validated author checkpoint is required to preserve revision feedback.",
-        )
-    pending = checkpoint.get("pending_visual_revision")
-    parent_html_sha256 = _result_html_sha256(result)
-    if (
-        not isinstance(pending, dict)
-        or pending.get("parent_html_sha256") != parent_html_sha256
-    ):
-        raise visual_review.VisualReviewError(
-            "visual_review_invalid",
-            "Rejected revision feedback has no matching pending visual receipt.",
-        )
-    updated_pending = {
-        **pending,
-        "regressed_inspection_feedback": feedback,
-    }
-    draft_checkpoint.save(
-        workspace,
-        stage="author-ready",
-        state={**checkpoint, "pending_visual_revision": updated_pending},
-    )
-
-
-def clear_pending_visual_revision(result: dict[str, Any]) -> None:
-    """Clear a pending receipt only after the same candidate explicitly passes."""
-
-    workspace_value = str(result.get("workspace") or "").strip()
-    if not workspace_value:
-        return
-    workspace = Path(workspace_value)
-    checkpoint = draft_checkpoint.load(workspace)
-    if checkpoint is None or checkpoint.get("stage") != "author-ready":
-        return
-    pending = checkpoint.get("pending_visual_revision")
-    if not isinstance(pending, dict):
-        return
-    if pending.get("parent_html_sha256") != result.get("html_sha256"):
-        return
-    cleared = dict(checkpoint)
-    cleared.pop("pending_visual_revision", None)
-    draft_checkpoint.save(workspace, stage="author-ready", state=cleared)
-
-
-def _result_workspace(result: dict[str, Any]) -> Path:
-    workspace_value = str(result.get("workspace") or "").strip()
-    if not workspace_value:
-        raise visual_review.VisualReviewError(
-            "visual_review_invalid",
-            "Visual revision requires a durable task workspace.",
-        )
-    raw_workspace = Path(workspace_value).expanduser()
-    if raw_workspace.is_symlink():
-        raise visual_review.VisualReviewError(
-            "visual_review_invalid",
-            "Visual revision workspace is not a regular directory.",
-        )
-    workspace = raw_workspace.resolve()
-    if not workspace.is_dir():
-        raise visual_review.VisualReviewError(
-            "visual_review_invalid",
-            "Visual revision workspace is not a regular directory.",
-        )
-    return workspace
-
-
-def _result_html_sha256(result: dict[str, Any]) -> str:
-    expected = str(result.get("html_sha256") or "").strip()
-    html_path = str(result.get("html_path") or "").strip()
-    if not html_path:
-        raise visual_review.VisualReviewError(
-            "visual_review_invalid",
-            "Visual revision requires the exact published HTML path.",
-        )
-    try:
-        actual = visual_review.sha256_file(html_path)
-    except visual_review.VisualReviewError as exc:
-        raise visual_review.VisualReviewError(
-            "visual_review_invalid",
-            "Visual revision HTML is unavailable for checkpoint binding.",
-        ) from exc
-    if not expected or actual != expected:
-        raise visual_review.VisualReviewError(
-            "visual_review_invalid",
-            "Visual revision HTML bytes do not match the published candidate.",
-        )
-    return expected
-
-
-def _workspace_receipt_path(workspace: Path, value: str) -> Path:
-    path = Path(value).expanduser().resolve()
-    if not path.is_relative_to(workspace.resolve()):
-        raise visual_review.VisualReviewError(
-            "visual_review_invalid",
-            "Visual review receipt must remain inside the task workspace.",
-        )
-    return path
 
 
 def revision_checkpoint_source(
@@ -603,19 +335,23 @@ def validate_content_replan_targets(
 
 def vlm_revision_mode(
     operations: frozenset[str] | set[str] | list[str],
-    *,
-    requested_mode: str = "",
 ) -> str:
-    """Choose the narrowest model boundary for one validated VLM repair."""
+    """Keep automatic visual repair inside the canonical draft DOM."""
 
     normalized = {str(operation) for operation in operations}
     if "content-replan" in normalized:
         return "content-replan"
-    if "reflow" in normalized or requested_mode == "full-layout":
-        return "full-layout"
-    # A pure restyle can preserve the editable DOM. Reflow cannot: modules may
-    # need to move across independently flowing groups, and a prior stylesheet
-    # attempt may explicitly escalate to full-layout.
+    # The deterministic draft body uses CSS multi-column flow, so reflow is a
+    # stylesheet concern. Automatic review must not replace the verified DOM.
+    return "style-only"
+
+
+def manual_revision_mode(value: object) -> str:
+    """Keep ordinary visual feedback compact unless the caller opts into a replan."""
+
+    requested = str(value or "").strip()
+    if requested in {"style-only", "full-layout", "content-replan"}:
+        return requested
     return "style-only"
 
 
@@ -686,31 +422,3 @@ def validate_revision_selection(
                 f"Selection {name} does not match the source HTML.",
             )
     return selection
-
-
-def advance_best_checkpoint(
-    result: dict[str, Any],
-    *,
-    inspection_repair_attempt: int | None = None,
-    visual_iteration: int | None = None,
-) -> None:
-    """Advance loop progress while keeping the checkpoint bound to active HTML."""
-
-    updates: dict[str, int] = {}
-    if inspection_repair_attempt is not None:
-        updates["inspection_repair_attempt"] = inspection_repair_attempt
-    if visual_iteration is not None:
-        updates["visual_iteration"] = visual_iteration
-    result.update(updates)
-    workspace_value = str(result.get("workspace") or "").strip()
-    if not workspace_value or not updates:
-        return
-    workspace = Path(workspace_value)
-    checkpoint = draft_checkpoint.load(workspace)
-    if checkpoint is None or checkpoint.get("stage") != "author-ready":
-        return
-    draft_checkpoint.save(
-        workspace,
-        stage="author-ready",
-        state={**checkpoint, **updates},
-    )

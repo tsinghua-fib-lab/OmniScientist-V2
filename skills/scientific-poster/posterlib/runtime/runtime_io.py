@@ -118,7 +118,7 @@ async def store_artifact(
                 copy=True,
                 meta={"skill": "scientific-poster", "format": fmt, "sha256": digest},
             )
-        except Exception as exc:  # noqa: BLE001 - host store is an external boundary
+        except Exception as exc:
             raise OSError(f"host artifact store failed for {path.name}: {exc}") from exc
         uri = str(_stored_value(stored, "uri") or "").strip()
         stored_value = _stored_value(stored, "path")
@@ -162,7 +162,6 @@ async def inspect_preview(
     out_dir: Path,
     *,
     scale: float,
-    expected_source_figure_sha256s: set[str] | None = None,
 ) -> dict[str, Any]:
     """Run the optional Chromium inspector and normalize its host outcome."""
 
@@ -171,7 +170,6 @@ async def inspect_preview(
             html_path,
             out_dir,
             scale=scale,
-            expected_source_figure_sha256s=expected_source_figure_sha256s,
         )
     except Exception as exc:  # noqa: BLE001 - browser tooling is optional
         return {

@@ -12,7 +12,7 @@ Aim for the conference character visible across the bundled real posters and Pos
 4. Primary evidence receives the most visual area and retains conditions, units, baselines, and uncertainty.
 5. Any source-grounded limitation or boundary condition bounds the claim; provenance remains legible and compact.
 
-Do not mirror the paper section by section. Omit secondary prose before shrinking type. Use a figure only when it carries evidence; never add decorative scientific-looking graphics. If the PDF yields relevant original figures, use at least one, retain its machine-readable locator, and give it a short interpretive caption and takeaway. A caption explains what to notice; it does not say where the figure came from.
+Do not mirror the paper section by section. Omit secondary prose before shrinking type. Use a figure only when it carries evidence at readable scale; never add one merely because the PDF yielded it, and never add decorative scientific-looking graphics. A selected figure receives a short interpretive caption or takeaway that explains what to notice rather than where it came from.
 
 ## Layout
 

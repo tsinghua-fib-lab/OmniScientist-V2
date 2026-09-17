@@ -54,7 +54,10 @@ _RUBRIC = {
     ),
     "figure_readability": (
         "Are the important paper figures and equations large enough to read, selectively "
-        "used, and integrated with nearby explanations?"
+        "used, and integrated with nearby explanations? When the grounded source supplies "
+        "no selected figures or equations, judge whether its comparison panels, tables, "
+        "metric callouts, or method flows provide readable visual anchors; do not penalize "
+        "the absence of unavailable paper figures by itself."
     ),
     "space_use": (
         "Is the page purposefully dense without large accidental voids, stretched "
@@ -77,23 +80,25 @@ _RUBRIC = {
     ),
 }
 _INSTRUCTIONS = (
-    "Compare the complete candidate screenshot at full resolution with the supplied "
-    "reference image. The reference is visual grammar only: compare structure, "
-    "density, hierarchy, section treatment, figure scale, and poster character. "
-    "MUST NOT transfer any reference text, numbers, logos, figures, data, claims, "
-    "authors, affiliations, citations, equations, or venue identity. Judge the "
-    "rendered visual result, not DOM metrics or author intent. Deterministic inspection "
+    "Judge the complete candidate screenshot at full resolution as a top-conference "
+    "academic poster. A separate design-planning stage already distilled the supplied "
+    "reference into the bound visual-grammar metadata below; reference pixels are not "
+    "part of this final review. Use that metadata for structure, density, hierarchy, "
+    "section treatment, figure scale, and poster character, but never request transfer of "
+    "reference text, numbers, logos, figures, data, claims, authors, affiliations, "
+    "citations, equations, or venue identity. Judge the rendered visual result, not DOM "
+    "metrics or author intent. Deterministic inspection "
     "measurements in the content brief are evidence, not verdicts: act on them only when "
     "their visible effect harms reading, hierarchy, or evidence legibility. Judge typography "
     "from the complete overview at fit-to-page scale, not from imagined zoom or a "
     "high-resolution crop. Compare typography_distribution measurements with "
-    "content_brief.readability_reference and the reference image's type-to-page "
+    "content_brief.readability_reference and the bound grammar's type-to-page "
     "relationship. Body copy that is materially underscaled, uses overly long thin lines, "
     "or requires zoom to read is actionable, while the physical targets remain advisory "
     "evidence rather than an automatic threshold. For typography_distribution, never claim "
     "that a role meets its supplied physical target when difference_from_minimum_mm is "
     "negative. Such a role may still be accepted only when the reason names concrete visible "
-    "full-page and reference-comparison evidence that justifies the exception. "
+    "full-page evidence and bound reading targets that justify the exception. "
     "For a multi-panel source figure, judge internal axes, legends, labels, and annotations "
     "at whole-page scale; a large outer image box alone does not prove readability. When "
     "important internal marks disappear at fit-to-page scale, request reflow or a grounded "
@@ -107,19 +112,20 @@ _INSTRUCTIONS = (
     "visual evidence rather than automatic verdicts; revise them when they visibly weaken "
     "conference-poster hierarchy, density, or scan flow. "
     "Do not require a focal module to span columns when figure scale, module depth, "
-    "position, or typography already makes it dominant, and do not penalize compact "
-    "independent rails solely because their bottom edges differ. When one lane ends "
-    "conspicuously earlier than its neighbours and leaves a large uninterrupted rectangle "
-    "that the bound reference does not use compositionally, treat the visible void as "
-    "actionable; prefer reassigning or reordering intact modules over equal-height stretch, "
-    "padding, or filler. On a dense poster, generic phrases such as natural content length, "
-    "breathing room, transition of attention, or a natural stopping point do not identify a "
-    "visible compositional purpose for a large terminal rectangle. Return "
+    "position, or typography already makes it dominant. Different terminal depths alone are not a defect: "
+    "independent evidence groups may end at different positions when every group is compact, readable, and "
+    "visually anchored. Treat empty space as actionable only when it visibly interrupts a reading path, "
+    "strands a module, forces evidence or type below readable scale, or creates an obviously accidental "
+    "interior hole. Do not relocate an intact terminal scope or provenance module merely to align column "
+    "bottoms; the proposed destination must visibly improve the complete composition without creating a "
+    "new imbalance. Return "
     f"one exact {RESULT_SCHEMA} JSON object. Scores are diagnostic; no numeric score "
     "threshold decides the verdict. Do not require a linear narrative: judge whether the "
-    "scan-first hierarchy supports useful optional reading paths. Return revise whenever "
-    "a safe, executable repair would improve the rubric; pass means no actionable "
-    "residual remains, and requires empty critical_issues and global_directives. A revise "
+    "scan-first hierarchy supports useful optional reading paths. Return revise only for a material visible defect "
+    "that blocks conference-scale reading, obscures evidence, breaks the intended hierarchy, or leaves an "
+    "obviously accidental composition. A merely preferable alternative or marginal balance improvement is not "
+    "a blocker. Pass means the candidate is already fit for its stated use and requires empty critical_issues "
+    "and global_directives. A revise "
     "requires at least one concrete critical issue; keep global_directives empty unless "
     "a genuine whole-page preservation constraint is needed. If a "
     "source-intrinsic limitation cannot be safely changed, describe it in summary instead "
@@ -143,14 +149,14 @@ _INSTRUCTIONS = (
     "describe the whole-page end state. Prescribe an exact relocation only when both its "
     "source and destination capacity are visibly supported and the move will not create a "
     "new void or crowded zone; otherwise request a global reflow and let the authoring model "
-    "choose placement. When the bound visual design names a dominant macro topology, compare "
+    "choose placement. When the bound visual design encodes dominant lane proportions or lead placement, compare "
     "it from the body entrance below the masthead; later lanes do not excuse a detached "
-    "preliminary stage with unused side regions unless the reference or grounded geometry "
+    "preliminary stage with unused side regions unless the bound grammar or grounded geometry "
     "visibly supports that stage. When broad genuine spare capacity remains, judge whether "
     "the smallest body, caption, equation, or evidence scale should improve for conference "
     "reading distance before accepting the void; never request filler or stretched "
     "low-information blocks. Compare section treatment at the group level: flag repeated card chrome "
-    "or one-band-per-module styling when the reference instead uses open content and shared "
+    "or one-band-per-module styling when the bound grammar instead calls for open content and shared "
     "section cues. Before returning revise, mentally apply the proposal across the whole "
     "page and reject repairs that merely transfer imbalance elsewhere."
 )
@@ -456,11 +462,6 @@ def _review_body(
                 "visual_review_invalid",
                 "a pass verdict cannot contain critical_issues or global_directives",
             )
-        if any(item["judgment"] != "acceptable" for item in assessments):
-            raise VisualReviewError(
-                "visual_review_invalid",
-                "a pass verdict requires every evidence observation to be acceptable",
-            )
     else:
         if not issues:
             raise VisualReviewError(
@@ -531,18 +532,6 @@ def revision_feedback(receipt: Mapping[str, Any]) -> str:
     return _revision_feedback_text(normalized)
 
 
-def continuation_feedback(receipt: Mapping[str, Any]) -> str:
-    """Convert one exhausted revise receipt into a fresh-cycle repair brief."""
-
-    normalized = _validate_receipt(receipt)
-    if normalized.get("quality_state") != "failed":
-        raise VisualReviewError(
-            "visual_review_invalid",
-            "continuation feedback requires an exhausted revise receipt",
-        )
-    return _revision_feedback_text(normalized)
-
-
 def _revision_feedback_text(normalized: Mapping[str, Any]) -> str:
     """Format one already-validated revise receipt without changing its authority."""
 
@@ -565,15 +554,21 @@ def _revision_feedback_text(normalized: Mapping[str, Any]) -> str:
             f"- [{item['judgment']}] {item['observation_id']}: {item['reason']}"
             for item in normalized["observation_assessments"]
         ],
-        "Preserve all scientific claims, source bindings, figures, page width and orientation. "
-        "A host may adjust height only within an existing adaptive page plan; an explicit "
-        "fixed page remains fixed.",
-        "Use the reference as visual grammar only; never transfer its text, numbers, logos, "
-        "figures, data, or identity.",
-        "Treat issue targets as observation anchors, not a whitelist of movable modules. "
-        "The visible evidence and whole-page acceptance outcome are authoritative; any "
-        "suggested exact placement is advisory. Repack other intact modules when needed, "
-        "and do not transfer an empty or crowded zone from one part of the page to another.",
+        (
+            "Preserve all scientific claims, source bindings, figures, page width and orientation. "
+            "A host may adjust height only within an existing adaptive page plan; an explicit "
+            "fixed page remains fixed."
+        ),
+        (
+            "Use the reference as visual grammar only; never transfer its text, numbers, logos, "
+            "figures, data, or identity."
+        ),
+        (
+            "Treat issue targets as observation anchors, not a whitelist of movable modules. "
+            "The visible evidence and whole-page acceptance outcome are authoritative; any "
+            "suggested exact placement is advisory. Repack other intact modules when needed, "
+            "and do not transfer an empty or crowded zone from one part of the page to another."
+        ),
         "Global directives:",
         *[f"- {directive}" for directive in directives],
         "Actionable repair tasks:",
@@ -1077,7 +1072,6 @@ __all__ = [
     "RESULT_SCHEMA",
     "VisualReviewError",
     "build_request",
-    "continuation_feedback",
     "document_sha256",
     "load_receipt",
     "load_request",

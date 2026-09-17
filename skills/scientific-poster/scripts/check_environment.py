@@ -15,8 +15,8 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 if str(SKILL_DIR) not in sys.path:
     sys.path.insert(0, str(SKILL_DIR))
 
-import poster_core  # noqa: E402
-from posterlib.runtime.capability import (  # noqa: E402
+import poster_core
+from posterlib.runtime.capability import (
     CAPABILITY_REQUIREMENTS,
     classify_chromium_failure,
     install_argv,

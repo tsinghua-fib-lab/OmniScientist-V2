@@ -1,11 +1,11 @@
 ---
 name: scientific-poster
-description: "One-call poster. Always copy the complete user request verbatim into input; do not decompose design, page, venue, or content direction into invented fields. For revise, emit action=revise with source_html_uri and visual_review_path and omit revision_mode when a receipt is supplied. Use paper_path for PDF and optional conference for one explicit venue. Never emit paper_source, style, venue_hint, existing_html, or visual_review_receipt."
+description: "One-call poster. Always copy the complete user request verbatim into input. Separately bind only explicit execution controls to their schema fields: action, paper_path, reference_image, page/orientation, conference, output_dir, and revision inputs. Keep content, hierarchy, density, and visual direction in the verbatim input; never invent structured design fields from prose. Bind a requested venue through conference; the Skill resolves supported branding from its vetted local registry. For revise, emit action=revise with source_html_uri and visual_review_path and omit revision_mode when a receipt is supplied. Never emit paper_source, venue_identity, style, venue_hint, existing_html, or visual_review_receipt."
 license: "Apache-2.0 for original code and documentation only; third-party visual assets are excluded (see NOTICE.md)"
 metadata:
   helixforge:
     version: "1.0"
-    dependencies: ["python>=3.11", "playwright + chromium (preview/export)", "python-pptx (editable PPTX export)"]
+    dependencies: ["python>=3.11", "latex2mathml (semantic equation rendering)", "Pillow (bounded VLM reference images)", "playwright + chromium (preview/export)", "python-pptx (editable PPTX export)"]
     allowed_tools: [write_file, bash, read_file, cite_source, record_claim, add_evidence, log_run]
     research_contract: portable_provenance_v1
     kind: python_engine
@@ -15,8 +15,7 @@ metadata:
     priority: 90
     delivery_mode: async_task
     execution:
-      effects: [user_files.write]
-      max_seconds: 600
+      max_seconds: 1800
     engine:
       module: engine
       class: ScientificPosterEngine
@@ -46,6 +45,7 @@ metadata:
           x-omni:
             semantic_role: instruction
         paper_path: {type: string, description: local PDF path or artifact URI; the Skill extracts text and caption-grounded figures before authoring}
+        reference_image: {type: string, description: optional local PNG, JPEG, or WebP visual reference; its pixels guide layout grammar only and never scientific content}
         instructions: {type: string, description: optional authoring preferences when source_text is supplied separately}
         conference: {type: string, description: one explicit conference name and optional year; supported venues bind a vetted local logo}
         research: {type: object}
@@ -59,26 +59,35 @@ metadata:
         revision_mode: {type: string, enum: [style-only, full-layout, content-replan], description: optional manual revision mode; omit it when visual_review_path is supplied because the receipt derives mode and targets; never send a boolean or the string true}
         content_replan_targets: {type: array, minItems: 1, uniqueItems: true, items: {type: string}, description: exact grounded module ids whose explanatory copy the user authorizes the main model to curate or compress}
         selection_state: {type: object}
-        page: {type: object}
-        orientation: {type: string, description: "page orientation; canonical values are auto, portrait, and landscape; horizontal normalizes to landscape and vertical normalizes to portrait"}
+        page:
+          type: object
+          description: explicit physical poster page; bind a named A0 request through format and orientation, or bind exact millimetre dimensions
+          properties:
+            format: {type: string, enum: [A0]}
+            width_mm: {type: number, minimum: 200, maximum: 2000}
+            height_mm: {type: number, minimum: 200, maximum: 2000}
+            orientation: {type: string, enum: [portrait, landscape]}
+          additionalProperties: false
+          x-omni:
+            semantic_key: poster_page
+            binding_owner: model
+        orientation:
+          type: string
+          enum: [auto, portrait, landscape]
+          description: explicit page orientation; the host model binds horizontal to landscape and vertical to portrait
+          x-omni:
+            semantic_key: orientation
+            binding_owner: model
         content_budget: {type: object, description: prevalidated grounded evidence budget for deterministic portable estimate or controlled draft}
         visual_preferences:
           type: object
           description: optional user-owned typography, section framing, and accent direction; these guide design but never scientific content
           properties:
-            typography: {type: string}
-            framing: {type: string}
+            typography: {type: string, enum: [sans, serif, hybrid]}
+            framing: {type: string, enum: [unframed, section-outline]}
             accent_color: {type: string, pattern: "^#[0-9a-fA-F]{6}$"}
-        venue_identity:
-          type: object
-          description: explicit conference identity overrides exact single-venue request resolution; distinctions are never inferred
-          required: [label, evidence_uri]
-          properties:
-            venue_id: {type: string, enum: [icml, neurips, iclr, cvpr], description: optional supported venue id used to bind the vetted local logo}
-            label: {type: string}
-            evidence_uri: {type: string}
-            distinction: {type: string}
-            logo_asset_sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
+        max_repair_attempts: {type: integer, minimum: 0, maximum: 10, default: 3}
+        workflow_timeout_seconds: {type: number, exclusiveMinimum: 0, maximum: 1800, default: 1790}
         authoring_timeout_seconds: {type: number, exclusiveMinimum: 0, maximum: 900}
         authoring_transport_retries: {type: integer, minimum: 0, maximum: 2}
         assets: {type: array, description: optional local, artifact, data-URI, or harness-prepared visual assets; remote URLs are not fetched by the portable core}
@@ -183,7 +192,7 @@ metadata:
         decision_request: {type: object, description: non-blocking hash-bound user choice returned only after automatic visual repair cannot safely continue}
         visual_quality_state: {type: string}
         visual_review_mode: {type: string, enum: [not-run, pending, vlm, deterministic-only]}
-        reference_source_kind: {type: string, enum: [generated, seed]}
+        reference_source_kind: {type: string, enum: [custom, generated, seed]}
         revision_feedback: {type: string}
         pptx_path: {type: string}
         pptx_uri: {type: string}
@@ -223,7 +232,7 @@ metadata:
 
 # Scientific Poster
 
-Author a complete HTML/CSS scientific poster, compare its rendered screenshot with a non-authoritative visual reference, export an editable one-slide PowerPoint, and snapshot the exact approved bytes. The model designs the page directly; JSON is machine state for evidence, review bindings, selections, and approval receipts, never the poster authoring language.
+Author a complete HTML/CSS scientific poster, compare its rendered screenshot with a non-authoritative visual reference, export an editable one-slide PowerPoint, and snapshot the exact approved bytes. The model selects grounded scientific content; a deterministic renderer owns the initial DOM, page geometry, and executable reference grammar. JSON is machine state for evidence, review bindings, selections, and approval receipts, never the poster authoring language.
 
 ## Normal Omni path
 
@@ -237,10 +246,10 @@ Ask Omni in natural language to use the `scientific-poster` skill; do not rely o
 4. Resolve one non-authoritative visual reference before authoring. Complete `OMNI_IMAGE_GEN_*` independently produces a content-free generated reference. Missing, incomplete, invalid, failed, or budget-ineligible image generation selects the deterministic conference-poster seed for the same content signals. VLM availability never changes which reference is resolved. Reference content is never scientific evidence.
 5. Author one complete inert HTML document with inline CSS, physical millimetres, embedded figures, a compact title band, and stable evidence/source bindings. Render the verified author list once as one identity block; wrapping is a visual choice. Venue identity uses only explicit or unambiguous supplied evidence. Bindings support grounding, selection, and export but never prescribe cards, rails, panels, module count, or topology.
 6. Run static validation and Chromium inspection. Hard gates protect grounding, identity, byte provenance, offline safety, and delivery integrity: the page must be measurable, required evidence must render, content boxes must not overflow, and visible poster elements must stay inside the physical page. Type size, figure scale, occupancy, density, whitespace, hierarchy, section distinction, and non-lossy clipping diagnostics remain visual-review evidence rather than aesthetic vetoes.
-7. With a usable host-injected `ctx.vlm`, or complete `OMNI_VLM_*` fallback configuration when that host service is absent or unavailable, inspect the exact resolved reference pixels before authoring, whether generated or seeded; without a VLM, a seed uses its structured fallback grammar and a generated reference uses content-adaptive fallback guidance. After rendering, bind the full-resolution screenshot to Chromium text, figure, typography, physical-page extent, out-of-page modules, module-internal spacing, inter-module visual-lane gaps, lane-to-page trailing space, and page-bottom observations plus a small high-resolution evidence atlas. These are descriptive measurements, not equal-height rules or numeric aesthetic gates; physical out-of-page evidence identifies content absent from the delivered canvas. Require the VLM to assess every selected observation. When placement alone cannot produce readable fit, the VLM may direct the main model to curate or compress only named grounded modules while retaining their central takeaways and source-bound facts. Review staged revisions before commit, keeping independent composition and physical-delivery incumbents so a zero-overflow but visually regressed candidate cannot replace a stronger composition. Permit at most two staged revisions inside the shared workflow deadline. A valid VLM revise/fail verdict leaves the candidate unaccepted and blocks automatic PPTX export. No configured VLM yields `visual_review_mode: deterministic-only`; a configured but unavailable or timed-out VLM remains `visual_review_mode: vlm` with `awaiting-review` and blocks automatic export. Use the provider-neutral review actions when another image-capable harness supplies feedback.
+7. With a usable host-injected `ctx.vlm`, or complete `OMNI_VLM_*` fallback configuration when that host service is absent or unavailable, inspect the exact resolved reference pixels before authoring, whether generated or seeded; without a VLM, a seed uses its structured fallback grammar and a generated reference uses content-adaptive fallback guidance. After rendering, bind the full-resolution screenshot to Chromium text, figure, typography, physical-page extent, out-of-page modules, module-internal spacing, inter-module visual-lane gaps, lane-to-page trailing space, and page-bottom observations plus a small high-resolution evidence atlas. These are descriptive measurements, not equal-height rules or numeric aesthetic gates; physical out-of-page evidence identifies content absent from the delivered canvas. Require the VLM to assess every selected observation once. The draft action does not silently rewrite reviewed HTML: a revise/fail verdict returns hash-bound feedback for an explicit `revise` action and blocks automatic PPTX export. No configured VLM yields `visual_review_mode: deterministic-only`; a configured but unavailable or timed-out VLM remains `visual_review_mode: vlm` with `awaiting-review` and blocks automatic export. Use the provider-neutral review actions when another image-capable harness supplies feedback.
 8. Keep HTML as the authoring source of truth. `preview_argv` serves the active HTML with an ephemeral selection overlay and does not alter its bytes. A deterministic-only candidate may still return an editable PPTX when Chromium inspection passes; a candidate rejected by a configured VLM does not. PowerPoint export maps native text, shapes, tables, equations, and scientific images from the exact HTML rather than placing a full-poster screenshot.
-9. Do not wait for user input inside a background execution. If configured visual review or bounded automatic repair cannot safely continue, return a non-blocking `decision_request` bound to the exact HTML. A harness may show its preview and options, then issue a normal `revise` call with the returned continuation fields plus the user's feedback. Absence of a VLM alone is not a human-decision checkpoint.
-9. After a passing visual receipt, request the exact returned `operator_confirmation`. Approval reruns grounding and Chromium checks and snapshots `poster.html`, `visual-review.json`, and `approval.json`. Final visual receipt, approval, HTML, and PPTX must bind the same HTML bytes; any HTML change requires another review.
+9. Do not wait for user input inside a background execution. If configured visual review requests a change, return a non-blocking `decision_request` bound to the exact HTML. A harness may show its preview and options, then issue a normal `revise` call with the returned continuation fields plus the user's feedback. Absence of a VLM alone is not a human-decision checkpoint.
+9. After a passing visual receipt, request the exact returned `operator_confirmation`. Approval verifies the static contract and the already-rendered review receipt against the same HTML hash, then snapshots `poster.html`, `visual-review.json`, and `approval.json`; it does not repeat Chromium. Final visual receipt, approval, HTML, and PPTX must bind the same HTML bytes; any HTML change requires another review.
 
 ## Visual reference and review configuration
 
@@ -258,7 +267,7 @@ export OMNI_VLM_API_KEY='<vlm-key>'
 
 Each environment endpoint is a complete HTTPS POST URL implementing the Omni-normalized OpenAI-compatible contract and uses bearer authentication. The CLI or gateway owns provider adaptation; the Skill never guesses a provider from a URL. Each environment group is enabled only when its own three variables are complete, neither borrows credentials or models from the other, and the Skill does not auto-load `.env` files.
 
-`OMNI_IMAGE_GEN_*` alone decides whether the reference is generated or falls back to a seed. Host `ctx.vlm` and fallback `OMNI_VLM_*` independently enable pixel interpretation and the automatic visual-feedback loop. Once a usable host service is selected, a request failure remains a host-service failure and is never replayed through the environment endpoint. Without either VLM path, keep the resolved reference unchanged: seed references use their structured grammar and generated references use unanchored content-adaptive fallback guidance. Return the exact manual review request and leave visual quality pending. The VLM cannot change scientific evidence planning or page estimation.
+`OMNI_IMAGE_GEN_*` alone decides whether the reference is generated or falls back to a seed. Host `ctx.vlm` and fallback `OMNI_VLM_*` independently enable pixel interpretation and one evidence-bound visual review. Once a usable host service is selected, a request failure remains a host-service failure and is never replayed through the environment endpoint. Without either VLM path, keep the resolved reference unchanged: seed references use their structured grammar and generated references use unanchored content-adaptive fallback guidance. Return the exact manual review request and leave visual quality pending. The VLM cannot change scientific evidence planning or page estimation.
 
 Reference pixels and text are never evidence. Do not source or copy claims, numbers, authors, affiliations, equations, figures, citations, logos, or venue identity from them. `design_reference.image_sha256` binds only the review reference; it never enters `source_figure_sha256s` or `source_figure_manifest_sha256`.
 
@@ -313,8 +322,8 @@ The skill works without Omni; Omni adds persistence, provenance, and task lifecy
 
 - Omni calls `ScientificPosterEngine.execute` for the normal model-backed flow. Durable tasks checkpoint the grounded plan, resolved reference, and best accepted HTML; retries resume rather than restarting accepted work. Rejected staged revisions never replace the active candidate.
 - Direct Codex, Claude Code, and inline engine use the same portable contracts. They may author complete HTML with file tools, run deterministic actions through `scripts/run.py`, and satisfy the provider-neutral review boundary with an image-capable harness.
-- The Skill imports no Omni CLI module. Text authoring needs only Python 3.11; the standalone VLM reviewer additionally needs `httpx`; evidence crops and host VLM montage review additionally need Pillow; local PDF ingestion additionally needs `pymupdf>=1.24`; browser inspection and scene capture need Playwright with Chromium; editable PowerPoint export additionally needs `python-pptx>=1.0`, `mathml2omml==0.0.2`, and `pymupdf>=1.24` for inline SVG rasterization in the active Python environment. MathML expressions export as editable Office Math with a visual fallback for viewers that do not support the native equation extension. The Skill never installs dependencies into its own directory.
-- `python3 scripts/check_environment.py` probes PDF ingestion and browser inspection without installing anything. With explicit authority, `--install` executes only returned allowlisted argv without a shell and then re-probes.
+- The Skill imports no Omni CLI module. Plain-text authoring needs only Python 3.11; semantic equation rendering additionally needs `latex2mathml>=3.81,<4`; bounded reference-image transport, evidence crops, and host VLM montage review need Pillow; the standalone VLM reviewer additionally needs `httpx`; local PDF ingestion additionally needs `pymupdf>=1.24`; browser inspection and scene capture need Playwright with Chromium; editable PowerPoint export additionally needs `python-pptx>=1.0`, `mathml2omml==0.0.2`, and `pymupdf>=1.24` for inline SVG rasterization in the active Python environment. MathML expressions export as editable Office Math with a visual fallback for viewers that do not support the native equation extension. The Skill never installs dependencies into its own directory.
+- `python3 scripts/check_environment.py` probes equation rendering, PDF ingestion, and browser inspection without installing anything. With explicit authority, `--install` executes only returned allowlisted argv without a shell and then re-probes.
 - `python3 scripts/run.py --self-test` runs the offline portability smoke test.
 
 ## Portable research provenance
@@ -331,4 +340,4 @@ OpenClaw.
   evidence. Preserve source locators, hashes, commands, and artifact paths needed
   to audit the delivered poster.
 
-The Skill bundles five downsampled real conference-poster seed images. They provide visual grammar for authoring and review, not templates, starter science, or paper evidence. Their text, figures, formulas, identities, logos, and claims must never be copied into an output poster.
+The Skill bundles five downsampled real conference-poster seed images. They provide visual grammar for authoring and review, not templates, starter science, or paper evidence. The image-aware preflight projects any seed or user reference into one bounded executable contract covering lane proportions, lead placement, group framing and header treatment, module framing, spacing, masthead scale and alignment, figure emphasis, typography, and palette roles; renderer and reviewer consume that same contract. Their text, figures, formulas, identities, logos, and claims must never be copied into an output poster.

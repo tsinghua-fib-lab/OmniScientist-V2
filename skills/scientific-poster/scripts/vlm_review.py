@@ -13,8 +13,8 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 if str(SKILL_DIR) not in sys.path:
     sys.path.insert(0, str(SKILL_DIR))
 
-from posterlib.runtime import runtime_io  # noqa: E402
-from posterlib.visual import visual_review, vlm_client, vlm_review  # noqa: E402
+from posterlib.runtime import runtime_io
+from posterlib.visual import visual_review, vlm_client, vlm_review
 
 
 async def run_request(

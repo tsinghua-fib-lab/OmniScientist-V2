@@ -12,12 +12,13 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
 
+from posterlib.paths import SKILL_ROOT
 from posterlib.runtime.capability import (
     CAPABILITY_REQUIREMENTS,
     install_argv,
     probe_python_packages,
 )
-from posterlib.paths import SKILL_ROOT
+
 from .pptx_rubric import evaluate_scene
 from .pptx_scene import SceneError, normalize_scene
 

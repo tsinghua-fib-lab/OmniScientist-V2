@@ -39,13 +39,6 @@
   if (!(posterRect.width > 0 && posterRect.height > 0)) {
     warnings.push({code: 'zero_poster_rect', message: 'Poster has no rendered area.'});
   }
-  if (poster.scrollWidth > poster.clientWidth + 1 || poster.scrollHeight > poster.clientHeight + 1) {
-    warnings.push({
-      code: 'poster_scroll_overflow',
-      message: 'Poster content exceeds the poster box.'
-    });
-  }
-
   function visible(element) {
     if (!element || element.getClientRects().length === 0) return false;
     let opacity = 1;
@@ -320,9 +313,14 @@
       ? 'title'
       : element.closest('[data-poster-venue="verified"]')
       ? 'identity'
+      : element.closest(
+          '.section-label,.source-label,.equation-label,[data-content-role="source-label"]'
+        )
+      ? 'provenance'
       : element.closest('figcaption,[data-content-role="caption"],.fig-caption')
       ? 'caption'
-      : element.closest('[data-focal-role]')
+      : element.closest('[data-focal-role]') &&
+        element.matches('h2,h3,[data-content-role="takeaway"]')
       ? 'focal'
       : element.closest('[data-content-role="provenance"]') ||
         element.closest('[data-semantic-roles~="provenance"]')

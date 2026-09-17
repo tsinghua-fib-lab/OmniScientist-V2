@@ -14,29 +14,29 @@ SKILL_DIR = Path(__file__).resolve().parent
 if str(SKILL_DIR) not in sys.path:
     sys.path.insert(0, str(SKILL_DIR))
 
-import poster_core as _core  # noqa: E402 - copied Skill bootstraps its own root
-from posterlib.content import html_contract as _html_contract  # noqa: E402
-from posterlib.content import planning as _planning  # noqa: E402
-from posterlib.delivery import portable_actions as _portable_actions  # noqa: E402
-from posterlib.generation import model_runtime as _model_runtime  # noqa: E402
-from posterlib.runtime import runtime_io as _runtime_io  # noqa: E402
-from posterlib.sources import paper_source as _paper_source  # noqa: E402
-from posterlib.sources import source_runtime as _source_runtime  # noqa: E402
-from posterlib.visual import candidate_control as _candidate_control  # noqa: E402
-from posterlib.visual import inspection_policy as _inspection_policy  # noqa: E402
-from posterlib.visual import reference_seeds as _reference_seeds  # noqa: E402
-from posterlib.visual import visual_design as _visual_design  # noqa: E402
-from posterlib.visual import visual_review as _visual_review  # noqa: E402
-from posterlib.workflows import draft_checkpoint as _draft_checkpoint  # noqa: E402
-from posterlib.workflows import draft_pipeline as _draft_pipeline  # noqa: E402
-from posterlib.workflows import (  # noqa: E402
+import poster_core as _core
+from posterlib.content import html_contract as _html_contract
+from posterlib.content import planning as _planning
+from posterlib.delivery import portable_actions as _portable_actions
+from posterlib.generation import authoring as _authoring
+from posterlib.generation import model_runtime as _model_runtime
+from posterlib.runtime import runtime_io as _runtime_io
+from posterlib.sources import paper_source as _paper_source
+from posterlib.sources import source_runtime as _source_runtime
+from posterlib.visual import inspection_policy as _inspection_policy
+from posterlib.visual import reference_seeds as _reference_seeds
+from posterlib.visual import visual_design as _visual_design
+from posterlib.visual import visual_review as _visual_review
+from posterlib.workflows import draft_checkpoint as _draft_checkpoint
+from posterlib.workflows import draft_pipeline as _draft_pipeline
+from posterlib.workflows import (
     request_normalization as _request_normalization,
 )
-from posterlib.workflows import revision_pipeline as _revision_pipeline  # noqa: E402
-from posterlib.workflows import revision_state as _revision_state  # noqa: E402
-from posterlib.workflows import runtime_budget as _runtime_budget  # noqa: E402
-from posterlib.workflows import visual_loop as _visual_loop  # noqa: E402
-from posterlib.workflows import workflow_outcomes as _workflow_outcomes  # noqa: E402
+from posterlib.workflows import revision_pipeline as _revision_pipeline
+from posterlib.workflows import revision_state as _revision_state
+from posterlib.workflows import runtime_budget as _runtime_budget
+from posterlib.workflows import visual_loop as _visual_loop
+from posterlib.workflows import workflow_outcomes as _workflow_outcomes
 
 _MAX_SOURCE_CHARS = 1_500_000
 _NOOP_REVISION_WARNING = _visual_loop.NOOP_REVISION_WARNING
@@ -47,13 +47,9 @@ _VISUAL_REVIEW_RECEIPT_WARNING = (
     "Visual review receipt could not be published; the exact HTML candidate remains "
     "available."
 )
-_PUBLIC_REVISION_REGRESSION_WARNING = (
-    "The receipt-bound revision remained physically dominated by the exact source "
-    "after one bounded retry; the source poster was preserved."
-)
-_PUBLIC_REVISION_COMPARISON_WARNING = (
-    "The exact source poster could not be rendered for the receipt-bound pre-commit "
-    "comparison; the source poster was preserved."
+_PUBLIC_REVISION_BLOCKED_WARNING = (
+    "The receipt-bound revision failed rendered inspection; the exact source poster "
+    "was preserved."
 )
 _PORTABLE_HOST_METADATA_FIELDS = frozenset(
     {
@@ -83,28 +79,8 @@ class _PreparedVersion:
     html_sha256: str
     candidate_path: str
     inspection: dict[str, Any]
-    review_request: dict[str, Any] | None
-    review_request_path: str | None
     checkpoint_state: dict[str, Any] | None
     publication: dict[str, Any]
-
-
-def _prepared_inspection(candidate: Any) -> dict[str, Any] | None:
-    """Expose a deferred candidate inspection without coupling posterlib to engine."""
-
-    return candidate.inspection if isinstance(candidate, _PreparedVersion) else None
-
-
-def _prepared_review(candidate: Any) -> tuple[dict[str, Any], str] | None:
-    """Expose the exact pre-commit review request for one rendered candidate."""
-
-    if (
-        not isinstance(candidate, _PreparedVersion)
-        or candidate.review_request is None
-        or not candidate.review_request_path
-    ):
-        return None
-    return dict(candidate.review_request), candidate.review_request_path
 
 
 def _append_artifact_once(
@@ -200,7 +176,7 @@ class ScientificPosterEngine:
         if action == _core.ACTION_REVISE:
             loop = asyncio.get_running_loop()
             deadline = _runtime_budget.workflow_deadline(
-                getattr(self, "ctx", None), loop.time()
+                getattr(self, "ctx", None), loop.time(), input_data
             )
             result, continue_visual_loop = await self._run_public_revision(
                 input_data,
@@ -217,7 +193,6 @@ class ScientificPosterEngine:
             if continue_visual_loop:
                 result = await self._complete_visual_loop(
                     result,
-                    input_data=input_data,
                     progress_callback=progress_callback,
                     deadline=deadline,
                 )
@@ -316,7 +291,7 @@ class ScientificPosterEngine:
 
         ctx = getattr(self, "ctx", None)
         deadline = _runtime_budget.workflow_deadline(
-            ctx, asyncio.get_running_loop().time()
+            ctx, asyncio.get_running_loop().time(), input_data
         )
         workspace = _runtime_io.create_workspace(input_data, ctx)
         try:
@@ -351,6 +326,7 @@ class ScientificPosterEngine:
                 assets=assets,
                 source_figure_sha256s=expected_figures,
                 authoring_request=source.authoring_request,
+                max_repair_attempts=_request_normalization.repair_attempts(input_data),
                 page=input_data.get("page"),
                 orientation=str(input_data.get("orientation") or "auto"),
                 deadline=deadline,
@@ -391,7 +367,7 @@ class ScientificPosterEngine:
 
         ctx = getattr(self, "ctx", None)
         loop = asyncio.get_running_loop()
-        deadline = _runtime_budget.workflow_deadline(ctx, loop.time())
+        deadline = _runtime_budget.workflow_deadline(ctx, loop.time(), input_data)
         visual_runtime = self._visual_runtime or _visual_loop.runtime_from_context(
             ctx,
             self._visual_environ,
@@ -404,7 +380,6 @@ class ScientificPosterEngine:
                 progress_callback,
                 ctx=ctx,
                 max_source_chars=_MAX_SOURCE_CHARS,
-                transport_options=_request_normalization.authoring_transport_options,
                 host_llm=_runtime_budget.host_llm,
                 publish_version=self._publish_version,
                 visual_design_client=(
@@ -414,10 +389,41 @@ class ScientificPosterEngine:
             )
             completed = await self._complete_visual_loop(
                 result,
-                input_data=input_data,
                 progress_callback=progress_callback,
                 deadline=deadline,
             )
+            if (
+                completed.get("visual_quality_state") == "revision-required"
+                and str(completed.get("visual_review_path") or "").strip()
+                and str(completed.get("html_uri") or "").strip()
+            ):
+                revision_input = {
+                    **input_data,
+                    "action": _core.ACTION_REVISE,
+                    "source_html_uri": str(completed["html_uri"]),
+                    "source_html_sha256": str(completed.get("html_sha256") or ""),
+                    "visual_review_path": str(completed["visual_review_path"]),
+                }
+                try:
+                    revised, continue_visual_loop = await self._run_public_revision(
+                        revision_input,
+                        progress_callback,
+                        deadline=deadline,
+                    )
+                except _model_runtime.ModelBoundaryError as exc:
+                    _workflow_outcomes.append_warning_once(
+                        completed,
+                        f"Bounded visual revision was unavailable: {exc}",
+                    )
+                else:
+                    if continue_visual_loop and not _workflow_outcomes.revision_model_timed_out(
+                        revised
+                    ):
+                        completed = await self._complete_visual_loop(
+                            revised,
+                            progress_callback=progress_callback,
+                            deadline=deadline,
+                        )
             return await self._attach_editable_pptx(
                 completed,
                 progress_callback=progress_callback,
@@ -598,24 +604,14 @@ class ScientificPosterEngine:
         self,
         initial: dict[str, Any],
         *,
-        input_data: dict[str, Any],
         progress_callback: Any,
         deadline: float | None = None,
     ) -> dict[str, Any]:
-        """Bind engine-owned revision operations to the portable visual loop."""
+        """Run one exact-byte visual review without hidden authoring retries."""
 
-        callbacks = _visual_loop.VisualLoopCallbacks(
-            revise=self._revise,
-            commit=self._commit_prepared,
-            prepared_inspection=_prepared_inspection,
-            prepared_review=_prepared_review,
-            defer_revision_commit=_DEFER_REVISION_COMMIT,
-        )
         completed = await _visual_loop.complete(
             initial,
-            input_data=input_data,
             progress_callback=progress_callback,
-            callbacks=callbacks,
             ctx=getattr(self, "ctx", None),
             deadline=deadline,
             environ=self._visual_environ,
@@ -728,204 +724,28 @@ class ScientificPosterEngine:
             return candidate, True
         if not receipt_bound:
             raise RuntimeError("public poster revision remained deferred")
-        return await self._guard_receipt_bound_revision(
-            input_data,
-            candidate,
-            progress_callback=progress_callback,
-            deadline=deadline,
-        )
-
-    async def _guard_receipt_bound_revision(
-        self,
-        input_data: dict[str, Any],
-        candidate: _PreparedVersion,
-        *,
-        progress_callback: Any,
-        deadline: float,
-    ) -> tuple[dict[str, Any], bool]:
-        """Retry one physically regressed candidate before any activation."""
-
-        source_render = await self._inspect_revision_source(
-            input_data,
-            candidate,
-            deadline=deadline,
-        )
-        if source_render is None:
+        if candidate.inspection.get("status") != "ok":
             return (
                 self._preserved_revision_source(
                     input_data,
-                    source_path=None,
                     source_sha256=str(
                         input_data.get("source_html_sha256")
                         or candidate.publication.get("parent_html_sha256")
                         or ""
                     ),
-                    source_inspection=None,
-                    warning=_PUBLIC_REVISION_COMPARISON_WARNING,
+                    rejected_feedback=_inspection_policy.inspection_feedback(
+                        candidate.inspection
+                    ),
                 ),
                 False,
             )
-        source_path, source_sha256, source_inspection = source_render
-        if not self._revision_is_delivery_dominated(
-            source_sha256,
-            source_inspection,
-            candidate,
-        ):
-            return await self._commit_prepared(candidate), True
-
-        candidate_feedback = _inspection_policy.inspection_feedback(
-            candidate.inspection
-        )
-        retry_input = dict(input_data)
-        retry_input["feedback"] = "\n".join(
-            item
-            for item in (
-                str(input_data.get("feedback") or "").strip(),
-                (
-                    "The uncommitted Chromium render was physically dominated by the "
-                    "exact source poster. Repair the measured delivery regressions while "
-                    "applying the same receipt-bound visual request:"
-                ),
-                *candidate_feedback,
-            )
-            if item
-        )
-        retry_input["_defer_revision_commit"] = _DEFER_REVISION_COMMIT
-        remaining = deadline - asyncio.get_running_loop().time()
-        if not _runtime_budget.bound_automatic_revision(
-            retry_input,
-            remaining_seconds=remaining,
-        ):
-            return (
-                self._preserved_revision_source(
-                    input_data,
-                    source_path=source_path,
-                    source_sha256=source_sha256,
-                    source_inspection=source_inspection,
-                    warning=_PUBLIC_REVISION_REGRESSION_WARNING,
-                    rejected_feedback=candidate_feedback,
-                ),
-                False,
-            )
-        retried = await self._revise(
-            retry_input,
-            progress_callback,
-            deadline=deadline,
-        )
-        if isinstance(retried, _PreparedVersion) and not (
-            self._revision_is_delivery_dominated(
-                source_sha256,
-                source_inspection,
-                retried,
-            )
-        ):
-            return await self._commit_prepared(retried), True
-        retry_feedback = (
-            _inspection_policy.inspection_feedback(retried.inspection)
-            if isinstance(retried, _PreparedVersion)
-            else []
-        )
-        retry_failure = (
-            str(retried.get("error") or retried.get("summary") or "").strip()
-            if isinstance(retried, Mapping)
-            else ""
-        )
-        return (
-            self._preserved_revision_source(
-                input_data,
-                source_path=source_path,
-                source_sha256=source_sha256,
-                source_inspection=source_inspection,
-                warning=_PUBLIC_REVISION_REGRESSION_WARNING,
-                rejected_feedback=[
-                    *retry_feedback,
-                    *([retry_failure] if retry_failure else []),
-                ],
-            ),
-            False,
-        )
-
-    async def _inspect_revision_source(
-        self,
-        input_data: dict[str, Any],
-        candidate: _PreparedVersion,
-        *,
-        deadline: float | None,
-    ) -> tuple[Path, str, dict[str, Any]] | None:
-        """Render the exact source bytes beside a deferred revision candidate."""
-
-        source_uri = str(input_data.get("source_html_uri") or "").strip()
-        source_path = await _runtime_io.resolve_path(
-            getattr(self, "ctx", None),
-            source_uri,
-            base_dir=input_data.get("cwd"),
-        )
-        if source_path is None or not source_path.is_file():
-            return None
-        try:
-            source_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
-        except OSError:
-            return None
-        expected_sha256 = str(input_data.get("source_html_sha256") or "").strip()
-        if expected_sha256 and expected_sha256 != source_sha256:
-            return None
-        expected_figures = candidate.publication.get("source_figure_sha256s")
-        source_figure_sha256s = (
-            set(expected_figures)
-            if isinstance(expected_figures, (set, frozenset, list, tuple))
-            else set()
-        )
-        inspection_call = _runtime_io.inspect_preview(
-            source_path,
-            Path(candidate.candidate_path).parent / "source-inspection",
-            scale=_runtime_io.bounded_float(
-                input_data.get("scale"), default=2.0, low=0.5, high=4.0
-            ),
-            expected_source_figure_sha256s=source_figure_sha256s,
-        )
-        if deadline is None:
-            inspection = await inspection_call
-        else:
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                inspection_call.close()
-                return None
-            try:
-                async with asyncio.timeout(remaining):
-                    inspection = await inspection_call
-            except TimeoutError:
-                return None
-        return source_path, source_sha256, dict(inspection)
-
-    @staticmethod
-    def _revision_is_delivery_dominated(
-        source_sha256: str,
-        source_inspection: Mapping[str, Any],
-        candidate: _PreparedVersion,
-    ) -> bool:
-        """Compare only rendered delivery facts, never aesthetic preferences."""
-
-        source_evidence = _candidate_control.CandidateEvidence(
-            html_sha256=source_sha256,
-            inspection=source_inspection,
-        )
-        candidate_evidence = _candidate_control.CandidateEvidence(
-            html_sha256=candidate.html_sha256,
-            inspection=candidate.inspection,
-        )
-        return (
-            _candidate_control.delivery_relation(source_evidence, candidate_evidence)
-            == "dominated"
-        )
+        return await self._commit_prepared(candidate), True
 
     def _preserved_revision_source(
         self,
         input_data: dict[str, Any],
         *,
-        source_path: Path | None,
         source_sha256: str,
-        source_inspection: dict[str, Any] | None,
-        warning: str,
         rejected_feedback: list[str] | None = None,
     ) -> dict[str, Any]:
         """Return a recoverable exact-source result without activating a candidate."""
@@ -938,24 +758,19 @@ class ScientificPosterEngine:
             "visual_review_mode": "vlm",
             "visual_quality_state": "revision-required",
             "retry_from_checkpoint": False,
-            "warnings": [warning, *(rejected_feedback or [])],
+            "warnings": [
+                _PUBLIC_REVISION_BLOCKED_WARNING,
+                *(rejected_feedback or []),
+            ],
         }
-        if source_path is not None:
-            result["html_path"] = str(source_path)
-            result["preview_uri"] = source_path.resolve().as_uri()
-        if source_inspection is not None:
-            result["inspection"] = source_inspection
-            result["inspection_feedback"] = _inspection_policy.inspection_feedback(
-                source_inspection
-            )
         return _workflow_outcomes.visual_outcome(
             result,
             "visual_revision_required",
             (
                 "The exact source poster was preserved because the receipt-bound "
-                "revision could not improve its physical delivery evidence."
+                "revision failed rendered inspection."
             ),
-            decision_reason="automatic-revision-regressed",
+            decision_reason="revision-inspection-blocked",
         )
 
     async def _commit_prepared(
@@ -971,7 +786,7 @@ class ScientificPosterEngine:
             checkpoint_state=prepared.checkpoint_state,
         )
         if isinstance(committed, _PreparedVersion):
-            raise RuntimeError("prepared poster activation remained deferred")
+            raise TypeError("prepared poster activation remained deferred")
         return committed
 
     async def _publish_version(
@@ -1007,12 +822,8 @@ class ScientificPosterEngine:
         candidate_dir = workspace / ".candidates" / html_sha256
         candidate_path = candidate_dir / "poster.html"
         _runtime_io.replace_file_atomic(candidate_path, html_bytes)
-        static_report = _core.validate_poster_html(html_text, source_text=source_text)
-        source_figure_issues = _core.source_figure_usage_issues(
-            html_text,
-            source_figure_sha256s,
-        )
-        if static_report.get("status") != "ok" or source_figure_issues:
+        static_report = _core.validate_poster_html(html_text)
+        if static_report.get("status") != "ok":
             return _workflow_outcomes.error_result(
                 "candidate_validation_failed",
                 "Poster HTML changed before persistence or failed final validation.",
@@ -1025,7 +836,6 @@ class ScientificPosterEngine:
                 scale=_runtime_io.bounded_float(
                     input_data.get("scale"), default=2.0, low=0.5, high=4.0
                 ),
-                expected_source_figure_sha256s=source_figure_sha256s,
             )
             if deadline is None:
                 inspection = await inspection_call
@@ -1039,6 +849,82 @@ class ScientificPosterEngine:
                         inspection = await inspection_call
                 except TimeoutError:
                     return _workflow_outcomes.inspection_deadline_result()
+        if (
+            inspection.get("status") == "ok"
+            or _inspection_policy.lane_fill_recoverable(inspection)
+        ) and isinstance(content_budget, dict):
+            report = inspection.get("report")
+            if isinstance(report, dict):
+                scales = _inspection_policy.measured_lane_scales(report)
+                modules = [
+                    dict(item)
+                    for item in content_budget.get("content_modules") or []
+                    if isinstance(item, dict)
+                ]
+                stylesheet = _authoring.measured_lane_stylesheet(
+                    scales,
+                    width_mm=float(page_plan["width_mm"]),
+                    modules=modules,
+                    column_count=len(scales),
+                )
+                if stylesheet:
+                    filled_html = _html_contract.append_stylesheet_override(
+                        html_text,
+                        f"<style>{stylesheet}</style>",
+                    )
+                    filled_bytes = filled_html.encode("utf-8")
+                    filled_sha256 = hashlib.sha256(filled_bytes).hexdigest()
+                    filled_dir = workspace / ".candidates" / filled_sha256
+                    filled_path = filled_dir / "poster.html"
+                    filled_static = _core.validate_poster_html(filled_html)
+                    if filled_static.get("status") == "ok":
+                        _runtime_io.replace_file_atomic(filled_path, filled_bytes)
+                        filled_call = _runtime_io.inspect_preview(
+                            filled_path,
+                            filled_dir / "inspection",
+                            scale=_runtime_io.bounded_float(
+                                input_data.get("scale"),
+                                default=2.0,
+                                low=0.5,
+                                high=4.0,
+                            ),
+                        )
+                        filled_inspection: dict[str, Any] | None = None
+                        if deadline is None:
+                            filled_inspection = await filled_call
+                        else:
+                            remaining = deadline - asyncio.get_running_loop().time()
+                            if remaining <= 0:
+                                filled_call.close()
+                            else:
+                                try:
+                                    async with asyncio.timeout(remaining):
+                                        filled_inspection = await filled_call
+                                except TimeoutError:
+                                    filled_inspection = None
+                        if (
+                            isinstance(filled_inspection, dict)
+                            and filled_inspection.get("status") == "ok"
+                        ):
+                            filled_report = filled_inspection.get("report")
+                            before_score = _inspection_policy.lane_fill_score(report)
+                            after_score = (
+                                _inspection_policy.lane_fill_score(filled_report)
+                                if isinstance(filled_report, dict)
+                                else None
+                            )
+                            if (
+                                before_score is not None
+                                and after_score is not None
+                                and after_score[0] < before_score[0] - 1.0
+                                and after_score[1] <= before_score[1] + 1.0
+                            ):
+                                html_text = filled_html
+                                html_bytes = filled_bytes
+                                html_sha256 = filled_sha256
+                                candidate_dir = filled_dir
+                                candidate_path = filled_path
+                                inspection = filled_inspection
         inspection_feedback = _inspection_policy.inspection_feedback(inspection)
         review_request: dict[str, Any] | None = None
         review_request_path: Path | None = None
@@ -1056,7 +942,9 @@ class ScientificPosterEngine:
                     displayed_html=html_text,
                 )
                 if visual_design_plan is not None:
-                    content_brief["visual_design"] = visual_design_plan.to_dict()
+                    content_brief["visual_design"] = (
+                        visual_design_plan.executable_dict()
+                    )
                 review_request = _visual_review.build_request(
                     html_path=candidate_path,
                     screenshot_path=screenshot_path,
@@ -1098,12 +986,6 @@ class ScientificPosterEngine:
                 html_sha256=html_sha256,
                 candidate_path=str(candidate_path),
                 inspection=dict(inspection),
-                review_request=review_request,
-                review_request_path=(
-                    str(review_request_path)
-                    if review_request_path is not None
-                    else None
-                ),
                 checkpoint_state=(
                     dict(checkpoint_state) if checkpoint_state is not None else None
                 ),
@@ -1285,11 +1167,6 @@ class ScientificPosterEngine:
             source_figure_manifest_sha256,
         )
         checkpoint_state = _draft_checkpoint.load(workspace)
-        inspection_repair_attempt = (
-            _revision_state.inspection_repair_attempt(input_data)
-            if "inspection_repair_attempt" in input_data
-            else _revision_state.inspection_repair_attempt(checkpoint_state or {})
-        )
         result = _core.outcome_result(
             outcome_code,
             summary=publication_summary,
@@ -1327,11 +1204,9 @@ class ScientificPosterEngine:
             visual_iteration=(
                 review_request.get("iteration") if review_request is not None else None
             ),
-            inspection_repair_attempt=inspection_repair_attempt,
             visual_review_request_path=(
                 str(review_request_path) if review_request_path is not None else ""
             ),
-            visual_review_request=review_request,
             visual_evidence_path=(
                 str(evidence_path) if evidence_path.is_file() else ""
             ),
@@ -1353,6 +1228,9 @@ class ScientificPosterEngine:
                 "operator_confirmation": operator_confirmation,
             },
         )
+        result = {key: value for key, value in result.items() if value is not None}
+        if review_request is not None:
+            result["visual_review_request"] = review_request
         state = {
             "html_sha256": html_sha256,
             "artifact_path": html_artifact["path"],
@@ -1368,7 +1246,6 @@ class ScientificPosterEngine:
             "visual_iteration": (
                 review_request.get("iteration") if review_request is not None else 0
             ),
-            "inspection_repair_attempt": inspection_repair_attempt,
         }
         if checkpoint_state is not None:
             state = {**checkpoint_state, **state}

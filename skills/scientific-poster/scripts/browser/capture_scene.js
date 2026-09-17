@@ -20,13 +20,34 @@
     }
     return match.slice(1, 4).map((part) => Number(part).toString(16).padStart(2, '0')).join('').toUpperCase();
   };
-  const fontFace = (value) => {
+  const fontAvailability = new Map();
+  const fontAvailable = (face) => {
+    if (fontAvailability.has(face)) return fontAvailability.get(face);
+    const context = document.createElement('canvas').getContext('2d');
+    const sample = 'mmmmmmmmmmlli汉字かな한글';
+    context.font = '72px monospace';
+    const fallbackWidth = context.measureText(sample).width;
+    context.font = `72px "${face}", monospace`;
+    const available = Math.abs(context.measureText(sample).width - fallbackWidth) > 0.5;
+    fontAvailability.set(face, available);
+    return available;
+  };
+  const fontFace = (value, text = '') => {
     const faces = String(value || '').split(',')
       .map((face) => face.replace(/["']/g, '').trim()).filter(Boolean);
     const portable = new Set([
       'Arial', 'Aptos', 'Calibri', 'Cambria', 'Courier New', 'Georgia',
       'Tahoma', 'Times New Roman', 'Trebuchet MS', 'Verdana'
     ]);
+    const cjk = [
+      'Noto Sans SC', 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans CJK SC',
+      'Source Han Sans SC', 'Microsoft YaHei', 'SimHei', 'Arial Unicode MS'
+    ];
+    if (/[\u2e80-\u9fff\u3040-\u30ff\uac00-\ud7af]/u.test(text)) {
+      const candidates = [...faces.filter((face) => cjk.includes(face)), ...cjk];
+      const selected = [...new Set(candidates)].find(fontAvailable);
+      if (selected) return selected;
+    }
     return faces.find((face) => portable.has(face)) || 'Arial';
   };
   const fontReady = (face, sizePx, text) => Boolean(
@@ -245,7 +266,7 @@
   }
 
   const frameSet = new Set(frameElements);
-  const visualElements = [...root.querySelectorAll('[data-poster-decor], div, span')];
+  const visualElements = [...root.querySelectorAll('[data-poster-decor], div, span, header')];
   for (const element of visualElements) {
     if (!visible(element) || frameSet.has(element) ||
         element.matches('[data-poster-body], [data-poster-title-band], [data-poster-module]') ||
@@ -298,7 +319,10 @@
       module_id: moduleId(element), ...bounds, rows,
       row_heights: rowHeights, column_widths: columnWidths,
       font_size_pt: Number.parseFloat(bodyStyle.fontSize || style.fontSize || '16') * 0.75,
-      font_face: fontFace(bodyStyle.fontFamily || style.fontFamily || 'Arial'),
+      font_face: fontFace(
+        bodyStyle.fontFamily || style.fontFamily || 'Arial',
+        rows.flat().join(' ')
+      ),
       color: rgb(bodyStyle.color, '111111'),
       fill: transparent(bodyStyle.backgroundColor) ? 'FFFFFF' : rgb(bodyStyle.backgroundColor, 'FFFFFF'),
       line: rgb(bodyStyle.borderColor, 'D8D8D8'),
@@ -360,7 +384,7 @@
       element.closest('figcaption,[data-content-role="caption"],.fig-caption')
         ? 'caption' : 'body';
     const style = getComputedStyle(element);
-    const fontFaceValue = fontFace(style.fontFamily || 'Arial');
+    const fontFaceValue = fontFace(style.fontFamily || 'Arial', text);
     const wordWrap = textLineCount(element) > 1;
     const fontScale = portableTextScale(element, text, fontFaceValue, wordWrap);
     const fontSizePx = Number.parseFloat(style.fontSize || '16') * fontScale;

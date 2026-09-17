@@ -109,7 +109,6 @@ def _estimate(payload: dict[str, Any]) -> dict[str, Any]:
 
         budget = normalize_content_budget(
             payload.get("content_budget"),
-            source_text=source_text,
             source_figure_sha256s=set(raw_hashes),
         )
         page_plan = estimate_page(
@@ -139,9 +138,7 @@ def _estimate(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _validate(payload: dict[str, Any]) -> dict[str, Any]:
-    checked = _validated_html(
-        payload, allowed={"action", "html", "source", "source_text"}
-    )
+    checked = _validated_html(payload, allowed={"action", "html"})
     if isinstance(checked, dict) and checked.get("status") == "error":
         return checked
     path, source_bytes, report = checked
@@ -338,9 +335,7 @@ def _submit_visual_review(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _preview(payload: dict[str, Any]) -> dict[str, Any]:
-    checked = _validated_html(
-        payload, allowed={"action", "html", "source", "source_text"}
-    )
+    checked = _validated_html(payload, allowed={"action", "html"})
     if isinstance(checked, dict) and checked.get("status") == "error":
         return checked
     path, source_bytes, report = checked
@@ -502,12 +497,8 @@ def _inspect(payload: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "action",
         "html",
-        "source",
-        "source_text",
         "output_dir",
         "scale",
-        "paper_path",
-        "source_figure_sha256s",
     }
     unexpected = sorted(set(payload) - allowed)
     if unexpected:
@@ -515,66 +506,13 @@ def _inspect(payload: dict[str, Any]) -> dict[str, Any]:
             "candidate_validation_failed",
             "inspect received unexpected field(s): " + ", ".join(unexpected),
         )
-    paper_path = str(payload.get("paper_path") or "").strip()
-    if paper_path and payload.get("source_figure_sha256s"):
-        return _error(
-            "candidate_validation_failed",
-            "source_figure_sha256s is derived from paper_path and must not be supplied.",
-        )
-    if paper_path and (payload.get("source") or payload.get("source_text")):
-        return _error(
-            "candidate_validation_failed",
-            "paper_path cannot be combined with source or source_text during inspection.",
-        )
-
     static_payload = {
-        key: value
-        for key, value in payload.items()
-        if key in {"action", "html", "source", "source_text"}
+        key: value for key, value in payload.items() if key in {"action", "html"}
     }
-    expected_hashes: set[str] | None = None
-    if paper_path:
-        try:
-            from posterlib.sources.paper_source import PaperSourceError, prepare_pdf
-
-            with tempfile.TemporaryDirectory(
-                prefix="scientific-poster-inspection-source-"
-            ) as directory:
-                paper = prepare_pdf(
-                    Path(paper_path.removeprefix("file://")),
-                    directory,
-                )
-        except PaperSourceError as exc:
-            if exc.code == "missing_capability":
-                from posterlib.runtime.capability import missing_result
-
-                return missing_result(
-                    "pdf-reading",
-                    dependency="pymupdf",
-                    stage="inspection-source",
-                    error=exc,
-                )
-            return _error(exc.code, str(exc))
-        static_payload["source_text"] = paper.text
-        expected_hashes = {str(figure["sha256"]) for figure in paper.figures}
-    elif "source_figure_sha256s" in payload:
-        raw_hashes = payload.get("source_figure_sha256s")
-        if not isinstance(raw_hashes, list) or not all(
-            isinstance(item, str) for item in raw_hashes
-        ):
-            return _error(
-                "candidate_validation_failed",
-                "source_figure_sha256s must be a string array.",
-            )
-        try:
-            poster_core.source_figure_manifest_sha256(raw_hashes)
-        except ValueError as exc:
-            return _error("candidate_validation_failed", str(exc))
-        expected_hashes = set(raw_hashes)
 
     checked = _validated_html(
         static_payload,
-        allowed={"action", "html", "source", "source_text"},
+        allowed={"action", "html"},
     )
     if isinstance(checked, dict) and checked.get("status") == "error":
         return checked
@@ -598,10 +536,6 @@ def _inspect(payload: dict[str, Any]) -> dict[str, Any]:
     ]
     if payload.get("scale") is not None:
         command.extend(["--scale", str(payload["scale"])])
-    if expected_hashes is not None:
-        command.append("--source-figure-manifest-known")
-        for digest in sorted(expected_hashes):
-            command.extend(["--expected-source-figure-sha256", digest])
     result = _run_json_process(
         command,
         timeout=180,
@@ -616,7 +550,7 @@ def _inspect(payload: dict[str, Any]) -> dict[str, Any]:
 def _export_pptx(payload: dict[str, Any]) -> dict[str, Any]:
     """Export validated poster HTML as a one-slide native PowerPoint deck."""
 
-    allowed = {"action", "html", "source", "source_text", "output_dir"}
+    allowed = {"action", "html", "output_dir"}
     checked = _validated_html(payload, allowed=allowed)
     if isinstance(checked, dict) and checked.get("status") == "error":
         return checked
@@ -681,17 +615,7 @@ def _validated_html(
         html_text = source_bytes.decode("utf-8")
     except (OSError, UnicodeError) as exc:
         return _error("source_read_failed", str(exc))
-    source_path = str(payload.get("source") or "").strip()
-    if source_path:
-        try:
-            source_text = Path(source_path).expanduser().read_text(encoding="utf-8")
-        except (OSError, UnicodeError) as exc:
-            return _error("source_read_failed", str(exc))
-    else:
-        source_text = payload.get("source_text")
-        if not isinstance(source_text, str):
-            source_text = ""
-    report = poster_core.validate_poster_html(html_text, source_text=source_text)
+    report = poster_core.validate_poster_html(html_text)
     return path, source_bytes, report
 
 

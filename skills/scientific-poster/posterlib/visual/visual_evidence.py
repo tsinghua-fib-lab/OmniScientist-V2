@@ -6,8 +6,11 @@ import hashlib
 import json
 import math
 import re
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
+
+_MIN_PAGE_TRAILING_OBSERVATION_RATIO = 0.12
 
 from posterlib.content import planning
 
@@ -104,7 +107,10 @@ def _select_observations(
     """Keep factual coverage bounded without deciding whether a layout is good."""
 
     page = [
-        item for item in space_observations if item["kind"] == "page_trailing_space"
+        item
+        for item in space_observations
+        if item["kind"] == "page_trailing_space"
+        and float(item["salience"]) >= _MIN_PAGE_TRAILING_OBSERVATION_RATIO
     ]
     modules = sorted(
         (
@@ -118,13 +124,6 @@ def _select_observations(
         (item for item in space_observations if item["kind"] == "inter_module_gap"),
         key=lambda item: (-float(item["salience"]), str(item["id"])),
     )[:2]
-    lane_trailing = sorted(
-        (item for item in space_observations if item["kind"] == "lane_trailing_space"),
-        key=lambda item: (-float(item["salience"]), str(item["id"])),
-    )[:2]
-    lane_depth_profiles = [
-        item for item in space_observations if item["kind"] == "lane_depth_profile"
-    ]
     lane_entries = sorted(
         (item for item in space_observations if item["kind"] == "lane_entry_offset"),
         key=lambda item: (-float(item["salience"]), str(item["id"])),
@@ -153,8 +152,6 @@ def _select_observations(
         *modules,
         *interior_gaps,
         *lane_entries,
-        *lane_depth_profiles,
-        *lane_trailing,
         *figures,
     ]
     return sorted(observations, key=lambda item: str(item["id"]))
@@ -386,29 +383,6 @@ def _inter_module_gap_observations(
                 continue
             candidates.append((gap, -overlap, lower_id, lower))
         if not candidates:
-            trailing = max(0.0, page_height - upper_bottom)
-            if trailing > 0.0:
-                observations.append(
-                    {
-                        "id": f"space:lane-tail:{_stable_id(upper_id)}",
-                        "kind": "lane_trailing_space",
-                        "module_ids": [upper_id],
-                        "salience": trailing / page_height,
-                        "rect": {
-                            "left": upper["left"],
-                            "top": upper_bottom,
-                            "width": upper["width"],
-                            "height": trailing,
-                        },
-                        "facts": {
-                            "module_bottom_px": upper_bottom,
-                            "page_bottom_px": page_height,
-                            "trailing_space_px": trailing,
-                            "trailing_space_ratio": trailing / page_height,
-                            "lane_width_ratio": upper["width"] / page_width,
-                        },
-                    }
-                )
             continue
         gap, _negative_overlap, lower_id, lower = min(candidates)
         overlap_left = max(upper["left"], lower["left"])
@@ -441,77 +415,7 @@ def _inter_module_gap_observations(
                 },
             }
         )
-    lane_depth_profile = _lane_depth_profile_observation(
-        observations,
-        page_height=page_height,
-    )
-    if lane_depth_profile is not None:
-        observations.append(lane_depth_profile)
     return observations
-
-
-def _lane_depth_profile_observation(
-    observations: list[dict[str, Any]],
-    *,
-    page_height: float,
-) -> dict[str, Any] | None:
-    """Describe relative lane depth while leaving its visual value to the reviewer."""
-
-    terminal_lanes = [
-        item for item in observations if item["kind"] == "lane_trailing_space"
-    ]
-    if len(terminal_lanes) < 2:
-        return None
-    lane_facts = sorted(
-        (
-            {
-                "module_id": str(item["module_ids"][0]),
-                "left_px": float(item["rect"]["left"]),
-                "right_px": _right(item["rect"]),
-                "module_bottom_px": float(item["facts"]["module_bottom_px"]),
-                "trailing_space_px": float(item["facts"]["trailing_space_px"]),
-            }
-            for item in terminal_lanes
-        ),
-        key=lambda item: (float(item["left_px"]), str(item["module_id"])),
-    )
-    if any(
-        float(current["left_px"]) < float(previous["right_px"]) - _COORDINATE_EPSILON_PX
-        for previous, current in zip(lane_facts, lane_facts[1:], strict=False)
-    ):
-        return None
-    shallowest_bottom = min(float(item["module_bottom_px"]) for item in lane_facts)
-    deepest_bottom = max(float(item["module_bottom_px"]) for item in lane_facts)
-    depth_difference = deepest_bottom - shallowest_bottom
-    if depth_difference <= _COORDINATE_EPSILON_PX:
-        return None
-    for item in lane_facts:
-        item["unused_while_peers_continue_px"] = max(
-            0.0,
-            deepest_bottom - float(item["module_bottom_px"]),
-        )
-    left = min(float(item["left_px"]) for item in lane_facts)
-    right = max(float(item["right_px"]) for item in lane_facts)
-    return {
-        "id": "space:lane-depth-profile",
-        "kind": "lane_depth_profile",
-        "module_ids": [str(item["module_id"]) for item in lane_facts],
-        "salience": depth_difference / page_height,
-        "rect": {
-            "left": left,
-            "top": shallowest_bottom,
-            "width": right - left,
-            "height": depth_difference,
-        },
-        "facts": {
-            "terminal_lanes": lane_facts,
-            "shallowest_lane_bottom_px": shallowest_bottom,
-            "deepest_lane_bottom_px": deepest_bottom,
-            "unused_while_peers_continue_px": depth_difference,
-            "unused_while_peers_continue_ratio": depth_difference / page_height,
-            "common_page_trailing_px": max(0.0, page_height - deepest_bottom),
-        },
-    }
 
 
 def _figure_observations(

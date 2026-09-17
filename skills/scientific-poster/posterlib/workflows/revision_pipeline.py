@@ -31,7 +31,6 @@ _REVISION_REPAIRABLE_SOURCE_ISSUES = frozenset(
     {
         "malformed_mathml_operator",
         "math_layout_override",
-        "ungrounded_rights_claim",
     }
 )
 
@@ -120,7 +119,6 @@ async def run_revision(
         )
     source_report = poster_core.validate_poster_html(
         source_html,
-        source_text=source_text,
     )
     blocking_source_issues = [
         item
@@ -172,7 +170,6 @@ async def run_revision(
         # A normal user/harness revision starts a fresh bounded visual-review
         # cycle.  Do not inherit an exhausted iteration from the source draft.
         input_data["visual_iteration"] = 0
-        input_data["inspection_repair_attempt"] = 0
     preferred_asset_tokens: dict[str, str] = {}
     checkpoint_assets: list[dict[str, Any]] = []
     if all(
@@ -194,22 +191,6 @@ async def run_revision(
         source_html,
         preferred_tokens=preferred_asset_tokens,
     )
-    checkpoint_assets_by_hash = {
-        str(item.get("content_sha256") or ""): item for item in checkpoint_assets
-    }
-    contract_assets = [
-        {
-            **item,
-            "description": str(
-                checkpoint_assets_by_hash.get(
-                    str(item.get("content_sha256") or ""), {}
-                ).get("description")
-                or item.get("description")
-                or ""
-            ),
-        }
-        for item in embedded_assets
-    ]
     raw_design_reference = state.get("design_reference")
     try:
         if not isinstance(raw_design_reference, Mapping):
@@ -264,10 +245,6 @@ async def run_revision(
             visual_iteration=revision_state.visual_iteration(
                 (checkpoint_source or {}).get("visual_iteration", 0)
             ),
-            inspection_repair_attempt=revision_state.inspection_repair_attempt(
-                checkpoint_source or {}
-            ),
-            preserve_pending_visual_revision=True,
         )
         if baseline_checkpoint is not None:
             draft_checkpoint.save(
@@ -287,14 +264,9 @@ async def run_revision(
     revision_mode = (
         revision_state.vlm_revision_mode(
             receipt_operations,
-            requested_mode=caller_mode,
         )
         if visual_review_path
-        else (
-            caller_mode
-            if caller_mode in {"style-only", "content-replan"}
-            else "full-layout"
-        )
+        else revision_state.manual_revision_mode(caller_mode)
     )
     style_only = revision_mode == "style-only"
     content_brief = revision_state.visual_content_brief(
@@ -317,7 +289,6 @@ async def run_revision(
             selection=selection,
             page_plan=revision_page_plan,
             allow_adaptive_height=allow_adaptive_height,
-            design_reference=design_reference,
             visual_design_plan=visual_design_plan,
             content_brief=content_brief,
             revision_mode=revision_mode,
@@ -330,7 +301,6 @@ async def run_revision(
     ) -> dict[str, Any]:
         report = html_contract.validate_candidate(
             candidate,
-            source_text=source_text,
             assets=embedded_assets,
             required_source_figure_sha256s=required_source_figure_sha256s,
             expected_page=candidate_page_plan,
@@ -383,11 +353,6 @@ async def run_revision(
             html_template=candidate_template,
             page_plan=candidate_page_plan,
             visual_iteration=visual_iteration,
-            inspection_repair_attempt=(
-                revision_state.inspection_repair_attempt(input_data)
-                if "inspection_repair_attempt" in input_data
-                else 0
-            ),
         )
 
     live_path_value = str(state.get("live_html_path") or "").strip()
@@ -437,36 +402,18 @@ async def run_revision(
                 system=system,
                 user=user,
                 apply_stylesheet=lambda stylesheet: (
-                    html_contract.replace_single_stylesheet(
+                    html_contract.append_stylesheet_override(
                         html_template,
                         stylesheet,
                     )
                 ),
                 validate=validate,
-                max_repair_attempts=model_runtime.MAX_REPAIR_ATTEMPTS,
+                max_repair_attempts=request_normalization.repair_attempts(input_data),
                 timeout_seconds=timeout_seconds,
                 max_transport_retries=transport_retries,
                 deadline=deadline,
             )
         else:
-
-            def canonicalize_full_revision(candidate: str) -> str:
-                bound = html_contract.bind_authored_contract(
-                    candidate,
-                    content_budget=(
-                        content_budget if isinstance(content_budget, dict) else None
-                    ),
-                    page_plan=revision_page_plan,
-                    paper_identity=paper_identity,
-                    assets=contract_assets,
-                )
-                if revision_mode == "full-layout":
-                    return scientific_snapshot.restore_frozen_module_text(
-                        html_template,
-                        bound,
-                    )
-                return bound
-
             revised_template = await model_runtime.request_html(
                 llm,
                 system=system,
@@ -474,8 +421,7 @@ async def run_revision(
                 repair_system=authoring.html_repair_system(revision_mode=revision_mode),
                 repair_context=user,
                 validate=validate,
-                canonicalize=canonicalize_full_revision,
-                max_repair_attempts=model_runtime.MAX_REPAIR_ATTEMPTS,
+                max_repair_attempts=request_normalization.repair_attempts(input_data),
                 initial_temperature=0.0,
                 timeout_seconds=timeout_seconds,
                 max_transport_retries=transport_retries,

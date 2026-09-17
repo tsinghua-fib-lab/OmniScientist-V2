@@ -19,7 +19,7 @@ from posterlib.visual import (
     visual_design,
 )
 
-from . import draft_checkpoint, runtime_budget
+from . import draft_checkpoint, request_normalization, runtime_budget
 
 PublishVersion = Callable[..., Awaitable[dict[str, Any]]]
 
@@ -38,7 +38,6 @@ async def run_draft(
     *,
     ctx: Any,
     max_source_chars: int,
-    transport_options: Callable[[dict[str, Any]], tuple[float, int]],
     host_llm: Callable[[Any], Any],
     publish_version: PublishVersion,
     visual_design_client: Any | None = None,
@@ -73,6 +72,12 @@ async def run_draft(
             ctx=ctx,
             max_source_chars=max_source_chars,
         )
+        if persisted:
+            draft_checkpoint.save(
+                workspace,
+                stage=str(checkpoint["stage"]),
+                state=state,
+            )
 
     stage = (
         str(checkpoint.get("stage") or "") if checkpoint is not None else "plan-ready"
@@ -101,6 +106,7 @@ async def run_draft(
         design_reference = reference_seeds.ReferenceBundle.from_dict(
             dict(state["design_reference"])
         )
+        state["design_reference"] = design_reference.to_dict()
 
     if stage == "reference-ready":
         design_plan = await _visual_design_stage(
@@ -117,74 +123,33 @@ async def run_draft(
                 0.28,
                 checkpoint="design-ready",
                 planner=design_plan.planner,
-                topology=design_plan.topology,
+                column_count=len(design_plan.layout.column_weights),
+                lead_placement=design_plan.layout.lead_placement,
             )
         stage = "design-ready"
     else:
         design_plan = visual_design.VisualDesignPlan.from_dict(
             dict(state["visual_design"])
         )
+        state["visual_design"] = design_plan.to_dict()
 
-    timeout_seconds, transport_retries = transport_options(input_data)
     expected_figures = set(state["source_figure_sha256s"])
     page_plan = dict(state["page_plan"])
     source_text = str(state["source_text"])
     budget = dict(state["content_budget"])
     paper_identity = dict(state["paper_source"])
-    llm = host_llm(ctx)
-
-    if stage in {"design-ready", "author-repair-ready"}:
-        authoring_deadline = (
-            runtime_budget.draft_authoring_deadline(deadline)
-            if deadline is not None
-            else None
-        )
-        initial_candidate = (
-            str(checkpoint.get("html_template") or "")
-            if stage == "author-repair-ready" and checkpoint is not None
-            else None
-        )
-        completed_repair_attempts = (
-            int(checkpoint.get("author_repair_attempt") or 0)
-            if stage == "author-repair-ready" and checkpoint is not None
-            else 0
-        )
-
-        async def save_invalid_candidate(
-            candidate: str,
-            _issues: list[dict[str, Any]],
-            attempt: int,
-        ) -> None:
-            state["html_template"] = candidate
-            state["author_repair_attempt"] = attempt
-            draft_checkpoint.save(
-                workspace,
-                stage="author-repair-ready",
-                state=state,
-            )
-
+    if stage == "design-ready":
         html_template = await _author_stage(
             progress_callback,
-            llm=llm,
-            source_text=source_text,
             assets=assets,
             expected_figures=expected_figures,
             budget=budget,
             page_plan=page_plan,
             paper_source=dict(state["paper_source"]),
-            authoring_request=str(state["authoring_request"]),
-            design_reference=design_reference,
             visual_design_plan=design_plan,
-            timeout_seconds=timeout_seconds,
-            transport_retries=transport_retries,
-            initial_candidate=initial_candidate,
-            completed_repair_attempts=completed_repair_attempts,
-            on_invalid_candidate=save_invalid_candidate if persisted else None,
-            deadline=authoring_deadline,
         )
         if persisted:
             state["html_template"] = html_template
-            state.pop("author_repair_attempt", None)
             draft_checkpoint.save(workspace, stage="author-ready", state=state)
             await runtime_io.progress(
                 progress_callback,
@@ -196,7 +161,6 @@ async def run_draft(
         html_template = str(checkpoint["html_template"])
         _require_valid_html(
             html_template,
-            source_text=source_text,
             assets=assets,
             expected_figures=expected_figures,
             page_plan=page_plan,
@@ -251,15 +215,10 @@ async def _plan_stage(
             for item in source_runtime.normalize_asset_inputs(input_data.get("assets"))
         ],
     ]
-    try:
-        automatic_venue = venue_branding.resolve_verified_identity(
-            input_data.get("venue_identity")
-        ) or _resolve_automatic_venue(
-            input_data,
-            authoring_request=source.authoring_request,
-        )
-    except venue_branding.VenueBrandingError as exc:
-        raise DraftPipelineError("invalid_payload", str(exc)) from exc
+    automatic_venue = _resolve_automatic_venue(
+        input_data,
+        authoring_request=source.authoring_request,
+    )
     venue_asset_input = _venue_brand_asset_input(automatic_venue)
     if venue_asset_input is not None:
         asset_inputs.append(venue_asset_input)
@@ -267,11 +226,13 @@ async def _plan_stage(
     expected_figures = html_contract.source_figure_sha256s(assets)
     supplied_budget = input_data.get("content_budget")
     if supplied_budget is not None:
+        supplied_budget = planning.bind_prepared_figure_geometry(
+            dict(supplied_budget),
+            assets=assets,
+        )
         budget = planning.normalize_content_budget(
             supplied_budget,
-            source_text=source.text,
             source_figure_sha256s=expected_figures,
-            source_figure_numbers=planning.source_figure_number_bindings(assets),
         )
     else:
         await runtime_io.progress(progress_callback, "poster.plan-content", 0.10)
@@ -281,6 +242,7 @@ async def _plan_stage(
             assets=assets,
             source_figure_sha256s=expected_figures,
             authoring_request=source.authoring_request,
+            max_repair_attempts=request_normalization.repair_attempts(input_data),
             page=input_data.get("page"),
             capacity_hint=planning.content_capacity_hint(
                 input_data.get("page"),
@@ -303,7 +265,6 @@ async def _plan_stage(
         "warnings": [*source.warnings, *asset_warnings],
         "paper_source": _bind_paper_identity(
             source.summary,
-            input_data,
             assets,
             automatic_venue=automatic_venue,
         ),
@@ -314,6 +275,9 @@ async def _plan_stage(
         ),
         "visual_iteration": 0,
     }
+    reference_image = str(input_data.get("reference_image") or "").strip()
+    if reference_image:
+        state["reference_image"] = reference_image
     return state, assets
 
 
@@ -330,9 +294,7 @@ async def _restore_state(
     expected_figures = html_contract.source_figure_sha256s(assets)
     budget = planning.normalize_content_budget(
         state["content_budget"],
-        source_text=source_text,
         source_figure_sha256s=expected_figures,
-        source_figure_numbers=planning.source_figure_number_bindings(assets),
     )
     state["content_budget"] = budget
     return state, assets
@@ -384,24 +346,27 @@ async def _reference_stage(
         dict(state["content_budget"]),
         dict(state["page_plan"]),
     )
+    custom_image = str(state.get("reference_image") or "").strip()
+    if custom_image:
+        try:
+            return reference_seeds.load_custom_bundle(
+                custom_image.removeprefix("file://"),
+            )
+        except reference_seeds.ReferenceSeedError as exc:
+            raise DraftPipelineError("invalid_payload", str(exc)) from exc
     seed = reference_seeds.select_seed(**signals["selection"])
     prompt = reference_generation_prompt(signals)
     generation_budget_s: float | None = None
     if deadline is not None:
-        remaining = deadline - asyncio.get_running_loop().time()
-        generation_budget_s = max(
-            0.0,
-            min(
-                90.0,
-                remaining - runtime_budget.POST_REFERENCE_RESERVE_SECONDS,
-            ),
+        generation_budget_s = runtime_budget.reference_step_budget_seconds(
+            deadline,
+            asyncio.get_running_loop().time(),
         )
     return await asyncio.to_thread(
         reference_generation.resolve_reference,
         seed,
         prompt=prompt,
         output_dir=workspace / "design-reference",
-        density=str(signals["selection"]["density"]),
         generation_budget_s=generation_budget_s,
     )
 
@@ -425,8 +390,12 @@ async def _visual_design_stage(
         page_plan=dict(state["page_plan"]),
         client=client,
         preferences=dict(state["visual_preferences"]),
-        authoring_request=str(state["authoring_request"]),
         deadline=preflight_deadline,
+    )
+    plan = authoring.constrain_visual_design_plan(
+        dict(state["content_budget"]),
+        dict(state["page_plan"]),
+        plan,
     )
     state["visual_design"] = plan.to_dict()
     if plan.warning:
@@ -551,96 +520,47 @@ def _append_warning_once(warnings: list[Any], warning: str) -> None:
 async def _author_stage(
     progress_callback: Any,
     *,
-    llm: Any,
-    source_text: str,
     assets: list[dict[str, Any]],
     expected_figures: set[str],
     budget: dict[str, Any],
     page_plan: dict[str, Any],
     paper_source: dict[str, Any],
-    authoring_request: str,
-    design_reference: reference_seeds.ReferenceBundle,
     visual_design_plan: visual_design.VisualDesignPlan,
-    timeout_seconds: float,
-    transport_retries: int,
-    initial_candidate: str | None = None,
-    completed_repair_attempts: int = 0,
-    on_invalid_candidate: Callable[[str, list[dict[str, Any]], int], Awaitable[None]]
-    | None = None,
-    deadline: float | None = None,
 ) -> str:
+    """Render and validate one canonical draft without model-authored HTML."""
+
     expected_page = {
         "width_mm": float(page_plan["width_mm"]),
         "height_mm": float(page_plan["height_mm"]),
     }
-    system, user = authoring.draft_prompt(
+    await runtime_io.progress(progress_callback, "poster.author", 0.18)
+    html_template = authoring.render_draft_html(
         assets=assets,
         content_budget=budget,
         page_plan=page_plan,
-        authoring_request=authoring_request,
         paper_source=paper_source,
-        design_reference=design_reference,
         visual_design_plan=visual_design_plan,
     )
-    await runtime_io.progress(progress_callback, "poster.author", 0.18)
-
-    async def report_repair(attempt: int, maximum: int) -> None:
-        await runtime_io.progress(
-            progress_callback,
-            "poster.author-repair",
-            0.18 + (0.20 * attempt / max(1, maximum)),
-            attempt=attempt,
-            maximum=maximum,
-        )
-
-    html_template = await model_runtime.request_html(
-        llm,
-        system=system,
-        user=user,
-        repair_system=authoring.html_repair_system(),
-        repair_context=authoring.repair_manifest(
-            assets=assets,
-            content_budget=budget,
-            page_plan=page_plan,
-            paper_source=paper_source,
-        ),
-        validate=lambda candidate: html_contract.validate_candidate(
-            candidate,
-            source_text=source_text,
-            assets=assets,
-            required_source_figure_sha256s=expected_figures,
-            expected_page=expected_page,
-            content_contract=page_plan.get("content_contract"),
-            paper_identity=paper_source,
-        ),
-        canonicalize=lambda candidate: html_contract.bind_authored_contract(
-            candidate,
-            content_budget=budget,
-            page_plan=page_plan,
-            paper_identity=paper_source,
-            assets=assets,
-        ),
-        initial_candidate=initial_candidate,
-        completed_repair_attempts=completed_repair_attempts,
-        initial_temperature=0.0,
-        timeout_seconds=timeout_seconds,
-        max_transport_retries=transport_retries,
-        on_repair_attempt=report_repair,
-        on_invalid_candidate=on_invalid_candidate,
-        deadline=deadline,
-        minimum_repair_budget_seconds=(
-            runtime_budget.MIN_FULL_HTML_REPAIR_BUDGET_SECONDS
-            if on_invalid_candidate is not None
-            else 0.0
-        ),
+    report = html_contract.validate_candidate(
+        html_template,
+        assets=assets,
+        required_source_figure_sha256s=expected_figures,
+        expected_page=expected_page,
+        content_contract=page_plan.get("content_contract"),
+        paper_identity=paper_source,
     )
+    if report.get("status") != "ok":
+        raise model_runtime.ModelBoundaryError(
+            "candidate_validation_failed",
+            "Deterministic draft renderer violated the poster contract: "
+            + json.dumps(report.get("issues") or [], ensure_ascii=False),
+        )
     return html_template
 
 
 def _require_valid_html(
     html_template: str,
     *,
-    source_text: str,
     assets: list[dict[str, Any]],
     expected_figures: set[str],
     page_plan: dict[str, Any],
@@ -648,7 +568,6 @@ def _require_valid_html(
 ) -> None:
     report = html_contract.validate_candidate(
         html_template,
-        source_text=source_text,
         assets=assets,
         required_source_figure_sha256s=expected_figures,
         expected_page={
@@ -668,89 +587,29 @@ def _require_valid_html(
 
 def _bind_paper_identity(
     source_summary: Mapping[str, Any],
-    input_data: Mapping[str, Any],
     assets: list[dict[str, Any]],
     *,
     automatic_venue: venue_branding.VenueBranding | None = None,
 ) -> dict[str, Any]:
-    """Bind explicit or safely resolved venue identity to its local logo asset."""
+    """Bind one safely resolved venue identity to its vetted local logo asset."""
 
     identity = dict(source_summary)
-    raw_venue = input_data.get("venue_identity")
-    if raw_venue is None:
-        if automatic_venue is None:
-            return identity
-        venue = {
-            "label": automatic_venue.label,
-            "evidence_uri": automatic_venue.evidence_uri,
-        }
-        if automatic_venue.distinction:
-            venue["distinction"] = automatic_venue.distinction
-        logo_digest = automatic_venue.logo_sha256
-        if logo_digest:
-            logo_asset = next(
-                (
-                    item
-                    for item in assets
-                    if item.get("source_kind") == "venue_brand_asset"
-                    and str(item.get("content_sha256") or "").lower() == logo_digest
-                ),
-                None,
-            )
-            if logo_asset is None:
-                raise DraftPipelineError(
-                    "source_read_failed",
-                    "bundled venue logo is missing from the prepared asset manifest",
-                )
-            venue["logo_asset_sha256"] = logo_digest
-            venue["logo_asset_token"] = str(logo_asset["token"])
-        identity["venue_identity"] = venue
+    if automatic_venue is None:
         return identity
-    if not isinstance(raw_venue, Mapping):
-        raise DraftPipelineError(
-            "invalid_payload",
-            "venue_identity must be an object supplied by a verifying harness",
-        )
-    label = " ".join(str(raw_venue.get("label") or "").split())
-    evidence_uri = str(raw_venue.get("evidence_uri") or "").strip()
-    if not label or not evidence_uri:
-        raise DraftPipelineError(
-            "invalid_payload",
-            "venue_identity requires label and evidence_uri",
-        )
-    venue = {"label": label, "evidence_uri": evidence_uri}
-    venue_id = str(raw_venue.get("venue_id") or "").strip().lower()
-    if venue_id:
-        venue["venue_id"] = venue_id
-    distinction = " ".join(str(raw_venue.get("distinction") or "").split())
-    if distinction:
-        venue["distinction"] = distinction
-    logo_digest = str(raw_venue.get("logo_asset_sha256") or "").strip().lower()
+    venue = {
+        "label": automatic_venue.label,
+        "evidence_uri": automatic_venue.evidence_uri,
+    }
+    if automatic_venue.distinction:
+        venue["distinction"] = automatic_venue.distinction
+    logo_digest = automatic_venue.logo_sha256
     if logo_digest:
         logo_asset = next(
             (
                 item
                 for item in assets
-                if item.get("source_kind") == "user_asset"
-                and str(item.get("content_sha256") or "").lower() == logo_digest
-            ),
-            None,
-        )
-        if logo_asset is None:
-            raise DraftPipelineError(
-                "invalid_payload",
-                "venue_identity logo_asset_sha256 must match a prepared user asset",
-            )
-        venue["logo_asset_sha256"] = logo_digest
-        venue["logo_asset_token"] = str(logo_asset["token"])
-    elif automatic_venue is not None and automatic_venue.logo_sha256:
-        logo_asset = next(
-            (
-                item
-                for item in assets
                 if item.get("source_kind") == "venue_brand_asset"
-                and str(item.get("content_sha256") or "").lower()
-                == automatic_venue.logo_sha256
+                and str(item.get("content_sha256") or "").lower() == logo_digest
             ),
             None,
         )
@@ -759,7 +618,7 @@ def _bind_paper_identity(
                 "source_read_failed",
                 "bundled venue logo is missing from the prepared asset manifest",
             )
-        venue["logo_asset_sha256"] = automatic_venue.logo_sha256
+        venue["logo_asset_sha256"] = logo_digest
         venue["logo_asset_token"] = str(logo_asset["token"])
     identity["venue_identity"] = venue
     return identity
@@ -772,8 +631,6 @@ def _resolve_automatic_venue(
 ) -> venue_branding.VenueBranding | None:
     """Resolve one explicit venue without treating design direction as evidence."""
 
-    if input_data.get("venue_identity") is not None:
-        return None
     conference = input_data.get("conference")
     if isinstance(conference, str) and conference.strip():
         return venue_branding.resolve_venue_branding(conference)

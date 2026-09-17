@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 
@@ -94,30 +93,10 @@ def inspection_feedback(inspection: dict[str, Any]) -> list[str]:
                 "masthead before compressing scientific content."
             )
 
-    raw_warnings = [
-        item
-        for source in (report.get("warnings"), inspection.get("warnings"))
-        if isinstance(source, list)
-        for item in source
-        if isinstance(item, dict)
-    ]
-    warnings: list[dict[str, Any]] = []
-    seen_warnings: set[str] = set()
-    for item in raw_warnings:
-        identity = json.dumps(
-            {
-                "code": item.get("code"),
-                "poster_id": item.get("poster_id"),
-                "role": item.get("role"),
-                "observed": item.get("observed"),
-                "target": item.get("target"),
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        )
-        if identity not in seen_warnings:
-            seen_warnings.add(identity)
-            warnings.append(item)
+    raw_warnings = inspection.get("warnings")
+    if not isinstance(raw_warnings, list):
+        raw_warnings = report.get("warnings")
+    warnings = [item for item in raw_warnings or [] if isinstance(item, dict)]
     for item in warnings:
         if item.get("code") == "poster_physical_size_mismatch":
             rendered_width = _positive_number(item.get("rendered_width_mm"))
@@ -232,21 +211,6 @@ def inspection_feedback(inspection: dict[str, Any]) -> list[str]:
                 "one role to compensate for another."
             )
 
-    below_reference = [
-        item for item in warnings if item.get("code") == "type_below_advisory_reference"
-    ]
-    if below_reference:
-        observed = min(
-            (_observed_font_size_mm(item) for item in below_reference),
-            default=None,
-            key=lambda value: float("inf") if value is None else value,
-        )
-        if observed is not None:
-            feedback.append(
-                f"Smallest type is {observed:g} mm, below the advisory 12 pt "
-                "readability reference."
-            )
-
     source_figures = report.get("source_figures")
     if isinstance(source_figures, dict):
         count = source_figures.get("count")
@@ -280,6 +244,95 @@ def inspection_feedback(inspection: dict[str, Any]) -> list[str]:
     return feedback
 
 
+def measured_lane_scales(report: dict[str, Any]) -> tuple[float, ...]:
+    """Return one conservative text scale per measured physical lane."""
+
+    poster = report.get("poster")
+    modules = report.get("modules")
+    if not isinstance(poster, dict) or not isinstance(modules, list):
+        return ()
+    poster_width = _positive_number(poster.get("width"))
+    poster_height = _positive_number(poster.get("height"))
+    if poster_width is None or poster_height is None:
+        return ()
+    geometry = _module_geometry(modules)
+    lanes = _lane_extents(geometry, poster_width=poster_width)
+    if len(lanes) < 2:
+        return ()
+    target_bottom = poster_height * 0.90
+    scales: list[float] = []
+    for _left, top, bottom in lanes:
+        depth = bottom - top
+        if depth <= 0:
+            scales.append(1.0)
+            continue
+        if bottom > poster_height:
+            required_ratio = (poster_height * 0.95 - top) / depth
+            scales.append(
+                round(max(0.82, 1.0 - 1.2 * (1.0 - required_ratio)), 2)
+            )
+            continue
+        if bottom >= target_bottom:
+            scales.append(1.0)
+            continue
+        required_ratio = (target_bottom - top) / depth
+        if required_ratio < 1.04:
+            scales.append(1.0)
+            continue
+        scales.append(round(min(1.22, 1.0 + 0.9 * (required_ratio - 1.0)), 2))
+    return tuple(scales)
+
+
+def lane_fill_recoverable(inspection: dict[str, Any]) -> bool:
+    """Allow one measured repair only for isolated vertical lane overflow."""
+
+    warnings = inspection.get("warnings")
+    if not isinstance(warnings, list) or not warnings:
+        return False
+    saw_vertical_overflow = False
+    for warning in warnings:
+        if not isinstance(warning, dict) or warning.get("severity") != "error":
+            continue
+        code = str(warning.get("code") or "")
+        if code == "element_outside_poster":
+            continue
+        if code != "element_content_overflow":
+            return False
+        observed = warning.get("observed")
+        if not isinstance(observed, dict):
+            return False
+        overflow_x = _positive_number(
+            observed.get("overflow_x_px"),
+            allow_zero=True,
+        )
+        overflow_y = _positive_number(
+            observed.get("overflow_y_px"),
+            allow_zero=True,
+        )
+        if overflow_x is None or overflow_y is None or overflow_x > 1 or overflow_y <= 1:
+            return False
+        saw_vertical_overflow = True
+    return saw_vertical_overflow
+
+
+def lane_fill_score(report: dict[str, Any]) -> tuple[float, float] | None:
+    """Score terminal void and lane imbalance; lower is better."""
+
+    poster = report.get("poster")
+    modules = report.get("modules")
+    if not isinstance(poster, dict) or not isinstance(modules, list):
+        return None
+    poster_width = _positive_number(poster.get("width"))
+    poster_height = _positive_number(poster.get("height"))
+    if poster_width is None or poster_height is None:
+        return None
+    lanes = _lane_extents(_module_geometry(modules), poster_width=poster_width)
+    if len(lanes) < 2:
+        return None
+    trailing = [max(0.0, poster_height - bottom) for _left, _top, bottom in lanes]
+    return sum(trailing), max(trailing) - min(trailing)
+
+
 def _observed_font_size_mm(warning: dict[str, Any]) -> float | None:
     """Read either element-level or role-aggregated typography measurements."""
 
@@ -298,6 +351,58 @@ def _positive_number(value: Any, *, allow_zero: bool = False) -> float | None:
         return None
     minimum = 0.0 if allow_zero else 1e-12
     return number if number >= minimum else None
+
+
+def _module_geometry(modules: list[Any]) -> list[dict[str, float | str]]:
+    geometry: list[dict[str, float | str]] = []
+    for module in modules:
+        if not isinstance(module, dict):
+            continue
+        rect = module.get("rect")
+        if not isinstance(rect, dict):
+            continue
+        left = _positive_number(rect.get("left"), allow_zero=True)
+        top = _positive_number(rect.get("top"), allow_zero=True)
+        width = _positive_number(rect.get("width"))
+        height = _positive_number(rect.get("height"))
+        if None in {left, top, width, height}:
+            continue
+        geometry.append(
+            {
+                "module_id": str(module.get("module_id") or "unknown"),
+                "left": float(left),
+                "top": float(top),
+                "width": float(width),
+                "bottom": float(top) + float(height),
+            }
+        )
+    return geometry
+
+
+def _lane_extents(
+    geometry: list[dict[str, float | str]],
+    *,
+    poster_width: float,
+) -> list[tuple[float, float, float]]:
+    lanes: list[list[float]] = []
+    tolerance = poster_width * 0.02
+    for item in sorted(geometry, key=lambda value: float(value["left"])):
+        width = float(item["width"])
+        if width <= 0 or width >= poster_width * 0.8:
+            continue
+        left = float(item["left"])
+        top = float(item["top"])
+        bottom = float(item["bottom"])
+        target = next(
+            (lane for lane in lanes if abs(lane[0] - left) <= tolerance),
+            None,
+        )
+        if target is None:
+            lanes.append([left, top, bottom])
+        else:
+            target[1] = min(target[1], top)
+            target[2] = max(target[2], bottom)
+    return [(left, top, bottom) for left, top, bottom in lanes]
 
 
 def _stack_bottoms(

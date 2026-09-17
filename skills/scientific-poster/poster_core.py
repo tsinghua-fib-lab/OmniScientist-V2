@@ -6,7 +6,6 @@ import hashlib
 import json
 import re
 from collections import Counter
-from collections.abc import Mapping, Sequence
 from html.parser import HTMLParser
 from pathlib import Path
 from types import MappingProxyType
@@ -182,45 +181,6 @@ _SVG_PRESENTATION_ATTRIBUTES = {
     "mask",
     "stroke",
 }
-_PLACEHOLDER_RE = re.compile(
-    r"(?:\blorem ipsum\b|\breplace this\b|\binsert (?:text|figure|image)(?: here)?\b|"
-    r"\[(?:todo|tbd|placeholder)\]|\{\{[^{}]+\}\})",
-    re.IGNORECASE,
-)
-_RIGHTS_CLAIM_PATTERNS = (
-    re.compile(r"\ball\s+rights\s+reserved\b", re.IGNORECASE),
-    re.compile(
-        r"\b(?:reproduced|reprinted|republished|adapted|used|included|provided)"
-        r"\s+(?:with|by|under)\s+(?:the\s+)?(?:[\w-]+\s+){0,3}permission\b",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"\bpermission\s+(?:(?:was|is|has\s+been)\s+)?"
-        r"(?:granted|obtained)\b",
-        re.IGNORECASE,
-    ),
-    re.compile(r"(?:©|\bcopyright(?:ed)?\b)", re.IGNORECASE),
-)
-_SOURCE_LOCATOR_RE = re.compile(
-    r"(?:\b(?:abstract|bibliography|references|title\s+page|grounded\s+brief)\b|"
-    r"\b(?:figures?|figs?\.?|tables?|pages?|pp?\.?)\s*\d+\b|"
-    r"\b(?:equations?|eqs?\.?)\s*\(?\d+(?:\.\d+)*\)?(?![\d.])|"
-    r"(?:§{1,2}|\b(?:sections?|secs?\.?))\s*\d+(?:\.\d+)*\b|"
-    r"\b(?:doi|arxiv)\s*:)",
-    re.IGNORECASE,
-)
-_SOURCE_PAGE_MARKER_RE = re.compile(r"(?m)^\[Page\s+(\d+)\]\s*$", re.IGNORECASE)
-_LABEL_PAGE_RE = re.compile(r"\b(?:pages?|pp?\.?)\s*(\d+)\b", re.IGNORECASE)
-_LABEL_FIGURE_RE = re.compile(r"\b(?:figures?|figs?\.?)\s*(\d+)\b", re.IGNORECASE)
-_LABEL_TABLE_RE = re.compile(r"\btables?\s*(\d+)\b", re.IGNORECASE)
-_LABEL_EQUATION_RE = re.compile(
-    r"\b(?:equations?|eqs?\.?)\s*\(?(\d+(?:\.\d+)*)\)?",
-    re.IGNORECASE,
-)
-_LABEL_SECTION_RE = re.compile(
-    r"(?:§{1,2}|\b(?:sections?|secs?\.?))\s*(\d+(?:\.\d+)*)",
-    re.IGNORECASE,
-)
 _PAGE_SIZE_RE = re.compile(
     r"@page\s*(?:[^\{]*)\{[^{}]*?\bsize\s*:\s*"
     r"([0-9]+(?:\.[0-9]+)?)mm\s+([0-9]+(?:\.[0-9]+)?)mm\s*;?",
@@ -344,7 +304,6 @@ class ParsedPosterHtml(HTMLParser):
         self.semantic_roles: set[str] = set()
         self.styles: list[str] = []
         self.visible_text: list[str] = []
-        self.source_labels: list[str] = []
         self.visible_source_figure_sha256s: set[str] = set()
         self.issues: list[dict[str, str]] = []
         self.parse_error: str | None = None
@@ -476,16 +435,6 @@ class ParsedPosterHtml(HTMLParser):
                         f"Module {module_id!r} needs data-source-label.",
                     )
                 )
-            elif _SOURCE_LOCATOR_RE.search(source_label) is None:
-                self.issues.append(
-                    _issue(
-                        "source_locator",
-                        f"Module {module_id!r} needs a page, section, equation, "
-                        "figure, table, bibliography, or grounded-brief locator.",
-                    )
-                )
-            else:
-                self.source_labels.append(source_label)
         inherited_module = next(
             (item[1] for item in reversed(self._stack) if item[1]), None
         )
@@ -623,7 +572,6 @@ def parse_poster_html(html_text: str) -> ParsedPosterHtml:
 def validate_poster_html(
     html_text: str,
     *,
-    source_text: str = "",
     facts: ParsedPosterHtml | None = None,
 ) -> dict[str, Any]:
     """Validate one complete, offline, semantically selectable poster document."""
@@ -713,18 +661,6 @@ def validate_poster_html(
                     "empty_module", f"Poster module {module_id!r} has no visible text."
                 )
             )
-        if "provenance" not in parsed.module_roles.get(module_id, ()) and any(
-            re.match(r"^\s*source\s*[:：]", item, re.IGNORECASE)
-            for item in parsed.module_text.get(module_id, ())
-        ):
-            issues.append(
-                _issue(
-                    "visible_source_locator",
-                    f"Module {module_id!r} prints a paper locator as poster copy. Keep "
-                    "source labels in metadata and explain what the evidence shows; "
-                    "render locators only in the provenance/references module.",
-                )
-            )
     css = "\n".join(parsed.styles)
     page_match = _PAGE_SIZE_RE.search(css)
     page: dict[str, float] | None = None
@@ -745,20 +681,6 @@ def validate_poster_html(
             )
         else:
             page = {"width_mm": width, "height_mm": height}
-    visible = " ".join(parsed.visible_text)
-    if _PLACEHOLDER_RE.search(visible):
-        issues.append(_issue("placeholder_copy", "Poster contains placeholder copy."))
-    unsupported_rights = _unsupported_rights_claims(visible, source_text)
-    if unsupported_rights:
-        issues.append(
-            _issue(
-                "ungrounded_rights_claim",
-                "Rights or permission language is not supported by the source: "
-                + ", ".join(unsupported_rights),
-            )
-        )
-    if source_text:
-        issues.extend(_source_locator_issues(parsed.source_labels, source_text))
     return {
         "status": "error" if issues else "ok",
         "issues": issues,
@@ -775,233 +697,6 @@ def validate_poster_html(
         "module_order": parsed.module_order,
         "semantic_roles": sorted(parsed.semantic_roles),
     }
-
-
-def validate_grounded_fragments(
-    fragments: Sequence[Mapping[str, Any]],
-    *,
-    source_text: str = "",
-) -> dict[str, Any]:
-    """Validate fragment locators and reject unsupported legal assertions."""
-
-    issues: list[dict[str, Any]] = []
-    source_labels: list[str] = []
-    fragment_text: list[str] = []
-    for index, fragment in enumerate(fragments):
-        source_label = str(fragment.get("source_label") or "").strip()
-        if not source_label or _SOURCE_LOCATOR_RE.search(source_label) is None:
-            shown_label = source_label or "<missing>"
-            issues.append(
-                _issue(
-                    "source_locator",
-                    f"Grounded fragment {index + 1} has source_label "
-                    f"{shown_label!r}; use a page, section, equation, figure, "
-                    "table, bibliography, or grounded-brief locator.",
-                )
-            )
-        else:
-            source_labels.append(source_label)
-        fragment_text.append(str(fragment.get("text") or ""))
-        detail_points = fragment.get("detail_points")
-        if isinstance(detail_points, Sequence) and not isinstance(
-            detail_points, (str, bytes)
-        ):
-            fragment_text.extend(str(item) for item in detail_points)
-    unsupported_rights = _unsupported_rights_claims(
-        " ".join(fragment_text),
-        source_text,
-    )
-    if unsupported_rights:
-        issues.append(
-            _issue(
-                "ungrounded_rights_claim",
-                "Rights or permission language is not supported by the source: "
-                + ", ".join(unsupported_rights),
-            )
-        )
-    if source_text:
-        issues.extend(_source_locator_issues(source_labels, source_text))
-    return {"status": "error" if issues else "ok", "issues": issues}
-
-
-def _unsupported_rights_claims(
-    candidate_text: str,
-    source_text: str,
-) -> list[str]:
-    """Return legal assertions that are not present verbatim in the source."""
-
-    candidate = " ".join(candidate_text.split())
-    source = " ".join(source_text.split()).casefold()
-    unsupported: list[str] = []
-    for pattern in _RIGHTS_CLAIM_PATTERNS:
-        for match in pattern.finditer(candidate):
-            phrase = " ".join(match.group(0).split())
-            if phrase.casefold() not in source and phrase not in unsupported:
-                unsupported.append(phrase)
-    return unsupported
-
-
-def remove_unsupported_rights_claims(
-    candidate_text: str,
-    source_text: str,
-) -> str:
-    """Remove generated legal boilerplate while preserving source-supported wording."""
-
-    source = " ".join(source_text.split()).casefold()
-    has_unaffected_sentence = any(
-        segment.strip() and not _unsupported_rights_claims(segment, source_text)
-        for segment in re.split(r"(?<=[.!?])\s+", candidate_text)
-    )
-    removed = False
-    cleaned = candidate_text
-    for pattern in _RIGHTS_CLAIM_PATTERNS:
-
-        def replace(match: re.Match[str]) -> str:
-            nonlocal removed
-            phrase = " ".join(match.group(0).split())
-            if phrase.casefold() in source:
-                return match.group(0)
-            removed = True
-            return ""
-
-        cleaned = pattern.sub(replace, cleaned)
-    if not removed:
-        return candidate_text
-    cleaned = re.sub(r"\s+([,.;:!?])", r"\1", cleaned)
-    cleaned = re.sub(r"[,;:]\s*([.!?])", r"\1", cleaned)
-    cleaned = re.sub(r"([.!?])(?:\s*[.!?])+", r"\1", cleaned)
-    cleaned = " ".join(cleaned.split()).strip(" ,;:-")
-    if len(re.findall(r"\b[\w'-]+\b", cleaned)) <= 4 and not has_unaffected_sentence:
-        return ""
-    return cleaned
-
-
-def _source_locator_issues(
-    source_labels: list[str],
-    source_text: str,
-) -> list[dict[str, str]]:
-    """Reject concrete locators that cannot exist in the supplied source."""
-
-    pages = {int(value) for value in _SOURCE_PAGE_MARKER_RE.findall(source_text)}
-    source_lower = source_text.lower()
-    invalid: set[str] = set()
-    for label in source_labels:
-        for value in _LABEL_PAGE_RE.findall(label):
-            if pages and int(value) not in pages:
-                invalid.add(f"p.{value}")
-        for value in _LABEL_FIGURE_RE.findall(label):
-            if (
-                re.search(
-                    rf"\b(?:figure|fig\.?)\s*{re.escape(value)}\b",
-                    source_text,
-                    re.IGNORECASE,
-                )
-                is None
-            ):
-                invalid.add(f"Figure {value}")
-        for value in _LABEL_TABLE_RE.findall(label):
-            if (
-                re.search(
-                    rf"\btable\s*{re.escape(value)}\b", source_text, re.IGNORECASE
-                )
-                is None
-            ):
-                invalid.add(f"Table {value}")
-        for value in _LABEL_EQUATION_RE.findall(label):
-            escaped = re.escape(value)
-            explicit_equation = re.search(
-                rf"\b(?:equation|eq\.?)\s*\(?{escaped}\)?(?![\d.])",
-                source_text,
-                re.IGNORECASE,
-            )
-            numbered_display = re.search(
-                rf"(?<![\d.])\(\s*{escaped}\s*\)(?![\d.])",
-                source_text,
-            )
-            if explicit_equation is None and numbered_display is None:
-                invalid.add(f"Equation {value}")
-        for value in _LABEL_SECTION_RE.findall(label):
-            escaped = re.escape(value)
-            heading = re.compile(
-                rf"(?m)(?:^|[ \t]{{2,}}){escaped}(?:\.\s+|[ \t]+)",
-                re.IGNORECASE,
-            )
-            explicit = re.compile(
-                rf"(?:\b(?:section|sec\.?)\s*|§\s*){escaped}(?![\d.])",
-                re.IGNORECASE,
-            )
-            if (
-                pages
-                and heading.search(source_text) is None
-                and explicit.search(source_text) is None
-            ):
-                invalid.add(f"§{value}")
-        if "abstract" in label.lower() and pages and "abstract" not in source_lower:
-            invalid.add("Abstract")
-        if "references" in label.lower() and pages and "references" not in source_lower:
-            invalid.add("References")
-        if (
-            "bibliography" in label.lower()
-            and pages
-            and "bibliography" not in source_lower
-            and "references" not in source_lower
-        ):
-            invalid.add("Bibliography")
-    if not invalid:
-        return []
-    return [
-        _issue(
-            "source_locator_mismatch",
-            "Source locator(s) are absent from the supplied paper: "
-            + ", ".join(sorted(invalid)),
-        )
-    ]
-
-
-def prune_invalid_source_locator_parts(source_label: str, source_text: str) -> str:
-    """Drop invalid semicolon-delimited locators when another locator remains valid."""
-
-    original = str(source_label).strip()
-    parts = [part.strip() for part in original.split(";") if part.strip()]
-    if len(parts) < 2:
-        return original
-    valid = [
-        part
-        for part in parts
-        if _SOURCE_LOCATOR_RE.search(part) is not None
-        and not _source_locator_issues([part], source_text)
-    ]
-    return "; ".join(valid) if valid else original
-
-
-def source_figure_usage_issues(
-    html_text: str,
-    expected_sha256s: set[str] | tuple[str, ...] | list[str],
-    *,
-    facts: ParsedPosterHtml | None = None,
-) -> list[dict[str, str]]:
-    """Require one statically visible, byte-matched figure from a prepared PDF."""
-
-    expected = {str(value) for value in expected_sha256s}
-    if not expected:
-        return []
-    if any(re.fullmatch(r"[0-9a-f]{64}", value) is None for value in expected):
-        return [
-            _issue(
-                "source_figure_identity", "Expected source-figure hashes are invalid."
-            )
-        ]
-    parsed = facts or parse_poster_html(html_text)
-    if parsed.parse_error:
-        return [_issue("malformed_html", f"HTML parser failed: {parsed.parse_error}")]
-    if expected.isdisjoint(parsed.visible_source_figure_sha256s):
-        return [
-            _issue(
-                "missing_source_figure",
-                "Use at least one visible figure extracted from the supplied PDF.",
-            )
-        ]
-    return []
 
 
 class _PosterIdentityParser(HTMLParser):

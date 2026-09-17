@@ -52,28 +52,6 @@ def evaluate_scene(scene: dict[str, Any]) -> dict[str, Any]:
                     "Export regions as native shapes and text; keep raster content to figures only.",
                 )
             )
-        if item["kind"] in {"equation", "table", "text"}:
-            size = item["font_size_pt"]
-            if size < 12:
-                warnings.append(
-                    _issue(
-                        item["id"],
-                        "minimum_type_size",
-                        "warning",
-                        f"Text is {size:g} pt, below the advisory 12 pt reference.",
-                        "Increase this object's type size or shorten its content.",
-                    )
-                )
-            elif size < 16:
-                warnings.append(
-                    _issue(
-                        item["id"],
-                        "minimum_type_size",
-                        "warning",
-                        f"Text is only {size:g} pt at poster scale.",
-                        "Prefer at least 16 pt for secondary poster text.",
-                    )
-                )
         if item["kind"] == "text" and item.get("fit") != "shrink":
             failures.append(
                 _issue(

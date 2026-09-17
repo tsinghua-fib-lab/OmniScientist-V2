@@ -14,8 +14,8 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 if str(SKILL_DIR) not in sys.path:
     sys.path.insert(0, str(SKILL_DIR))
 
-import poster_core  # noqa: E402 - copied Skill bootstraps its own root
-from posterlib.delivery.portable_actions import run  # noqa: E402
+import poster_core
+from posterlib.delivery.portable_actions import run
 
 
 class InputError(ValueError):

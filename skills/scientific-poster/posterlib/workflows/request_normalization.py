@@ -13,25 +13,8 @@ import poster_core
 from posterlib.generation import model_runtime
 from posterlib.sources import source_runtime
 
-from . import workflow_outcomes
+from . import runtime_budget, workflow_outcomes
 
-_PAGE_DIMENSIONS_PATTERN = re.compile(
-    r"(?P<width>\d+(?:\.\d+)?)\s*(?:mm)?\s*[x×*]\s*"
-    r"(?P<height>\d+(?:\.\d+)?)\s*mm\b",
-    re.IGNORECASE,
-)
-_OUTPUT_DIR_PATTERN = re.compile(
-    r"output[_ -]?(?:dir|directory)\s*[=:]\s*(?P<path>[^\s,;，；]+)",
-    re.IGNORECASE,
-)
-_QUOTED_PDF_PATH_PATTERN = re.compile(
-    r"""(?P<quote>[`"'])(?P<path>(?:file://|/|\./|\.\./|~/|[A-Za-z]:[\\/]).+?\.pdf)(?P=quote)""",
-    re.IGNORECASE,
-)
-_BARE_PDF_PATH_PATTERN = re.compile(
-    r"""(?<!\S)(?P<path>(?:file://|/|\./|\.\./|~/|[A-Za-z]:[\\/])[^\s`"',;，；。)\]}]+\.pdf)(?=$|[\s,;，；。)\]}])""",
-    re.IGNORECASE,
-)
 _A0_LANDSCAPE_PAGE = {"width_mm": 1189.0, "height_mm": 841.0}
 _A0_PORTRAIT_PAGE = {"width_mm": 841.0, "height_mm": 1189.0}
 _ORIENTATION_VALUES = {
@@ -71,11 +54,20 @@ def validate_action_boundary(
             "missing_input",
             "source_html_uri plus feedback or visual_review_path are required.",
         )
+    if action in {
+        poster_core.ACTION_DRAFT, poster_core.ACTION_ESTIMATE, poster_core.ACTION_REVISE
+    }:
+        try:
+            repair_attempts(data)
+            authoring_transport_options(data)
+            runtime_budget.workflow_timeout_seconds(data)
+        except model_runtime.ModelBoundaryError as exc:
+            return None, workflow_outcomes.error_result(exc.code, str(exc))
     return action, None
 
 
 def normalize_poster_input(input_data: dict[str, Any]) -> dict[str, Any]:
-    """Fill missing poster controls from a natural-language Omni request."""
+    """Normalize only explicit structured controls at the Skill boundary."""
 
     normalized = dict(input_data)
     embedded = _embedded_control_payload(normalized.get("input"))
@@ -92,70 +84,20 @@ def normalize_poster_input(input_data: dict[str, Any]) -> dict[str, Any]:
         canonical_orientation = _ORIENTATION_VALUES.get(raw_orientation.strip().lower())
         if canonical_orientation is not None:
             normalized["orientation"] = canonical_orientation
-    request = source_runtime.authoring_request(normalized)
-    if not request:
-        return normalized
-
-    if _may_infer_draft_pdf(normalized):
-        inferred_pdf = _single_pdf_path(request)
-        if inferred_pdf:
-            normalized["paper_path"] = inferred_pdf
-
-    if not str(normalized.get("action") or "").strip() and _requests_estimate_only(
-        request
-    ):
-        normalized["action"] = poster_core.ACTION_ESTIMATE
-
-    if not normalized.get("page"):
-        dimensions = _PAGE_DIMENSIONS_PATTERN.search(request)
-        if dimensions is not None:
-            normalized["page"] = {
-                "width_mm": float(dimensions.group("width")),
-                "height_mm": float(dimensions.group("height")),
-            }
-        elif re.search(r"\bA0\b", request, re.IGNORECASE):
+    page = normalized.get("page")
+    if isinstance(page, Mapping) and str(page.get("format") or "").upper() == "A0":
+        page_orientation = _ORIENTATION_VALUES.get(
+            str(page.get("orientation") or normalized.get("orientation") or "portrait")
+            .strip()
+            .lower()
+        )
+        if page_orientation in {"landscape", "portrait"}:
             normalized["page"] = (
                 dict(_A0_LANDSCAPE_PAGE)
-                if _requests_landscape(request)
+                if page_orientation == "landscape"
                 else dict(_A0_PORTRAIT_PAGE)
             )
-        elif _requests_landscape(request):
-            normalized.setdefault("orientation", "landscape")
-        elif _requests_portrait(request):
-            normalized.setdefault("orientation", "portrait")
-        else:
-            normalized.setdefault("orientation", "auto")
-
-    raw_preferences = normalized.get("visual_preferences")
-    preferences = dict(raw_preferences) if isinstance(raw_preferences, Mapping) else {}
-    if "visual_preferences" not in normalized:
-        typography = re.search(
-            r"\b(neutral-sans|scholarly-serif|hybrid)\b",
-            request,
-            re.IGNORECASE,
-        )
-        if typography is not None:
-            preferences["typography"] = typography.group(1).lower()
-        if re.search(r"\b(?:no borders?|unframed)\b", request, re.IGNORECASE):
-            preferences["framing"] = "unframed"
-        elif re.search(r"\b(?:border|frame|outline)\b", request, re.IGNORECASE):
-            preferences["framing"] = "section-outline"
-        accent = re.search(
-            r"accent(?:\s+color)?\s*[:=]?\s*(#[0-9a-f]{6})\b",
-            request,
-            re.IGNORECASE,
-        )
-        if accent is not None:
-            preferences["accent_color"] = accent.group(1).lower()
-    if preferences:
-        normalized["visual_preferences"] = preferences
-
-    if not str(normalized.get("output_dir") or "").strip():
-        output_dir = _OUTPUT_DIR_PATTERN.search(request)
-        if output_dir is not None:
-            normalized["output_dir"] = (
-                output_dir.group("path").strip("`'\"").rstrip(".,;:，；。)]}")
-            )
+            normalized["orientation"] = page_orientation
     return normalized
 
 
@@ -207,40 +149,15 @@ def _infer_continuation_action(data: Mapping[str, Any]) -> str:
     return ""
 
 
-def _may_infer_draft_pdf(data: Mapping[str, Any]) -> bool:
-    """Allow explicit invocation text to carry one unambiguous local PDF path."""
+def repair_attempts(input_data: dict[str, Any]) -> int:
+    """Return the validation repair allowance, separate from transport retries."""
 
-    action = str(data.get("action") or "").strip().lower()
-    return action in {
-        "",
-        poster_core.ACTION_DRAFT,
-        poster_core.ACTION_ESTIMATE,
-    } and not any(
-        data.get(field) not in (None, "", {}, [])
-        for field in (
-            "paper_path",
-            "file_uri",
-            "source",
-            "source_text",
-            "research",
+    value = input_data.get("max_repair_attempts", model_runtime.MAX_REPAIR_ATTEMPTS)
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 10:
+        raise model_runtime.ModelBoundaryError(
+            "invalid_payload", "max_repair_attempts must be an integer between 0 and 10"
         )
-    )
-
-
-def _single_pdf_path(request: str) -> str:
-    """Extract one explicit path-like PDF token without treating prose as evidence."""
-
-    candidates = {
-        match.group("path").strip()
-        for match in _BARE_PDF_PATH_PATTERN.finditer(request)
-    }
-    candidates.update(
-        path
-        for match in _QUOTED_PDF_PATH_PATTERN.finditer(request)
-        if (path := match.group("path").strip())
-        and len(re.findall(r"\.pdf\b", path, re.IGNORECASE)) == 1
-    )
-    return next(iter(candidates)) if len(candidates) == 1 else ""
+    return value
 
 
 def authoring_transport_options(input_data: dict[str, Any]) -> tuple[float, int]:
@@ -280,24 +197,3 @@ def authoring_transport_options(input_data: dict[str, Any]) -> tuple[float, int]
             f"{model_runtime.MAX_AUTHORING_TRANSPORT_RETRIES}",
         )
     return timeout, retries
-
-
-def _requests_landscape(request: str) -> bool:
-    return bool(re.search(r"\b(?:landscape|horizontal)\b", request, re.IGNORECASE))
-
-
-def _requests_estimate_only(request: str) -> bool:
-    """Recognize an explicit planning-only request without guessing from paper prose."""
-
-    return bool(
-        re.search(r"\baction\s*[:=]?\s*estimate\b", request, re.IGNORECASE)
-        or re.search(
-            r"\b(?:estimate(?:\s*/\s*planning)?|planning)\s+stage\s+only\b",
-            request,
-            re.IGNORECASE,
-        )
-    )
-
-
-def _requests_portrait(request: str) -> bool:
-    return bool(re.search(r"\b(?:portrait|vertical)\b", request, re.IGNORECASE))

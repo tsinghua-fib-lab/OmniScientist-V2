@@ -212,15 +212,16 @@ def _first_page_identity(page: Any) -> tuple[str, str]:
         (line for line in lines if _ABSTRACT_HEADING_PATTERN.fullmatch(line["text"])),
         None,
     )
-    if abstract is None:
-        return "", ""
-
     page_height = float(page.rect.height)
-    abstract_top = float(abstract["bbox"][1])
+    identity_bottom = (
+        float(abstract["bbox"][1])
+        if abstract is not None
+        else page_height * 0.35
+    )
     title_candidates = [
         line
         for line in lines
-        if float(line["bbox"][1]) < abstract_top
+        if float(line["bbox"][1]) < identity_bottom
         and float(line["bbox"][1]) < page_height * 0.55
         and _has_letters(line["text"])
         and "@" not in line["text"]
@@ -251,11 +252,13 @@ def _first_page_identity(page: Any) -> tuple[str, str]:
         " ".join(str(line["text"]) for line in title_lines),
     ).strip()
     title_bottom = max(float(line["bbox"][3]) for line in title_lines)
+    if abstract is None:
+        return title, ""
 
     author_lines = [
         line
         for line in lines
-        if title_bottom < float(line["bbox"][1]) < abstract_top
+        if title_bottom < float(line["bbox"][1]) < identity_bottom
         and _looks_like_author_copy(str(line["bold_text"]))
     ]
     author_lines.sort(

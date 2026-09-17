@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -127,34 +126,6 @@ def resolve_venue_branding(
     )
 
 
-def resolve_verified_identity(
-    identity: object,
-) -> VenueBranding | None:
-    """Bind a structured supported venue only when its provenance matches."""
-
-    if not isinstance(identity, Mapping) or not identity.get("venue_id"):
-        return None
-    venue_id = str(identity.get("venue_id") or "").strip().lower()
-    if venue_id not in _SPECS:
-        raise VenueBrandingError("venue_identity venue_id is not supported")
-    label = " ".join(str(identity.get("label") or "").split())
-    evidence_uri = str(identity.get("evidence_uri") or "").strip()
-    resolved = resolve_venue_branding(
-        label,
-        distinction=str(identity.get("distinction") or "") or None,
-    )
-    spec = _SPECS[venue_id]
-    if (
-        resolved is None
-        or resolved.venue_id != venue_id
-        or evidence_uri != spec.evidence_uri
-    ):
-        raise VenueBrandingError(
-            "venue_identity label, venue_id, and evidence_uri do not match"
-        )
-    return resolved
-
-
 def _canonical_id(name: str) -> VenueId:
     normalized = name.casefold()
     if normalized == "icml":
@@ -208,5 +179,4 @@ __all__ = [
     "VenueBrandingError",
     "VenueId",
     "resolve_venue_branding",
-    "resolve_verified_identity",
 ]

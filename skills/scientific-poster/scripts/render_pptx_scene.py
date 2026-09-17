@@ -18,11 +18,11 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 if str(SKILL_DIR) not in sys.path:
     sys.path.insert(0, str(SKILL_DIR))
 
-from posterlib.delivery.pptx_math import (  # noqa: E402
+from posterlib.delivery.pptx_math import (
     A14_NAMESPACE,
     build_text_math_xml,
 )
-from posterlib.delivery.pptx_scene import normalize_scene  # noqa: E402
+from posterlib.delivery.pptx_scene import normalize_scene
 
 MC_NAMESPACE = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 _SVG_TARGET_PPI = 300

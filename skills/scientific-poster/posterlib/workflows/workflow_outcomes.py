@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any
 
 import poster_core
 
 from posterlib.sources import paper_source
 
-from . import decision_checkpoint, draft_checkpoint, runtime_budget
+from . import decision_checkpoint, runtime_budget
 
 
 def visual_outcome(
@@ -62,18 +61,11 @@ def revision_timeout_error(
     if detail:
         message = f"{message} {detail}"
     result = dict(best)
-    workspace = str(best.get("workspace") or "")
-    retry_from_checkpoint = False
-    if workspace:
-        checkpoint = draft_checkpoint.load(Path(workspace))
-        retry_from_checkpoint = isinstance(
-            (checkpoint or {}).get("pending_visual_revision"), dict
-        )
     result.update(
         {
-            "workspace": workspace,
+            "workspace": str(best.get("workspace") or ""),
             "visual_quality_state": "revision-required",
-            "retry_from_checkpoint": retry_from_checkpoint,
+            "retry_from_checkpoint": False,
         }
     )
     append_warning_once(result, message)

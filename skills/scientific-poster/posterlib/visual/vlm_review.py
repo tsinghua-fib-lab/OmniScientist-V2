@@ -25,6 +25,7 @@ _REVIEW_FIELDS = {
 }
 _MAX_TRANSIENT_ATTEMPTS = 2
 _RETRY_BASE_DELAY_S = 0.25
+_EMBEDDED_VISUAL_MARKER = "[embedded visual omitted; inspect attached image]"
 
 Sleep = Callable[[float], Awaitable[None]]
 
@@ -57,7 +58,7 @@ async def review_request(
         bound["candidate_html_sha256"],
         label="candidate HTML",
     )
-    reference = _require_current_file(
+    _require_current_file(
         bound["reference"]["image_path"],
         bound["reference_image_sha256"],
         label="reference image",
@@ -65,31 +66,13 @@ async def review_request(
     overview = _require_current_file(
         bound["screenshot_path"], bound["screenshot_sha256"], label="screenshot"
     )
-    evidence = bound["visual_evidence"]
     images: tuple[vlm_client.VlmImage, ...] = (
-        vlm_client.VlmImage(
-            label="REFERENCE IMAGE — use visual grammar only; do not copy its content.",
-            image_bytes=reference.content,
-            mime_type=_image_mime(reference.path, label="reference image"),
-        ),
         vlm_client.VlmImage(
             label="CANDIDATE OVERVIEW — review the complete poster.",
             image_bytes=overview.content,
             mime_type=_image_mime(overview.path, label="candidate overview"),
         ),
     )
-    if evidence["atlas"] is not None:
-        atlas = _evidence_image(evidence["atlas"], label="evidence atlas")
-        images += (
-            vlm_client.VlmImage(
-                label=(
-                    "EVIDENCE ATLAS — labeled high-resolution crops for the "
-                    "observation ids in the request."
-                ),
-                image_bytes=atlas.content,
-                mime_type=_image_mime(atlas.path, label="evidence atlas"),
-            ),
-        )
     prompt = _review_prompt(bound)
     raw = await _generate_with_transient_retry(
         client,
@@ -212,12 +195,6 @@ def _require_current_file(path: Any, expected_sha256: Any, *, label: str) -> _Bo
     return _BoundFile(path=candidate, content=content)
 
 
-def _evidence_image(value: Any, *, label: str) -> _BoundFile:
-    if not isinstance(value, Mapping):
-        raise vlm_client.VlmError(f"{label} binding is invalid")
-    return _require_current_file(value.get("path"), value.get("sha256"), label=label)
-
-
 def _image_mime(path: Path, *, label: str) -> str:
     image_mime = mimetypes.guess_type(path.name)[0] or ""
     if not image_mime.startswith("image/"):
@@ -246,6 +223,38 @@ def _review_semantic_shape(request: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _prompt_json(value: Any) -> str:
+    """Serialize model context without repeating embedded visual bytes.
+
+    The exact request remains content-addressed and unchanged for validation. The VLM
+    already receives the rendered reference, candidate, and evidence images, so inline
+    ``data:`` payloads inside the scientific snapshot add transport and context cost but
+    no review evidence.
+    """
+
+    return json.dumps(
+        _without_embedded_visual_bytes(value),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _without_embedded_visual_bytes(value: Any) -> Any:
+    """Return a JSON-shaped value with inline visual payloads replaced by a marker."""
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _without_embedded_visual_bytes(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_without_embedded_visual_bytes(item) for item in value]
+    if isinstance(value, str) and value.lstrip().lower().startswith("data:image/"):
+        return _EMBEDDED_VISUAL_MARKER
+    return value
+
+
 def _review_revise_issue_shape() -> dict[str, Any]:
     """Describe one issue element without making it part of the pass example."""
 
@@ -253,8 +262,10 @@ def _review_revise_issue_shape() -> dict[str, Any]:
         "criterion": "one rubric key",
         "priority": "critical, major, or minor",
         "targets": [
-            "1-4 items: exact grounded module ids for content-replan; existing "
-            "module ids or visual regions for restyle/reflow"
+            (
+                "1-4 items: exact grounded module ids for content-replan; existing "
+                "module ids or visual regions for restyle/reflow"
+            )
         ],
         "evidence": "visible candidate-vs-reference evidence",
         "desired_outcome": "specific whole-page visible end state, not an unverified move",
@@ -268,11 +279,15 @@ def _review_contract_guidance() -> tuple[str, ...]:
 
     return (
         "For pass, critical_issues and global_directives must both be empty arrays.",
-        "For revise, critical_issues must contain at least one object with exactly "
-        "this element structure:",
-        json.dumps(_review_revise_issue_shape(), ensure_ascii=False, indent=2),
-        "For revise, keep global_directives empty unless a genuine cross-task "
-        "constraint or preservation directive is needed.",
+        (
+            "For revise, critical_issues must contain at least one object with exactly "
+            "this element structure:"
+        ),
+        _prompt_json(_review_revise_issue_shape()),
+        (
+            "For revise, keep global_directives empty unless a genuine cross-task "
+            "constraint or preservation directive is needed."
+        ),
     )
 
 
@@ -292,7 +307,7 @@ def _review_repair_prompt(
             "CORRECTIVE RETRY: the previous JSON failed contract validation.",
             f"Exact validation error: {validation_error}",
             "Return one corrected JSON object only, with exactly this semantic shape:",
-            json.dumps(_review_semantic_shape(request), ensure_ascii=False, indent=2),
+            _prompt_json(_review_semantic_shape(request)),
             *_review_contract_guidance(),
             "Preserve valid visual judgments; repair only the contract-invalid fields.",
             "Previous invalid JSON:",
@@ -302,77 +317,90 @@ def _review_repair_prompt(
 
 
 def _review_prompt(request: Mapping[str, Any]) -> str:
-    reference = request["reference"]
     content_brief = request["content_brief"]
-    visual_design = content_brief.get("visual_design")
-    visual_design = visual_design if isinstance(visual_design, Mapping) else {}
-    reference_grammar = {
-        "orientation": reference["orientation"],
-        "density": reference["density"],
-        "design_brief": reference["design_brief"],
-        "non_authoritative_policy": reference["non_authoritative_policy"],
+    raw_visual_design = content_brief.get("visual_design")
+    raw_visual_design = (
+        raw_visual_design if isinstance(raw_visual_design, Mapping) else {}
+    )
+    executable_visual_design = {
+        key: raw_visual_design[key]
+        for key in ("typography", "palette", "layout")
+        if key in raw_visual_design
     }
-    topology_grammar = {
-        key: visual_design.get(key)
-        for key in (
-            "topology",
-            "focal_strategy",
-            "reading_path",
-            "reference_observations",
-            "directives",
-        )
-        if visual_design.get(key) is not None
+    review_content_brief = {
+        key: content_brief[key]
+        for key in ("page", "readability_reference", "grounded_authority")
+        if key in content_brief
     }
     return "\n".join(
         [
             "Act as a strict visual reviewer for a top-conference academic poster.",
             str(request["instructions"]),
-            "The visual input is pixel-labeled. REFERENCE is style grammar only; CANDIDATE "
-            "OVERVIEW is the poster being judged; EVIDENCE ATLAS contains candidate crops. "
-            "These embedded labels are authoritative even when the reference contains "
-            "unrelated paper text or figures.",
+            (
+                "CANDIDATE OVERVIEW is the only attached image and is the complete poster "
+                "being judged. The design planner already distilled the separate reference "
+                "into the bound grammar metadata below; reference pixels are not attached "
+                "to this final review."
+            ),
+            (
+                "Only CANDIDATE OVERVIEW depicts whole-page geometry. No separate "
+                "evidence-atlas crop is attached; deterministic observations below are "
+                "coordinate facts about that same complete overview."
+            ),
             "Treat the grounded candidate content brief as the only authority for scientific content.",
             "Judge only what is visibly present in the attached full-resolution images.",
             "Score every rubric criterion from 1 to 5.",
-            "Assess every supplied evidence observation exactly once by its exact id. "
-            "The measurements identify what to inspect, not whether it is aesthetically "
-            "wrong. Mark each acceptable, actionable, or uncertain and explain the visible "
-            "effect. A pass requires every observation to be acceptable.",
-            "For inter_module_gap, lane_entry_offset, lane_depth_profile, and "
-            "lane_trailing_space observations, "
-            "inspect the complete overview and evidence crop to decide whether the separation "
-            "supports hierarchy or interrupts a visual lane. A lane_entry_offset is a factual "
-            "difference between the first module positions, not an automatic defect. When the "
-            "grounded visual design names a dominant lane topology, several intended lanes "
-            "starting far below an isolated module can instead reveal a detached pre-grid "
-            "stage. Do not describe the later columns as topology-aligned unless the reference "
-            "or visible content geometry supports that stage. "
-            "A small page-trailing margin does not excuse a large accidental interior void, "
-            "including one created when a full-width section cue waits below uneven modules. "
-            "A lane_depth_profile crop spans the interval where a shallower lane has ended "
-            "while peer lanes continue. If accepting it, identify the visible compositional "
-            "purpose rather than citing unequal lane bottoms alone. This remains a visual "
-            "judgment, not a numeric threshold or an equal-height rule.",
-            "Apply the bound topology grammar below as explicit reference-specific context "
-            "while following the request instructions; never infer a universal lane count.",
-            "Return only one JSON object with exactly this semantic shape:",
-            json.dumps(_review_semantic_shape(request), ensure_ascii=False, indent=2),
-            *_review_contract_guidance(),
-            "Reference visual-grammar metadata:",
-            json.dumps(reference_grammar, ensure_ascii=False, indent=2, sort_keys=True),
-            "Bound reference-derived topology grammar:",
-            json.dumps(topology_grammar, ensure_ascii=False, indent=2, sort_keys=True),
-            "Grounded poster content brief:",
-            json.dumps(content_brief, ensure_ascii=False, indent=2, sort_keys=True),
-            "Deterministic visual evidence observations:",
-            json.dumps(
-                request["visual_evidence"]["observations"],
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
+            (
+                "Assess every supplied evidence observation exactly once by its exact id. "
+                "The measurements identify what to inspect and are not independent acceptance "
+                "gates. Mark each acceptable, actionable, or uncertain and explain the visible "
+                "effect. Only visible, consequential defects can block delivery."
             ),
+            (
+                "For inter_module_gap and lane_entry_offset observations, inspect the complete "
+                "overview to decide "
+                "whether the separation supports hierarchy or interrupts a "
+                "visual lane. A lane_entry_offset is a factual difference between the first "
+                "module positions, not an automatic defect. Several lanes starting far below an "
+                "isolated module can reveal a detached pre-grid stage. Do not describe later "
+                "columns as aligned unless the visible content geometry supports that judgment. "
+                "A small page-trailing margin does not excuse a "
+                "large accidental interior void, including one created when a full-width "
+                "section cue waits below uneven modules. Judge terminal balance directly from "
+                "the complete poster rather than turning small differences between column "
+                "endings into a separate failure condition. "
+                "Do not use content-replan merely to scale modules up or consume a common bottom "
+                "band; request reflow or restyle unless grounded copy itself must be compressed "
+                "or reorganized. Do not invent a pixel clearance threshold that is absent from "
+                "the request; acceptance checks must describe a visible, evidence-relative end "
+                "state without creating a new numeric gate. "
+                "This remains a visual judgment, not a numeric threshold or an equal-height "
+                "rule."
+            ),
+            (
+                "Source figures retain the paper's own typography and may be dense multi-panel "
+                "summaries. Judge whether their panel structure, comparative trend, legend, and "
+                "key annotations are visibly distinguishable together with the adjacent caption "
+                "and takeaway. Do not require every paper-original axis label to match poster body "
+                "type or be readable from the downscaled whole-page preview, and subplot count "
+                "alone is not evidence of illegibility. Request enlargement only when the actual "
+                "full-resolution evidence fails to communicate the cited result."
+            ),
+            (
+                "Use only the bound executable visual contract below as reference-specific "
+                "authority. Other design-plan prose is diagnostic and cannot create a review gate."
+            ),
+            "Return only one JSON object with exactly this semantic shape:",
+            _prompt_json(_review_semantic_shape(request)),
+            *_review_contract_guidance(),
+            "Bound executable visual contract:",
+            _prompt_json(executable_visual_design),
+            "Grounded poster content brief:",
+            _prompt_json(review_content_brief),
+            "Deterministic visual evidence observations:",
+            _prompt_json(request["visual_evidence"]["observations"]),
             "Rubric:",
-            json.dumps(request["rubric"], ensure_ascii=False, indent=2, sort_keys=True),
+            _prompt_json(request["rubric"]),
         ]
     )
 

@@ -55,7 +55,6 @@ class _RejectRedirects(urllib.request.HTTPRedirectHandler):
         newurl: str,
     ) -> None:
         del req, fp, code, msg, headers, newurl
-        return None
 
 
 @dataclass(frozen=True)
@@ -234,7 +233,6 @@ def resolve_reference(
     *,
     prompt: str,
     output_dir: str | Path,
-    density: str,
     environ: Mapping[str, str] | None = None,
     generator: ReferenceImageGenerator | None = None,
     generation_budget_s: float | None = None,
@@ -246,11 +244,9 @@ def resolve_reference(
         raise reference_seeds.ReferenceSeedError(
             "reference seed must come from registry"
         )
-    normalized_density = reference_seeds.normalize_density(density)
     if generation_budget_s is not None and generation_budget_s < 10.0:
         return reference_seeds.load_seed_bundle(
             seed,
-            density=normalized_density,
             warning=GENERATION_BUDGET_WARNING,
         )
     attempt_timeout = (
@@ -265,7 +261,6 @@ def resolve_reference(
     if config is None:
         return reference_seeds.load_seed_bundle(
             seed,
-            density=normalized_density,
             warning=configuration_warning,
         )
     client = generator or ImageGenerationClient()
@@ -279,7 +274,6 @@ def resolve_reference(
     except ReferenceGenerationError:
         return reference_seeds.load_seed_bundle(
             seed,
-            density=normalized_density,
             warning=GENERATION_FAILED_WARNING,
         )
 
@@ -292,9 +286,6 @@ def resolve_reference(
         image_sha256=_sha256_bytes(image_bytes),
         source_kind="generated",
         seed_id=seed.seed_id,
-        orientation=seed.orientation,
-        density=normalized_density,
-        design_brief=seed.design_brief,
     )
 
 

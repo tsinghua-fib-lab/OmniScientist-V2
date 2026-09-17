@@ -24,7 +24,7 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 if str(SKILL_DIR) not in sys.path:
     sys.path.insert(0, str(SKILL_DIR))
 
-import poster_core  # noqa: E402
+import poster_core
 
 _MAX_SELECTION_BYTES = 64 * 1024
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")

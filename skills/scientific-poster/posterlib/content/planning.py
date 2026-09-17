@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import copy
 import math
 import re
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from typing import Any
 
+import poster_assets
 import poster_core
+
+from posterlib.content.equations import EquationSyntaxError, latex_to_mathml
 
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _MODULE_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
@@ -48,7 +53,6 @@ _MAX_LANDSCAPE_ASPECT_RATIO = 1.50
 _TARGET_OCCUPANCY = 0.90
 _MAX_AUTO_OCCUPANCY = 1.0
 _MIN_OCCUPANCY = 0.72
-_CAPACITY_PRESSURE_LIMIT = 1.15
 _COMPACT_LANDSCAPE_FLOW_RESERVE = 1.12
 _COMPACT_LANDSCAPE_MAX_WIDTH_MM = 1000.0
 _FIXED_VERTICAL_OVERHEAD_RATIO = 0.15
@@ -56,10 +60,6 @@ _FIGURE_ORIENTATION_EXTENT_TARGET = 0.18
 _MIN_PAGE_DIMENSION_MM = 200.0
 _MAX_PAGE_DIMENSION_MM = 2000.0
 _MAX_EQUATION_LATEX_CHARS = 600
-_FIGURE_LOCATOR_RE = re.compile(
-    r"\b(?:fig(?:ure)?s?|figs?\.?)\s*(\d+)(?:\s*[-\u2013\u2014]\s*(\d+))?",
-    re.IGNORECASE,
-)
 
 
 class PlanningError(ValueError):
@@ -204,9 +204,25 @@ def typography_metrics(width_mm: float) -> dict[str, float]:
         "title_min_mm": min(26.0, max(20.0, 0.020 * width)),
         "section_heading_min_mm": min(13.0, max(10.0, 0.011 * width)),
         "body_min_mm": min(9.0, max(5.5, 0.0090 * width)),
-        "body_target_mm": min(9.6, max(5.8, 0.0096 * width)),
-        "provenance_min_mm": min(5.6, max(4.0, 0.0060 * width)),
+        "body_target_mm": min(11.0, max(6.2, 0.0104 * width)),
+        "provenance_min_mm": min(6.4, max(4.4, 0.0064 * width)),
     }
+
+
+def display_width_units(value: str) -> float:
+    """Estimate glyph advance using Unicode width, independent of language."""
+
+    width = 0.0
+    for character in str(value):
+        if unicodedata.combining(character):
+            continue
+        if character == "\t":
+            width += 4.0
+        elif unicodedata.east_asian_width(character) in {"F", "W"}:
+            width += 2.0
+        else:
+            width += 1.0
+    return width
 
 
 def layout_capacity(width_mm: float) -> dict[str, float | int]:
@@ -243,7 +259,7 @@ def content_capacity_hint(
     """Describe the physical selection envelope before evidence is chosen."""
 
     if page is not None:
-        return {
+        hint: dict[str, Any] = {
             **page,
             "figure_readability_reference": {
                 "minimum_orientation_extent_ratio": (_FIGURE_ORIENTATION_EXTENT_TARGET),
@@ -253,6 +269,43 @@ def content_capacity_hint(
                 ),
             },
         }
+        width = page.get("width_mm")
+        height = page.get("height_mm")
+        if (
+            isinstance(width, (int, float))
+            and not isinstance(width, bool)
+            and isinstance(height, (int, float))
+            and not isinstance(height, bool)
+            and width > 0
+            and height > 0
+        ):
+            capacity = layout_capacity(float(width))
+            typical_columns = min(
+                3,
+                int(capacity["maximum_readable_column_count"]),
+            )
+            typical_width = (
+                _printable_width(float(width))
+                - (typical_columns - 1) * float(capacity["gutter_mm"])
+            ) / typical_columns
+            typography = typography_metrics(float(width))
+            hint["readable_layout_reference"] = {
+                "typical_column_count": typical_columns,
+                "maximum_readable_column_count": int(
+                    capacity["maximum_readable_column_count"]
+                ),
+                "typical_column_width_mm": round(typical_width, 1),
+                "minimum_column_width_mm": float(
+                    capacity["minimum_column_width_mm"]
+                ),
+                "usable_body_depth_mm": round(
+                    max(160.0, float(height) - _fixed_vertical_overhead(float(width))),
+                    1,
+                ),
+                "body_target_mm": float(typography["body_target_mm"]),
+                "body_minimum_mm": float(typography["body_min_mm"]),
+            }
+        return hint
     normalized = str(orientation).strip().lower()
     if normalized == "landscape":
         bounds = _LANDSCAPE_PAGES_MM
@@ -311,39 +364,44 @@ def content_capacity_hint(
     }
 
 
-def module_depth_hints(
-    budget: Mapping[str, Any],
+def bind_prepared_figure_geometry(
+    value: dict[str, Any],
     *,
-    width_mm: float,
-) -> list[dict[str, float | str]]:
-    """Return advisory relative layout pressure for independently movable modules."""
+    assets: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Bind selected figure groups to measured prepared-asset aspect ratios.
 
-    modules = budget.get("content_modules")
+    The same helper is used for model-generated and caller-supplied budgets so page
+    estimation never falls back to a square figure merely because of the input path.
+    """
+
+    bound_value = copy.deepcopy(value)
+    ratios = {
+        str(asset.get("content_sha256") or ""): poster_assets.asset_aspect_ratio(asset)
+        for asset in assets
+        if asset.get("source_kind") == "pdf_figure"
+        and str(asset.get("content_sha256") or "")
+    }
+    modules = bound_value.get("content_modules")
     if not isinstance(modules, list):
-        raise PlanningError("invalid_content_budget", "normalized modules are required")
-    if not modules:
-        return []
-    metrics = _area_metrics(width_mm)
-    measured: list[tuple[str, float]] = []
-    for raw in modules:
-        if not isinstance(raw, Mapping):
-            raise PlanningError(
-                "invalid_content_budget", "normalized modules are required"
-            )
-        measured.append(
-            (
-                str(raw.get("id") or ""),
-                _module_content_area(raw, width_mm=width_mm, metrics=metrics),
-            )
+        return bound_value
+    for module in modules:
+        if not isinstance(module, dict):
+            continue
+        raw_hashes = module.get("figure_sha256s")
+        if not isinstance(raw_hashes, list) or not raw_hashes:
+            module.pop("figure_aspect_ratio", None)
+            continue
+        selected = [ratios.get(str(item)) for item in raw_hashes]
+        if any(ratio is None or ratio <= 0 for ratio in selected):
+            module.pop("figure_aspect_ratio", None)
+            continue
+        valid = [float(ratio) for ratio in selected if ratio is not None]
+        module["figure_aspect_ratio"] = round(
+            len(valid) / sum(1.0 / ratio for ratio in valid),
+            4,
         )
-    mean_area = sum(area for _module_id, area in measured) / len(measured)
-    return [
-        {
-            "module_id": module_id,
-            "relative_depth": round(area / mean_area, 2),
-        }
-        for module_id, area in measured
-    ]
+    return bound_value
 
 
 def _density_profile(plan: Mapping[str, Any]) -> str:
@@ -366,9 +424,7 @@ def _density_profile(plan: Mapping[str, Any]) -> str:
 def normalize_content_budget(
     value: object,
     *,
-    source_text: str,
     source_figure_sha256s: set[str],
-    source_figure_numbers: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """Validate source-grounded modules without prescribing visual sections."""
 
@@ -469,12 +525,6 @@ def normalize_content_budget(
                 "invalid_content_budget", "content module ids must be unique"
             )
         seen_ids.add(module_id)
-        _validate_figure_locator_bindings(
-            module_id=module_id,
-            source_label=source_label,
-            figure_sha256s=figures,
-            source_figure_numbers=source_figure_numbers,
-        )
         raw_aspect_ratio = raw.get("figure_aspect_ratio")
         aspect_ratio = (
             _positive_finite(
@@ -485,17 +535,6 @@ def normalize_content_budget(
             if figures
             else None
         )
-        syntax_issue = _visible_copy_syntax_issue(
-            title=title,
-            text=text,
-            takeaway=takeaway,
-            detail_points=detail_points,
-        )
-        if syntax_issue is not None:
-            raise PlanningError(
-                "invalid_content_budget",
-                f"module {module_id}: {syntax_issue}",
-            )
         module = {
             "id": module_id,
             "section_id": section_id,
@@ -516,36 +555,6 @@ def normalize_content_budget(
 
     _ensure_focal_module(modules, focal_role=focal_role)
 
-    grounding_fragments = [
-        {
-            "text": f"{module['title']} {module['text']} {module['takeaway']}",
-            "detail_points": module["detail_points"],
-            "source_label": module["source_label"],
-        }
-        for module in modules
-    ]
-    grounding_fragments.extend(
-        {
-            "text": equation["latex"],
-            "detail_points": [],
-            "source_label": equation["source_label"],
-        }
-        for module in modules
-        for equation in module["equations"]
-    )
-    grounding = poster_core.validate_grounded_fragments(
-        grounding_fragments,
-        source_text=source_text,
-    )
-    grounding_issues = (
-        grounding.get("issues") if isinstance(grounding, dict) else grounding
-    )
-    if grounding_issues:
-        messages = "; ".join(
-            str(item.get("message") or item) if isinstance(item, Mapping) else str(item)
-            for item in grounding_issues
-        )
-        raise PlanningError("invalid_content_budget", messages)
     return {
         "organization_mode": organization_mode,
         "focal_role": focal_role,
@@ -665,67 +674,6 @@ def _presentation_hints(
     return organization_mode, focal_role
 
 
-def source_figure_number_bindings(
-    assets: list[dict[str, Any]],
-) -> dict[str, int]:
-    """Map prepared PDF-figure hashes to their explicit paper figure numbers."""
-
-    bindings: dict[str, int] = {}
-    for asset in assets:
-        if asset.get("source_kind") != "pdf_figure":
-            continue
-        digest = str(asset.get("content_sha256") or "").strip()
-        raw_number = asset.get("figure_number")
-        number_text = str(raw_number).strip() if raw_number is not None else ""
-        if _HASH_RE.fullmatch(digest) and number_text.isdigit():
-            bindings[digest] = int(number_text)
-    return bindings
-
-
-def source_figure_numbers_in_label(source_label: str) -> set[int]:
-    """Return explicit ``Figure N`` references from a source locator."""
-
-    numbers: set[int] = set()
-    for match in _FIGURE_LOCATOR_RE.finditer(source_label):
-        start = int(match.group(1))
-        end_text = match.group(2)
-        if end_text is None:
-            numbers.add(start)
-            continue
-        end = int(end_text)
-        numbers.update(range(min(start, end), max(start, end) + 1))
-    return numbers
-
-
-def _validate_figure_locator_bindings(
-    *,
-    module_id: str,
-    source_label: str,
-    figure_sha256s: list[str],
-    source_figure_numbers: Mapping[str, int] | None,
-) -> None:
-    """Require provenance locators for displayed prepared figures."""
-
-    if not figure_sha256s or not source_figure_numbers:
-        return
-    bound_numbers = {
-        int(source_figure_numbers[digest])
-        for digest in figure_sha256s
-        if digest in source_figure_numbers
-    }
-    if not bound_numbers:
-        return
-    cited_numbers = source_figure_numbers_in_label(source_label)
-    missing = sorted(bound_numbers - cited_numbers)
-    if missing:
-        shown = ", ".join(f"Figure {number}" for number in missing)
-        raise PlanningError(
-            "invalid_content_budget",
-            f"module {module_id}: displayed prepared figure(s) are missing from "
-            f"source_label provenance: {shown}",
-        )
-
-
 def _normalize_equations(value: object, *, module_id: str) -> list[dict[str, str]]:
     """Validate optional source-located display equations for semantic MathML."""
 
@@ -756,34 +704,15 @@ def _normalize_equations(value: object, *, module_id: str) -> list[dict[str, str
                 "invalid_content_budget",
                 f"module {module_id or '<unknown>'}: equation content is invalid",
             )
+        try:
+            latex_to_mathml(latex)
+        except EquationSyntaxError as exc:
+            raise PlanningError(
+                "invalid_content_budget",
+                f"module {module_id or '<unknown>'}: equation LaTeX cannot be rendered",
+            ) from exc
         equations.append({"latex": latex, "source_label": source_label})
     return equations
-
-
-def _visible_copy_syntax_issue(
-    *,
-    title: str,
-    text: str,
-    takeaway: str,
-    detail_points: list[str],
-) -> str | None:
-    """Catch truncated visible copy before it reaches HTML authoring."""
-
-    fields = {
-        "title": title,
-        "text": text,
-        "takeaway": takeaway,
-        **{
-            f"detail_points[{index}]": point
-            for index, point in enumerate(detail_points)
-        },
-    }
-    for field, value in fields.items():
-        if value.count("(") != value.count(")"):
-            return f"field {field} has unbalanced parentheses"
-        if value.count("[") != value.count("]"):
-            return f"field {field} has unbalanced brackets"
-    return None
 
 
 def _normalize_sections(value: object) -> list[dict[str, str]]:
@@ -827,7 +756,7 @@ def _derive_visual_kind(
     """Return an optional presentation hint inferred from scientific content."""
 
     explicit = str(value or "").strip()
-    if explicit in _VISUAL_KINDS:
+    if explicit in _VISUAL_KINDS and (explicit != "figure" or figures):
         return explicit
     if figures:
         return "figure"
@@ -879,7 +808,7 @@ def estimate_page(
             )
         orientation = "portrait" if height >= width else "landscape"
         reserved_occupancy = _reserved_occupancy_for(budget, width, height)
-        predicted_occupancy = min(1.0, reserved_occupancy)
+        predicted_occupancy = reserved_occupancy
         reasons = ["Explicit physical page preserved exactly."]
         if reserved_occupancy < _MIN_OCCUPANCY:
             reasons.append(
@@ -891,7 +820,7 @@ def estimate_page(
                 "Estimated occupancy exceeds the advisory fit target; review rendered "
                 "overflow and density."
             )
-        plan = _build_page_plan(
+        return _build_page_plan(
             strategy="fixed",
             width_mm=width,
             height_mm=height,
@@ -903,12 +832,6 @@ def estimate_page(
             predicted_occupancy=predicted_occupancy,
             reasons=tuple(reasons),
         )
-        validate_content_capacity(
-            budget,
-            width_mm=plan.width_mm,
-            height_mm=plan.height_mm,
-        )
-        return plan
 
     landscape = _prefer_standard_landscape_height(
         budget,
@@ -963,74 +886,13 @@ def estimate_page(
         chosen,
         reasons=(
             *chosen.reasons,
-            "Compared common landscape and portrait bounds using predicted overflow, "
-            "occupancy, page area, and source-figure aspect ratios.",
+            (
+                "Compared common landscape and portrait bounds using predicted overflow, "
+                "occupancy, page area, and source-figure aspect ratios."
+            ),
         ),
     )
     return plan
-
-
-def validate_content_capacity(
-    budget: Mapping[str, Any],
-    *,
-    width_mm: float,
-    height_mm: float,
-) -> float:
-    """Reject only evidence budgets that materially exceed a physical page.
-
-    Text-flow and browser geometry are estimates, so pressure up to fifteen percent
-    beyond the nominal printable area remains an authoring concern. Larger excess is
-    a semantic planning failure: layout cannot fix it without sacrificing readable
-    type, figure scale, or grounded content.
-    """
-
-    width = _positive_finite(width_mm, "width_mm")
-    height = _positive_finite(height_mm, "height_mm")
-    pressure = _capacity_pressure_for(budget, width, height)
-    if pressure <= _CAPACITY_PRESSURE_LIMIT:
-        return pressure
-
-    raise _content_capacity_exceeded_error(
-        budget,
-        width_mm=width,
-        height_mm=height,
-        pressure=pressure,
-        capacity_context=(
-            "The estimator already allows 15% headroom for approximate text flow "
-            "and browser geometry."
-        ),
-    )
-
-
-def _content_capacity_exceeded_error(
-    budget: Mapping[str, Any],
-    *,
-    width_mm: float,
-    height_mm: float,
-    pressure: float,
-    capacity_context: str,
-) -> PlanningError:
-    """Build the shared semantic-repair error for an overfull evidence budget."""
-
-    required_height = _round_up(
-        _required_height_for(
-            budget,
-            width_mm,
-            orientation="landscape" if width_mm > height_mm else "portrait",
-        ),
-        5.0,
-    )
-    return PlanningError(
-        "content_capacity_exceeded",
-        "evidence budget materially exceeds the selected one-page capacity: "
-        f"estimated pressure is {pressure:.1%} of the readable planning target and "
-        f"would need about {required_height:g} mm height at readable planning density, "
-        f"versus {height_mm:g} mm available on the {width_mm:g} × {height_mm:g} mm "
-        f"page. {capacity_context} Revise the evidence semantics before authoring: "
-        "preserve the main claim, essential method, and decisive evidence while "
-        "removing repetition and secondary material; do not mechanically truncate or "
-        "invent content.",
-    )
 
 
 def _prefer_standard_landscape_height(
@@ -1062,8 +924,10 @@ def _prefer_standard_landscape_height(
         ),
         reasons=(
             *plan.reasons,
-            "Starts on the full common landscape format; visual review may shorten "
-            "only within the existing common-proportion bounds.",
+            (
+                "Starts on the full common landscape format; visual review may shorten "
+                "only within the existing common-proportion bounds."
+            ),
         ),
     )
 
@@ -1140,8 +1004,10 @@ def _estimate_adaptive_page(
         flow_occupancy = raw_occupancy * flow_reserve
         occupancy = min(1.0, flow_occupancy)
         reasons = [
-            "Estimated from "
-            f"{len(budget.get('content_modules') or [])} grounded modules.",
+            (
+                "Estimated from "
+                f"{len(budget.get('content_modules') or [])} grounded modules."
+            ),
             "Reserves intrinsic height for contiguous column groups.",
             sizing_reason,
         ]
@@ -1184,9 +1050,11 @@ def _estimate_adaptive_page(
         largest,
         reasons=(
             *largest.reasons,
-            "Estimated occupancy exceeds the advisory fit target: the heuristic would "
-            f"use about {required:g} mm of height, so the recommendation is bounded to "
-            f"the largest common {orientation} page for rendered geometry review.",
+            (
+                "Estimated occupancy exceeds the advisory fit target: the heuristic would "
+                f"use about {required:g} mm of height, so the recommendation is bounded to "
+                f"the largest common {orientation} page for rendered geometry review."
+            ),
         ),
     )
 
@@ -1222,7 +1090,14 @@ def _meaningful_content_area(budget: Mapping[str, Any], width_mm: float) -> floa
 def _area_metrics(width_mm: float) -> dict[str, float]:
     typography = typography_metrics(width_mm)
     body = typography["body_min_mm"]
-    minimum_readable_width = float(layout_capacity(width_mm)["minimum_column_width_mm"])
+    capacity = layout_capacity(width_mm)
+    minimum_readable_width = float(capacity["minimum_column_width_mm"])
+    maximum_column_count = int(capacity["maximum_readable_column_count"])
+    planning_column_count = min(maximum_column_count, 3)
+    planning_column_width = (
+        _printable_width(width_mm)
+        - (planning_column_count - 1) * float(capacity["gutter_mm"])
+    ) / planning_column_count
     return {
         **typography,
         "body": body,
@@ -1232,6 +1107,7 @@ def _area_metrics(width_mm: float) -> dict[str, float]:
         "minimum_readable_figure_width": max(
             minimum_readable_width,
             width_mm * _FIGURE_ORIENTATION_EXTENT_TARGET,
+            planning_column_width,
         ),
     }
 
@@ -1247,8 +1123,12 @@ def _module_content_area(
     detail_points = raw.get("detail_points")
     if isinstance(detail_points, list):
         text = " ".join([text, *(str(item) for item in detail_points)])
-    area = len(text) * metrics["char_width"] * metrics["line_height"]
-    area += len(title) * metrics["section_heading_min_mm"] ** 2 * 0.55
+    area = display_width_units(text) * metrics["char_width"] * metrics["line_height"]
+    area += (
+        display_width_units(title)
+        * metrics["section_heading_min_mm"] ** 2
+        * 0.55
+    )
     area += metrics["minimum_readable_width"] * metrics["body"] * 1.7
     equations = raw.get("equations")
     if isinstance(equations, list):
@@ -1264,11 +1144,13 @@ def _module_content_area(
         "figure_aspect_ratio",
         code="invalid_content_budget",
     )
-    figure_width = min(
+    group_width = min(
         _printable_width(width_mm),
         metrics["minimum_readable_figure_width"]
         * (1.45 if str(raw.get("priority") or "") == "focal" else 1.0),
     )
+    grid_columns = 1 if len(figure_hashes) == 1 else 2
+    figure_width = group_width / grid_columns
     figure_height = min(figure_width / aspect_ratio, width_mm * 0.54)
     caption_height = metrics["provenance_min_mm"] * 2.5
     return area + len(figure_hashes) * figure_width * (figure_height + caption_height)

@@ -10,6 +10,7 @@ from typing import Any
 
 CAPABILITY_REQUIREMENTS = {
     "pdf-reading": ("pymupdf",),
+    "equation-rendering": ("latex2mathml",),
     "browser-inspection": ("playwright", "chromium"),
     "pptx-export": ("python-pptx", "mathml2omml", "pymupdf"),
 }
@@ -47,6 +48,8 @@ def install_argv(
     python = python_executable or sys.executable
     if capability == "pdf-reading":
         return [_package_install_argv(python, "pymupdf>=1.24")]
+    if capability == "equation-rendering":
+        return [_package_install_argv(python, "latex2mathml>=3.81,<4")]
     if capability == "browser-inspection":
         return [
             _package_install_argv(python, "playwright"),
@@ -101,13 +104,14 @@ def probe_python_packages() -> dict[str, bool]:
     available: dict[str, bool] = {}
     for dependency, module_name in (
         ("pymupdf", "pymupdf"),
+        ("latex2mathml", "latex2mathml.converter"),
         ("playwright", "playwright.async_api"),
         ("python-pptx", "pptx"),
         ("mathml2omml", "mathml2omml"),
     ):
         try:
             module = importlib.import_module(module_name)
-        except Exception:
+        except Exception:  # noqa: BLE001 - a broken optional import is unavailable
             available[dependency] = False
         else:
             available[dependency] = dependency != "pymupdf" or pymupdf_supported(module)
@@ -119,6 +123,6 @@ __all__ = [
     "classify_chromium_failure",
     "install_argv",
     "missing_result",
-    "pymupdf_supported",
     "probe_python_packages",
+    "pymupdf_supported",
 ]

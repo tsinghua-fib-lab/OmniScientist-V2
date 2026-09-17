@@ -15,8 +15,8 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 if str(SKILL_DIR) not in sys.path:
     sys.path.insert(0, str(SKILL_DIR))
 
-import poster_core  # noqa: E402
-from posterlib.runtime import browser_scripts  # noqa: E402
+import poster_core
+from posterlib.runtime import browser_scripts
 
 CAPTURE_JAVASCRIPT = browser_scripts.load("capture_scene.js", bind_poster_selector=True)
 ROOT_SIZE_JAVASCRIPT = browser_scripts.load("root_size.js", bind_poster_selector=True)
