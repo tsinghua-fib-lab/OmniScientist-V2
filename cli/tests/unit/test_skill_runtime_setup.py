@@ -48,6 +48,21 @@ def test_scientific_poster_setup_reports_playwright_failure(
         runtime_setup.setup_scientific_poster_runtime()
 
 
+def test_scientific_poster_setup_reports_playwright_start_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*_argv, **_kwargs):  # noqa: ANN002, ANN003
+        raise OSError("playwright missing")
+
+    monkeypatch.setattr(runtime_setup.subprocess, "run", boom)
+
+    with pytest.raises(
+        runtime_setup.SkillRuntimeSetupError,
+        match="could not start Playwright",
+    ):
+        runtime_setup.setup_scientific_poster_runtime()
+
+
 def _write_renderer_manifests(skill_dir: Path) -> Path:
     scripts = skill_dir / "scripts"
     scripts.mkdir(parents=True)

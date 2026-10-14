@@ -416,6 +416,71 @@ def test_init_prepares_bundled_skill_runtimes(monkeypatch):
     assert poster_prepared == [True]
 
 
+def test_init_and_update_report_poster_runtime_setup_failure(monkeypatch):
+    from omni.cli.commands import init_cmd, update_cmd
+    from omni.skills_runtime.runtime_setup import SkillRuntimeSetupError
+
+    def boom() -> None:
+        raise SkillRuntimeSetupError("chromium missing")
+
+    monkeypatch.setattr(init_cmd, "setup_scientific_poster_runtime", boom)
+    res = runner.invoke(app, ["init", "--non-interactive"])
+    assert res.exit_code == 1
+    assert "chromium missing" in res.output
+
+    monkeypatch.setattr(update_cmd, "setup_scientific_poster_runtime", boom)
+    import typer
+
+    with pytest.raises(typer.Exit) as caught:
+        update_cmd._prepare_bundled_skill_runtimes(SimpleNamespace())
+    assert caught.value.exit_code == 1
+
+
+def test_skills_setup_prepares_poster_and_rejects_unknown_targets(monkeypatch):
+    from omni.skills_runtime import runtime_setup
+
+    calls: list[object] = []
+
+    def poster(*, force: bool = False) -> None:
+        calls.append(("poster", force))
+
+    def pptx(_paths, *, force: bool = False) -> bool:  # noqa: ANN001
+        calls.append(("pptx", force))
+        return True
+
+    monkeypatch.setattr(runtime_setup, "setup_scientific_poster_runtime", poster)
+    monkeypatch.setattr(runtime_setup, "setup_research_pptx_runtime", pptx)
+
+    unknown = runner.invoke(app, ["skills", "setup", "no-such-skill"])
+    assert unknown.exit_code == 2
+    assert "scientific-poster" in unknown.output
+
+    poster_only = runner.invoke(app, ["skills", "setup", "scientific-poster"])
+    assert poster_only.exit_code == 0, poster_only.output
+    assert ("poster", False) in calls
+
+    both = runner.invoke(app, ["skills", "setup", "all", "--force"])
+    assert both.exit_code == 0, both.output
+    assert ("pptx", True) in calls
+    assert ("poster", True) in calls
+
+    def fail_poster(*, force: bool = False) -> None:
+        raise runtime_setup.SkillRuntimeSetupError("chromium missing")
+
+    monkeypatch.setattr(runtime_setup, "setup_scientific_poster_runtime", fail_poster)
+    failed = runner.invoke(app, ["skills", "setup", "scientific-poster"])
+    assert failed.exit_code == 1
+    assert "chromium missing" in failed.output
+
+    def fail_pptx(_paths, *, force: bool = False) -> bool:  # noqa: ANN001
+        raise runtime_setup.SkillRuntimeSetupError("renderer missing")
+
+    monkeypatch.setattr(runtime_setup, "setup_research_pptx_runtime", fail_pptx)
+    renderer = runner.invoke(app, ["skills", "setup", "research-pptx"])
+    assert renderer.exit_code == 1
+    assert "renderer missing" in renderer.output
+
+
 def test_init_non_interactive_can_cold_start_embeddings():
     """A new user can explicitly enable embeddings without reusing a chat-only URL."""
     res = runner.invoke(
