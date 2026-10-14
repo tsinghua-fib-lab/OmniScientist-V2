@@ -4,13 +4,18 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) and semanti
 
 ## Unreleased
 
+## [2.0.0rc9] - 2026-10-14
+
 ### Changed
 
-- ``scientific-poster`` now lands the ``zgy/poster`` workflow: the first HTML
-  draft is rendered from the verified content budget, repair/workflow budgets
-  are configurable, and the defaults match a 1800s host wall (workflow 1790s,
-  authoring 900s, 3 validation repairs, 600s VLM review). The leftover
-  visual-loop cap that starved automatic revision after a long draft is gone.
+- ``scientific-poster`` now extracts the source paper, renders the first HTML
+  draft from the verified content budget, and runs structured review and
+  revision with PPTX scene capture. Repair and workflow budgets stay
+  configurable and still match a 1800s host wall (workflow 1790s, authoring
+  900s, 3 validation repairs, 600s VLM review). ``omni init``, ``omni update``,
+  and ``omni skills setup scientific-poster`` install the matching Playwright
+  Chromium; the skill's Python packages ship with the install.
+- Bumped the release candidate to `2.0.0rc9` (Git tag `v2.0.0rc9`).
 
 ## [2.0.0rc8] - 2026-09-07
 
