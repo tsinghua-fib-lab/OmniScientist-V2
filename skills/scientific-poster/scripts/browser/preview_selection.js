@@ -10,7 +10,7 @@
     'grid-template-rows','gap','align-items','justify-content','text-align','overflow',
     'border-radius','opacity','transform'];
   const targetFor = event => event.target instanceof Element
-    ? event.target.closest('[data-poster-id]') : null;
+    ? event.target.closest('[data-poster-id],[data-poster-module]') : null;
   const show = element => {
     if (!element) { highlight.hidden = true; return; }
     const rect = element.getBoundingClientRect();
@@ -29,7 +29,7 @@
     const rect = element.getBoundingClientRect();
     const computed = getComputedStyle(element); const styles = {};
     for (const name of styleNames) styles[name] = computed.getPropertyValue(name).slice(0,300);
-    selectedId = element.dataset.posterId || '';
+    selectedId = element.dataset.posterId || element.dataset.posterModule || '';
     label.textContent = `Selected: ${selectedId}`;
     const payload = {source_html_sha256:sourceHash,poster_id:selectedId,
       poster_module:module?.dataset.posterModule || '',

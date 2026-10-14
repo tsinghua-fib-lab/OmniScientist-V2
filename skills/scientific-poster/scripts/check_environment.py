@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Detect optional scientific-poster capabilities without changing the environment."""
+"""Detect scientific-poster runtime capabilities without changing the environment."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 if str(SKILL_DIR) not in sys.path:
     sys.path.insert(0, str(SKILL_DIR))
 
-import poster_core
-from posterlib.runtime.capability import (
+import poster_contract  # noqa: E402
+from posterlib.runtime.dependencies import (  # noqa: E402
     CAPABILITY_REQUIREMENTS,
     classify_chromium_failure,
     install_argv,
@@ -94,14 +94,14 @@ async def check_environment() -> dict[str, Any]:
         if ready
         else "missing_capability"
     )
-    return poster_core.outcome_result(
+    return poster_contract.outcome_result(
         outcome,
         summary=(
-            "All optional scientific-poster capabilities are ready."
+            "All scientific-poster runtime capabilities are ready."
             if ready
             else "One or more configured scientific-poster capabilities failed to start."
             if failed
-            else "One or more optional scientific-poster capabilities are missing."
+            else "One or more scientific-poster runtime capabilities are missing."
         ),
         python=sys.executable,
         components=components,
@@ -211,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = asyncio.run(_run(args))
     except Exception as exc:
-        result = poster_core.outcome_result(
+        result = poster_contract.outcome_result(
             "capability_probe_failed",
             summary="Capability probing failed.",
             error=repr(exc),

@@ -1,20 +1,24 @@
-"""Feature-scoped optional dependency detection for scientific-poster."""
+"""Feature-scoped runtime dependency detection for scientific-poster."""
 
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import re
 import shutil
 import sys
 from typing import Any
 
 CAPABILITY_REQUIREMENTS = {
+    "html-validation": ("tinycss2",),
     "pdf-reading": ("pymupdf",),
-    "equation-rendering": ("latex2mathml",),
+    "structured-equation-source": ("lxml",),
+    "equation-rendering": ("latex2mathml", "pyparsing", "markdown-it-py", "mdit-py-plugins"),
     "browser-inspection": ("playwright", "chromium"),
     "pptx-export": ("python-pptx", "mathml2omml", "pymupdf"),
 }
-_MINIMUM_PYMUPDF_VERSION = (1, 24)
+_MINIMUM_PYMUPDF_VERSION = (1, 28)
+PYMUPDF_REQUIREMENT = "pymupdf>=" + ".".join(map(str, _MINIMUM_PYMUPDF_VERSION))
 
 
 def pymupdf_supported(module: Any) -> bool:
@@ -46,10 +50,17 @@ def install_argv(
     """Return explicit installer argv without mutating the caller's environment."""
 
     python = python_executable or sys.executable
+    if capability == "html-validation":
+        return [_package_install_argv(python, "tinycss2>=1.4,<2")]
     if capability == "pdf-reading":
-        return [_package_install_argv(python, "pymupdf>=1.24")]
+        return [_package_install_argv(python, PYMUPDF_REQUIREMENT)]
+    if capability == "structured-equation-source":
+        return [_package_install_argv(python, "lxml>=5,<7")]
     if capability == "equation-rendering":
-        return [_package_install_argv(python, "latex2mathml>=3.81,<4")]
+        return [_package_install_argv(
+            python, "latex2mathml>=3.81,<4", "pyparsing>=3.2,<4",
+            "markdown-it-py>=4,<5", "mdit-py-plugins>=0.6,<0.7"
+        )]
     if capability == "browser-inspection":
         return [
             _package_install_argv(python, "playwright"),
@@ -61,7 +72,7 @@ def install_argv(
                 python,
                 "python-pptx>=1.0",
                 "mathml2omml==0.0.2",
-                "pymupdf>=1.24",
+                PYMUPDF_REQUIREMENT,
             )
         ]
     raise ValueError(f"unknown capability: {capability}")
@@ -99,12 +110,21 @@ def missing_result(
 
 
 def probe_python_packages() -> dict[str, bool]:
-    """Re-probe importable optional packages for every caller invocation."""
+    """Re-probe importable packages for every caller invocation."""
 
-    available: dict[str, bool] = {}
+    # Importing the layout reader changes process-global MuPDF glyph settings.
+    # Only the clean PDF worker imports it, after native figure bytes are frozen.
+    available: dict[str, bool] = {
+        "pymupdf4llm": importlib.util.find_spec("pymupdf4llm") is not None,
+    }
     for dependency, module_name in (
+        ("tinycss2", "tinycss2"),
         ("pymupdf", "pymupdf"),
         ("latex2mathml", "latex2mathml.converter"),
+        ("pyparsing", "pyparsing"),
+        ("markdown-it-py", "markdown_it"),
+        ("mdit-py-plugins", "mdit_py_plugins"),
+        ("lxml", "lxml.html"),
         ("playwright", "playwright.async_api"),
         ("python-pptx", "pptx"),
         ("mathml2omml", "mathml2omml"),
@@ -120,6 +140,7 @@ def probe_python_packages() -> dict[str, bool]:
 
 __all__ = [
     "CAPABILITY_REQUIREMENTS",
+    "PYMUPDF_REQUIREMENT",
     "classify_chromium_failure",
     "install_argv",
     "missing_result",

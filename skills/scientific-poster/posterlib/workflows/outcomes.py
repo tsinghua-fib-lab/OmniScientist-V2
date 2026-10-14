@@ -5,11 +5,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-import poster_core
+import poster_contract
 
-from posterlib.sources import paper_source
+from posterlib.sources import paper_extraction
 
-from . import decision_checkpoint, runtime_budget
+from . import decision_request, deadlines
 
 
 def visual_outcome(
@@ -26,16 +26,21 @@ def visual_outcome(
         for key, value in result.items()
         if key not in {"status", "outcome", "summary", "blocking", "recoverable"}
     }
-    details["requires_approval"] = code == "visual_review_passed"
+    details["requires_approval"] = (
+        code == "visual_review_passed" and not details.get("editing_issue")
+    )
     if decision_reason:
         try:
-            details["decision_request"] = decision_checkpoint.build_request(
+            details["decision_request"] = decision_request.build_request(
                 details,
                 reason=decision_reason,
             )
         except ValueError:
             pass
-    return poster_core.outcome_result(code, summary=summary, **details)
+    outcome = poster_contract.outcome_result(code, summary=summary, **details)
+    if outcome["status"] == "ok" and details.get("editing_issue"):
+        outcome["status"] = "partial"
+    return outcome
 
 
 def revision_model_timed_out(result: dict[str, Any]) -> bool:
@@ -61,11 +66,17 @@ def revision_timeout_error(
     if detail:
         message = f"{message} {detail}"
     result = dict(best)
+    diagnostic = failure.get("diagnostic_candidate")
+    if isinstance(diagnostic, Mapping):
+        result["diagnostic_candidate"] = dict(diagnostic)
     result.update(
         {
             "workspace": str(best.get("workspace") or ""),
             "visual_quality_state": "revision-required",
-            "retry_from_checkpoint": False,
+            "retry_from_checkpoint": bool(
+                isinstance(diagnostic, Mapping)
+                and diagnostic.get("revision_state_persisted") is True
+            ),
         }
     )
     append_warning_once(result, message)
@@ -91,7 +102,7 @@ def visual_loop_pending(result: dict[str, Any]) -> dict[str, Any]:
 
     return visual_review_unavailable(
         result,
-        runtime_budget.VISUAL_LOOP_TIMEOUT_WARNING,
+        deadlines.VISUAL_LOOP_TIMEOUT_WARNING,
     )
 
 
@@ -127,84 +138,48 @@ def visual_review_unavailable(
         {
             "requires_approval": False,
             "visual_review_mode": review_mode,
-            "visual_quality_state": "awaiting-review",
+            "visual_quality_state": (
+                "revision-required"
+                if details.get("visual_quality_state") == "revision-required"
+                else "awaiting-review"
+            ),
             "warnings": warnings,
         }
     )
     if review_mode == "vlm":
         try:
-            details["decision_request"] = decision_checkpoint.build_request(
+            details["decision_request"] = decision_request.build_request(
                 details,
                 reason="reviewer-unavailable",
             )
         except ValueError:
             pass
-    return poster_core.outcome_result(
+    return poster_contract.outcome_result(
         "visual_review_unavailable",
         summary="The exact rendered candidate is awaiting image-capable review.",
         **details,
     )
 
 
-def rendered_inspection_blocked(
-    result: dict[str, Any],
-    warning: str = "",
-    *,
-    decision_reason: str = "",
-) -> dict[str, Any]:
-    """Expose the actual failed inspection without relabeling capabilities as geometry."""
-
-    if warning:
-        append_warning_once(result, warning)
-    result["visual_review_mode"] = "not-run"
-    result["visual_quality_state"] = "not-reviewable"
-    inspection = result.get("inspection")
-    outcome = (
-        inspection.get("outcome")
-        if isinstance(inspection, Mapping)
-        else result.get("outcome")
-    )
-    code = str(outcome.get("code") or "") if isinstance(outcome, Mapping) else ""
-    if code not in poster_core.OUTCOME_CONTRACTS:
-        code = "inspection_unavailable"
-    inspection_summary = (
-        str(inspection.get("summary") or "").strip()
-        if isinstance(inspection, Mapping)
-        else str(result.get("summary") or "").strip()
-    )
-    if not inspection_summary:
-        inspection_summary = (
-            "The rendered poster still exceeds its physical delivery geometry."
-            if code == "inspection_blocked"
-            else "Rendered inspection did not produce a reviewable poster."
-        )
-    return visual_outcome(
-        result,
-        "visual_revision_required" if decision_reason else code,
-        inspection_summary,
-        decision_reason=decision_reason,
-    )
-
-
 def inspection_deadline_result() -> dict[str, Any]:
     """Report a bounded render timeout without claiming the candidate passed."""
 
-    return poster_core.outcome_result(
+    return poster_contract.outcome_result(
         "inspection_unavailable",
         summary=(
-            "Poster rendering reached the shared workflow deadline; the durable "
-            "authoring checkpoint can be resumed."
+            "Poster work reached the shared workflow deadline; resume from the "
+            "returned checkpoint when one is available."
         ),
         requires_approval=False,
         visual_quality_state="not-reviewable",
-        warnings=[runtime_budget.VISUAL_LOOP_TIMEOUT_WARNING],
+        warnings=[deadlines.VISUAL_LOOP_TIMEOUT_WARNING],
     )
 
 
 def error_result(code: str, message: str) -> dict[str, Any]:
     """Build one stable scientific-poster error outcome."""
 
-    result = poster_core.outcome_result(
+    result = poster_contract.outcome_result(
         code,
         summary=f"scientific-poster did not complete: {message}",
     )
@@ -213,11 +188,11 @@ def error_result(code: str, message: str) -> dict[str, Any]:
     return result
 
 
-def paper_source_failure(exc: paper_source.PaperSourceError) -> dict[str, Any]:
+def paper_source_failure(exc: paper_extraction.PaperSourceError) -> dict[str, Any]:
     """Translate a paper-source failure into the public workflow outcome contract."""
 
     if exc.code == "missing_capability":
-        from posterlib.runtime.capability import missing_result
+        from posterlib.runtime.dependencies import missing_result
 
         return missing_result(
             "pdf-reading",

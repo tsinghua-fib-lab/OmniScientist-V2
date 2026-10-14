@@ -35,6 +35,7 @@ from omni.runtime.uninstall import installation_method_for_prefix
 from omni.skills_runtime.runtime_setup import (
     SkillRuntimeSetupError,
     setup_research_pptx_runtime,
+    setup_scientific_poster_runtime,
 )
 
 app = typer.Typer(
@@ -713,6 +714,12 @@ def _prepare_bundled_skill_runtimes(paths) -> None:  # noqa: ANN001
         success("research-pptx renderer dependencies installed.")
     else:
         info("research-pptx renderer dependencies are ready.")
+    try:
+        setup_scientific_poster_runtime()
+    except SkillRuntimeSetupError as exc:
+        error(str(exc))
+        raise typer.Exit(1) from exc
+    info("scientific-poster Chromium is ready.")
 
 
 def _prepare_bundled_skill_runtimes_with_updated_cli(_paths) -> None:  # noqa: ANN001

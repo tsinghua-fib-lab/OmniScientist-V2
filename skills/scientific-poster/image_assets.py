@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
+import math
 import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
 
-from css_safety import offline_css_issues
+from css_validation import offline_css_issues
 
 MAX_EMBEDDED_ASSET_BYTES = 8 * 1024 * 1024
+SOURCE_FIGURE_KINDS = frozenset(
+    {"pdf_algorithm", "pdf_figure", "pdf_table", "latex_figure"}
+)
 ACTIVE_CONTENT_TAGS = frozenset(
     {
         "animate",
@@ -104,11 +109,7 @@ def prepare_asset_manifest(
             if isinstance(value, dict)
             else "user_asset"
         )
-        if source_kind not in {
-            "pdf_figure",
-            "user_asset",
-            "venue_brand_asset",
-        }:
+        if source_kind not in {*SOURCE_FIGURE_KINDS, "user_asset", "venue_brand_asset"}:
             warnings.append(f"{token}: unsupported asset provenance: {source_kind}")
             continue
         claimed_sha256 = (
@@ -136,7 +137,7 @@ def prepare_asset_manifest(
                 "label": venue_label,
                 "evidence_uri": evidence_uri,
             }
-        if isinstance(value, dict) and source_kind == "pdf_figure":
+        if isinstance(value, dict) and is_source_figure_asset(value):
             extraction_mode = str(value.get("extraction_mode") or "").strip()
             if extraction_mode and extraction_mode not in {
                 "embedded-raster",
@@ -147,6 +148,24 @@ def prepare_asset_manifest(
                 continue
             if extraction_mode:
                 figure_provenance["extraction_mode"] = extraction_mode
+            caption = str(value.get("caption") or "").strip()
+            if caption:
+                figure_provenance["caption"] = caption[:600]
+            context = " ".join(str(value.get("context") or "").split())
+            if context:
+                figure_provenance["context"] = context[:600]
+            carrier_label = " ".join(str(value.get("carrier_label") or "").split())
+            if carrier_label:
+                figure_provenance["carrier_label"] = carrier_label[:80]
+            carrier_number = value.get("carrier_number")
+            if isinstance(carrier_number, int) and not isinstance(carrier_number, bool):
+                figure_provenance["carrier_number"] = carrier_number
+            measured_size = _image_natural_size(content, mime)
+            if measured_size is not None:
+                (
+                    figure_provenance["natural_width_px"],
+                    figure_provenance["natural_height_px"],
+                ) = measured_size
         manifest.append(
             {
                 "token": token,
@@ -166,7 +185,7 @@ def prepare_asset_manifest(
                         "page": value.get("page"),
                         "crop_bbox": value.get("crop_bbox"),
                     }
-                    if isinstance(value, dict) and source_kind == "pdf_figure"
+                    if isinstance(value, dict) and is_source_figure_asset(value)
                     else {}
                 ),
             }
@@ -189,8 +208,28 @@ def data_image_sha256(value: str) -> str | None:
     return hashlib.sha256(content).hexdigest()
 
 
+def is_source_figure_asset(value: Any) -> bool:
+    """Return whether one asset is a paper-bound visual carrier."""
+
+    return isinstance(value, dict) and value.get("source_kind") in SOURCE_FIGURE_KINDS
+
+
 def asset_aspect_ratio(asset: dict[str, Any]) -> float:
-    """Return prepared crop geometry as a width/height ratio."""
+    """Return the prepared image ratio Chromium uses for object fitting."""
+
+    try:
+        natural_width = float(asset.get("natural_width_px"))
+        natural_height = float(asset.get("natural_height_px"))
+    except (TypeError, ValueError):
+        pass
+    else:
+        if (
+            math.isfinite(natural_width)
+            and natural_width > 0
+            and math.isfinite(natural_height)
+            and natural_height > 0
+        ):
+            return round(natural_width / natural_height, 4)
 
     bbox = asset.get("crop_bbox")
     if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
@@ -221,6 +260,47 @@ def image_asset_mime(content: bytes) -> str | None:
     except (ElementTree.ParseError, UnicodeDecodeError):
         return None
     return "image/svg+xml" if root.tag.rsplit("}", 1)[-1].lower() == "svg" else None
+
+
+def _image_natural_size(content: bytes, mime: str) -> tuple[float, float] | None:
+    """Return intrinsic dimensions without discarding an SVG's exact aspect."""
+
+    if mime == "image/svg+xml":
+        try:
+            root = ElementTree.fromstring(content)
+            width = _unitless_svg_length(root.get("width"))
+            height = _unitless_svg_length(root.get("height"))
+        except ElementTree.ParseError:
+            return None
+        if width is None or height is None:
+            return None
+        return max(1.0, width), max(1.0, height)
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    try:
+        with Image.open(io.BytesIO(content)) as image:
+            width, height = image.size
+    except (OSError, ValueError):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return float(width), float(height)
+
+
+def _unitless_svg_length(value: str | None) -> float | None:
+    """Parse the unitless or CSS-pixel dimensions emitted by PDF extraction."""
+
+    match = re.fullmatch(
+        r"\s*([0-9]+(?:\.[0-9]+)?)\s*(?:px)?\s*",
+        str(value or ""),
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    length = float(match.group(1))
+    return length if math.isfinite(length) and length > 0 else None
 
 
 def svg_asset_is_safe(content: bytes) -> bool:
@@ -308,9 +388,11 @@ def safe_svg_css(css: str) -> bool:
 __all__ = [
     "ACTIVE_CONTENT_TAGS",
     "MAX_EMBEDDED_ASSET_BYTES",
+    "SOURCE_FIGURE_KINDS",
     "asset_aspect_ratio",
     "data_image_sha256",
     "image_asset_mime",
+    "is_source_figure_asset",
     "prepare_asset_manifest",
     "safe_embedded_reference",
     "safe_svg_css",

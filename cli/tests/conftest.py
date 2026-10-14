@@ -224,6 +224,8 @@ def isolated_home(tmp_path, monkeypatch):
 
     monkeypatch.setattr(init_cmd, "setup_research_pptx_runtime", lambda _paths: False)
     monkeypatch.setattr(update_cmd, "setup_research_pptx_runtime", lambda _paths: False)
+    monkeypatch.setattr(init_cmd, "setup_scientific_poster_runtime", lambda: None)
+    monkeypatch.setattr(update_cmd, "setup_scientific_poster_runtime", lambda: None)
     monkeypatch.setattr(init_cmd, "install_builtin_personas", lambda _paths: inert_persona_result)
     monkeypatch.setattr(update_cmd, "install_builtin_personas", lambda _paths: inert_persona_result)
     yield

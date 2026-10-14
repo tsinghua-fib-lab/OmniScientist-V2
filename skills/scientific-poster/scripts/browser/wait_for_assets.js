@@ -5,9 +5,11 @@ async () => {
   await Promise.all(images.map(async (image) => {
     if (image.complete && image.naturalWidth > 0) return;
     try { await image.decode(); } catch (_) {
+      if (image.complete) return;
       await new Promise((resolve) => {
         image.addEventListener('load', resolve, {once: true});
         image.addEventListener('error', resolve, {once: true});
+        if (image.complete) resolve();
       });
     }
   }));

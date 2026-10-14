@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import sys
 from collections.abc import Mapping
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -14,42 +13,36 @@ SKILL_DIR = Path(__file__).resolve().parent
 if str(SKILL_DIR) not in sys.path:
     sys.path.insert(0, str(SKILL_DIR))
 
-import poster_core as _core
-from posterlib.content import html_contract as _html_contract
-from posterlib.content import planning as _planning
-from posterlib.delivery import portable_actions as _portable_actions
-from posterlib.generation import authoring as _authoring
-from posterlib.generation import model_runtime as _model_runtime
-from posterlib.runtime import runtime_io as _runtime_io
-from posterlib.sources import paper_source as _paper_source
-from posterlib.sources import source_runtime as _source_runtime
-from posterlib.visual import inspection_policy as _inspection_policy
-from posterlib.visual import reference_seeds as _reference_seeds
-from posterlib.visual import visual_design as _visual_design
-from posterlib.visual import visual_review as _visual_review
-from posterlib.workflows import draft_checkpoint as _draft_checkpoint
-from posterlib.workflows import draft_pipeline as _draft_pipeline
-from posterlib.workflows import (
+import poster_contract as _core  # noqa: E402
+from posterlib.content import html_contract as _html_contract  # noqa: E402
+from posterlib.content import planning as _planning  # noqa: E402
+from posterlib.delivery import portable_actions as _portable_actions  # noqa: E402
+from posterlib.generation import model_runtime as _model_runtime  # noqa: E402
+from posterlib.runtime import browser_inspection as _browser_inspection  # noqa: E402
+from posterlib.runtime import runtime_io as _runtime_io  # noqa: E402
+from posterlib.sources import paper_extraction as _paper_extraction  # noqa: E402
+from posterlib.sources import source_preparation as _source_preparation  # noqa: E402
+from posterlib.visual import reference_analysis as _reference_analysis  # noqa: E402
+from posterlib.visual import reference_catalog as _reference_catalog  # noqa: E402
+from posterlib.visual import review_contract as _review_contract  # noqa: E402
+from posterlib.workflows import deadlines as _deadlines  # noqa: E402
+from posterlib.workflows import draft_checkpoint as _draft_checkpoint  # noqa: E402
+from posterlib.workflows import draft_pipeline as _draft_pipeline  # noqa: E402
+from posterlib.workflows import outcomes as _outcomes  # noqa: E402
+from posterlib.workflows import (  # noqa: E402
     request_normalization as _request_normalization,
 )
-from posterlib.workflows import revision_pipeline as _revision_pipeline
-from posterlib.workflows import revision_state as _revision_state
-from posterlib.workflows import runtime_budget as _runtime_budget
-from posterlib.workflows import visual_loop as _visual_loop
-from posterlib.workflows import workflow_outcomes as _workflow_outcomes
+from posterlib.workflows import review_pipeline as _review_pipeline  # noqa: E402
+from posterlib.workflows import revision_pipeline as _revision_pipeline  # noqa: E402
+from posterlib.workflows import revision_state as _revision_state  # noqa: E402
 
 _MAX_SOURCE_CHARS = 1_500_000
-_NOOP_REVISION_WARNING = _visual_loop.NOOP_REVISION_WARNING
 _PPTX_EXPORT_WARNING = (
     "Editable PPTX export did not complete; the exact HTML candidate remains available."
 )
-_VISUAL_REVIEW_RECEIPT_WARNING = (
-    "Visual review receipt could not be published; the exact HTML candidate remains "
-    "available."
-)
-_PUBLIC_REVISION_BLOCKED_WARNING = (
-    "The receipt-bound revision failed rendered inspection; the exact source poster "
-    "was preserved."
+_INVALID_VISUAL_REVIEW_WARNING = (
+    "Visual review receipt is unavailable for this exact HTML candidate; the poster "
+    "remains unapproved."
 )
 _PORTABLE_HOST_METADATA_FIELDS = frozenset(
     {
@@ -69,18 +62,70 @@ _PORTABLE_HOST_METADATA_FIELDS = frozenset(
         "workflow_step_id",
     }
 )
-_DEFER_REVISION_COMMIT = object()
 
 
-@dataclass(frozen=True)
-class _PreparedVersion:
-    """A statically valid, rendered candidate that has not replaced the active poster."""
+def _visual_reflow_targets(review: Any) -> frozenset[str]:
+    """Return module targets that the validated review asks to reflow."""
 
-    html_sha256: str
-    candidate_path: str
-    inspection: dict[str, Any]
-    checkpoint_state: dict[str, Any] | None
-    publication: dict[str, Any]
+    if not isinstance(review, Mapping):
+        return frozenset()
+    issues = review.get("critical_issues")
+    if not isinstance(issues, list):
+        return frozenset()
+    return frozenset(
+        str(target).strip()
+        for issue in issues
+        if isinstance(issue, Mapping) and issue.get("operation") == "reflow"
+        for target in issue.get("targets", [])
+        if str(target).strip()
+    )
+
+
+def _activate_candidate_files(
+    result: Mapping[str, Any], *, selected_state: bytes | None = None
+) -> None:
+    """Restore the selected candidate after comparing a later proposal."""
+
+    workspace = Path(str(result.get("workspace") or ""))
+    digest = str(result.get("html_sha256") or "")
+    source = workspace / ".candidates" / digest / "poster.html"
+    content = source.read_bytes()
+    if hashlib.sha256(content).hexdigest() != digest:
+        raise ValueError("The selected candidate does not match its recorded HTML hash.")
+    raw_html_path = str(result.get("html_path") or "").strip()
+    source_sidecar = _revision_state.revision_sidecar_path(source)
+    if selected_state is not None:
+        _runtime_io.replace_file_atomic(source_sidecar, selected_state)
+    if raw_html_path and _draft_checkpoint.load_path(source_sidecar) is None:
+        raise ValueError("The selected candidate has no valid draft checkpoint.")
+    for field in ("html_path", "live_html_path"):
+        raw_path = str(result.get(field) or "").strip()
+        if raw_path:
+            _runtime_io.replace_file_atomic(Path(raw_path), content)
+    if raw_html_path:
+        html_path = Path(raw_html_path)
+        _runtime_io.replace_file_atomic(
+            _revision_state.revision_sidecar_path(html_path),
+            source_sidecar.read_bytes(),
+        )
+        if not _draft_checkpoint.restore(workspace, source_sidecar):
+            raise ValueError("The selected candidate has no valid draft checkpoint.")
+    if selected_state is not None:
+        for artifact in result.get("artifacts") or []:
+            if not isinstance(artifact, Mapping) or not (
+                artifact.get("kind") == "poster"
+                and artifact.get("format") == "html"
+                and artifact.get("sha256") == digest
+            ):
+                continue
+            artifact_path = Path(str(artifact.get("path") or ""))
+            if artifact_path.is_file() and hashlib.sha256(
+                artifact_path.read_bytes()
+            ).hexdigest() == digest:
+                _runtime_io.replace_file_atomic(
+                    _revision_state.revision_sidecar_path(artifact_path),
+                    selected_state,
+                )
 
 
 def _append_artifact_once(
@@ -111,36 +156,78 @@ def _append_artifact_once(
     artifacts.append(dict(artifact))
 
 
-def _downgrade_unpublished_visual_review(
+async def _store_delivery_artifact(
+    ctx: Any,
+    path: Path,
+    *,
+    kind: str,
+    title: str,
+    fmt: str,
+    mime: str,
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Keep a primary delivery available when host artifact registration fails."""
+
+    try:
+        return await _runtime_io.store_artifact(
+            ctx,
+            path,
+            kind=kind,
+            title=title,
+            fmt=fmt,
+            mime=mime,
+        )
+    except OSError as exc:
+        warnings.append(
+            f"{title} could not be registered with the host; using its immutable "
+            f"local snapshot instead: {exc}"
+        )
+        return _runtime_io.snapshot_artifact(
+            path,
+            kind=kind,
+            title=title,
+            fmt=fmt,
+            mime=mime,
+        )
+
+
+def _downgrade_invalid_visual_review(
     result: dict[str, Any],
     *,
     summary: str,
 ) -> dict[str, Any]:
-    """Prevent an unavailable receipt from authorizing delivery."""
+    """Discard a receipt whose candidate identity is invalid."""
 
-    for field in (
-        "visual_review",
-        "visual_review_path",
-        "visual_review_uri",
-        "visual_review_sha256",
-    ):
-        result.pop(field, None)
-    result["requires_approval"] = False
+    result.pop("visual_review_uri", None)
     result["visual_review_mode"] = "vlm"
-    result["visual_quality_state"] = "awaiting-review"
-    return _workflow_outcomes.visual_outcome(
-        result,
-        "visual_review_unavailable",
-        summary,
-    )
+    return _outcomes.visual_review_unavailable(result, summary)
+
+
+def _pptx_export_failure(
+    result: dict[str, Any],
+    *,
+    code: str,
+    summary: str,
+    outcome: Any = None,
+) -> dict[str, Any]:
+    """Keep the HTML deliverable while marking the poster package incomplete."""
+
+    _outcomes.append_warning_once(result, _PPTX_EXPORT_WARNING)
+    if result.get("status") != "error":
+        result["status"] = "partial"
+    result["pptx_export"] = {
+        "status": "error",
+        "outcome": outcome if isinstance(outcome, Mapping) else {"code": code},
+        "summary": summary,
+    }
+    return result
 
 
 class ScientificPosterEngine:
     """Ask the host model for complete inert HTML and manage review versions."""
 
     def __init__(self) -> None:
-        self._versions: dict[str, dict[str, Any]] = {}
-        self._visual_runtime: _visual_loop.VisualLoopRuntime | None = None
+        self._visual_runtime: _review_pipeline.ReviewRuntime | None = None
         self._visual_reviewer: Any = None
         self._visual_environ: dict[str, str] | None = None
 
@@ -169,36 +256,71 @@ class ScientificPosterEngine:
         if error is not None:
             return error
         assert action is not None
+        if (
+            action in {_core.ACTION_DRAFT, _core.ACTION_REVISE}
+            and self._visual_runtime is None
+        ):
+            self._visual_runtime = _review_pipeline.runtime_from_context(
+                getattr(self, "ctx", None), self._visual_environ,
+            )
         if action == _core.ACTION_DRAFT:
             return await self._draft(input_data, progress_callback)
         if action == _core.ACTION_ESTIMATE:
             return await self._estimate(input_data, progress_callback)
         if action == _core.ACTION_REVISE:
             loop = asyncio.get_running_loop()
-            deadline = _runtime_budget.workflow_deadline(
+            deadline = _deadlines.workflow_deadline(
                 getattr(self, "ctx", None), loop.time(), input_data
             )
-            result, continue_visual_loop = await self._run_public_revision(
+            edit_deadline = _deadlines.editing_deadline(deadline, loop.time())
+            result = await self._revise(
                 input_data,
                 progress_callback,
-                deadline=deadline,
+                deadline=edit_deadline,
             )
-            if _workflow_outcomes.revision_model_timed_out(result):
+            if _outcomes.revision_model_timed_out(result):
                 preserved = {
                     "html_uri": str(input_data.get("source_html_uri") or ""),
                     "html_sha256": str(input_data.get("source_html_sha256") or ""),
                     "warnings": [],
                 }
-                return _workflow_outcomes.revision_timeout_error(preserved, result)
-            if continue_visual_loop:
-                result = await self._complete_visual_loop(
-                    result,
-                    progress_callback=progress_callback,
-                    deadline=deadline,
-                )
+                return _outcomes.revision_timeout_error(preserved, result)
+            if result.get("status") != "error":
+                receipt_path = str(input_data.get("visual_review_path") or "")
+                if (
+                    receipt_path
+                    and result.get("html_sha256")
+                    == input_data.get("source_html_sha256")
+                ):
+                    receipt = _review_contract.load_receipt(
+                        receipt_path,
+                        expected_html_sha256=str(result["html_sha256"]),
+                    )
+                    result["visual_review"] = receipt
+                    result["visual_review_path"] = receipt_path
+                    result["visual_review_mode"] = "vlm"
+                    result["visual_quality_state"] = receipt["quality_state"]
+                    result = await self._attach_visual_review_receipt(result)
+                    result = _outcomes.visual_outcome(
+                        result,
+                        (
+                            "visual_review_passed"
+                            if receipt["quality_state"] == "passed"
+                            else "visual_revision_required"
+                        ),
+                        str(receipt["summary"]),
+                    )
+                else:
+                    result = await self._review_and_revise(
+                        result,
+                        input_data=input_data,
+                        progress_callback=progress_callback,
+                        deadline=edit_deadline,
+                    )
             return await self._attach_editable_pptx(
                 result,
                 progress_callback=progress_callback,
+                deadline=deadline,
             )
 
         portable_input = {**input_data, "action": action}
@@ -208,53 +330,14 @@ class ScientificPosterEngine:
             _core.ACTION_EXPORT_PPTX,
         }:
             source_uri = str(portable_input.get("source_html_uri") or "").strip()
-            source_sha256 = str(portable_input.get("source_html_sha256") or "").strip()
-            state = self._versions.get(source_uri) or self._versions.get(source_sha256)
-            if state is not None:
-                try:
-                    supplied_source = (
-                        await _source_runtime.resolve_explicit_source_text(
-                            portable_input,
-                            ctx=getattr(self, "ctx", None),
-                        )
-                    )
-                except _paper_source.PaperSourceError as exc:
-                    return _workflow_outcomes.paper_source_failure(exc)
-                stored_source = str(state.get("source_text") or "")
-                if supplied_source and supplied_source != stored_source:
-                    return _workflow_outcomes.error_result(
-                        "approval_source_mismatch",
-                        "Approval grounding source differs from the authored poster version.",
-                    )
-                portable_input["source_text"] = str(state.get("source_text") or "")
-                portable_input["source_figure_sha256s"] = list(
-                    state.get("source_figure_sha256s") or ()
-                )
-                if action == _core.ACTION_INSPECT:
-                    portable_input.setdefault(
-                        "html", str(state.get("artifact_path") or "")
-                    )
-                    portable_input.pop("source_html_uri", None)
-                    portable_input.pop("source_html_sha256", None)
-                elif action == _core.ACTION_EXPORT_PPTX:
-                    portable_input.setdefault(
-                        "html", str(state.get("artifact_path") or "")
-                    )
-                    portable_input.pop("source_html_uri", None)
-                    portable_input.pop("source_html_sha256", None)
-                    portable_input.pop("source_figure_sha256s", None)
-                    portable_input.pop("paper_path", None)
-                else:
-                    portable_input.pop("paper_path", None)
-                    portable_input.pop("source", None)
-            elif source_uri:
+            if source_uri:
                 source_path = await _runtime_io.resolve_path(
                     getattr(self, "ctx", None),
                     source_uri,
                     base_dir=portable_input.get("cwd"),
                 )
                 if source_path is None:
-                    return _workflow_outcomes.error_result(
+                    return _outcomes.error_result(
                         "source_not_found",
                         "The requested poster HTML artifact could not be resolved.",
                     )
@@ -264,7 +347,7 @@ class ScientificPosterEngine:
                 if expected_sha256:
                     actual_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
                     if actual_sha256 != expected_sha256:
-                        return _workflow_outcomes.error_result(
+                        return _outcomes.error_result(
                             "stale_selection",
                             "source_html_sha256 does not match the source artifact bytes.",
                         )
@@ -290,28 +373,28 @@ class ScientificPosterEngine:
         """Build a grounded evidence budget and recommend a physical page."""
 
         ctx = getattr(self, "ctx", None)
-        deadline = _runtime_budget.workflow_deadline(
+        deadline = _deadlines.workflow_deadline(
             ctx, asyncio.get_running_loop().time(), input_data
         )
         workspace = _runtime_io.create_workspace(input_data, ctx)
         try:
-            source = await _source_runtime.prepare_draft_source(
+            source = await _source_preparation.prepare_draft_source(
                 input_data,
                 ctx=ctx,
                 workspace=workspace,
                 progress_callback=progress_callback,
             )
             if len(source.text) > _MAX_SOURCE_CHARS:
-                return _workflow_outcomes.error_result(
+                return _outcomes.error_result(
                     "source_too_large",
                     f"Research input exceeds the {_MAX_SOURCE_CHARS}-character safety limit.",
                 )
-            assets, asset_warnings = await _source_runtime.prepare_assets(
+            assets, asset_warnings = await _source_preparation.prepare_assets(
                 [
                     *source.assets,
                     *[
-                        _source_runtime.normalize_user_asset(item)
-                        for item in _source_runtime.normalize_asset_inputs(
+                        _source_preparation.normalize_user_asset(item)
+                        for item in _source_preparation.normalize_asset_inputs(
                             input_data.get("assets")
                         )
                     ],
@@ -319,14 +402,18 @@ class ScientificPosterEngine:
                 ctx,
             )
             expected_figures = _html_contract.source_figure_sha256s(assets)
+            source_equations = _source_preparation.structured_source_equations(
+                source.summary
+            )
             await _runtime_io.progress(progress_callback, "poster.plan-content", 0.12)
-            budget = await _model_runtime.request_evidence_budget(
-                _runtime_budget.host_llm(ctx),
+            budget = await _model_runtime.request_content_plan(
+                _model_runtime.require_host_llm(ctx),
                 source_text=source.text,
                 assets=assets,
                 source_figure_sha256s=expected_figures,
                 authoring_request=source.authoring_request,
                 max_repair_attempts=_request_normalization.repair_attempts(input_data),
+                source_equations=source_equations,
                 page=input_data.get("page"),
                 orientation=str(input_data.get("orientation") or "auto"),
                 deadline=deadline,
@@ -336,14 +423,37 @@ class ScientificPosterEngine:
                 page=input_data.get("page"),
                 orientation=str(input_data.get("orientation") or "auto"),
             )
+            budget = await _model_runtime.request_content_plan(
+                _model_runtime.require_host_llm(ctx),
+                source_text=source.text,
+                assets=assets,
+                source_figure_sha256s=expected_figures,
+                authoring_request=source.authoring_request,
+                max_repair_attempts=_request_normalization.repair_attempts(
+                    input_data
+                ),
+                source_equations=source_equations,
+                page={
+                    "width_mm": page_plan.width_mm,
+                    "height_mm": page_plan.height_mm,
+                },
+                orientation=page_plan.orientation,
+                draft_budget=budget,
+                deadline=deadline,
+            )
+            page_plan = _planning.estimate_page(
+                budget,
+                page=input_data.get("page"),
+                orientation=page_plan.orientation,
+            )
         except _model_runtime.ModelBoundaryError as exc:
-            return _workflow_outcomes.error_result(exc.code, str(exc))
+            return _outcomes.error_result(exc.code, str(exc))
         except _planning.PlanningError as exc:
-            return _workflow_outcomes.error_result(exc.code, str(exc))
-        except _paper_source.PaperSourceError as exc:
-            return _workflow_outcomes.paper_source_failure(exc)
+            return _outcomes.error_result(exc.code, str(exc))
+        except _paper_extraction.PaperSourceError as exc:
+            return _outcomes.paper_source_failure(exc)
         except (OSError, UnicodeError, ValueError) as exc:
-            return _workflow_outcomes.error_result(
+            return _outcomes.error_result(
                 "candidate_validation_failed",
                 f"Poster estimation failed: {exc}",
             )
@@ -367,126 +477,382 @@ class ScientificPosterEngine:
 
         ctx = getattr(self, "ctx", None)
         loop = asyncio.get_running_loop()
-        deadline = _runtime_budget.workflow_deadline(ctx, loop.time(), input_data)
-        visual_runtime = self._visual_runtime or _visual_loop.runtime_from_context(
-            ctx,
-            self._visual_environ,
-        )
-        if self._visual_runtime is None and visual_runtime is not None:
-            self._visual_runtime = visual_runtime
+        deadline = _deadlines.workflow_deadline(ctx, loop.time(), input_data)
+        edit_deadline = _deadlines.editing_deadline(deadline, loop.time())
+        visual_runtime = self._visual_runtime
         try:
             result = await _draft_pipeline.run_draft(
                 input_data,
                 progress_callback,
                 ctx=ctx,
                 max_source_chars=_MAX_SOURCE_CHARS,
-                host_llm=_runtime_budget.host_llm,
+                planning_llm=_model_runtime.require_host_llm,
+                author_llm=lambda current_ctx: _model_runtime.require_author_llm(
+                    current_ctx,
+                    _request_normalization.author_model_role(input_data),
+                ),
                 publish_version=self._publish_version,
-                visual_design_client=(
+                visual_client=(
                     visual_runtime.client if visual_runtime is not None else None
                 ),
-                deadline=deadline,
+                deadline=edit_deadline,
             )
-            completed = await self._complete_visual_loop(
+            if not result.get("html_path"):
+                return result
+            completed = await self._review_and_revise(
                 result,
+                input_data=input_data,
+                progress_callback=progress_callback,
+                deadline=edit_deadline,
+                allow_content_replan=True,
+            )
+            return await self._attach_editable_pptx(
+                completed,
                 progress_callback=progress_callback,
                 deadline=deadline,
             )
+        except _model_runtime.ModelBoundaryError as exc:
+            result = _outcomes.error_result(exc.code, str(exc))
+            workspace = _runtime_io.create_workspace(input_data, ctx)
+            checkpoint = _draft_checkpoint.load(workspace)
+            checkpoint_stage = str((checkpoint or {}).get("stage") or "")
+            result.update(
+                {
+                    "workspace": str(workspace),
+                    "checkpoint_stage": checkpoint_stage,
+                    "retry_from_checkpoint": bool(checkpoint_stage),
+                }
+            )
+            return result
+        except _draft_pipeline.DraftPipelineError as exc:
+            return _outcomes.error_result(exc.code, str(exc))
+        except _planning.PlanningError as exc:
+            return _outcomes.error_result(exc.code, str(exc))
+        except _paper_extraction.PaperSourceError as exc:
+            return _outcomes.paper_source_failure(exc)
+        except (OSError, UnicodeError, ValueError) as exc:
+            return _outcomes.error_result(
+                "candidate_validation_failed",
+                f"Poster authoring failed: {exc}",
+            )
+
+    async def _review_and_revise(
+        self,
+        result: dict[str, Any],
+        *,
+        input_data: dict[str, Any],
+        progress_callback: Any,
+        deadline: float,
+        allow_content_replan: bool = False,
+    ) -> dict[str, Any]:
+        """Keep the best rendered candidate until review passes or progress stops."""
+
+        completed = await self._review_candidate(
+            result,
+            progress_callback=progress_callback,
+            deadline=deadline,
+        )
+        previous_reflow_targets = frozenset[str]()
+        retry_feedback = ""
+        replan_stalled = False
+        layout_failure = ""
+
+        def escalate_layout_failure(incumbent: Mapping[str, Any], reason: str) -> bool:
+            nonlocal layout_failure, replan_stalled
             if (
+                not allow_content_replan
+                or layout_failure
+                or _draft_pipeline.render_capacity_feedback(incumbent) is None
+            ):
+                return False
+            layout_failure = reason or "Layout revision did not improve the candidate."
+            replan_stalled = False
+            return True
+
+        while True:
+            if not (
                 completed.get("visual_quality_state") == "revision-required"
                 and str(completed.get("visual_review_path") or "").strip()
                 and str(completed.get("html_uri") or "").strip()
             ):
-                revision_input = {
-                    **input_data,
-                    "action": _core.ACTION_REVISE,
-                    "source_html_uri": str(completed["html_uri"]),
-                    "source_html_sha256": str(completed.get("html_sha256") or ""),
-                    "visual_review_path": str(completed["visual_review_path"]),
-                }
-                try:
-                    revised, continue_visual_loop = await self._run_public_revision(
+                break
+            now = asyncio.get_running_loop().time()
+            if deadline <= now:
+                _outcomes.append_warning_once(
+                    completed,
+                    _deadlines.VISUAL_LOOP_TIMEOUT_WARNING,
+                )
+                break
+            incumbent = completed
+            selected_sidecar = _revision_state.revision_sidecar_path(
+                Path(str(incumbent.get("html_path") or ""))
+            )
+            selected_state = (
+                selected_sidecar.read_bytes() if selected_sidecar.is_file() else None
+            )
+            incumbent_review = incumbent.get("visual_review")
+            baseline_sha256 = (
+                str(incumbent_review.get("screenshot_sha256") or "")
+                if isinstance(incumbent_review, Mapping)
+                else ""
+            )
+            revision_input = {
+                **input_data,
+                "action": _core.ACTION_REVISE,
+                "source_html_uri": str(completed["html_uri"]),
+                "source_html_sha256": str(completed.get("html_sha256") or ""),
+                "visual_review_path": str(completed["visual_review_path"]),
+                "_comparison_baseline": {
+                    "path": str(completed.get("screenshot_path") or ""),
+                    "sha256": baseline_sha256,
+                },
+                "_comparison_baseline_page": {
+                    key: completed.get("page_plan", {}).get(key)
+                    for key in ("width_mm", "height_mm")
+                },
+            }
+            reflow_targets = _visual_reflow_targets(completed.get("visual_review"))
+            persistent_targets = reflow_targets & previous_reflow_targets
+            feedback_parts = [retry_feedback] if retry_feedback else []
+            if persistent_targets:
+                target_list = ", ".join(sorted(persistent_targets))
+                feedback_parts.append(
+                    "Rendered review still flags the same targets for reflow after "
+                    f"the preceding revision: {target_list}. Compare their measured "
+                    "bounds and the prior visual review before choosing a different "
+                    "composition or sizing strategy."
+                )
+            if feedback_parts:
+                revision_input["feedback"] = "\n\n".join(feedback_parts)
+            previous_reflow_targets = reflow_targets
+            # The user selection belongs to the original manual edit. The
+            # reviewer supplies targets bound to this new candidate instead.
+            revision_input.pop("selection_state", None)
+            rendered_feedback = (
+                _draft_pipeline.render_capacity_feedback(incumbent)
+                if allow_content_replan and not replan_stalled else None
+            )
+            if rendered_feedback is not None and layout_failure:
+                rendered_feedback["layout_attempt_failure"] = layout_failure
+            trying_replan = rendered_feedback is not None
+            try:
+                if trying_replan:
+                    ctx = getattr(self, "ctx", None)
+                    revised = await _draft_pipeline.run_draft(
+                        {
+                            **input_data,
+                            "visual_iteration": int(incumbent.get("visual_iteration") or 0) + 1,
+                            "_comparison_baseline": revision_input["_comparison_baseline"],
+                            "_comparison_baseline_page": revision_input[
+                                "_comparison_baseline_page"
+                            ],
+                        },
+                        progress_callback,
+                        ctx=ctx,
+                        max_source_chars=_MAX_SOURCE_CHARS,
+                        planning_llm=_model_runtime.require_host_llm,
+                        author_llm=lambda current_ctx: _model_runtime.require_author_llm(
+                            current_ctx,
+                            _request_normalization.author_model_role(input_data),
+                        ),
+                        publish_version=self._publish_version,
+                        visual_client=(
+                            self._visual_runtime.client
+                            if self._visual_runtime is not None else None
+                        ),
+                        deadline=deadline,
+                        resume_workspace=Path(str(incumbent["workspace"])),
+                        resume_html_sha256=str(incumbent["html_sha256"]),
+                        rendered_feedback=rendered_feedback,
+                    )
+                else:
+                    revised = await self._revise(
                         revision_input,
                         progress_callback,
                         deadline=deadline,
                     )
-                except _model_runtime.ModelBoundaryError as exc:
-                    _workflow_outcomes.append_warning_once(
-                        completed,
-                        f"Bounded visual revision was unavailable: {exc}",
-                    )
-                else:
-                    if continue_visual_loop and not _workflow_outcomes.revision_model_timed_out(
-                        revised
-                    ):
-                        completed = await self._complete_visual_loop(
-                            revised,
-                            progress_callback=progress_callback,
-                            deadline=deadline,
-                        )
-            return await self._attach_editable_pptx(
-                completed,
-                progress_callback=progress_callback,
-            )
-        except _model_runtime.ModelBoundaryError as exc:
-            result = _workflow_outcomes.error_result(exc.code, str(exc))
-            if exc.code == "llm_error":
-                workspace = _runtime_io.create_workspace(input_data, ctx)
-                checkpoint = _draft_checkpoint.load(workspace)
-                checkpoint_stage = str((checkpoint or {}).get("stage") or "")
-                result.update(
-                    {
-                        "workspace": str(workspace),
-                        "checkpoint_stage": checkpoint_stage,
-                        "retry_from_checkpoint": bool(checkpoint_stage),
-                    }
+            except _model_runtime.ModelBoundaryError as exc:
+                _outcomes.append_warning_once(
+                    completed,
+                    f"Bounded visual revision was unavailable: {exc}",
                 )
-            return result
-        except _draft_pipeline.DraftPipelineError as exc:
-            return _workflow_outcomes.error_result(exc.code, str(exc))
-        except _planning.PlanningError as exc:
-            return _workflow_outcomes.error_result(exc.code, str(exc))
-        except _paper_source.PaperSourceError as exc:
-            return _workflow_outcomes.paper_source_failure(exc)
-        except (OSError, UnicodeError, ValueError) as exc:
-            return _workflow_outcomes.error_result(
-                "candidate_validation_failed",
-                f"Poster authoring failed: {exc}",
+                if trying_replan:
+                    _activate_candidate_files(incumbent, selected_state=selected_state)
+                    if layout_failure:
+                        break
+                    replan_stalled = True
+                    continue
+                if escalate_layout_failure(incumbent, str(exc)):
+                    continue
+                break
+            if (
+                revised.get("status") == "error"
+                or _outcomes.revision_model_timed_out(revised)
+            ):
+                failure_summary = str(revised.get("summary") or "").strip()
+                if failure_summary:
+                    _outcomes.append_warning_once(completed, failure_summary)
+                diagnostic = revised.get("diagnostic_candidate")
+                if isinstance(diagnostic, Mapping):
+                    completed["diagnostic_candidate"] = dict(diagnostic)
+                    completed["retry_from_checkpoint"] = bool(
+                        diagnostic.get("revision_state_persisted") is True
+                    )
+                warnings = revised.get("warnings")
+                if isinstance(warnings, list):
+                    for warning in warnings:
+                        if str(warning).strip():
+                            _outcomes.append_warning_once(
+                                completed,
+                                str(warning),
+                            )
+                if trying_replan:
+                    _activate_candidate_files(incumbent, selected_state=selected_state)
+                    if layout_failure:
+                        break
+                    replan_stalled = True
+                    continue
+                if escalate_layout_failure(incumbent, failure_summary):
+                    continue
+                break
+            if (
+                str(revised.get("html_sha256") or "")
+                == str(incumbent.get("html_sha256") or "")
+            ):
+                for warning in revised.get("warnings") or []:
+                    if str(warning).strip():
+                        _outcomes.append_warning_once(incumbent, str(warning))
+                _outcomes.append_warning_once(
+                    incumbent,
+                    "Visual revision did not change the selected poster; "
+                    "review was not repeated.",
+                )
+                _activate_candidate_files(incumbent, selected_state=selected_state)
+                completed = incumbent
+                if trying_replan:
+                    if layout_failure:
+                        break
+                    replan_stalled = True
+                    continue
+                if escalate_layout_failure(incumbent, "The layout revision changed no HTML."):
+                    continue
+                break
+            revised_screenshot = Path(str(revised.get("screenshot_path") or ""))
+            if (
+                baseline_sha256
+                and revised_screenshot.is_file()
+                and hashlib.sha256(revised_screenshot.read_bytes()).hexdigest()
+                == baseline_sha256
+            ):
+                _activate_candidate_files(incumbent, selected_state=selected_state)
+                completed = incumbent
+                if trying_replan:
+                    if layout_failure:
+                        break
+                    replan_stalled = True
+                    continue
+                if retry_feedback:
+                    _outcomes.append_warning_once(
+                        incumbent,
+                        "The revised layout still rendered the same pixels; the current "
+                        "poster remains selected.",
+                    )
+                    if escalate_layout_failure(
+                        incumbent, "Layout revisions rendered the same pixels."
+                    ):
+                        continue
+                    break
+                retry_feedback = (
+                    "The proposal rendered exactly the same pixels as the current "
+                    "poster. Change the CSS rule that actually sizes the painted "
+                    "figures or choose a different wrapper composition."
+                )
+                continue
+            proposal = await self._review_candidate(
+                revised,
+                progress_callback=progress_callback,
+                deadline=deadline,
             )
+            proposal_review = proposal.get("visual_review")
+            comparison = (
+                str(proposal_review.get("comparison") or "")
+                if isinstance(proposal_review, Mapping)
+                else ""
+            )
+            if (
+                proposal.get("visual_quality_state") == "passed"
+                and comparison != "regressed"
+            ):
+                completed = proposal
+                break
+            proposal_inspection = proposal.get("inspection")
+            incumbent_inspection = incumbent.get("inspection")
+            if (
+                comparison not in {"improved", "regressed"}
+                and proposal.get("visual_quality_state") == "awaiting-review"
+                and isinstance(proposal_inspection, Mapping)
+                and proposal_inspection.get("status") == "ok"
+                and isinstance(incumbent_inspection, Mapping)
+                and incumbent_inspection.get("status") != "ok"
+            ):
+                completed = proposal
+                break
+            if comparison != "improved":
+                for warning in proposal.get("warnings") or []:
+                    if str(warning).strip():
+                        _outcomes.append_warning_once(incumbent, str(warning))
+                _outcomes.append_warning_once(
+                    incumbent,
+                    (
+                        "Pairwise review did not establish an overall improvement, so "
+                        "the current best poster remains selected."
+                    ),
+                )
+                _activate_candidate_files(incumbent, selected_state=selected_state)
+                completed = incumbent
+                if trying_replan:
+                    if layout_failure:
+                        break
+                    replan_stalled = True
+                    continue
+                if escalate_layout_failure(
+                    incumbent,
+                    str(proposal_review.get("summary") or "")
+                    if isinstance(proposal_review, Mapping)
+                    else "Layout review did not improve the candidate.",
+                ):
+                    continue
+                if comparison not in {"unchanged", "regressed"}:
+                    break
+                review_summary = (
+                    str(proposal_review.get("summary") or "").strip()
+                    if isinstance(proposal_review, Mapping)
+                    else ""
+                )
+                retry_feedback = (
+                    f"Pairwise review judged the previous proposal {comparison}. "
+                    "Start again from the retained incumbent and choose a materially "
+                    "different composition or governing layout strategy. Preserve its "
+                    "existing strengths."
+                    + (f" Previous proposal review: {review_summary}" if review_summary else "")
+                )
+                continue
+            completed = proposal
+            replan_stalled = False
+            layout_failure = ""
+            retry_feedback = ""
+        return completed
 
     async def _attach_editable_pptx(
         self,
         result: dict[str, Any],
         *,
         progress_callback: Any,
+        deadline: float | None = None,
     ) -> dict[str, Any]:
-        """Export the exact rendered candidate without changing its workflow status."""
+        """Export the exact rendered candidate and report an incomplete package."""
 
         if result.get("status") == "error" or result.get("pptx_path"):
-            return result
-        if (
-            result.get("visual_review_mode") == "vlm"
-            and result.get("visual_quality_state") != "passed"
-        ):
-            result["pptx_export"] = {
-                "status": "blocked",
-                "outcome": {"code": "visual_review_required"},
-                "summary": (
-                    "Editable PPTX export is blocked because the configured visual "
-                    "reviewer has not accepted the exact rendered candidate."
-                ),
-            }
-            return result
-        inspection = result.get("inspection")
-        if not isinstance(inspection, Mapping) or inspection.get("status") != "ok":
-            result["pptx_export"] = {
-                "status": "blocked",
-                "outcome": {"code": "inspection_blocked"},
-                "summary": (
-                    "Editable PPTX export is blocked because deterministic inspection "
-                    "is missing or did not pass."
-                ),
-            }
             return result
         html_path = Path(str(result.get("html_path") or ""))
         expected_sha256 = str(result.get("html_sha256") or "")
@@ -495,36 +861,62 @@ class ScientificPosterEngine:
         workspace = Path(str(result.get("workspace") or html_path.parent))
         html_bytes = html_path.read_bytes()
         if hashlib.sha256(html_bytes).hexdigest() != expected_sha256:
-            _workflow_outcomes.append_warning_once(result, _PPTX_EXPORT_WARNING)
-            result["pptx_export"] = {
-                "status": "error",
-                "outcome": {"code": "approval_source_mismatch"},
-                "summary": "HTML changed before editable PPTX export.",
-            }
-            return result
+            return _pptx_export_failure(
+                result,
+                code="approval_source_mismatch",
+                summary="HTML changed before editable PPTX export.",
+            )
         export_dir = workspace / "editable-poster" / expected_sha256
         frozen_html = export_dir / "source.html"
         _runtime_io.replace_file_atomic(frozen_html, html_bytes)
         await _runtime_io.progress(progress_callback, "poster.export-pptx", 0.96)
-        export = await asyncio.to_thread(
+        export_payload: dict[str, Any] = {
+            "action": _core.ACTION_EXPORT_PPTX,
+            "html": str(frozen_html),
+            "output_dir": str(export_dir),
+        }
+        remaining: float | None = None
+        if deadline is not None:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 1.0:
+                return _pptx_export_failure(
+                    result,
+                    code="pptx_export_failed",
+                    summary=(
+                        "Editable PPTX export was skipped because the workflow runtime "
+                        "budget was exhausted; the rendered HTML remains available."
+                    ),
+                )
+            export_payload["runtime_timeout_seconds"] = min(remaining, 180.0)
+        export_call = asyncio.to_thread(
             _portable_actions.run,
-            {
-                "action": _core.ACTION_EXPORT_PPTX,
-                "html": str(frozen_html),
-                "output_dir": str(export_dir),
-            },
+            export_payload,
         )
+        try:
+            if remaining is None:
+                export = await export_call
+            else:
+                async with asyncio.timeout(remaining):
+                    export = await export_call
+        except TimeoutError:
+            return _pptx_export_failure(
+                result,
+                code="pptx_export_failed",
+                summary=(
+                    "Editable PPTX export reached the workflow runtime budget; the "
+                    "rendered HTML remains available."
+                ),
+            )
         if (
             export.get("status") == "error"
             or export.get("source_html_sha256") != expected_sha256
         ):
-            _workflow_outcomes.append_warning_once(result, _PPTX_EXPORT_WARNING)
-            result["pptx_export"] = {
-                "status": str(export.get("status") or "error"),
-                "outcome": export.get("outcome"),
-                "summary": str(export.get("summary") or ""),
-            }
-            return result
+            return _pptx_export_failure(
+                result,
+                code="pptx_export_failed",
+                outcome=export.get("outcome"),
+                summary=str(export.get("summary") or "Editable PPTX export failed."),
+            )
         for field in (
             "pptx_path",
             "scene_path",
@@ -564,32 +956,20 @@ class ScientificPosterEngine:
                 "application/json",
             ),
         )
+        warnings = list(result.get("warnings") or [])
         for uri_field, path, kind, title, fmt, mime in artifact_specs:
-            try:
-                artifact = await _runtime_io.store_artifact(
-                    getattr(self, "ctx", None),
-                    path,
-                    kind=kind,
-                    title=title,
-                    fmt=fmt,
-                    mime=mime,
-                )
-            except OSError as exc:
-                _workflow_outcomes.append_warning_once(
-                    result,
-                    f"{_PPTX_EXPORT_WARNING} Artifact delivery failed: {exc}",
-                )
-                result["pptx_export"] = {
-                    "status": "error",
-                    "outcome": {"code": "pptx_export_failed"},
-                    "summary": (
-                        f"{title} was generated locally, but artifact delivery failed: "
-                        f"{exc}"
-                    ),
-                }
-                return result
+            artifact = await _store_delivery_artifact(
+                getattr(self, "ctx", None),
+                path,
+                kind=kind,
+                title=title,
+                fmt=fmt,
+                mime=mime,
+                warnings=warnings,
+            )
             result[uri_field] = str(artifact["uri"])
             _append_artifact_once(result, artifact)
+        result["warnings"] = warnings
         result["pptx_export"] = {
             "status": str(export.get("status") or "ok"),
             "outcome": export.get("outcome") or {"code": "pptx_export_complete"},
@@ -600,7 +980,7 @@ class ScientificPosterEngine:
         }
         return result
 
-    async def _complete_visual_loop(
+    async def _review_candidate(
         self,
         initial: dict[str, Any],
         *,
@@ -609,7 +989,7 @@ class ScientificPosterEngine:
     ) -> dict[str, Any]:
         """Run one exact-byte visual review without hidden authoring retries."""
 
-        completed = await _visual_loop.complete(
+        completed = await _review_pipeline.run_review(
             initial,
             progress_callback=progress_callback,
             ctx=getattr(self, "ctx", None),
@@ -624,57 +1004,37 @@ class ScientificPosterEngine:
         self,
         result: dict[str, Any],
     ) -> dict[str, Any]:
-        """Validate and publish the receipt bound to the returned poster candidate."""
+        """Publish the receipt already validated by the visual-review owner."""
 
         receipt_path = str(result.get("visual_review_path") or "").strip()
         if not receipt_path:
             return result
-        design_reference = result.get("design_reference")
-        reference_sha256 = (
-            str(design_reference.get("image_sha256") or "")
-            if isinstance(design_reference, Mapping)
-            else ""
+        receipt = result.get("visual_review")
+        if not isinstance(receipt, dict) or receipt.get(
+            "candidate_html_sha256"
+        ) != result.get("html_sha256"):
+            result = _downgrade_invalid_visual_review(
+                result,
+                summary=(
+                    "The validated visual review receipt is not bound to this poster."
+                ),
+            )
+            _outcomes.append_warning_once(
+                result,
+                _INVALID_VISUAL_REVIEW_WARNING,
+            )
+            return result
+        warnings = list(result.get("warnings") or [])
+        artifact = await _store_delivery_artifact(
+            getattr(self, "ctx", None),
+            Path(receipt_path),
+            kind="poster-review-receipt",
+            title="Poster visual review receipt",
+            fmt="json",
+            mime="application/json",
+            warnings=warnings,
         )
-        try:
-            receipt = _visual_review.load_receipt(
-                receipt_path,
-                expected_html_sha256=str(result.get("html_sha256") or ""),
-                expected_reference_image_sha256=reference_sha256,
-            )
-        except _visual_review.VisualReviewError as exc:
-            result = _downgrade_unpublished_visual_review(
-                result,
-                summary=(
-                    "The visual review receipt could not be validated for this poster."
-                ),
-            )
-            _workflow_outcomes.append_warning_once(
-                result,
-                f"{_VISUAL_REVIEW_RECEIPT_WARNING} {exc}",
-            )
-            return result
-        try:
-            artifact = await _runtime_io.store_artifact(
-                getattr(self, "ctx", None),
-                Path(receipt_path),
-                kind="poster-review-receipt",
-                title="Poster visual review receipt",
-                fmt="json",
-                mime="application/json",
-            )
-        except OSError as exc:
-            result = _downgrade_unpublished_visual_review(
-                result,
-                summary=(
-                    "The validated visual review receipt could not be published for "
-                    "this poster."
-                ),
-            )
-            _workflow_outcomes.append_warning_once(
-                result,
-                f"{_VISUAL_REVIEW_RECEIPT_WARNING} Artifact delivery failed: {exc}",
-            )
-            return result
+        result["warnings"] = warnings
         result["visual_review"] = receipt
         result["visual_review_uri"] = str(artifact["uri"])
         result["visual_review_sha256"] = str(artifact["sha256"])
@@ -687,107 +1047,17 @@ class ScientificPosterEngine:
         progress_callback: Any,
         *,
         deadline: float | None = None,
-    ) -> dict[str, Any] | _PreparedVersion:
+    ) -> dict[str, Any]:
         """Delegate grounded HTML revision to the portable revision pipeline."""
 
         return await _revision_pipeline.run_revision(
             input_data,
             progress_callback,
             ctx=getattr(self, "ctx", None),
-            version_lookup=self._versions.get,
             publish_version=self._publish_version,
-            defer_revision_commit=_DEFER_REVISION_COMMIT,
             max_source_chars=_MAX_SOURCE_CHARS,
-            noop_revision_warning=_NOOP_REVISION_WARNING,
             deadline=deadline,
         )
-
-    async def _run_public_revision(
-        self,
-        input_data: dict[str, Any],
-        progress_callback: Any,
-        *,
-        deadline: float,
-    ) -> tuple[dict[str, Any], bool]:
-        """Keep a receipt-bound revision deferred until delivery evidence is safe."""
-
-        receipt_bound = bool(str(input_data.get("visual_review_path") or "").strip())
-        revision_input = dict(input_data)
-        if receipt_bound:
-            revision_input["_defer_revision_commit"] = _DEFER_REVISION_COMMIT
-        candidate = await self._revise(
-            revision_input,
-            progress_callback,
-            deadline=deadline,
-        )
-        if not isinstance(candidate, _PreparedVersion):
-            return candidate, True
-        if not receipt_bound:
-            raise RuntimeError("public poster revision remained deferred")
-        if candidate.inspection.get("status") != "ok":
-            return (
-                self._preserved_revision_source(
-                    input_data,
-                    source_sha256=str(
-                        input_data.get("source_html_sha256")
-                        or candidate.publication.get("parent_html_sha256")
-                        or ""
-                    ),
-                    rejected_feedback=_inspection_policy.inspection_feedback(
-                        candidate.inspection
-                    ),
-                ),
-                False,
-            )
-        return await self._commit_prepared(candidate), True
-
-    def _preserved_revision_source(
-        self,
-        input_data: dict[str, Any],
-        *,
-        source_sha256: str,
-        rejected_feedback: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """Return a recoverable exact-source result without activating a candidate."""
-
-        source_uri = str(input_data.get("source_html_uri") or "").strip()
-        result: dict[str, Any] = {
-            "html_uri": source_uri,
-            "html_sha256": source_sha256,
-            "visual_review_path": str(input_data.get("visual_review_path") or ""),
-            "visual_review_mode": "vlm",
-            "visual_quality_state": "revision-required",
-            "retry_from_checkpoint": False,
-            "warnings": [
-                _PUBLIC_REVISION_BLOCKED_WARNING,
-                *(rejected_feedback or []),
-            ],
-        }
-        return _workflow_outcomes.visual_outcome(
-            result,
-            "visual_revision_required",
-            (
-                "The exact source poster was preserved because the receipt-bound "
-                "revision failed rendered inspection."
-            ),
-            decision_reason="revision-inspection-blocked",
-        )
-
-    async def _commit_prepared(
-        self,
-        prepared: _PreparedVersion,
-    ) -> dict[str, Any]:
-        """Activate one already-inspected candidate after it beats the active version."""
-
-        committed = await self._publish_version(
-            **prepared.publication,
-            inspection=prepared.inspection,
-            activate=True,
-            checkpoint_state=prepared.checkpoint_state,
-        )
-        if isinstance(committed, _PreparedVersion):
-            raise TypeError("prepared poster activation remained deferred")
-        return committed
 
     async def _publish_version(
         self,
@@ -798,36 +1068,25 @@ class ScientificPosterEngine:
         progress_callback: Any,
         workspace: Path,
         parent_html_sha256: str | None,
-        live_html_path: Path | None,
         asset_warnings: list[str],
         inspection: dict[str, Any] | None,
         source_figure_sha256s: set[str],
         page_plan: dict[str, Any],
-        content_budget: dict[str, Any] | None,
-        design_reference: _reference_seeds.ReferenceBundle,
-        visual_design_plan: _visual_design.VisualDesignPlan,
+        design_reference: _reference_catalog.ReferenceBundle,
+        reference_brief: _reference_analysis.ReferenceAnalysis,
         visual_preferences: dict[str, str],
-        activate: bool = True,
         checkpoint_state: dict[str, Any] | None = None,
         deadline: float | None = None,
-    ) -> dict[str, Any] | _PreparedVersion:
+        inspection_session: _browser_inspection.ChromiumInspectionSession | None = None,
+    ) -> dict[str, Any]:
         """Persist exact HTML, inspect it, and expose live-preview metadata."""
 
         ctx = getattr(self, "ctx", None)
-        design_reference = _reference_seeds.ReferenceBundle.from_dict(
-            design_reference.to_dict()
-        )
         html_bytes = html_text.encode("utf-8")
         html_sha256 = hashlib.sha256(html_bytes).hexdigest()
         candidate_dir = workspace / ".candidates" / html_sha256
         candidate_path = candidate_dir / "poster.html"
         _runtime_io.replace_file_atomic(candidate_path, html_bytes)
-        static_report = _core.validate_poster_html(html_text)
-        if static_report.get("status") != "ok":
-            return _workflow_outcomes.error_result(
-                "candidate_validation_failed",
-                "Poster HTML changed before persistence or failed final validation.",
-            )
         if inspection is None:
             await _runtime_io.progress(progress_callback, "poster.inspect", 0.68)
             inspection_call = _runtime_io.inspect_preview(
@@ -836,6 +1095,7 @@ class ScientificPosterEngine:
                 scale=_runtime_io.bounded_float(
                     input_data.get("scale"), default=2.0, low=0.5, high=4.0
                 ),
+                session=inspection_session,
             )
             if deadline is None:
                 inspection = await inspection_call
@@ -843,172 +1103,48 @@ class ScientificPosterEngine:
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
                     inspection_call.close()
-                    return _workflow_outcomes.inspection_deadline_result()
+                    return _outcomes.inspection_deadline_result()
                 try:
                     async with asyncio.timeout(remaining):
                         inspection = await inspection_call
                 except TimeoutError:
-                    return _workflow_outcomes.inspection_deadline_result()
-        if (
-            inspection.get("status") == "ok"
-            or _inspection_policy.lane_fill_recoverable(inspection)
-        ) and isinstance(content_budget, dict):
-            report = inspection.get("report")
-            if isinstance(report, dict):
-                scales = _inspection_policy.measured_lane_scales(report)
-                modules = [
-                    dict(item)
-                    for item in content_budget.get("content_modules") or []
-                    if isinstance(item, dict)
-                ]
-                stylesheet = _authoring.measured_lane_stylesheet(
-                    scales,
-                    width_mm=float(page_plan["width_mm"]),
-                    modules=modules,
-                    column_count=len(scales),
-                )
-                if stylesheet:
-                    filled_html = _html_contract.append_stylesheet_override(
-                        html_text,
-                        f"<style>{stylesheet}</style>",
-                    )
-                    filled_bytes = filled_html.encode("utf-8")
-                    filled_sha256 = hashlib.sha256(filled_bytes).hexdigest()
-                    filled_dir = workspace / ".candidates" / filled_sha256
-                    filled_path = filled_dir / "poster.html"
-                    filled_static = _core.validate_poster_html(filled_html)
-                    if filled_static.get("status") == "ok":
-                        _runtime_io.replace_file_atomic(filled_path, filled_bytes)
-                        filled_call = _runtime_io.inspect_preview(
-                            filled_path,
-                            filled_dir / "inspection",
-                            scale=_runtime_io.bounded_float(
-                                input_data.get("scale"),
-                                default=2.0,
-                                low=0.5,
-                                high=4.0,
-                            ),
-                        )
-                        filled_inspection: dict[str, Any] | None = None
-                        if deadline is None:
-                            filled_inspection = await filled_call
-                        else:
-                            remaining = deadline - asyncio.get_running_loop().time()
-                            if remaining <= 0:
-                                filled_call.close()
-                            else:
-                                try:
-                                    async with asyncio.timeout(remaining):
-                                        filled_inspection = await filled_call
-                                except TimeoutError:
-                                    filled_inspection = None
-                        if (
-                            isinstance(filled_inspection, dict)
-                            and filled_inspection.get("status") == "ok"
-                        ):
-                            filled_report = filled_inspection.get("report")
-                            before_score = _inspection_policy.lane_fill_score(report)
-                            after_score = (
-                                _inspection_policy.lane_fill_score(filled_report)
-                                if isinstance(filled_report, dict)
-                                else None
-                            )
-                            if (
-                                before_score is not None
-                                and after_score is not None
-                                and after_score[0] < before_score[0] - 1.0
-                                and after_score[1] <= before_score[1] + 1.0
-                            ):
-                                html_text = filled_html
-                                html_bytes = filled_bytes
-                                html_sha256 = filled_sha256
-                                candidate_dir = filled_dir
-                                candidate_path = filled_path
-                                inspection = filled_inspection
-        inspection_feedback = _inspection_policy.inspection_feedback(inspection)
+                    return _outcomes.inspection_deadline_result()
         review_request: dict[str, Any] | None = None
         review_request_path: Path | None = None
         screenshot_path = Path(str(inspection.get("screenshot_path") or ""))
         inspection_passed = inspection.get("status") == "ok"
         visual_evidence = inspection.get("visual_evidence")
-        if screenshot_path.is_file() and isinstance(visual_evidence, Mapping):
+        review_inputs_ready = (
+            screenshot_path.is_file()
+            and isinstance(visual_evidence, Mapping)
+        )
+        if review_inputs_ready:
             try:
                 visual_iteration = _revision_state.visual_iteration(
                     input_data.get("visual_iteration")
                 )
-                content_brief = _revision_state.visual_content_brief(
-                    content_budget,
-                    page_plan,
-                    displayed_html=html_text,
-                )
-                if visual_design_plan is not None:
-                    content_brief["visual_design"] = (
-                        visual_design_plan.executable_dict()
-                    )
-                review_request = _visual_review.build_request(
-                    html_path=candidate_path,
-                    screenshot_path=screenshot_path,
-                    reference=design_reference,
-                    content_brief=content_brief,
-                    visual_evidence=visual_evidence,
+                review_request, review_request_path = _review_pipeline.prepare_candidate_review(
+                    candidate_path, inspection, page_plan=page_plan,
                     iteration=visual_iteration,
+                    quality_reference=(
+                        design_reference.to_dict() if design_reference.source_kind == "custom" else None
+                    ),
+                    comparison_baseline=(
+                        input_data.get("_comparison_baseline")
+                        if isinstance(input_data.get("_comparison_baseline"), Mapping)
+                        else None
+                    ),
+                    comparison_baseline_page=(
+                        input_data.get("_comparison_baseline_page")
+                        if isinstance(input_data.get("_comparison_baseline_page"), Mapping)
+                        else None
+                    ),
                 )
-                review_dir = (
-                    candidate_dir / "visual-review" / f"iteration-{visual_iteration}"
-                )
-                review_dir.mkdir(parents=True, exist_ok=True)
-                review_request_path = review_dir / "visual-review-request.json"
-                _runtime_io.write_json_atomic(
-                    review_request_path,
-                    review_request,
-                    indent=2,
-                    sort_keys=True,
-                    allow_nan=False,
-                )
-            except (OSError, _visual_review.VisualReviewError) as exc:
+            except (OSError, _review_contract.ReviewContractError) as exc:
                 review_request = None
                 review_request_path = None
                 asset_warnings.append(f"Cannot prepare visual review: {exc}")
-        if not activate:
-            if checkpoint_state is not None:
-                candidate_sidecar_persisted = _revision_state.persist_revision_sidecar(
-                    workspace,
-                    artifact_path=candidate_path,
-                    html_text=html_text,
-                    checkpoint_state=checkpoint_state,
-                )
-                if candidate_sidecar_persisted is not True:
-                    asset_warnings.append(
-                        "Deferred poster candidate could not carry its grounded "
-                        "revision state; it cannot be resumed after this process."
-                    )
-            return _PreparedVersion(
-                html_sha256=html_sha256,
-                candidate_path=str(candidate_path),
-                inspection=dict(inspection),
-                checkpoint_state=(
-                    dict(checkpoint_state) if checkpoint_state is not None else None
-                ),
-                publication={
-                    "html_text": html_text,
-                    "source_text": source_text,
-                    "input_data": dict(input_data),
-                    "progress_callback": progress_callback,
-                    "workspace": workspace,
-                    "parent_html_sha256": parent_html_sha256,
-                    "live_html_path": live_html_path,
-                    "asset_warnings": list(asset_warnings),
-                    "source_figure_sha256s": set(source_figure_sha256s),
-                    "page_plan": dict(page_plan),
-                    "content_budget": (
-                        dict(content_budget) if content_budget is not None else None
-                    ),
-                    "design_reference": design_reference,
-                    "visual_design_plan": visual_design_plan,
-                    "visual_preferences": dict(visual_preferences),
-                    "deadline": deadline,
-                },
-            )
+        review_preparation_failed = review_inputs_ready and review_request is None
         if checkpoint_state is not None:
             _draft_checkpoint.save(
                 workspace,
@@ -1017,31 +1153,45 @@ class ScientificPosterEngine:
             )
         html_path = workspace / "poster.html"
         _runtime_io.replace_file_atomic(html_path, html_bytes)
-        html_artifact = await _runtime_io.store_artifact(
+        html_artifact = await _store_delivery_artifact(
             ctx,
             html_path,
             kind="poster",
             title="Scientific poster HTML",
             fmt="html",
             mime="text/html",
+            warnings=asset_warnings,
         )
-        revision_sidecar_persisted = _revision_state.persist_revision_sidecar(
-            workspace,
-            artifact_path=Path(str(html_artifact["path"])),
-            html_text=html_text,
+        published_paths = dict.fromkeys(
+            (html_path, Path(str(html_artifact["path"])))
         )
+        sidecar_results = (
+            [
+                _revision_state.persist_revision_sidecar(
+                    artifact_path=published_path,
+                    html_text=html_text,
+                    checkpoint_state=checkpoint_state,
+                )
+                for published_path in published_paths
+            ]
+            if checkpoint_state is not None
+            else []
+        )
+        revision_sidecar_persisted = bool(sidecar_results) and all(sidecar_results)
         inspection_path = _runtime_io.inspection_report_path(
             inspection, candidate_dir / "inspection"
         )
-        inspection_artifact = await _runtime_io.store_artifact(
+        inspection_artifact = await _store_delivery_artifact(
             ctx,
             inspection_path,
             kind="poster-report",
             title="Poster rendered inspection",
             fmt="json",
             mime="application/json",
+            warnings=asset_warnings,
         )
         review_artifacts: list[dict[str, Any]] = []
+        screenshot_artifact: dict[str, Any] | None = None
         evidence_path = Path(str(inspection.get("visual_evidence_path") or ""))
         if evidence_path.is_file():
             try:
@@ -1105,14 +1255,14 @@ class ScientificPosterEngine:
                 review_artifacts.append(request_artifact)
             except OSError as exc:
                 asset_warnings.append(f"Cannot store visual-review request: {exc}")
-        active_live_path = live_html_path or workspace / "live" / "poster.html"
+        active_live_path = workspace / "live" / "poster.html"
         try:
             _runtime_io.replace_file_atomic(active_live_path, html_path.read_bytes())
         except OSError as exc:
-            return _workflow_outcomes.error_result(
-                "live_preview_update_failed",
-                f"Live preview activation failed: {exc}",
+            asset_warnings.append(
+                f"Live preview activation failed; use the published poster HTML instead: {exc}"
             )
+            active_live_path = html_path
 
         preview_argv = _core.build_preview_argv(
             active_live_path,
@@ -1125,7 +1275,10 @@ class ScientificPosterEngine:
         inspection_summary = str(inspection.get("summary") or "").strip()
         outcome_code = (
             "visual_review_unavailable"
-            if inspection_passed and review_request is not None
+            if inspection_passed
+            and (review_request is not None or review_preparation_failed)
+            else "visual_revision_required"
+            if not inspection_passed
             else inspection_outcome_code
         )
         if inspection_passed and review_request is not None:
@@ -1133,10 +1286,15 @@ class ScientificPosterEngine:
                 "Scientific-poster HTML and screenshot are ready for "
                 "image-capable review."
             )
+        elif review_preparation_failed:
+            publication_summary = (
+                "HTML and screenshot are ready, but the visual review request "
+                "could not be prepared."
+            )
         elif not inspection_passed:
             publication_summary = (
-                inspection_summary
-                or "Rendered inspection did not produce a reviewable poster."
+                "An editable draft is available and still needs revision. "
+                + (inspection_summary or "Rendered inspection has not passed.")
             )
         else:
             publication_summary = (
@@ -1150,10 +1308,10 @@ class ScientificPosterEngine:
                 if isinstance(item, dict)
             ],
         ]
-        if revision_sidecar_persisted is False:
+        if revision_sidecar_persisted is not True:
             warnings.append(
                 "Published HTML could not carry its grounded revision state; "
-                "revise from live_html_path for this version."
+                "automatic revision of this version is unavailable."
             )
         grounding_source_sha256 = hashlib.sha256(
             source_text.encode("utf-8")
@@ -1166,7 +1324,6 @@ class ScientificPosterEngine:
             grounding_source_sha256,
             source_figure_manifest_sha256,
         )
-        checkpoint_state = _draft_checkpoint.load(workspace)
         result = _core.outcome_result(
             outcome_code,
             summary=publication_summary,
@@ -1179,27 +1336,31 @@ class ScientificPosterEngine:
             source_figure_manifest_sha256=source_figure_manifest_sha256,
             live_html_path=str(active_live_path),
             preview_uri=active_live_path.resolve().as_uri(),
+            screenshot_path=str(screenshot_path) if screenshot_path.is_file() else None,
+            screenshot_uri=str(screenshot_artifact["uri"]) if screenshot_artifact else None,
             preview_argv=preview_argv,
             selection_state_path=str(active_live_path.parent / "selection-state.json"),
             inspection=inspection,
             page_plan=page_plan,
-            content_budget=content_budget,
             density_profile=page_plan.get("density_profile"),
             focal_role=page_plan.get("focal_role"),
             design_reference=design_reference.to_dict(),
-            visual_design=(visual_design_plan.to_dict()),
+            visual_design=(reference_brief.to_dict()),
             visual_preferences=dict(visual_preferences),
             reference_source_kind=design_reference.source_kind,
             visual_review_mode=(
-                "pending"
-                if review_request is not None
+                "vlm"
+                if review_preparation_failed or review_request is not None
                 else "not-run"
                 if not inspection_passed
                 else "deterministic-only"
             ),
             parent_html_sha256=parent_html_sha256,
             visual_quality_state=(
-                "awaiting-review" if review_request is not None else "not-reviewable"
+                "revision-required" if not inspection_passed else
+                "awaiting-review"
+                if review_request is not None
+                else "not-reviewable"
             ),
             visual_iteration=(
                 review_request.get("iteration") if review_request is not None else None
@@ -1215,7 +1376,6 @@ class ScientificPosterEngine:
                 if isinstance(visual_evidence, Mapping)
                 else ""
             ),
-            inspection_feedback=inspection_feedback,
             warnings=warnings,
             artifacts=[html_artifact, inspection_artifact, *review_artifacts],
             approval={
@@ -1231,25 +1391,5 @@ class ScientificPosterEngine:
         result = {key: value for key, value in result.items() if value is not None}
         if review_request is not None:
             result["visual_review_request"] = review_request
-        state = {
-            "html_sha256": html_sha256,
-            "artifact_path": html_artifact["path"],
-            "live_html_path": str(active_live_path),
-            "source_text": source_text,
-            "source_figure_sha256s": tuple(sorted(source_figure_sha256s)),
-            "page_plan": dict(page_plan),
-            "content_budget": content_budget,
-            "design_reference": design_reference.to_dict(),
-            "visual_design": (visual_design_plan.to_dict()),
-            "visual_preferences": dict(visual_preferences),
-            "inspection": dict(inspection),
-            "visual_iteration": (
-                review_request.get("iteration") if review_request is not None else 0
-            ),
-        }
-        if checkpoint_state is not None:
-            state = {**checkpoint_state, **state}
-        self._versions[str(html_artifact["uri"])] = state
-        self._versions[html_sha256] = state
         await _runtime_io.progress(progress_callback, "poster.ready", 1.0)
         return result

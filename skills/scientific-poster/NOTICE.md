@@ -15,11 +15,10 @@ Excluded third-party assets:
 - `assets/venue-branding/*/logo.svg` contains conference names or marks. Each
   directory has its own `NOTICE.md` with the official source and permitted-use
   context; no Apache-2.0 license or broader trademark right is granted for it.
-- `seeds/*.png` contains downsampled third-party conference-poster imagery used
-  only as non-authoritative visual references. No Apache-2.0 license or
-  redistribution right is granted for those images by this package. Their
-  upstream provenance and any separate permission must be established before
-  redistributing them independently; this notice makes no rights claim.
+
+`seeds/*.png` contains original, content-free synthetic design boards created
+for this skill. They contain no paper text, research figures, logos, venue
+identity, or other third-party poster material.
 
 Research content retrieved while using the skill may likewise be governed by
 separate publisher, dataset, or service terms.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Send one bound reference/candidate image pair to the configured Omni VLM."""
+"""Send one bound candidate overview and its detail atlas to the configured VLM."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 if str(SKILL_DIR) not in sys.path:
     sys.path.insert(0, str(SKILL_DIR))
 
-from posterlib.runtime import runtime_io
-from posterlib.visual import visual_review, vlm_client, vlm_review
+from posterlib.runtime import runtime_io  # noqa: E402
+from posterlib.visual import review_contract, vlm_client, vlm_review  # noqa: E402
 
 
 async def run_request(
@@ -25,7 +25,7 @@ async def run_request(
 ) -> Path:
     """Review one request and write the bound model result."""
 
-    request = visual_review.load_request(request_path)
+    request = review_contract.load_request(request_path)
     result = await vlm_review.review_request(request, client=client)
     destination = Path(output_dir).expanduser().resolve()
     destination.mkdir(parents=True, exist_ok=True)
@@ -66,7 +66,7 @@ async def _invoke(args: argparse.Namespace) -> Path:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Compare a bound poster reference and candidate with the Omni VLM."
+        description="Review a bound poster candidate and its detail evidence with the Omni VLM."
     )
     parser.add_argument(
         "--request",
@@ -80,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--endpoint", default="")
     parser.add_argument("--model", default="")
-    parser.add_argument("--timeout", type=float, default=180.0)
+    parser.add_argument("--timeout", type=float, default=1800.0)
     args = parser.parse_args(argv)
     try:
         result_path = asyncio.run(_invoke(args))

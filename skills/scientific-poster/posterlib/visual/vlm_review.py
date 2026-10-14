@@ -6,26 +6,29 @@ import asyncio
 import hashlib
 import json
 import mimetypes
-import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-from . import visual_review, vlm_client
+from PIL import Image, UnidentifiedImageError
+
+from . import review_contract, vlm_client
 
 _REVIEW_FIELDS = {
     "verdict",
+    "comparison",
     "scores",
     "summary",
     "strengths",
-    "observation_assessments",
     "critical_issues",
     "global_directives",
 }
 _MAX_TRANSIENT_ATTEMPTS = 2
 _RETRY_BASE_DELAY_S = 0.25
 _EMBEDDED_VISUAL_MARKER = "[embedded visual omitted; inspect attached image]"
+_MAX_OVERVIEW_EDGE_PX = 2048
 
 Sleep = Callable[[float], Awaitable[None]]
 
@@ -46,34 +49,116 @@ async def review_request(
     client: vlm_client.VlmClient,
     sleep: Sleep = asyncio.sleep,
 ) -> dict[str, Any]:
-    """Review the exact reference and candidate bytes bound by a request."""
+    """Review the exact rendered candidate bytes bound by a request."""
 
     try:
-        bound = visual_review.validate_request(request)
-    except (OSError, visual_review.VisualReviewError) as exc:
+        bound = review_contract.validate_request(request)
+    except (OSError, review_contract.ReviewContractError) as exc:
         raise vlm_client.VlmError(str(exc)) from exc
+
+    result, _receipt = await review_bound_request(bound, client=client, sleep=sleep)
+    return result
+
+
+async def review_bound_request(
+    bound: Mapping[str, Any],
+    *,
+    client: vlm_client.VlmClient,
+    sleep: Sleep = asyncio.sleep,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Review an entry-validated request and return its result and checked receipt."""
 
     _require_current_file(
         bound["candidate_html_path"],
         bound["candidate_html_sha256"],
         label="candidate HTML",
     )
-    _require_current_file(
-        bound["reference"]["image_path"],
-        bound["reference_image_sha256"],
-        label="reference image",
-    )
     overview = _require_current_file(
         bound["screenshot_path"], bound["screenshot_sha256"], label="screenshot"
     )
-    images: tuple[vlm_client.VlmImage, ...] = (
+    review_images: list[vlm_client.VlmImage] = []
+    comparison_baseline = bound["content_brief"].get("comparison_baseline")
+    if comparison_baseline is not None:
+        if not isinstance(comparison_baseline, Mapping):
+            raise vlm_client.VlmError("comparison baseline must be an image binding")
+        baseline = _require_current_file(
+            comparison_baseline["path"],
+            comparison_baseline["sha256"],
+            label="comparison baseline",
+        )
+        overview_edge = _image_edge_px(overview)
+        baseline_edge = _image_edge_px(baseline)
+        pair_scale = min(1.0, _MAX_OVERVIEW_EDGE_PX / max(overview_edge, baseline_edge))
+        overview_bytes, overview_mime = _bounded_overview(
+            overview, max_edge_px=max(1, round(overview_edge * pair_scale))
+        )
+        baseline_bytes, baseline_mime = _bounded_overview(
+            baseline, max_edge_px=max(1, round(baseline_edge * pair_scale))
+        )
+        review_images.append(
+            vlm_client.VlmImage(
+                label=(
+                    "INCUMBENT CANDIDATE — current best poster; compare the proposal "
+                    "against this complete image."
+                ),
+                image_bytes=baseline_bytes,
+                mime_type=baseline_mime,
+            )
+        )
+    else:
+        overview_bytes, overview_mime = _bounded_overview(overview)
+    review_images.append(
         vlm_client.VlmImage(
-            label="CANDIDATE OVERVIEW — review the complete poster.",
-            image_bytes=overview.content,
-            mime_type=_image_mime(overview.path, label="candidate overview"),
-        ),
+            label=(
+                "PROPOSED CANDIDATE — review the complete poster and decide whether "
+                "it improves on the incumbent when one is supplied."
+            ),
+            image_bytes=overview_bytes,
+            mime_type=overview_mime,
+        )
     )
-    prompt = _review_prompt(bound)
+    quality_reference = bound["content_brief"].get("quality_reference")
+    if quality_reference is not None:
+        if not isinstance(quality_reference, Mapping) or set(quality_reference) != {"path", "sha256"}:
+            raise vlm_client.VlmError("quality reference must bind an image path and its hash")
+        reference = _require_current_file(
+            quality_reference["path"], quality_reference["sha256"], label="quality reference",
+        )
+        reference_bytes, reference_mime = _bounded_overview(reference)
+        review_images.append(vlm_client.VlmImage(
+            label=(
+                "QUALITY REFERENCE — communication-quality floor; compare hierarchy, "
+                "visual explanation and finish without copying scientific content or layout."
+            ),
+            image_bytes=reference_bytes, mime_type=reference_mime,
+        ))
+    atlas_binding = bound["visual_evidence"].get("atlas")
+    attach_detail_atlas = bool(
+        isinstance(atlas_binding, Mapping)
+        and getattr(client, "accepts_detail_atlas", False)
+    )
+    if attach_detail_atlas:
+        assert isinstance(atlas_binding, Mapping)
+        atlas = _require_current_file(
+            atlas_binding["path"],
+            atlas_binding["sha256"],
+            label="evidence detail atlas",
+        )
+        review_images.append(
+            vlm_client.VlmImage(
+                label=(
+                    "EVIDENCE DETAIL ATLAS — crops of candidate figures, not extra "
+                    "poster content; never infer whole-page scale from this image."
+                ),
+                image_bytes=atlas.content,
+                mime_type=_image_mime(atlas.path, label="evidence detail atlas"),
+            )
+        )
+    images = tuple(review_images)
+    prompt = _review_prompt(
+        bound,
+        detail_atlas_attached=attach_detail_atlas,
+    )
     raw = await _generate_with_transient_retry(
         client,
         prompt,
@@ -118,25 +203,12 @@ async def _generate_with_transient_retry(
 
 
 def parse_review_json(text: str) -> dict[str, Any]:
-    """Parse a raw or fenced JSON object returned by the configured VLM."""
+    """Decode review syntax at the shared VLM boundary before domain validation."""
 
-    candidate = text.strip()
-    fenced = re.fullmatch(
-        r"```(?:json)?\s*(.*?)\s*```",
-        candidate,
-        flags=re.DOTALL | re.IGNORECASE,
-    )
-    if fenced:
-        candidate = fenced.group(1).strip()
     try:
-        value = json.loads(candidate)
-    except json.JSONDecodeError as exc:
-        raise VlmReviewResponseError(
-            f"VLM review is not valid JSON: {exc.msg}"
-        ) from exc
-    if not isinstance(value, dict):
-        raise VlmReviewResponseError("VLM review must be a JSON object")
-    return value
+        return vlm_client.parse_json_object(text)
+    except vlm_client.VlmError as exc:
+        raise VlmReviewResponseError(str(exc)) from exc
 
 
 def _validated_result(
@@ -144,25 +216,28 @@ def _validated_result(
     raw: str,
     *,
     model: str,
-) -> dict[str, Any]:
-    review = parse_review_json(raw)
-    missing = sorted(_REVIEW_FIELDS - set(review))
-    extra = sorted(set(review) - _REVIEW_FIELDS)
-    if missing or extra:
-        details = []
-        if missing:
-            details.append("missing " + ", ".join(missing))
-        if extra:
-            details.append("unexpected " + ", ".join(extra))
-        raise VlmReviewResponseError(
-            "VLM review fields are invalid: " + "; ".join(details)
-        )
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    # The model owns semantic review fields; the host owns artifact provenance.
+    # Ignore unused commentary fields instead of spending another vision call
+    # repairing data no downstream consumer reads. Required values remain strict.
+    review = {key: value for key, value in parse_review_json(raw).items() if key in _REVIEW_FIELDS}
+    if isinstance(review.get("critical_issues"), list):
+        review["critical_issues"] = [
+            {key: value for key, value in issue.items() if key in {"criterion", "targets", "operation"}}
+            if isinstance(issue, Mapping) else issue
+            for issue in review["critical_issues"]
+        ]
+    if "verdict" not in review and review.get("critical_issues"):
+        # Valid critical issues already preclude a pass. Keep that feedback
+        # without repeating vision inference for a redundant decision field.
+        # The shared result validator below still validates every issue; a pass
+        # is never inferred, and explicit contradictory verdicts remain invalid.
+        review["verdict"] = "revise"
     result = {
-        "schema": visual_review.RESULT_SCHEMA,
+        "schema": review_contract.RESULT_SCHEMA,
         "request_sha256": request["request_sha256"],
         "candidate_html_sha256": request["candidate_html_sha256"],
         "screenshot_sha256": request["screenshot_sha256"],
-        "reference_image_sha256": request["reference_image_sha256"],
         "visual_evidence_sha256": request["visual_evidence_sha256"],
         "reviewer": {
             "provider": "omni-vlm",
@@ -172,10 +247,10 @@ def _validated_result(
         **review,
     }
     try:
-        visual_review.validate_result(request, result)
-    except visual_review.VisualReviewError as exc:
+        receipt = review_contract.build_receipt(request, result)
+    except review_contract.ReviewContractError as exc:
         raise VlmReviewResponseError(f"VLM returned an invalid review: {exc}") from exc
-    return result
+    return result, receipt
 
 
 def _require_current_file(path: Any, expected_sha256: Any, *, label: str) -> _BoundFile:
@@ -202,22 +277,49 @@ def _image_mime(path: Path, *, label: str) -> str:
     return image_mime
 
 
+def _image_edge_px(bound: _BoundFile) -> int:
+    try:
+        with Image.open(BytesIO(bound.content)) as source:
+            return max(source.size)
+    except (OSError, UnidentifiedImageError) as exc:
+        raise vlm_client.VlmError("poster overview is not a readable image") from exc
+
+
+def _bounded_overview(
+    bound: _BoundFile, *, max_edge_px: int = _MAX_OVERVIEW_EDGE_PX,
+) -> tuple[bytes, str]:
+    """Bound VLM pixel cost while the request still hashes the original screenshot."""
+
+    mime_type = _image_mime(bound.path, label="candidate overview")
+    try:
+        with Image.open(BytesIO(bound.content)) as source:
+            if max(source.size) <= max_edge_px:
+                return bound.content, mime_type
+            overview = source.convert("RGB")
+            overview.thumbnail(
+                (max_edge_px, max_edge_px),
+                Image.Resampling.LANCZOS,
+            )
+            output = BytesIO()
+            overview.save(output, format="PNG")
+    except (OSError, UnidentifiedImageError) as exc:
+        raise vlm_client.VlmError("candidate overview is not a readable image") from exc
+    return output.getvalue(), "image/png"
+
+
 def _review_semantic_shape(request: Mapping[str, Any]) -> dict[str, Any]:
     """Return the exact model-owned fields expected by the review validator."""
 
     return {
         "verdict": "pass or revise",
-        "scores": {criterion: "integer 1-5" for criterion in visual_review.CRITERIA},
+        "comparison": (
+            "improved, unchanged, or regressed"
+            if request["content_brief"].get("comparison_baseline") is not None
+            else "initial"
+        ),
+        "scores": {criterion: 3 for criterion in review_contract.CRITERIA},
         "summary": "concise visual assessment",
         "strengths": ["observed visual strength"],
-        "observation_assessments": [
-            {
-                "observation_id": str(item["id"]),
-                "judgment": "acceptable, actionable, or uncertain",
-                "reason": "visible explanation grounded in overview or evidence atlas",
-            }
-            for item in request["visual_evidence"]["observations"]
-        ],
         "critical_issues": [],
         "global_directives": [],
     }
@@ -227,7 +329,7 @@ def _prompt_json(value: Any) -> str:
     """Serialize model context without repeating embedded visual bytes.
 
     The exact request remains content-addressed and unchanged for validation. The VLM
-    already receives the rendered reference, candidate, and evidence images, so inline
+    already receives the candidate and evidence images, so inline
     ``data:`` payloads inside the scientific snapshot add transport and context cost but
     no review evidence.
     """
@@ -260,35 +362,38 @@ def _review_revise_issue_shape() -> dict[str, Any]:
 
     return {
         "criterion": "one rubric key",
-        "priority": "critical, major, or minor",
         "targets": [
             (
-                "1-4 items: exact grounded module ids for content-replan; existing "
-                "module ids or visual regions for restyle/reflow"
+                "exact grounded module ids; poster is also allowed only for a "
+                "whole-page restyle or reflow"
             )
         ],
-        "evidence": "visible candidate-vs-reference evidence",
-        "desired_outcome": "specific whole-page visible end state, not an unverified move",
         "operation": "restyle, reflow, or content-replan",
-        "acceptance_check": "visible check for the repaired result",
     }
 
 
-def _review_contract_guidance() -> tuple[str, ...]:
+def _review_contract_guidance(request: Mapping[str, Any]) -> tuple[str, ...]:
     """Explain verdict-dependent arrays without showing a contradictory pass shape."""
 
     return (
-        "For pass, critical_issues and global_directives must both be empty arrays.",
+        "Scores are JSON integers from 1 to 5 and describe the five rubric dimensions.",
         (
-            "For revise, critical_issues must contain at least one object with exactly "
-            "this element structure:"
+            "comparison must be improved, unchanged, or regressed. Judge the whole "
+            "proposal against the whole incumbent; a local gain does not count as "
+            "improved when another material dimension becomes worse."
+            if request["content_brief"].get("comparison_baseline") is not None
+            else "comparison must be initial because no incumbent is attached."
         ),
+        "A pass has empty critical_issues and global_directives. A revise has at least one issue.",
+        "Each issue has exactly this shape:",
         _prompt_json(_review_revise_issue_shape()),
-        (
-            "For revise, keep global_directives empty unless a genuine cross-task "
-            "constraint or preservation directive is needed."
-        ),
+        "The concise summary states the visible defect and reading impact. The author chooses "
+        "the repair; do not prescribe coordinates, columns, rows or other layout topology.",
+        "The host binds observations from the criterion and exact targets. Do not repeat "
+        "observation ids or measurements in the response. Keep global_directives empty unless "
+        "a necessary preservation constraint applies.",
     )
+
 
 
 def _review_repair_prompt(
@@ -308,93 +413,84 @@ def _review_repair_prompt(
             f"Exact validation error: {validation_error}",
             "Return one corrected JSON object only, with exactly this semantic shape:",
             _prompt_json(_review_semantic_shape(request)),
-            *_review_contract_guidance(),
+            *_review_contract_guidance(request),
             "Preserve valid visual judgments; repair only the contract-invalid fields.",
-            "Previous invalid JSON:",
-            vlm_client.bounded_response_excerpt(previous_response),
+            "Previous response, encoded as one JSON string (decode before correcting):",
+            json.dumps(previous_response, ensure_ascii=False),
         ]
     )
 
 
-def _review_prompt(request: Mapping[str, Any]) -> str:
+def _review_prompt(
+    request: Mapping[str, Any],
+    *,
+    detail_atlas_attached: bool = False,
+) -> str:
+    """Ask for one current-artifact judgment without replaying authoring history."""
+
     content_brief = request["content_brief"]
-    raw_visual_design = content_brief.get("visual_design")
-    raw_visual_design = (
-        raw_visual_design if isinstance(raw_visual_design, Mapping) else {}
-    )
-    executable_visual_design = {
-        key: raw_visual_design[key]
-        for key in ("typography", "palette", "layout")
-        if key in raw_visual_design
-    }
     review_content_brief = {
         key: content_brief[key]
-        for key in ("page", "readability_reference", "grounded_authority")
+        for key in ("page", "comparison_baseline_page", "rendered_inspection")
         if key in content_brief
     }
+    rendered = review_content_brief.get("rendered_inspection")
+    if isinstance(rendered, Mapping):
+        review_content_brief["rendered_inspection"] = {
+            "status": rendered.get("status"),
+            "issues": [item for item in rendered.get("issues", [])
+                       if isinstance(item, Mapping)],
+        }
+    authority = content_brief.get("grounded_authority")
+    if isinstance(authority, Mapping):
+        review_content_brief["grounded_authority"] = review_contract.module_binding_brief(
+            authority
+        )
+    attached_image_guidance = "PROPOSED CANDIDATE is the poster being evaluated."
+    if content_brief.get("comparison_baseline") is not None:
+        attached_image_guidance += (
+            " INCUMBENT CANDIDATE is the current best version. Compare both complete "
+            "posters in this same judgment. Their overviews use one pixel scale; the "
+            "declared incumbent and proposal page dimensions give their physical sizes. "
+            "Mark improved only when the proposal makes "
+            "material progress without a material regression elsewhere; unchanged or "
+            "regressed proposals must not replace the incumbent."
+        )
+    if content_brief.get("quality_reference") is not None:
+        attached_image_guidance += (
+            " QUALITY REFERENCE follows: the user's reference poster sets the comparison "
+            "standard for hierarchy, explanatory clarity, relative type scale and purposeful "
+            "space use. A pass requires comparable visual communication quality, not merely "
+            "an unclipped layout. Do not copy its scientific content, require identical "
+            "columns or penalize a different successful design. Compare the ease of reading "
+            "the contribution, method and evidence in each complete image."
+        )
+    if detail_atlas_attached:
+        attached_image_guidance += " The final EVIDENCE DETAIL ATLAS only magnifies candidate regions."
     return "\n".join(
         [
-            "Act as a strict visual reviewer for a top-conference academic poster.",
+            "Act as an independent visual reviewer for a top-conference academic poster.",
             str(request["instructions"]),
+            attached_image_guidance,
             (
-                "CANDIDATE OVERVIEW is the only attached image and is the complete poster "
-                "being judged. The design planner already distilled the separate reference "
-                "into the bound grammar metadata below; reference pixels are not attached "
-                "to this final review."
-            ),
-            (
-                "Only CANDIDATE OVERVIEW depicts whole-page geometry. No separate "
-                "evidence-atlas crop is attached; deterministic observations below are "
-                "coordinate facts about that same complete overview."
-            ),
-            "Treat the grounded candidate content brief as the only authority for scientific content.",
-            "Judge only what is visibly present in the attached full-resolution images.",
-            "Score every rubric criterion from 1 to 5.",
-            (
-                "Assess every supplied evidence observation exactly once by its exact id. "
-                "The measurements identify what to inspect and are not independent acceptance "
-                "gates. Mark each acceptable, actionable, or uncertain and explain the visible "
-                "effect. Only visible, consequential defects can block delivery."
-            ),
-            (
-                "For inter_module_gap and lane_entry_offset observations, inspect the complete "
-                "overview to decide "
-                "whether the separation supports hierarchy or interrupts a "
-                "visual lane. A lane_entry_offset is a factual difference between the first "
-                "module positions, not an automatic defect. Several lanes starting far below an "
-                "isolated module can reveal a detached pre-grid stage. Do not describe later "
-                "columns as aligned unless the visible content geometry supports that judgment. "
-                "A small page-trailing margin does not excuse a "
-                "large accidental interior void, including one created when a full-width "
-                "section cue waits below uneven modules. Judge terminal balance directly from "
-                "the complete poster rather than turning small differences between column "
-                "endings into a separate failure condition. "
-                "Do not use content-replan merely to scale modules up or consume a common bottom "
-                "band; request reflow or restyle unless grounded copy itself must be compressed "
-                "or reorganized. Do not invent a pixel clearance threshold that is absent from "
-                "the request; acceptance checks must describe a visible, evidence-relative end "
-                "state without creating a new numeric gate. "
-                "This remains a visual judgment, not a numeric threshold or an equal-height "
-                "rule."
-            ),
-            (
-                "Source figures retain the paper's own typography and may be dense multi-panel "
-                "summaries. Judge whether their panel structure, comparative trend, legend, and "
-                "key annotations are visibly distinguishable together with the adjacent caption "
-                "and takeaway. Do not require every paper-original axis label to match poster body "
-                "type or be readable from the downscaled whole-page preview, and subplot count "
-                "alone is not evidence of illegibility. Request enlargement only when the actual "
-                "full-resolution evidence fails to communicate the cited result."
-            ),
-            (
-                "Use only the bound executable visual contract below as reference-specific "
-                "authority. Other design-plan prose is diagnostic and cannot create a review gate."
+                "Judge legibility from the image at the declared physical page size. "
+                "Compare title, body, table and figure-label scale at the declared "
+                "physical page sizes. Equal displayed image height does not mean equal "
+                "physical scale when the sheets have different dimensions; use measured "
+                "font and painted-figure sizes in millimetres before judging legibility. A font "
+                "that clears an advisory size in millimetres can still read too small "
+                "relative to a large canvas; use the measured type-to-page ratios as "
+                "context, not as automatic pass thresholds. "
+                "No transcript is supplied: knowing the underlying words or numbers is not "
+                "evidence that a visitor can read them. The source author owns scientific "
+                "fidelity; this review owns visual communication. A failed rendered_inspection "
+                "requires revise even if the visible portion looks good. Inspect the whole page "
+                "for large unoccupied cells between content bands or beside spanning modules; "
+                "page-wide content does not make an interior void intentional."
             ),
             "Return only one JSON object with exactly this semantic shape:",
             _prompt_json(_review_semantic_shape(request)),
-            *_review_contract_guidance(),
-            "Bound executable visual contract:",
-            _prompt_json(executable_visual_design),
+            *_review_contract_guidance(request),
             "Grounded poster content brief:",
             _prompt_json(review_content_brief),
             "Deterministic visual evidence observations:",

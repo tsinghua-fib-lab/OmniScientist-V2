@@ -1208,6 +1208,15 @@ wheels = [
 ]
 
 [[package]]
+name = "latex2mathml"
+version = "3.81.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/88/db/336c38300e44582752b95842b15a4be8fe656914cf5b02ad1bec53cebceb/latex2mathml-3.81.1.tar.gz", hash = "sha256:c95add0c0fcdecad2d70567e0643050d5ea1149fb2e98a5d5792fb1c8eea2ed5", size = 77475, upload-time = "2026-09-07T19:55:11.037Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/30/b8bcfb01a2514cb7554a048ed52883de276e66d757c3cc535a3c29eb9e98/latex2mathml-3.81.1-py3-none-any.whl", hash = "sha256:c337668441b71c819b6733905a8058ba9a9d767bae11a0c5fdacb3aff31361bd", size = 79159, upload-time = "2026-09-07T19:55:09.611Z" },
+]
+
+[[package]]
 name = "lxml"
 version = "6.1.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1322,6 +1331,15 @@ wheels = [
 ]
 
 [[package]]
+name = "mathml2omml"
+version = "0.0.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/4a/0c/8ce3a89839fb263fb9b66e291c9419adcdb57f214c7ca7c9a5d1b28ac4ba/mathml2omml-0.0.2.tar.gz", hash = "sha256:c67b289cd09208c4b6f3c4f74653f6d86edfd8fff4c18e6c95a7afa9994e7323", size = 23280, upload-time = "2019-11-24T07:30:53.556Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b8/c9/0359d7975900d26e30c39d0058828cc1f787ae75171866112aa7e4ce4c76/mathml2omml-0.0.2-py3-none-any.whl", hash = "sha256:6a2a1a10e90d7d8a672a1b37b6b49a6187e6720439aeb922949d254bb4656f25", size = 23853, upload-time = "2019-11-24T07:30:51.486Z" },
+]
+
+[[package]]
 name = "matplotlib"
 version = "3.11.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1409,6 +1427,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c1/ee/94c6c50ffc5b5cf4737052275d11b57367f32d1a8516e31dcd60591b3916/mcp-1.28.0.tar.gz", hash = "sha256:559d3f9943674cafbe5744c5d3794f3237e8b47f9bbc58e20c0fad680d8487c2", size = 636040, upload-time = "2026-06-16T21:37:17.996Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/2e/e1/4c1dc1fbb688641a712d34650c3d58bbbdcb314ddb75bc5817bbf33515a4/mcp-1.28.0-py3-none-any.whl", hash = "sha256:9c1e7cf3a9125557e418ecd4fed8e9adddce81b0dfdae4d6601d700f5beb71a4", size = 221959, upload-time = "2026-06-16T21:37:16.579Z" },
+]
+
+[[package]]
+name = "mdit-py-plugins"
+version = "0.6.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "markdown-it-py" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/59/fc/f8d0863f8862f25602c0404d75568e89fb6b4109804645e5cdfb1be5cf56/mdit_py_plugins-0.6.1.tar.gz", hash = "sha256:a2bca0f039f39dbd35fb74ae1b5f998608c437463371f0ff7f49a19a17a114d0", size = 56114, upload-time = "2026-05-13T09:03:38.91Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a5/69/6da5581c6a7fede7dc261bf4e67d6adca4196f176b43288b55b3db395b6e/mdit_py_plugins-0.6.1-py3-none-any.whl", hash = "sha256:214c82fb2ac524472ab6a5bcab1de80f73b50443e187f401bfd77efbc7c6481d", size = 66663, upload-time = "2026-05-13T09:03:37.76Z" },
 ]
 
 [[package]]
@@ -1720,18 +1750,27 @@ dependencies = [
     { name = "httpx" },
     { name = "json-repair" },
     { name = "jsonschema" },
+    { name = "latex2mathml" },
+    { name = "lxml" },
+    { name = "markdown-it-py" },
+    { name = "mathml2omml" },
     { name = "matplotlib" },
+    { name = "mdit-py-plugins" },
     { name = "packaging" },
+    { name = "pillow" },
     { name = "platformdirs" },
+    { name = "playwright" },
     { name = "prompt-toolkit" },
     { name = "pydantic" },
     { name = "pymupdf" },
     { name = "pymupdf4llm" },
+    { name = "pyparsing" },
     { name = "python-pptx" },
     { name = "pyyaml" },
     { name = "qrcode" },
     { name = "rich" },
     { name = "sqlalchemy" },
+    { name = "tinycss2" },
     { name = "tomli-w" },
     { name = "typer" },
     { name = "tzdata" },
@@ -1802,17 +1841,25 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.21" },
     { name = "lark-oapi", marker = "extra == 'all'", specifier = ">=1.6.8" },
     { name = "lark-oapi", marker = "extra == 'channels'", specifier = ">=1.6.8" },
+    { name = "latex2mathml", specifier = ">=3.81,<4" },
+    { name = "lxml", specifier = ">=5,<7" },
+    { name = "markdown-it-py", specifier = ">=4,<5" },
+    { name = "mathml2omml", specifier = "==0.0.2" },
     { name = "matplotlib", specifier = ">=3.8" },
     { name = "mcp", marker = "extra == 'all'", specifier = ">=1.2" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.2" },
+    { name = "mdit-py-plugins", specifier = ">=0.6,<0.7" },
     { name = "modal", marker = "extra == 'all'", specifier = ">=0.63" },
     { name = "modal", marker = "extra == 'compute'", specifier = ">=0.63" },
     { name = "packaging", specifier = ">=23.0" },
+    { name = "pillow", specifier = ">=10" },
     { name = "platformdirs", specifier = ">=4.2" },
+    { name = "playwright", specifier = ">=1.49,<2" },
     { name = "prompt-toolkit", specifier = ">=3.0.52" },
     { name = "pydantic", specifier = ">=2.5" },
-    { name = "pymupdf", specifier = ">=1.24" },
+    { name = "pymupdf", specifier = ">=1.28" },
     { name = "pymupdf4llm", specifier = ">=0.0.17" },
+    { name = "pyparsing", specifier = ">=3.2,<4" },
     { name = "pypdf", marker = "extra == 'all'", specifier = ">=4.0" },
     { name = "pypdf", marker = "extra == 'pdf'", specifier = ">=4.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
@@ -1829,6 +1876,7 @@ requires-dist = [
     { name = "starlette", marker = "extra == 'web'", specifier = ">=0.41" },
     { name = "tiktoken", marker = "extra == 'all'", specifier = ">=0.7" },
     { name = "tiktoken", marker = "extra == 'tokens'", specifier = ">=0.7" },
+    { name = "tinycss2", specifier = ">=1.4,<2" },
     { name = "tomli-w", specifier = ">=1.0" },
     { name = "typer", specifier = ">=0.12" },
     { name = "tzdata", specifier = ">=2024.1" },
@@ -1976,6 +2024,25 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d7/47/e4501f49c178ae1d9f4a75073fda4204f52647993f075a9db4d14930e0c5/platformdirs-4.10.0.tar.gz", hash = "sha256:31e761a6a0ca04faf7353ea759bdba55652be214725111e5aac52dfa29d4bef7", size = 31224, upload-time = "2026-05-28T03:32:53.587Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/81/e6/cd9575ac904136b3cbf7aa7ee819ef86eedb7274e46f230e94ea4342e729/platformdirs-4.10.0-py3-none-any.whl", hash = "sha256:fb516cdb12eb0d857d0cd85a7c57cea4d060bee4578d6cf5a14dfdf8cbf8784a", size = 22743, upload-time = "2026-05-28T03:32:52.175Z" },
+]
+
+[[package]]
+name = "playwright"
+version = "1.63.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "greenlet" },
+    { name = "pyee" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/19/dd/fbb3d34228ad753bc14464d5f2252585b73367539775a88d0a3949cf5a45/playwright-1.63.0-py3-none-macosx_10_13_x86_64.whl", hash = "sha256:84c540759e8e7f01e690e197e04060f48899d37cea322299f255843273d3385d", size = 44278407, upload-time = "2026-09-15T16:49:06.045Z" },
+    { url = "https://files.pythonhosted.org/packages/f5/9a/948b930b1a8c4ee869e5a139a2b7747caa06aab56a3f09a2f0abdcbda221/playwright-1.63.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:fd1aa00631d44d55e56e0975bf3f3f285fac4a9fd2813183f0c12a488f1a1b24", size = 42944679, upload-time = "2026-09-15T16:49:10.039Z" },
+    { url = "https://files.pythonhosted.org/packages/94/11/dc5c13fa1602371603acd461be47529c1b3513815d3a0dc98f642c291a10/playwright-1.63.0-py3-none-macosx_11_0_universal2.whl", hash = "sha256:c89fc4736502a1f0fac2c8ca5d10c0cbc1c669f1f4774a2d8507a43140e4d53f", size = 44278410, upload-time = "2026-09-15T16:49:13.861Z" },
+    { url = "https://files.pythonhosted.org/packages/27/9c/103a5037789062bdab27c7dca53f3ca6b075b572ab2cd96eec825b3aec4e/playwright-1.63.0-py3-none-manylinux1_x86_64.whl", hash = "sha256:ad21bc07516b187965a7521c5cf0df0bd657b17482eaad74335272d35a2b07de", size = 48217159, upload-time = "2026-09-15T16:49:17.404Z" },
+    { url = "https://files.pythonhosted.org/packages/f3/82/3d85505284c5a210f2da6c07b8f757524e79d1fba9cfdafe1eafb766ae59/playwright-1.63.0-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:354e15b29503565fc598b89f16fbe070459343bef9d7498a93e304864000c6a7", size = 47902708, upload-time = "2026-09-15T16:49:21.055Z" },
+    { url = "https://files.pythonhosted.org/packages/69/8d/f74ff6b52751859f4b69caf66aa7d4a3c8d6c1f0c7dc9920da103612ee39/playwright-1.63.0-py3-none-win32.whl", hash = "sha256:660c00c62639e31b16700ba5456b351ddba55bb766b7ce8261223aa34928e482", size = 38606075, upload-time = "2026-09-15T16:49:29.546Z" },
+    { url = "https://files.pythonhosted.org/packages/76/eb/d6b8d92658038e260dbc7dd69fb3fdbe245aac283953de8b50b02bfe5f61/playwright-1.63.0-py3-none-win_amd64.whl", hash = "sha256:2f9a707a6c6c91157ed77bff2b8caeb04b3c8d46e70d585fc134298cbe4b5cc6", size = 38606082, upload-time = "2026-09-15T16:49:32.838Z" },
+    { url = "https://files.pythonhosted.org/packages/be/75/2432b3e3c7c62103b72d4c4cc8b16a56383ada372bbb0d1278591e988f71/playwright-1.63.0-py3-none-win_arm64.whl", hash = "sha256:1e4a3a838ce22fb68ad17193fcd142a19610d9d70fb9966d2239f5dddc0cc05b", size = 34523554, upload-time = "2026-09-15T16:49:36.455Z" },
 ]
 
 [[package]]
@@ -2293,6 +2360,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/5c/b5/8f48e906c3e0205276e8bd8cb7512217a87b2685304d64be27cad5b3019f/pydantic_settings-2.14.2.tar.gz", hash = "sha256:c19dd64b19097f1de80184f0cc7b0272a13ae6e170cbf240a3e27e381ed14a5f", size = 237700, upload-time = "2026-06-19T13:44:56.324Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/77/c1/6e422f34e569cf8e18df68d1939c81c099d2b61e4f7d9621c8a77560799c/pydantic_settings-2.14.2-py3-none-any.whl", hash = "sha256:a20c97b37910b6550d5ea50fbcc2d4187defe58cd57070b73863d069419c9440", size = 61715, upload-time = "2026-06-19T13:44:55.02Z" },
+]
+
+[[package]]
+name = "pyee"
+version = "13.0.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8b/04/e7c1fe4dc78a6fdbfd6c337b1c3732ff543b8a397683ab38378447baa331/pyee-13.0.1.tar.gz", hash = "sha256:0b931f7c14535667ed4c7e0d531716368715e860b988770fc7eb8578d1f67fc8", size = 31655, upload-time = "2026-02-14T21:12:28.044Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a0/c4/b4d4827c93ef43c01f599ef31453ccc1c132b353284fc6c87d535c233129/pyee-13.0.1-py3-none-any.whl", hash = "sha256:af2f8fede4171ef667dfded53f96e2ed0d6e6bd7ee3bb46437f77e3b57689228", size = 15659, upload-time = "2026-02-14T21:12:26.263Z" },
 ]
 
 [[package]]
@@ -3050,6 +3129,18 @@ wheels = [
 ]
 
 [[package]]
+name = "tinycss2"
+version = "1.5.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "webencodings" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a3/ae/2ca4913e5c0f09781d75482874c3a95db9105462a92ddd303c7d285d3df2/tinycss2-1.5.1.tar.gz", hash = "sha256:d339d2b616ba90ccce58da8495a78f46e55d4d25f9fd71dfd526f07e7d53f957", size = 88195, upload-time = "2025-11-23T10:29:10.082Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/60/45/c7b5c3168458db837e8ceab06dc77824e18202679d0463f0e8f002143a97/tinycss2-1.5.1-py3-none-any.whl", hash = "sha256:3415ba0f5839c062696996998176c4a3751d18b7edaaeeb658c9ce21ec150661", size = 28404, upload-time = "2025-11-23T10:29:08.676Z" },
+]
+
+[[package]]
 name = "toml"
 version = "0.10.2"
 source = { registry = "https://pypi.org/simple" }
@@ -3263,6 +3354,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/34/74/c6428f875774288bec1396f5bfcbc2d925700a4dad61727fd5f2b12f249d/wcwidth-0.8.2.tar.gz", hash = "sha256:91fbef97204b96a3d4d421609b80340b760cf33e26da123ff243d76b1fda8dda", size = 1466253, upload-time = "2026-06-29T18:11:11.601Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/96/42/3e5985a0a7e57de470b320c6d6a1a67c844f6737a587f3d44dd13d1819e7/wcwidth-0.8.2-py3-none-any.whl", hash = "sha256:d63947694a0539a1d51e01eda7caf800c291020e6cdd7e28ad7b14dd33ad4f85", size = 323166, upload-time = "2026-06-29T18:11:09.888Z" },
+]
+
+[[package]]
+name = "webencodings"
+version = "0.6.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d5/a0/8fd707bcb776a7be556bad06a2ea5fb9bd519df78ef8e26f70ccf0f38bff/webencodings-0.6.1.tar.gz", hash = "sha256:565f9ad031c702dae404e27a099e3e09186a3ab1b9520f06d215502b651fd910", size = 15001, upload-time = "2026-08-15T14:22:57.549Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/77/c6/040cbc72480d789a5f40d63fb484d3106554c4dfa2d2b70ad5022057750f/webencodings-0.6.1-py3-none-any.whl", hash = "sha256:7fab6269c8bf237c657876b52058ccb182e861518d1c695c1a9aaa8c1c105d5b", size = 8745, upload-time = "2026-08-15T14:22:56.31Z" },
 ]
 
 [[package]]

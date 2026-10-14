@@ -1,17 +1,20 @@
 """Provider-neutral multimodal client for Omni-managed VLM endpoints.
 
-The endpoint contract is deliberately small: Omni supplies a complete
-OpenAI-compatible ``/chat/completions`` URL, model name, and bearer credential.
-Skills do not infer providers from URLs and do not carry provider-specific auth or
-payload branches.
+The endpoint contract is deliberately small: Omni supplies an OpenAI-compatible
+base URL or ``/chat/completions`` URL, model name, and bearer credential. Skills do
+not infer providers from URLs and do not carry provider-specific auth or payload
+branches.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
+import json
 import math
 import os
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -25,15 +28,15 @@ _MODEL_ENV = "OMNI_VLM_MODEL"
 _API_KEY_ENV = "OMNI_VLM_API_KEY"
 _HOST_MODEL = "host-configured"
 _LABELED_IMAGE_MAX_WIDTH = 4_096
-_LABELED_IMAGE_MAX_HEIGHT = 4_096
 _SINGLE_IMAGE_MAX_BYTES = 2 * 1024 * 1024
 _SINGLE_IMAGE_MIN_DIMENSION = 640
 _MONTAGE_PANEL_WIDTH = 1_920
 _MONTAGE_MAX_IMAGE_HEIGHT = 2_160
 _MONTAGE_GAP = 32
 _MONTAGE_LABEL_HEIGHT = 88
-_DEFAULT_RESPONSE_EXCERPT_CHARS = 8_000
 _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+_TRANSIENT_ATTEMPTS = 2
+_RETRY_DELAY_S = 0.25
 
 
 class VlmError(RuntimeError):
@@ -44,17 +47,66 @@ class RetryableVlmError(VlmError):
     """A transient endpoint failure that may succeed on a bounded retry."""
 
 
-def bounded_response_excerpt(
-    value: Any,
+async def generate_json_text_bounded(
+    client: Any,
+    prompt: str,
     *,
-    max_chars: int = _DEFAULT_RESPONSE_EXCERPT_CHARS,
+    images: Sequence[VlmImage],
+    deadline: float | None,
+    timeout_message: str,
 ) -> str:
-    """Return a bounded provider response suitable for a corrective prompt."""
+    """Generate within one shared deadline and retry one transient failure."""
 
-    text = str(value)
-    if len(text) <= max_chars:
-        return text
-    return text[:max_chars] + "\n[previous response truncated]"
+    for attempt in range(_TRANSIENT_ATTEMPTS):
+        remaining = (
+            None
+            if deadline is None
+            else deadline - asyncio.get_running_loop().time()
+        )
+        if remaining is not None and remaining <= 0:
+            raise TimeoutError(timeout_message)
+        try:
+            if remaining is None:
+                return await client.generate_json_text(prompt, images=images)
+            async with asyncio.timeout(remaining):
+                return await client.generate_json_text(prompt, images=images)
+        except RetryableVlmError:
+            if attempt == _TRANSIENT_ATTEMPTS - 1:
+                raise
+            await asyncio.sleep(_RETRY_DELAY_S)
+    raise AssertionError("unreachable VLM transient retry state")
+
+
+def parse_json_object(text: str) -> dict[str, Any]:
+    """Decode one complete VLM object without synthesizing missing review data."""
+
+    candidate = text.strip()
+    fenced = re.fullmatch(
+        r"```(?:json)?\s*(.*?)\s*```", candidate, re.DOTALL | re.IGNORECASE
+    )
+    if fenced:
+        candidate = fenced.group(1).strip()
+    try:
+        value = json.loads(candidate)
+    except json.JSONDecodeError as exc:
+        raise VlmError(f"VLM response is not valid JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise VlmError("VLM response must be a JSON object")
+    return value
+
+
+def _chat_completions_url(endpoint: str) -> str:
+    """Normalize a site origin, API base, or complete chat endpoint."""
+
+    parsed = urlparse(endpoint)
+    path = (parsed.path or "").rstrip("/")
+    if path.lower().endswith("/chat/completions"):
+        request_path = path
+    elif path:
+        request_path = f"{path}/chat/completions"
+    else:
+        request_path = "/v1/chat/completions"
+    return parsed._replace(path=request_path, fragment="").geturl()
 
 
 @dataclass(frozen=True)
@@ -97,10 +149,10 @@ class VlmConfig:
             isinstance(self.timeout_s, bool)
             or not isinstance(self.timeout_s, (int, float))
             or not math.isfinite(float(self.timeout_s))
-            or not 0 < float(self.timeout_s) <= 600
+            or float(self.timeout_s) <= 0
         ):
             raise VlmError("VLM timeout must be a positive finite number")
-        object.__setattr__(self, "endpoint", endpoint)
+        object.__setattr__(self, "endpoint", _chat_completions_url(endpoint))
         object.__setattr__(self, "model", model)
         object.__setattr__(self, "api_key", api_key)
         object.__setattr__(self, "timeout_s", float(self.timeout_s))
@@ -164,6 +216,12 @@ class VlmClient:
 
         return self._config.model
 
+    @property
+    def accepts_detail_atlas(self) -> bool:
+        """Keep automatic review overview-only when inputs become one montage."""
+
+        return False
+
     async def generate_json_text(
         self,
         prompt: str,
@@ -181,22 +239,22 @@ class VlmClient:
             if not isinstance(image, VlmImage):
                 raise VlmError("VLM images must be VlmImage objects")
         if len(normalized_images) >= 2:
+            montage = _labeled_montage_data_url(normalized_images)
             content.append(
                 {
                     "type": "text",
                     "text": (
-                        "Each following image carries its role in a deterministic "
-                        "pixel label. The embedded REFERENCE, CANDIDATE, and EVIDENCE "
-                        "labels are authoritative; never swap their roles."
+                        "The single attached image is a deterministic labeled montage. "
+                        "Read each pane by its embedded label and preserve the original "
+                        "left-to-right image order."
                     ),
                 }
             )
-            content.extend(
+            content.append(
                 {
                     "type": "image_url",
-                    "image_url": {"url": _pixel_labeled_image_data_url(image)},
+                    "image_url": {"url": montage},
                 }
-                for image in normalized_images
             )
         else:
             for image in normalized_images:
@@ -206,7 +264,7 @@ class VlmClient:
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": _bounded_single_image_data_url(image)
+                                "url": bounded_image_data_url(image)
                             },
                         },
                     ]
@@ -221,9 +279,14 @@ class VlmClient:
             "Content-Type": "application/json",
         }
         try:
+            endpoint_host = (urlparse(self._config.endpoint).hostname or "").lower()
             async with httpx.AsyncClient(
                 timeout=self._config.timeout_s,
                 transport=self._transport,
+                # A loopback VLM is the local service itself. System proxy
+                # discovery can otherwise route 127.0.0.1 through a desktop proxy
+                # and leave a healthy local reviewer waiting on the wrong socket.
+                trust_env=endpoint_host not in _LOOPBACK_HOSTS,
             ) as client:
                 response = await client.post(
                     self._config.endpoint,
@@ -267,6 +330,12 @@ class HostVlmClient:
 
         return _HOST_MODEL
 
+    @property
+    def accepts_detail_atlas(self) -> bool:
+        """Keep the host port's established overview-only review contract."""
+
+        return False
+
     async def generate_json_text(
         self,
         prompt: str,
@@ -286,7 +355,7 @@ class HostVlmClient:
 
         reference_image_uri: str | None = None
         if len(normalized_images) == 1:
-            reference_image_uri = _bounded_single_image_data_url(
+            reference_image_uri = bounded_image_data_url(
                 normalized_images[0]
             )
         elif len(normalized_images) >= 2:
@@ -367,9 +436,22 @@ def _image_data_url(image: VlmImage) -> str:
     return f"data:{mime_type};base64,{encoded}"
 
 
-def _bounded_single_image_data_url(source: VlmImage) -> str:
+def bounded_image_data_url(
+    source: VlmImage,
+    *,
+    max_edge_px: int = _LABELED_IMAGE_MAX_WIDTH,
+) -> str:
     """Bound raster dimensions and transport bytes without changing source identity."""
 
+    if source.mime_type == "image/svg+xml":
+        from PIL import Image
+
+        raster = _flatten_image(_rasterize_svg(source.image_bytes), Image)
+        return _bounded_raster_data_url(
+            raster,
+            label=source.label,
+            image_module=Image,
+        )
     try:
         from PIL import Image, ImageOps
     except ImportError:
@@ -379,8 +461,8 @@ def _bounded_single_image_data_url(source: VlmImage) -> str:
             raster = ImageOps.exif_transpose(opened)
             raster.load()
             if (
-                raster.width <= _LABELED_IMAGE_MAX_WIDTH
-                and raster.height <= _LABELED_IMAGE_MAX_HEIGHT
+                raster.width <= max_edge_px
+                and raster.height <= max_edge_px
                 and len(source.image_bytes) <= _SINGLE_IMAGE_MAX_BYTES
             ):
                 return _image_data_url(source)
@@ -389,8 +471,8 @@ def _bounded_single_image_data_url(source: VlmImage) -> str:
         return _image_data_url(source)
     raster = _fit_montage_image(
         raster,
-        panel_width=_LABELED_IMAGE_MAX_WIDTH,
-        max_height=_LABELED_IMAGE_MAX_HEIGHT,
+        panel_width=max_edge_px,
+        max_height=max_edge_px,
         image_module=Image,
     )
     return _bounded_raster_data_url(
@@ -456,7 +538,11 @@ def _labeled_montage_data_url(images: Sequence[VlmImage]) -> str:
     decoded = []
     try:
         for image in images:
-            with Image.open(io.BytesIO(image.image_bytes)) as opened:
+            if image.mime_type == "image/svg+xml":
+                opened = _rasterize_svg(image.image_bytes)
+            else:
+                opened = Image.open(io.BytesIO(image.image_bytes))
+            with opened:
                 raster = ImageOps.exif_transpose(opened)
                 raster.load()
                 decoded.append(_flatten_image(raster, Image))
@@ -527,52 +613,59 @@ def _labeled_montage_data_url(images: Sequence[VlmImage]) -> str:
     return _image_data_url(comparison)
 
 
-def _pixel_labeled_image_data_url(source: VlmImage) -> str:
-    """Embed one authoritative role label without montage-scale detail loss."""
+def _rasterize_svg(content: bytes) -> Any:
+    """Rasterize one prepared SVG within the VLM image bounds."""
 
     try:
-        from PIL import Image, ImageDraw, ImageFont, ImageOps
+        import pymupdf
+        from PIL import Image
     except ImportError as exc:
-        raise VlmError("Pillow is required to label VLM evidence images") from exc
-
+        raise VlmError("PyMuPDF and Pillow are required for SVG VLM inputs") from exc
+    document = None
     try:
-        with Image.open(io.BytesIO(source.image_bytes)) as opened:
-            raster = ImageOps.exif_transpose(opened)
-            raster.load()
-            raster = _flatten_image(raster, Image)
-    except (OSError, ValueError) as exc:
-        raise VlmError(f"{source.label} is not a readable raster image") from exc
-    raster = _fit_montage_image(
-        raster,
-        panel_width=_LABELED_IMAGE_MAX_WIDTH,
-        max_height=_LABELED_IMAGE_MAX_HEIGHT - _MONTAGE_LABEL_HEIGHT,
-        image_module=Image,
-    )
-    sheet = Image.new(
-        "RGB",
-        (raster.width, raster.height + _MONTAGE_LABEL_HEIGHT),
-        "#111827",
-    )
-    draw = ImageDraw.Draw(sheet)
-    try:
-        font = ImageFont.truetype("DejaVuSans-Bold.ttf", 44)
-    except OSError:
-        font = ImageFont.load_default()
-    draw.text(
-        (24, 18),
-        " ".join(source.label.split())[:72].upper(),
-        fill="#ffffff",
-        font=font,
-    )
-    sheet.paste(raster, (0, _MONTAGE_LABEL_HEIGHT))
-    output = io.BytesIO()
-    sheet.save(output, format="PNG", compress_level=6)
-    return _image_data_url(
-        VlmImage(
-            label=f"pixel-labeled {source.label}",
-            image_bytes=output.getvalue(),
-            mime_type="image/png",
+        document = pymupdf.open(stream=content, filetype="svg")
+        page = document[0]
+        width = float(page.rect.width)
+        height = float(page.rect.height)
+        if width <= 0 or height <= 0:
+            raise ValueError("SVG dimensions must be positive")
+        scale = min(
+            _MONTAGE_PANEL_WIDTH / width,
+            _MONTAGE_MAX_IMAGE_HEIGHT / height,
         )
+        pixmap = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=True)
+        raster = Image.open(io.BytesIO(pixmap.tobytes("png")))
+        raster.load()
+        return raster
+    except (IndexError, OSError, RuntimeError, ValueError) as exc:
+        raise VlmError("VLM input contains an unreadable SVG image") from exc
+    finally:
+        if document is not None:
+            document.close()
+
+
+def labeled_montage(
+    images: Sequence[VlmImage],
+    *,
+    label: str = "labeled VLM evidence montage",
+) -> VlmImage:
+    """Return the maintained labeled montage as one reusable image input."""
+
+    normalized = tuple(images)
+    if not normalized:
+        raise VlmError("A labeled montage requires at least one image")
+    data_url = _labeled_montage_data_url(normalized)
+    header, separator, payload = data_url.partition(",")
+    if not separator or not header.startswith("data:image/") or ";base64" not in header:
+        raise VlmError("Labeled montage encoding is invalid")
+    try:
+        content = base64.b64decode(payload, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise VlmError("Labeled montage encoding is invalid") from exc
+    return VlmImage(
+        label=label,
+        image_bytes=content,
+        mime_type=header[5:].split(";", 1)[0],
     )
 
 
@@ -625,7 +718,10 @@ __all__ = [
     "VlmConfig",
     "VlmError",
     "VlmImage",
+    "bounded_image_data_url",
     "client_from_context",
     "config_from_env",
     "configuration_present",
+    "generate_json_text_bounded",
+    "labeled_montage",
 ]

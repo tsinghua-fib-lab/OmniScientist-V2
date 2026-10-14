@@ -169,7 +169,8 @@ These limits apply separately to each imported skill package. For a large monore
 | `omni skills list` | List Omni-managed built-ins, project skills, and imported skills |
 | `omni skills list --all` | Browse external Claude Code, Codex, and OpenClaw roots too; this does not import or trust them |
 | `omni skills search <query>` | Search visible skill metadata interactively |
-| `omni skills setup research-pptx` | Repair the lockfile-pinned Node renderer (currently the only setup target) |
+| `omni skills setup research-pptx` | Repair the lockfile-pinned Node renderer |
+| `omni skills setup scientific-poster` | Prepare the Chromium renderer matched to the installed Playwright package |
 | `omni skills why <name>` | Explain why a skill was or was not selected |
 | `omni skills export [tool]` | Copy Omni built-ins out to another agent's skill roots |
 | Natural-language request | Let the planner/agent choose an eligible skill |
@@ -295,13 +296,16 @@ Delivery is separate from implementation:
 - background tasks persist and return a task id;
 - workflows compose several contracted steps.
 
-The bundled `research-pptx` renderer has an owner-managed, lockfile-pinned Node runtime. Prepare or repair it outside task execution:
+Bundled renderers are prepared outside task execution:
 
 ```bash
 omni skills setup research-pptx
+omni skills setup scientific-poster
 ```
 
-This is currently the only `skills setup` target. Third-party skills retain their own reviewed dependency instructions; tasks do not invoke package managers.
+`research-pptx` uses an owner-managed, lockfile-pinned Node runtime.
+`scientific-poster` uses the Chromium build matched to Omni's Playwright package.
+Third-party skills retain their own reviewed dependency instructions; tasks do not invoke package managers.
 
 ## When a third-party skill needs Omni adaptation
 
@@ -394,4 +398,4 @@ omni skills trust my-skill --yes
 
 **The skill needs a missing binary or runtime**
 
-Review its dependency instructions. For the bundled `research-pptx` renderer, run `omni skills setup research-pptx`. Task execution will not install dependencies.
+Review its dependency instructions. For bundled renderers, run `omni skills setup research-pptx` or `omni skills setup scientific-poster`. Task execution will not install dependencies.

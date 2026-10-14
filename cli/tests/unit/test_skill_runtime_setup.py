@@ -11,6 +11,43 @@ import pytest
 import omni.skills_runtime.runtime_setup as runtime_setup
 
 
+def test_scientific_poster_setup_uses_current_playwright(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(argv, *, check):  # noqa: ANN001, ANN202
+        calls.append(list(argv))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(runtime_setup.subprocess, "run", fake_run)
+
+    runtime_setup.setup_scientific_poster_runtime()
+    runtime_setup.setup_scientific_poster_runtime(force=True)
+
+    prefix = [runtime_setup.sys.executable, "-m", "playwright", "install"]
+    assert calls == [
+        [*prefix, "chromium"],
+        [*prefix, "--force", "chromium"],
+    ]
+
+
+def test_scientific_poster_setup_reports_playwright_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        runtime_setup.subprocess,
+        "run",
+        lambda _argv, *, check: SimpleNamespace(returncode=7),
+    )
+
+    with pytest.raises(
+        runtime_setup.SkillRuntimeSetupError,
+        match="scientific-poster Chromium setup failed.*exit=7",
+    ):
+        runtime_setup.setup_scientific_poster_runtime()
+
+
 def _write_renderer_manifests(skill_dir: Path) -> Path:
     scripts = skill_dir / "scripts"
     scripts.mkdir(parents=True)

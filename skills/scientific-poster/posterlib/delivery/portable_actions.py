@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-import poster_core
+import poster_contract
 
 from posterlib.paths import SKILL_ROOT
 
@@ -30,7 +30,7 @@ def run(payload: dict[str, Any]) -> dict[str, Any]:
         key: value for key, value in payload.items() if key not in HOST_METADATA_FIELDS
     }
     try:
-        action = poster_core.normalize_action(payload.get("action"))
+        action = poster_contract.normalize_action(payload.get("action"))
     except ValueError as exc:
         return _error("invalid_action", str(exc))
     if action in HOST_ACTIONS:
@@ -38,6 +38,8 @@ def run(payload: dict[str, Any]) -> dict[str, Any]:
             "host_agent_required",
             "draft and revise require a host model that can author complete HTML/CSS.",
         )
+    if action == "prepare":
+        return _prepare(payload)
     if action == "estimate":
         return _estimate(payload)
     if action == "validate":
@@ -55,6 +57,104 @@ def run(payload: dict[str, Any]) -> dict[str, Any]:
     if action == "approve":
         return _approve(payload)
     return _error("invalid_action", f"Unsupported portable action: {action}")
+
+
+def _prepare(payload: dict[str, Any]) -> dict[str, Any]:
+    """Prepare one paper source into grounded text and figure bindings."""
+
+    unexpected = sorted(
+        set(payload)
+        - {"action", "paper_path", "latex_project_dir", "main_tex", "arxiv_id", "output_dir"}
+    )
+    if unexpected:
+        return _error(
+            "invalid_payload",
+            "prepare received unexpected field(s): " + ", ".join(unexpected),
+        )
+    output_dir = Path(
+        str(payload.get("output_dir") or Path.cwd() / "poster-materials")
+    ).expanduser().resolve()
+    if payload.get("main_tex") and not payload.get("latex_project_dir"):
+        return _error("invalid_payload", "main_tex requires latex_project_dir")
+    try:
+        from posterlib.runtime import runtime_io
+        from posterlib.sources import latex_source, paper_inputs
+        from posterlib.sources.paper_extraction import PaperSourceError
+        from posterlib.sources.pdf_worker import prepare_pdf
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        latex_dir = str(payload.get("latex_project_dir") or "").strip()
+        if latex_dir:
+            if payload.get("paper_path") or payload.get("arxiv_id"):
+                return _error("invalid_payload", "Supply one paper source")
+            source = latex_source.prepare_latex_project(
+                Path(latex_dir), output_dir / "figures",
+                main_tex=str(payload.get("main_tex") or "").strip(),
+            )
+            source_path = output_dir / "paper-source.txt"
+            paper_info = {
+                key: source[key]
+                for key in ("title", "authors", "affiliations", "equations")
+            }
+            figures = source["figures"]
+            warnings = source["warnings"]
+        else:
+            paper_path = paper_inputs.materialize_paper_pdf(
+                paper_path=str(payload.get("paper_path") or "").strip(),
+                arxiv_id=str(payload.get("arxiv_id") or "").strip(),
+                output_dir=output_dir,
+            )
+            paper = prepare_pdf(paper_path, output_dir / "figures")
+            source = {"text": paper.text}
+            source_path = output_dir / "paper-source.md"
+            paper_info = {
+                "title": paper.title,
+                "authors": paper.authors,
+                "affiliations": list(paper.affiliations),
+                "page_count": paper.page_count,
+                "equations": [dict(equation) for equation in paper.equations],
+            }
+            figures = paper.figures
+            warnings = paper.warnings
+        source_path.write_text(source["text"], encoding="utf-8")
+        manifest = {
+            "schema": "scientific-poster.portable-materials.v1",
+            "paper": paper_info,
+            "figures": [dict(figure) for figure in figures],
+            "warnings": list(warnings),
+        }
+        manifest_path = output_dir / "poster-materials.json"
+        runtime_io.write_json_atomic(manifest_path, manifest, indent=2, sort_keys=True)
+    except PaperSourceError as exc:
+        return _error(exc.code, str(exc))
+    except (OSError, TypeError, ValueError) as exc:
+        return _error("source_read_failed", str(exc))
+    return {
+        **_outcome(
+            "poster_materials_ready",
+            "Grounded paper text and caption-bound figure assets are ready.",
+        ),
+        "skill": SKILL,
+        "source_path": str(source_path),
+        "materials_path": str(manifest_path),
+        "paper_source": manifest["paper"],
+        "figures": manifest["figures"],
+        "warnings": manifest["warnings"],
+        "artifacts": [
+            {
+                "title": "Poster paper source",
+                "format": source_path.suffix.lstrip("."),
+                "path": str(source_path),
+                "mime": "text/plain" if latex_dir else "text/markdown",
+            },
+            {
+                "title": "Poster materials",
+                "format": "json",
+                "path": str(manifest_path),
+                "mime": "application/json",
+            },
+        ],
+    }
 
 
 def _estimate(payload: dict[str, Any]) -> dict[str, Any]:
@@ -119,7 +219,7 @@ def _estimate(payload: dict[str, Any]) -> dict[str, Any]:
     except PlanningError as exc:
         code = (
             exc.code
-            if exc.code in poster_core.OUTCOME_CONTRACTS
+            if exc.code in poster_contract.OUTCOME_CONTRACTS
             else "invalid_content_budget"
         )
         return _error(code, str(exc))
@@ -165,12 +265,10 @@ def _prepare_visual_review(payload: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "action",
         "html",
-        "screenshot",
-        "reference",
-        "content_brief",
-        "visual_evidence",
+        "inspection_path",
         "iteration",
         "output_dir",
+        "reference_image",
     }
     unexpected = sorted(set(payload) - allowed)
     if unexpected:
@@ -180,20 +278,57 @@ def _prepare_visual_review(payload: dict[str, Any]) -> dict[str, Any]:
             + ", ".join(unexpected),
         )
     try:
-        from posterlib.runtime import runtime_io
-        from posterlib.visual import visual_review
+        from posterlib.visual import review_contract
+        from posterlib.workflows import review_pipeline
 
-        request = visual_review.build_request(
-            html_path=str(payload.get("html") or ""),
-            screenshot_path=str(payload.get("screenshot") or ""),
-            reference=payload.get("reference"),
-            content_brief=payload.get("content_brief")
-            if isinstance(payload.get("content_brief"), dict)
-            else {},
-            visual_evidence=payload.get("visual_evidence")
-            if isinstance(payload.get("visual_evidence"), dict)
-            else {},
-            iteration=payload.get("iteration", 0),
+        html_path = Path(str(payload.get("html") or "")).expanduser().resolve()
+        raw_inspection_path = str(payload.get("inspection_path") or "").strip()
+        if not raw_inspection_path:
+            raise review_contract.ReviewContractError(
+                "visual_review_invalid",
+                "inspection_path is required",
+            )
+        inspection_path = Path(raw_inspection_path).expanduser().resolve()
+        inspection = json.loads(inspection_path.read_text(encoding="utf-8"))
+        if not isinstance(inspection, dict):
+            raise review_contract.ReviewContractError(
+                "visual_review_invalid",
+                "inspection must contain one JSON object",
+            )
+        source_bytes = html_path.read_bytes()
+        if inspection.get("source_html_sha256") != hashlib.sha256(source_bytes).hexdigest():
+            raise review_contract.ReviewContractError(
+                "visual_review_invalid",
+                "inspection_path does not describe the current candidate HTML",
+            )
+        if not str(inspection.get("screenshot_path") or "") or not isinstance(
+            inspection.get("visual_evidence"), dict
+        ):
+            raise review_contract.ReviewContractError(
+                "visual_review_invalid",
+                "inspection must contain its screenshot_path and visual_evidence",
+            )
+        source_html = source_bytes.decode("utf-8")
+        validation = poster_contract.validate_poster_html(source_html)
+        if validation.get("status") != "ok":
+            raise review_contract.ReviewContractError(
+                "visual_review_invalid",
+                "candidate HTML must pass static validation before visual review",
+            )
+        page = validation.get("page")
+        if not isinstance(page, dict):
+            raise review_contract.ReviewContractError(
+                "visual_review_invalid",
+                "candidate HTML is missing its physical page declaration",
+            )
+        reference_image = str(payload.get("reference_image") or "").strip()
+        quality_reference = (
+            {
+                "image_path": str(Path(reference_image).expanduser().resolve()),
+                "image_sha256": review_contract.sha256_file(reference_image),
+            }
+            if reference_image
+            else None
         )
         output_dir = (
             Path(payload.get("output_dir") or Path.cwd() / "poster-visual-review")
@@ -202,13 +337,20 @@ def _prepare_visual_review(payload: dict[str, Any]) -> dict[str, Any]:
         )
         output_dir.mkdir(parents=True, exist_ok=True)
         request_path = output_dir / "visual-review-request.json"
-        runtime_io.write_json_atomic(
-            request_path,
-            request,
-            indent=2,
-            sort_keys=True,
+        request, request_path = review_pipeline.prepare_candidate_review(
+            html_path,
+            inspection,
+            page_plan=page,
+            iteration=payload.get("iteration", 0),
+            quality_reference=quality_reference,
+            request_path=request_path,
         )
-    except (OSError, visual_review.VisualReviewError) as exc:
+    except (
+        OSError,
+        UnicodeError,
+        ValueError,
+        review_contract.ReviewContractError,
+    ) as exc:
         code = str(getattr(exc, "code", "visual_review_invalid"))
         return _error(code, str(exc))
     return {
@@ -248,18 +390,18 @@ def _submit_visual_review(payload: dict[str, Any]) -> dict[str, Any]:
         )
     try:
         from posterlib.runtime import runtime_io
-        from posterlib.visual import visual_review
+        from posterlib.visual import review_contract
 
         request_value = payload.get("visual_review_request")
         request = (
-            visual_review.load_request(request_value)
+            review_contract.load_request(request_value)
             if isinstance(request_value, (str, Path))
             else dict(request_value)
             if isinstance(request_value, dict)
             else None
         )
         if request is None:
-            raise visual_review.VisualReviewError(
+            raise review_contract.ReviewContractError(
                 "visual_review_invalid",
                 "visual_review_request must be a request object or JSON path",
             )
@@ -270,17 +412,17 @@ def _submit_visual_review(payload: dict[str, Any]) -> dict[str, Any]:
                     Path(result_value).expanduser().read_text(encoding="utf-8")
                 )
             except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-                raise visual_review.VisualReviewError(
+                raise review_contract.ReviewContractError(
                     "visual_review_invalid", f"cannot read visual review result: {exc}"
                 ) from exc
         else:
             loaded_result = result_value
         if not isinstance(loaded_result, dict):
-            raise visual_review.VisualReviewError(
+            raise review_contract.ReviewContractError(
                 "visual_review_invalid",
                 "visual_review_result must be a result object or JSON path",
             )
-        receipt = visual_review.validate_result(request, loaded_result)
+        receipt = review_contract.validate_result(request, loaded_result)
         output_dir = (
             Path(payload.get("output_dir") or Path.cwd() / "poster-visual-review")
             .expanduser()
@@ -294,7 +436,7 @@ def _submit_visual_review(payload: dict[str, Any]) -> dict[str, Any]:
             indent=2,
             sort_keys=True,
         )
-    except (OSError, visual_review.VisualReviewError) as exc:
+    except (OSError, review_contract.ReviewContractError) as exc:
         code = str(getattr(exc, "code", "visual_review_invalid"))
         return _error(code, str(exc))
 
@@ -302,7 +444,7 @@ def _submit_visual_review(payload: dict[str, Any]) -> dict[str, Any]:
     if quality_state == "passed":
         code = "visual_review_passed"
         summary = "The image-capable visual review passed for these exact poster bytes."
-    elif quality_state == "revision-required":
+    else:
         code = "visual_revision_required"
         operations = sorted(
             {str(issue["operation"]) for issue in receipt["critical_issues"]}
@@ -312,9 +454,6 @@ def _submit_visual_review(payload: dict[str, Any]) -> dict[str, Any]:
             if "content-replan" in operations
             else "The image-capable reviewer requested a complete poster revision."
         )
-    else:
-        code = "visual_review_failed"
-        summary = "The poster did not pass before the visual revision limit."
     result = {
         **_outcome(code, summary),
         "skill": SKILL,
@@ -330,7 +469,7 @@ def _submit_visual_review(payload: dict[str, Any]) -> dict[str, Any]:
         ],
     }
     if quality_state == "revision-required":
-        result["revision_feedback"] = visual_review.revision_feedback(receipt)
+        result["revision_feedback"] = review_contract.format_revision_feedback(receipt)
     return result
 
 
@@ -359,7 +498,7 @@ def _preview(payload: dict[str, Any]) -> dict[str, Any]:
         "html": str(path),
         "html_sha256": digest,
         "source_html_uri": f"portable://sha256/{digest}",
-        "preview_argv": poster_core.build_preview_argv(
+        "preview_argv": poster_contract.build_preview_argv(
             path,
             skill_dir=SKILL_ROOT,
             python_executable=sys.executable,
@@ -382,6 +521,9 @@ def _approve(payload: dict[str, Any]) -> dict[str, Any]:
         "session_id",
         "host_event_id",
         "paper_path",
+        "latex_project_dir",
+        "main_tex",
+        "arxiv_id",
         "source",
         "source_text",
         "source_figure_sha256s",
@@ -449,30 +591,49 @@ def _approval_grounding(
     """Resolve one explicit approval source without relying on engine memory."""
 
     paper_path = str(payload.get("paper_path") or "").strip()
+    latex_project_dir = str(payload.get("latex_project_dir") or "").strip()
+    arxiv_id = str(payload.get("arxiv_id") or "").strip()
+    if payload.get("main_tex") and not latex_project_dir:
+        return _error("invalid_payload", "main_tex requires latex_project_dir")
     grounding_path = str(payload.get("source") or "").strip()
     grounding_text = payload.get("source_text")
     has_text = isinstance(grounding_text, str) and bool(grounding_text.strip())
-    if sum((bool(paper_path), bool(grounding_path), has_text)) != 1:
+    if sum((bool(paper_path), bool(latex_project_dir), bool(arxiv_id), bool(grounding_path), has_text)) != 1:
         return _error(
             "missing_input",
-            "approve requires exactly one of paper_path, source, or source_text.",
+            "approve requires one paper_path, latex_project_dir, arxiv_id, source, or source_text.",
         )
-    if paper_path:
+    if paper_path or latex_project_dir or arxiv_id:
         if payload.get("source_figure_sha256s"):
             return _error(
                 "candidate_validation_failed",
-                "source_figure_sha256s is derived from paper_path and must not be supplied.",
+                "source_figure_sha256s is derived from the paper and must not be supplied.",
             )
         try:
-            from posterlib.sources.paper_source import PaperSourceError, prepare_pdf
+            from posterlib.sources import latex_source, paper_inputs
+            from posterlib.sources.paper_extraction import PaperSourceError
+            from posterlib.sources.pdf_worker import prepare_pdf
 
             with tempfile.TemporaryDirectory(
                 prefix="scientific-poster-approval-source-"
             ) as directory:
-                paper = prepare_pdf(paper_path, directory)
+                if latex_project_dir:
+                    source = latex_source.prepare_latex_project(
+                        Path(latex_project_dir), Path(directory) / "figures",
+                        main_tex=str(payload.get("main_tex") or "").strip(),
+                    )
+                    return source["text"], [
+                        str(figure["sha256"]) for figure in source["figures"]
+                    ]
+                source_pdf = paper_inputs.materialize_paper_pdf(
+                    paper_path=paper_path,
+                    arxiv_id=arxiv_id,
+                    output_dir=Path(directory),
+                )
+                paper = prepare_pdf(source_pdf, Path(directory) / "figures")
         except PaperSourceError as exc:
             if exc.code == "missing_capability":
-                from posterlib.runtime.capability import missing_result
+                from posterlib.runtime.dependencies import missing_result
 
                 return missing_result(
                     "pdf-reading",
@@ -506,22 +667,14 @@ def _inspect(payload: dict[str, Any]) -> dict[str, Any]:
             "candidate_validation_failed",
             "inspect received unexpected field(s): " + ", ".join(unexpected),
         )
-    static_payload = {
-        key: value for key, value in payload.items() if key in {"action", "html"}
-    }
-
-    checked = _validated_html(
-        static_payload,
-        allowed={"action", "html"},
-    )
-    if isinstance(checked, dict) and checked.get("status") == "error":
-        return checked
-    path, source_bytes, report = checked
-    if report.get("status") != "ok":
-        return {
-            **_error("source_html_invalid", "Poster HTML must pass static validation."),
-            "validation": report,
-        }
+    raw_path = str(payload.get("html") or "").strip()
+    if not raw_path:
+        return _error("missing_html", "html is required.")
+    path = Path(raw_path).expanduser().resolve()
+    try:
+        source_bytes = path.read_bytes()
+    except OSError as exc:
+        return _error("source_read_failed", str(exc))
     output = Path(
         str(payload.get("output_dir") or path.parent / "poster-inspection")
     ).expanduser()
@@ -544,13 +697,26 @@ def _inspect(payload: dict[str, Any]) -> dict[str, Any]:
     )
     result["skill"] = SKILL
     result["source_html_sha256"] = hashlib.sha256(source_bytes).hexdigest()
+    inspection_path = (output / "inspection.json").resolve()
+    result["inspection_path"] = str(inspection_path)
+    try:
+        from posterlib.runtime import runtime_io
+
+        runtime_io.write_json_atomic(
+            inspection_path,
+            result,
+            indent=2,
+            sort_keys=True,
+        )
+    except OSError as exc:
+        return _error("inspection_output_failed", str(exc))
     return result
 
 
 def _export_pptx(payload: dict[str, Any]) -> dict[str, Any]:
     """Export validated poster HTML as a one-slide native PowerPoint deck."""
 
-    allowed = {"action", "html", "output_dir"}
+    allowed = {"action", "html", "output_dir", "runtime_timeout_seconds"}
     checked = _validated_html(payload, allowed=allowed)
     if isinstance(checked, dict) and checked.get("status") == "error":
         return checked
@@ -571,11 +737,28 @@ def _export_pptx(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         from posterlib.delivery.pptx_export import ExportError, export_editable_pptx
 
-        bundle = export_editable_pptx(path, output)
+        raw_timeout = payload.get("runtime_timeout_seconds")
+        timeout_seconds = (
+            float(raw_timeout)
+            if isinstance(raw_timeout, (int, float))
+            and not isinstance(raw_timeout, bool)
+            and 0 < float(raw_timeout) <= 180.0
+            else None
+        )
+        if raw_timeout is not None and timeout_seconds is None:
+            return _error(
+                "pptx_export_failed",
+                "runtime_timeout_seconds must be between 0 and 180 seconds",
+            )
+        bundle = export_editable_pptx(
+            path,
+            output,
+            timeout_seconds=timeout_seconds,
+        )
     except ExportError as exc:
         code = (
             exc.code
-            if exc.code in poster_core.OUTCOME_CONTRACTS
+            if exc.code in poster_contract.OUTCOME_CONTRACTS
             else "pptx_export_failed"
         )
         return {**_error(code, str(exc)), **exc.details}
@@ -615,7 +798,7 @@ def _validated_html(
         html_text = source_bytes.decode("utf-8")
     except (OSError, UnicodeError) as exc:
         return _error("source_read_failed", str(exc))
-    report = poster_core.validate_poster_html(html_text)
+    report = poster_contract.validate_poster_html(html_text)
     return path, source_bytes, report
 
 
@@ -640,7 +823,7 @@ def _run_json_process(
         return _error(code, str(exc))
     if not isinstance(value, dict):
         return _error(code, "Child process returned a non-object result.")
-    value = poster_core.normalize_outcome_result(
+    value = poster_contract.normalize_outcome_result(
         value,
         fallback_code=code,
         fallback_summary="Child process failed to return a registered outcome.",
@@ -651,10 +834,10 @@ def _run_json_process(
 
 
 def _outcome(code: str, summary: str, **details: Any) -> dict[str, Any]:
-    return poster_core.outcome_result(code, summary=summary, **details)
+    return poster_contract.outcome_result(code, summary=summary, **details)
 
 
 def _error(code: str, message: str) -> dict[str, Any]:
-    result = poster_core.outcome_result(code, summary=message, error=message)
+    result = poster_contract.outcome_result(code, summary=message, error=message)
     result["skill"] = SKILL
     return result

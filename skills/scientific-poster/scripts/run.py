@@ -14,8 +14,8 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 if str(SKILL_DIR) not in sys.path:
     sys.path.insert(0, str(SKILL_DIR))
 
-import poster_core
-from posterlib.delivery.portable_actions import run
+import poster_contract  # noqa: E402
+from posterlib.delivery.portable_actions import run  # noqa: E402
 
 
 class InputError(ValueError):
@@ -33,7 +33,7 @@ class _JsonArgumentParser(argparse.ArgumentParser):
 
 
 def _error(code: str, message: str) -> dict[str, Any]:
-    result = poster_core.outcome_result(code, summary=message, error=message)
+    result = poster_contract.outcome_result(code, summary=message, error=message)
     result["skill"] = "scientific-poster"
     return result
 

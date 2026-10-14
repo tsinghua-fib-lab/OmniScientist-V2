@@ -24,13 +24,13 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 if str(SKILL_DIR) not in sys.path:
     sys.path.insert(0, str(SKILL_DIR))
 
-import poster_core
+import poster_contract  # noqa: E402
 
 _MAX_SELECTION_BYTES = 64 * 1024
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{20,200}$")
 _INSPECTOR_SCRIPT_PATH = (
-    Path(__file__).resolve().parent / "browser" / "preview_inspector.js"
+    Path(__file__).resolve().parent / "browser" / "preview_selection.js"
 )
 _INSPECTOR_PLACEHOLDERS = (
     "__POSTER_PREVIEW_TOKEN_JSON__",
@@ -312,19 +312,19 @@ def _selection_source_hash(payload: Any) -> str:
 def _normalize_selection(payload: Any) -> dict[str, Any]:
     source_hash = _selection_source_hash(payload)
     poster_id = _bounded_text(payload.get("poster_id"), 200)
-    if poster_core.POSTER_ID_RE.fullmatch(poster_id) is None:
+    if poster_contract.POSTER_ID_RE.fullmatch(poster_id) is None:
         raise ValueError("poster_id is required and must be stable.")
     poster_module = _bounded_text(payload.get("poster_module"), 200)
-    if poster_module and poster_core.POSTER_MODULE_RE.fullmatch(poster_module) is None:
+    if poster_module and poster_contract.POSTER_MODULE_RE.fullmatch(poster_module) is None:
         raise ValueError("poster_module is invalid.")
     semantic_roles = _bounded_text(payload.get("semantic_roles"), 200)
     role_tokens = semantic_roles.split()
     if len(role_tokens) != len(set(role_tokens)) or any(
-        role not in poster_core.SEMANTIC_ROLES for role in role_tokens
+        role not in poster_contract.SEMANTIC_ROLES for role in role_tokens
     ):
         raise ValueError("semantic_roles is invalid.")
     module_priority = _bounded_text(payload.get("module_priority"), 32)
-    if module_priority and module_priority not in poster_core.MODULE_PRIORITIES:
+    if module_priority and module_priority not in poster_contract.MODULE_PRIORITIES:
         raise ValueError("module_priority is invalid.")
     rect_raw = payload.get("rect") or {}
     if not isinstance(rect_raw, dict):
@@ -360,7 +360,7 @@ def _normalize_selection(payload: Any) -> dict[str, Any]:
 
 
 def _validate_selection_dom(state: dict[str, Any], html_text: str) -> None:
-    elements = poster_core.poster_identity_map(html_text)
+    elements = poster_contract.poster_identity_map(html_text)
     poster_id = str(state["poster_id"])
     if poster_id not in elements:
         raise ValueError("poster_id does not exist in the current poster HTML.")

@@ -1,4 +1,4 @@
-"""Standard-library contracts for inert HTML scientific posters."""
+"""Contracts for inert HTML scientific posters, with lazy CSS parsing."""
 
 from __future__ import annotations
 
@@ -11,10 +11,11 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-import poster_assets
-from css_safety import offline_css_issues
+import image_assets
+from css_validation import generated_content_declarations, offline_css_issues
 
 ACTION_DRAFT = "draft"
+ACTION_PREPARE = "prepare"
 ACTION_ESTIMATE = "estimate"
 ACTION_REVISE = "revise"
 ACTION_INSPECT = "inspect"
@@ -25,13 +26,15 @@ ACTION_PREPARE_VISUAL_REVIEW = "prepare-visual-review"
 ACTION_SUBMIT_VISUAL_REVIEW = "submit-visual-review"
 MAX_HTML_BYTES = 32 * 1024 * 1024
 POSTER_ROOT_SELECTOR = (
-    "body > main[data-poster-id], body > article[data-poster-id], "
-    "body > div[data-poster-id]"
+    "body > main[data-poster-root][data-poster-id], "
+    "body > article[data-poster-root][data-poster-id], "
+    "body > div[data-poster-root][data-poster-id]"
 )
 
 PUBLIC_ACTIONS = frozenset(
     {
         ACTION_DRAFT,
+        ACTION_PREPARE,
         ACTION_ESTIMATE,
         ACTION_REVISE,
         ACTION_INSPECT,
@@ -84,6 +87,7 @@ OUTCOME_CONTRACTS = MappingProxyType(
         "llm_unavailable": _outcome("error", False, True),
         "llm_error": _outcome("error", False, True),
         "host_agent_required": _outcome("partial", False, True),
+        "poster_materials_ready": _outcome("ok", False, False),
         "estimate_complete": _outcome("ok", False, False),
         "invalid_content_budget": _outcome("error", False, True),
         "invalid_page": _outcome("error", False, True),
@@ -181,13 +185,9 @@ _SVG_PRESENTATION_ATTRIBUTES = {
     "mask",
     "stroke",
 }
-_PAGE_SIZE_RE = re.compile(
-    r"@page\s*(?:[^\{]*)\{[^{}]*?\bsize\s*:\s*"
-    r"([0-9]+(?:\.[0-9]+)?)mm\s+([0-9]+(?:\.[0-9]+)?)mm\s*;?",
-    re.IGNORECASE | re.DOTALL,
-)
 _MATH_LAYOUT_OVERRIDE_RE = re.compile(
-    r"(?:\bmath\b|\[\s*data-content-role\s*=\s*['\"]?equation['\"]?\s*\]"
+    r"(?:(?:^|[,\s>+~])math(?=[\s>+~.#:[,{])"
+    r"|\[\s*data-content-role\s*=\s*['\"]?equation['\"]?\s*\]"
     r"|\[\s*data-latex(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\]\s]+))?\s*\])"
     r"[^{}]*\{[^{}]*\bdisplay\s*:\s*(?:block|flex|grid|inline-block)\s*(?:;|})",
     re.IGNORECASE | re.DOTALL,
@@ -303,6 +303,8 @@ class ParsedPosterHtml(HTMLParser):
         self.module_priorities: dict[str, str] = {}
         self.semantic_roles: set[str] = set()
         self.styles: list[str] = []
+        # Document styles only: element start, content start/end, element end.
+        self.style_spans: list[tuple[int, int, int, int]] = []
         self.visible_text: list[str] = []
         self.visible_source_figure_sha256s: set[str] = set()
         self.issues: list[dict[str, str]] = []
@@ -310,6 +312,23 @@ class ParsedPosterHtml(HTMLParser):
         self._stack: list[tuple[str, str | None, bool]] = []
         self._open_poster_root_depth: int | None = None
         self._style_depth = 0
+        self._open_style: tuple[int, int] | None = None
+        self._source = ""
+        self._line_starts = [0]
+
+    def feed(self, data: str) -> None:
+        """Retain raw offsets for stylesheet insertion without serializing the DOM."""
+
+        offset = len(self._source)
+        self._line_starts.extend(
+            offset + index + 1 for index, character in enumerate(data) if character == "\n"
+        )
+        self._source += data
+        super().feed(data)
+
+    def _source_offset(self) -> int:
+        line, column = self.getpos()
+        return self._line_starts[line - 1] + column
 
     def handle_decl(self, decl: str) -> None:
         self.doctypes.append(decl.strip().lower())
@@ -337,7 +356,7 @@ class ParsedPosterHtml(HTMLParser):
             self.html_count += 1
         elif tag == "body":
             self.body_count += 1
-        if tag in poster_assets.ACTIVE_CONTENT_TAGS:
+        if tag in image_assets.ACTIVE_CONTENT_TAGS:
             self.issues.append(
                 _issue("active_html", f"Active element <{tag}> is forbidden.")
             )
@@ -369,6 +388,15 @@ class ParsedPosterHtml(HTMLParser):
         hidden = "display:none" in attr.get("style", "").replace(" ", "").lower() or (
             "visibility:hidden" in attr.get("style", "").replace(" ", "").lower()
         )
+        equation_role = attr.get("data-content-role", "").strip() == "equation"
+        if tag != "math" and (equation_role or "data-latex" in attr):
+            self.issues.append(
+                _issue(
+                    "nonsemantic_equation",
+                    "Equation semantics belong on a native <math> element; image, "
+                    "SVG, canvas, and wrapper fallbacks are forbidden.",
+                )
+            )
         poster_id = attr.get("data-poster-id", "").strip()
         if poster_id:
             self.poster_ids.append(poster_id)
@@ -380,8 +408,18 @@ class ParsedPosterHtml(HTMLParser):
                     )
                 )
         module_id = attr.get("data-poster-module", "").strip()
+        if "data-poster-module" in attr and POSTER_MODULE_RE.fullmatch(module_id) is None:
+            self.issues.append(
+                _issue(
+                    "module_id",
+                    "data-poster-module must name a stable kebab-case identifier; "
+                    "a bare or empty marker does not identify its scientific content.",
+                    poster_id=poster_id,
+                )
+            )
         is_poster_root = (
             tag in {"main", "article", "div"}
+            and "data-poster-root" in attr
             and poster_id
             and not module_id
             and self._stack
@@ -404,20 +442,6 @@ class ParsedPosterHtml(HTMLParser):
             self.modules[module_id] += 1
             self.module_order.append(module_id)
             self.module_text.setdefault(module_id, [])
-            if POSTER_MODULE_RE.fullmatch(module_id) is None:
-                self.issues.append(
-                    _issue(
-                        "module_id",
-                        "data-poster-module must use a stable kebab-case identifier.",
-                    )
-                )
-            if not poster_id:
-                self.issues.append(
-                    _issue(
-                        "module_id",
-                        f"Module {module_id!r} needs a stable data-poster-id.",
-                    )
-                )
             roles = tuple(raw_roles.split())
             audit_roles = tuple(
                 dict.fromkeys(role for role in roles if role in SEMANTIC_ROLES)
@@ -449,7 +473,7 @@ class ParsedPosterHtml(HTMLParser):
         for name, value in attr.items():
             if (
                 name in _RESOURCE_ATTRIBUTES
-                and not poster_assets.safe_embedded_reference(value)
+                and not image_assets.safe_embedded_reference(value)
             ):
                 self.issues.append(
                     _issue(
@@ -457,7 +481,7 @@ class ParsedPosterHtml(HTMLParser):
                         f"<{tag}> {name} is not an inert embedded reference.",
                     )
                 )
-            if name in _SVG_PRESENTATION_ATTRIBUTES and not poster_assets.safe_svg_css(
+            if name in _SVG_PRESENTATION_ATTRIBUTES and not image_assets.safe_svg_css(
                 value
             ):
                 self.issues.append(
@@ -472,7 +496,7 @@ class ParsedPosterHtml(HTMLParser):
             )
         if tag == "img" and attr.get("data-source-figure-sha256"):
             claimed_figure_sha256 = attr["data-source-figure-sha256"].strip()
-            actual_figure_sha256 = poster_assets.data_image_sha256(attr.get("src", ""))
+            actual_figure_sha256 = image_assets.data_image_sha256(attr.get("src", ""))
             if (
                 re.fullmatch(r"[0-9a-f]{64}", claimed_figure_sha256) is None
                 or actual_figure_sha256 != claimed_figure_sha256
@@ -489,6 +513,13 @@ class ParsedPosterHtml(HTMLParser):
             self._check_css(attr["style"])
         if tag == "style":
             self._style_depth += 1
+            # Browser inspection keeps scripting enabled. Neither template contents
+            # nor noscript fallback styles belong to that document's stylesheets.
+            if not self_closing and not any(
+                item[0] in {"template", "noscript"} for item in self._stack
+            ):
+                start = self._source_offset()
+                self._open_style = (start, start + len(self.get_starttag_text()))
         if not self_closing:
             self._stack.append((tag, module_id or inherited_module, hidden))
 
@@ -509,10 +540,16 @@ class ParsedPosterHtml(HTMLParser):
             self._open_poster_root_depth = None
         if lowered == "style" and self._style_depth:
             self._style_depth -= 1
+            if self._open_style is not None:
+                start, content_start = self._open_style
+                content_end = self._source_offset()
+                end = self._source.index(">", content_end) + 1
+                self.style_spans.append((start, content_start, content_end, end))
+                self.styles.append(self._source[content_start:content_end])
+                self._open_style = None
 
     def handle_data(self, data: str) -> None:
         if self._style_depth:
-            self.styles.append(data)
             self._check_css(data)
             return
         text = " ".join(data.split())
@@ -526,7 +563,7 @@ class ParsedPosterHtml(HTMLParser):
     def _check_css(self, css: str) -> None:
         issues = offline_css_issues(
             css,
-            safe_reference=poster_assets.safe_embedded_reference,
+            safe_reference=image_assets.safe_embedded_reference,
         )
         if "unsafe_syntax" in issues:
             self.issues.append(
@@ -546,6 +583,15 @@ class ParsedPosterHtml(HTMLParser):
                     "CSS references must use supported inert embedded images.",
                 )
             )
+        if "generated_text" in issues:
+            self.issues.append(
+                _issue(
+                    "css_generated_text",
+                    "Scientific copy must remain editable DOM text. Native list "
+                    "styling is supported; custom CSS-generated content is not.",
+                    declarations=generated_content_declarations(css),
+                )
+            )
         if _MATH_LAYOUT_OVERRIDE_RE.search(css):
             self.issues.append(
                 _issue(
@@ -555,6 +601,46 @@ class ParsedPosterHtml(HTMLParser):
                     "scripts remain typeset.",
                 )
             )
+
+
+def _page_size_mm(stylesheets: list[str]) -> tuple[float, float] | None:
+    """Resolve global literal-mm page sizes by importance and source order.
+
+    This is the generated single-page contract, not a full CSS cascade: named
+    or pseudo pages, conditional/layer rules, and computed sizes are outside it.
+    """
+    # Environment checks must be able to import contracts before dependency setup.
+    from tinycss2 import parse_blocks_contents, parse_stylesheet
+
+    size: tuple[float, float] | None = None
+    important = False
+    for css in stylesheets:
+        for rule in parse_stylesheet(css, skip_comments=True, skip_whitespace=True):
+            if (
+                rule.type != "at-rule"
+                or rule.lower_at_keyword != "page"
+                or rule.content is None
+                or any(token.type not in {"whitespace", "comment"} for token in rule.prelude)
+            ):
+                continue
+            for declaration in parse_blocks_contents(
+                rule.content, skip_comments=True, skip_whitespace=True,
+            ):
+                if declaration.type != "declaration" or declaration.lower_name != "size":
+                    continue
+                values = [
+                    token for token in declaration.value
+                    if token.type not in {"whitespace", "comment"}
+                ]
+                if len(values) != 2 or not all(
+                    token.type == "dimension" and token.lower_unit == "mm" and token.value >= 0
+                    for token in values
+                ):
+                    continue
+                if declaration.important or not important:
+                    size = (values[0].value, values[1].value)
+                    important = declaration.important
+    return size
 
 
 def parse_poster_html(html_text: str) -> ParsedPosterHtml:
@@ -620,7 +706,8 @@ def validate_poster_html(
             _issue(
                 "poster_root",
                 "Poster needs exactly one body-level main, article, or div with "
-                f"data-poster-id; found {parsed.poster_roots}.",
+                "data-poster-root and data-poster-id; "
+                f"found {parsed.poster_roots}.",
             )
         )
     if parsed.title_bands != 1 or parsed.title_bands_inside_root != 1:
@@ -661,18 +748,16 @@ def validate_poster_html(
                     "empty_module", f"Poster module {module_id!r} has no visible text."
                 )
             )
-    css = "\n".join(parsed.styles)
-    page_match = _PAGE_SIZE_RE.search(css)
+    page_size = _page_size_mm(parsed.styles)
     page: dict[str, float] | None = None
-    if page_match is None:
+    if page_size is None:
         issues.append(
             _issue(
                 "physical_page", "Inline CSS must declare @page size in millimetres."
             )
         )
     else:
-        width = float(page_match.group(1))
-        height = float(page_match.group(2))
+        width, height = page_size
         if not (200 <= width <= 2000 and 200 <= height <= 2000):
             issues.append(
                 _issue(

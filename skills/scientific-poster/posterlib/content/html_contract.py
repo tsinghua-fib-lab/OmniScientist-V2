@@ -6,19 +6,17 @@ import json
 import math
 import re
 from collections.abc import Mapping
+from html.parser import HTMLParser
 from typing import Any
 
-import poster_assets
-import poster_core
+import image_assets
+import poster_contract
 
 from . import scientific_snapshot
+from .equations import render_inline_math
 
 _EMBEDDED_IMAGE_PATTERN = re.compile(
     r"data:image/(?:png|jpeg|gif|webp|svg\+xml);base64,[A-Za-z0-9+/=]+",
-    re.IGNORECASE,
-)
-_IMAGE_ASSET_PATTERN = re.compile(
-    r"\bsrc\s*=\s*([\"'])(asset://[0-9]+)\1",
     re.IGNORECASE,
 )
 _IMAGE_TAG_PATTERN = re.compile(
@@ -33,15 +31,6 @@ _SOURCE_FIGURE_ATTR_REMOVE_PATTERN = re.compile(
     r"\s+\bdata-source-figure-sha256\s*=\s*"
     r"(?:\"[0-9a-f]{64}\"|'[0-9a-f]{64}'|[0-9a-f]{64})",
     re.IGNORECASE,
-)
-_STYLE_ELEMENT_PATTERN = re.compile(
-    r"<style\b[^>]*>.*?</style>", re.IGNORECASE | re.DOTALL
-)
-_MATH_TYPE_START = "/* scientific-poster-math-type:start */"
-_MATH_TYPE_END = "/* scientific-poster-math-type:end */"
-_MATH_TYPE_PATTERN = re.compile(
-    rf"\s*{re.escape(_MATH_TYPE_START)}.*?{re.escape(_MATH_TYPE_END)}\s*",
-    re.DOTALL,
 )
 
 
@@ -65,7 +54,11 @@ def paper_identity_issues(
     visible = _canonical_identity_text(" ".join(parsed.title_band_text))
     issues: list[dict[str, str]] = []
     title = str(paper_identity.get("title") or "").strip()
-    if title and _canonical_identity_text(title) not in visible:
+    rendered_title = scientific_snapshot.parse_scientific_html(
+        '<header data-poster-title-band>' + render_inline_math(title) + '</header>'
+    )
+    expected_title = _canonical_identity_text(" ".join(rendered_title.title_band_text))
+    if title and expected_title not in visible:
         issues.append(
             _issue(
                 "missing_paper_title",
@@ -147,22 +140,43 @@ def _canonical_author_text(value: str) -> str:
     return "".join(character.casefold() for character in value if character.isalpha())
 
 
+def authored_content_contract(html_text: str, assets: list[dict[str, Any]]) -> dict[str, Any]:
+    """Bind later revisions to the actual authored selection, not an early outline."""
+
+    facts = scientific_snapshot.parse_scientific_html(_annotate_source_figure_tokens(html_text, assets))
+    return {
+        "modules": [
+            {
+                "module_id": module_id,
+                "equation_latex": list(facts.equation_latex.get(module_id, ())),
+                "source_figure_sha256s": sorted({
+                    digest for entry in entries for digest in entry["source_figure_sha256s"]
+                }),
+            }
+            for module_id, entries in facts.snapshot["modules"].items()
+        ],
+        "source_figure_sha256s": sorted(facts.source_figure_sha256s),
+    }
+
+
 def validate_candidate(
     html_text: str,
     *,
     assets: list[dict[str, Any]],
     required_source_figure_sha256s: set[str] | None = None,
     expected_page: dict[str, Any] | None = None,
-    allow_adaptive_height: bool = False,
     content_contract: Mapping[str, Any] | None = None,
     paper_identity: dict[str, Any] | None = None,
+    reference_html: str | None = None,
+    content_replan_targets: frozenset[str] | set[str] | list[str] | None = None,
+    editable_text_roles: frozenset[str] | set[str] | list[str] | None = None,
 ) -> dict[str, Any]:
     """Validate grounded HTML against assets, page size, and content integrity."""
 
     asset_source_figures = {
         str(item["content_sha256"])
         for item in assets
-        if item.get("source_kind") == "pdf_figure"
+        if image_assets.is_source_figure_asset(item)
     }
     requested_source_figures = {
         value for value in required_source_figure_sha256s or set() if value
@@ -173,10 +187,13 @@ def validate_candidate(
         resolved = _embed_annotated_assets(annotated, assets)
     except ValueError as exc:
         return {"status": "error", "issues": [_issue("asset_token", str(exc))]}
-    poster_facts = poster_core.parse_poster_html(resolved)
-    report = poster_core.validate_poster_html(resolved, facts=poster_facts)
+    poster_facts = poster_contract.parse_poster_html(resolved)
+    report = poster_contract.validate_poster_html(resolved, facts=poster_facts)
     needs_scientific_facts = bool(
-        paper_identity or content_contract or "data-source-figure-sha256" in annotated
+        paper_identity
+        or content_contract
+        or reference_html is not None
+        or "data-source-figure-sha256" in annotated
     )
     scientific_facts = (
         scientific_snapshot.parse_scientific_html(annotated)
@@ -204,11 +221,31 @@ def validate_candidate(
             prepared_source_figure_sha256s=prepared_source_figures,
             facts=scientific_facts,
         )
+    if reference_html is not None:
+        assert scientific_facts is not None
+        reference_annotated = _annotate_source_figure_tokens(reference_html, assets)
+        reference_facts = scientific_snapshot.parse_scientific_html(
+            reference_annotated
+        )
+        snapshot_issues = (
+            scientific_snapshot.grounded_replan_snapshot_issues(
+                reference_facts.snapshot,
+                scientific_facts.snapshot,
+                target_module_ids=content_replan_targets,
+                editable_text_roles=editable_text_roles,
+            )
+            if content_replan_targets is not None
+            else scientific_snapshot.scientific_content_snapshot_issues(
+                reference_facts.snapshot,
+                scientific_facts.snapshot,
+            )
+        )
+        if snapshot_issues:
+            report = _append_issues(report, snapshot_issues)
     if expected_page is not None and report.get("status") == "ok":
         issue = page_plan_issue(
             report.get("page"),
             expected_page,
-            allow_adaptive_height=allow_adaptive_height,
         )
         if issue is not None:
             if issue.get("severity") == "warning":
@@ -221,10 +258,8 @@ def validate_candidate(
 def page_plan_issue(
     observed: Any,
     expected: Mapping[str, Any],
-    *,
-    allow_adaptive_height: bool = False,
 ) -> dict[str, str] | None:
-    """Return a physical-page issue, allowing only bounded adaptive height changes."""
+    """Return a physical-page issue when the authored canvas changes."""
 
     if not isinstance(observed, Mapping):
         return _issue("page_changed", "HTML has no valid physical page dimensions.")
@@ -240,37 +275,21 @@ def page_plan_issue(
             "page_changed",
             "HTML physical page width differs from the active page plan.",
         )
-    adaptive = allow_adaptive_height and expected.get("strategy") == "auto"
-    if not adaptive:
-        if not math.isclose(height, expected_height, abs_tol=0.01):
-            return _issue(
-                "page_changed",
-                "HTML physical page dimensions differ from the active page plan.",
-            )
-        return None
-    if math.isclose(height, expected_height, abs_tol=0.01):
-        return None
-    try:
-        minimum = float(expected["min_height_mm"])
-        maximum = float(expected["max_height_mm"])
-    except (KeyError, TypeError, ValueError):
-        return _issue("page_changed", "Adaptive page height bounds are invalid.")
-    if height < minimum - 0.01 or height > maximum + 0.01:
-        return _warning(
-            "page_height_out_of_bounds",
-            f"Adaptive page height is outside the planned {minimum:g}-{maximum:g} mm "
-            "range; inspect whitespace, density, and overflow before publication.",
+    if not math.isclose(height, expected_height, abs_tol=0.01):
+        return _issue(
+            "page_changed",
+            "HTML physical page dimensions differ from the active page plan.",
         )
     return None
 
 
 def source_figure_sha256s(assets: list[dict[str, Any]]) -> set[str]:
-    """Return verified PDF-figure image identities from an asset manifest."""
+    """Return verified paper-figure identities from an asset manifest."""
 
     return {
         str(item.get("content_sha256") or "")
         for item in assets
-        if item.get("source_kind") == "pdf_figure"
+        if image_assets.is_source_figure_asset(item)
         and re.fullmatch(r"[0-9a-f]{64}", str(item.get("content_sha256") or ""))
     }
 
@@ -318,7 +337,7 @@ def tokenize_embedded_images(
         data_uri = match.group(0)
         token = tokens_by_uri.get(data_uri)
         if token is None:
-            digest = poster_assets.data_image_sha256(data_uri)
+            digest = image_assets.data_image_sha256(data_uri)
             token = preferred.get(digest or "", "")
             if not re.fullmatch(r"asset://[1-9]\d*", token) or token in used_tokens:
                 next_index = 1
@@ -340,62 +359,6 @@ def tokenize_embedded_images(
         return token
 
     return _EMBEDDED_IMAGE_PATTERN.sub(replace, html_text), assets
-
-
-def replace_single_stylesheet(html_text: str, stylesheet: str) -> str:
-    """Replace the sole stylesheet without allowing body or evidence edits."""
-
-    matches = list(_STYLE_ELEMENT_PATTERN.finditer(html_text))
-    if len(matches) != 1:
-        raise ValueError(
-            "Style-only revision requires exactly one existing style element."
-        )
-    if not re.fullmatch(
-        r"<style\b[^>]*>.*?</style>",
-        stylesheet.strip(),
-        flags=re.IGNORECASE | re.DOTALL,
-    ):
-        raise ValueError("Replacement must be exactly one complete style element.")
-    replacement = stylesheet.strip()
-    safety = _MATH_TYPE_PATTERN.search(matches[0].group())
-    if safety is not None and _MATH_TYPE_START not in replacement:
-        insertion = replacement.rfind("</style>")
-        replacement = (
-            replacement[:insertion]
-            + "\n"
-            + safety.group().strip()
-            + "\n"
-            + replacement[insertion:]
-        )
-    match = matches[0]
-    return html_text[: match.start()] + replacement + html_text[match.end() :]
-
-
-def append_stylesheet_override(html_text: str, stylesheet: str) -> str:
-    """Append model-authored override rules without exposing or replacing base CSS."""
-
-    matches = list(_STYLE_ELEMENT_PATTERN.finditer(html_text))
-    if len(matches) != 1:
-        raise ValueError(
-            "Style-only revision requires exactly one existing style element."
-        )
-    override = stylesheet.strip()
-    if not re.fullmatch(
-        r"<style\b[^>]*>.*?</style>",
-        override,
-        flags=re.IGNORECASE | re.DOTALL,
-    ):
-        raise ValueError("Override must be exactly one complete style element.")
-    opening_end = override.find(">")
-    closing_start = override.lower().rfind("</style>")
-    rules = override[opening_end + 1 : closing_start].strip()
-    if not rules:
-        raise ValueError("Stylesheet override must contain at least one rule.")
-    match = matches[0]
-    close_offset = match.group().lower().rfind("</style>")
-    insertion = match.start() + close_offset
-    patch = "\n/* scientific-poster-visual-override */\n" + rules + "\n"
-    return html_text[:insertion] + patch + html_text[insertion:]
 
 
 def _validate_content_contract(
@@ -534,17 +497,17 @@ def _annotate_source_figure_tokens(
     source_figures = {
         str(item["token"]): str(item["content_sha256"])
         for item in assets
-        if item.get("source_kind") == "pdf_figure"
+        if image_assets.is_source_figure_asset(item)
     }
     if not source_figures:
         return html_text
 
     def annotate(match: re.Match[str]) -> str:
         tag = match.group(0)
-        token_match = _IMAGE_ASSET_PATTERN.search(tag)
-        if token_match is None:
+        token = _image_source(tag)
+        if token is None:
             return tag
-        digest = source_figures.get(token_match.group(2))
+        digest = source_figures.get(token)
         if digest is None:
             return tag
         tag = _SOURCE_FIGURE_ATTR_REMOVE_PATTERN.sub("", tag)
@@ -556,6 +519,29 @@ def _annotate_source_figure_tokens(
         )
 
     return _IMAGE_TAG_PATTERN.sub(annotate, html_text)
+
+
+class _ImageSourceParser(HTMLParser):
+    """Read one image source with the standard HTML attribute grammar."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.source: str | None = None
+
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        if tag == "img":
+            self.source = dict(attrs).get("src")
+
+    handle_startendtag = handle_starttag
+
+
+def _image_source(tag: str) -> str | None:
+    parser = _ImageSourceParser()
+    parser.feed(tag)
+    parser.close()
+    return parser.source
 
 
 def _append_issue(

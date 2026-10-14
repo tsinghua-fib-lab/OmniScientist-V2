@@ -6,10 +6,9 @@ import argparse
 import asyncio
 import json
 import math
-import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 if __package__ in {None, ""}:
     for _candidate in Path(__file__).resolve().parents:
@@ -22,17 +21,17 @@ from posterlib.paths import SKILL_ROOT
 if str(SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(SKILL_ROOT))
 
-import poster_core
+import poster_contract
 
 from posterlib.content.planning import typography_metrics
 from posterlib.runtime import browser_scripts
-from posterlib.runtime.capability import (
+from posterlib.runtime.dependencies import (
     classify_chromium_failure,
     missing_result,
 )
-from posterlib.visual import visual_evidence
+from posterlib.visual import review_evidence
 
-POSTER_SELECTOR = poster_core.POSTER_ROOT_SELECTOR
+POSTER_SELECTOR = poster_contract.POSTER_ROOT_SELECTOR
 DEFAULT_VIEWPORT_WIDTH = 1400
 DEFAULT_VIEWPORT_HEIGHT = 1000
 ASPECT_RATIO_TOLERANCE = 0.005
@@ -42,10 +41,10 @@ DELIVERY_INTEGRITY_GEOMETRY_CODES = frozenset(
     {
         "element_content_overflow",
         "element_outside_poster",
+        "module_clipped_by_ancestor",
         "module_overlap",
-        # Retained for persisted reports emitted before root overflow was
-        # consolidated into the more informative element_content_overflow.
-        "poster_scroll_overflow",
+        "source_figure_text_overlap",
+        "table_text_overlap",
     }
 )
 
@@ -65,6 +64,7 @@ HARD_BLOCKER_CODES = (
             "poster_aspect_ratio_mismatch",
             "poster_physical_size_mismatch",
             "source_figure_clipped",
+            "source_figure_cropped_or_distorted",
             "source_figure_hidden",
             "source_figure_not_rendered",
             "source_figure_outside_poster",
@@ -76,7 +76,20 @@ HARD_BLOCKER_CODES = (
 )
 
 FONT_READY_JS = browser_scripts.load("wait_for_assets.js")
-INSPECT_JS = browser_scripts.load("inspect_dom.js", bind_poster_selector=True)
+_PAINTED_IMAGE_SIZE_JS = browser_scripts.load("painted_image_size.js")
+INSPECT_JS = browser_scripts.load("inspect_dom.js", bind_poster_selector=True).replace(
+    "__PAINTED_IMAGE_SIZE__", _PAINTED_IMAGE_SIZE_JS
+)
+
+
+class LayoutMeasurementError(RuntimeError):
+    """Carry the existing browser outcome across the private layout boundary."""
+
+    def __init__(self, result: dict[str, Any]) -> None:
+        super().__init__(
+            str(result.get("summary") or result.get("error") or "Browser layout failed")
+        )
+        self.result = result
 
 
 def _validate_report(
@@ -174,30 +187,6 @@ def _validate_report(
                 "message": "Poster needs one visible data-poster-title-band header.",
             }
         )
-    source_figures = report.get("source_figures")
-    source_figures = source_figures if isinstance(source_figures, dict) else {}
-    usable = _hash_set(source_figures.get("usable_sha256s"))
-    readable_recorded = "readable_sha256s" in source_figures
-    readable = _hash_set(source_figures.get("readable_sha256s"))
-    if readable_recorded and usable - readable:
-        warnings.append(
-            {
-                "code": "source_figure_below_readability_target",
-                "observed": {
-                    "usable_count": len(usable),
-                    "readable_count": len(readable),
-                },
-                "target": {
-                    "minimum_area_ratio": 0.005,
-                    "minimum_orientation_extent_ratio": 0.18,
-                },
-                "message": (
-                    "A usable source figure is below the advisory conference-viewing "
-                    "size target."
-                ),
-            }
-        )
-
     type_records = report.get("typography")
     rendered_width_mm = _finite_float(poster.get("width_mm"))
     if isinstance(type_records, list) and rendered_width_mm is not None:
@@ -210,7 +199,8 @@ def _validate_report(
             font_size_mm = _finite_float(item.get("font_size_mm"))
             reading_target_mm = _typography_target_mm(role, minimums)
             if (
-                font_size_mm is not None
+                role != "title"
+                and font_size_mm is not None
                 and font_size_mm + FONT_SIZE_TOLERANCE_MM < reading_target_mm
             ):
                 warnings.append(
@@ -227,30 +217,23 @@ def _validate_report(
                 )
             line_count = item.get("line_count")
             display_risk = role in {"title", "focal"} and (
-                item.get("requested_face_available") is False
-                or (
-                    isinstance(line_count, int)
-                    and not isinstance(line_count, bool)
-                    and line_count >= 4
-                )
+                isinstance(line_count, int)
+                and not isinstance(line_count, bool)
+                and line_count >= 4
             )
             if display_risk and not fallback_emitted:
                 fallback_emitted = True
                 warnings.append(
                     {
-                        "code": "typography_availability_risk",
+                        "code": "display_wrap_risk",
                         "severity": "warning",
                         "poster_id": item.get("poster_id"),
                         "observed": {
                             "line_count": line_count,
                             "font_family": item.get("font_family"),
-                            "requested_face_available": item.get(
-                                "requested_face_available"
-                            ),
                         },
                         "message": (
-                            "The display face is unavailable or wraps too deeply; "
-                            "consider a local fallback."
+                            "Display copy wraps too deeply for its current width and type scale."
                         ),
                     }
                 )
@@ -280,19 +263,21 @@ class ChromiumInspectionSession:
         self.browser: Any = None
         self.error: BaseException | None = None
         self.error_stage = "launch"
-        self.launch_count = 0
 
-    async def __aenter__(self) -> ChromiumInspectionSession:
+    async def __aenter__(self) -> Self:
         try:
             from playwright.async_api import async_playwright
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - optional browser dependency boundary
             self.error = exc
             self.error_stage = "import"
             return self
         try:
             self.playwright = await async_playwright().start()
             self.browser = await self.playwright.chromium.launch()
-            self.launch_count += 1
+        except asyncio.CancelledError:
+            await _close_quietly(self.browser, "close")
+            await _close_quietly(self.playwright, "stop")
+            raise
         except Exception as exc:  # noqa: BLE001 - browser boundary is external
             self.error = exc
             self.error_stage = "launch"
@@ -310,6 +295,8 @@ class ChromiumInspectionSession:
             html_path,
             out_dir,
             session=self,
+            scale=float(options.pop("scale", 2.0)),
+            capture_screenshot=bool(options.pop("capture_screenshot", True)),
             viewport_width=int(options.pop("viewport_width", DEFAULT_VIEWPORT_WIDTH)),
             viewport_height=int(
                 options.pop("viewport_height", DEFAULT_VIEWPORT_HEIGHT)
@@ -389,9 +376,18 @@ async def _inspect_target(
             "html_not_found", "input", f"HTML file not found: {html_path}"
         )
     try:
-        static_report = poster_core.validate_poster_html(
+        static_report = poster_contract.validate_poster_html(
             html_path.read_text(encoding="utf-8")
         )
+        if static_report.get("status") != "ok":
+            return {
+                **_stage_error(
+                    "source_html_invalid",
+                    "input",
+                    "Poster HTML must pass static validation before inspection.",
+                ),
+                "validation": static_report,
+            }
         expected_page = static_report.get("page")
     except (OSError, UnicodeError) as exc:
         return _stage_error("source_read_failed", "input", str(exc), exc)
@@ -418,28 +414,15 @@ async def _inspect_target(
     target_url = html_path.as_uri()
     try:
         try:
-            context = await browser.new_context(
-                viewport={"width": viewport_width, "height": viewport_height},
-                device_scale_factor=float(scale),
+            context, page = await _open_document_page(
+                browser,
+                target_url=target_url,
+                scale=scale,
+                viewport_width=viewport_width,
+                viewport_height=viewport_height,
+                blocked_requests=blocked_requests,
             )
-            page = await context.new_page()
-
-            async def block_external_requests(route: Any) -> None:
-                url = route.request.url
-                document = (
-                    url == target_url and route.request.resource_type == "document"
-                )
-                embedded = url.startswith(("data:", "blob:"))
-                if document or embedded:
-                    await route.continue_()
-                else:
-                    blocked_requests.append(url)
-                    await route.abort("blockedbyclient")
-
-            await page.route("**/*", block_external_requests)
-            await page.goto(target_url, wait_until="load")
-            await page.evaluate(FONT_READY_JS)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - browser navigation boundary
             return _stage_error(
                 "chromium_inspection_failed", "navigation", str(exc), exc
             )
@@ -451,11 +434,14 @@ async def _inspect_target(
                     await page.set_viewport_size(
                         {
                             "width": max(
-                                viewport_width, math.ceil(box["x"] + box["width"] + 32)
+                                viewport_width,
+                                math.ceil(box["width"] + 32),
+                                math.ceil(max(0.0, box["x"]) + box["width"] + 32),
                             ),
                             "height": max(
                                 viewport_height,
-                                math.ceil(box["y"] + box["height"] + 32),
+                                math.ceil(box["height"] + 32),
+                                math.ceil(max(0.0, box["y"]) + box["height"] + 32),
                             ),
                         }
                     )
@@ -471,23 +457,28 @@ async def _inspect_target(
                 else None,
             )
             report_path = _persist_report(report, out_dir)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - browser evaluation boundary
             return _stage_error("dom_evaluation_failed", "evaluate", str(exc), exc)
         screenshot_path: Path | None = None
         evidence_bundle: dict[str, Any] | None = None
         evidence_path: Path | None = None
+        blocking_warnings = [
+            warning for warning in warnings if warning.get("severity") == "error"
+        ]
         if capture_screenshot and await locator.count() == 1:
             try:
                 screenshot_path = out_dir / "poster.png"
                 screenshot_path.unlink(missing_ok=True)
                 await locator.screenshot(path=str(screenshot_path))
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - browser screenshot boundary
                 return _stage_error("screenshot_failed", "screenshot", str(exc), exc)
             try:
-                evidence_bundle, evidence_path = visual_evidence.build_visual_evidence(
-                    report=report,
-                    screenshot_path=screenshot_path,
-                    out_dir=out_dir,
+                evidence_bundle, evidence_path = (
+                    review_evidence.build_evidence(
+                        report=report,
+                        screenshot_path=screenshot_path,
+                        out_dir=out_dir,
+                    )
                 )
             except Exception as exc:  # noqa: BLE001 - evidence is advisory
                 warning = {
@@ -508,16 +499,13 @@ async def _inspect_target(
         if evidence_bundle is not None and evidence_path is not None:
             common["visual_evidence"] = evidence_bundle
             common["visual_evidence_path"] = str(evidence_path)
-        blocking_warnings = [
-            warning for warning in warnings if warning.get("severity") == "error"
-        ]
         if blocking_warnings:
-            return poster_core.outcome_result(
+            return poster_contract.outcome_result(
                 "inspection_blocked",
                 summary="Rendered inspection found approval-blocking poster issues.",
                 **common,
             )
-        return poster_core.outcome_result(
+        return poster_contract.outcome_result(
             "inspection_complete",
             summary="Rendered poster passed Chromium inspection.",
             **common,
@@ -525,6 +513,52 @@ async def _inspect_target(
     finally:
         await _close_quietly(page, "close")
         await _close_quietly(context, "close")
+
+
+async def _open_document_page(
+    browser: Any,
+    *,
+    scale: float,
+    viewport_width: int,
+    viewport_height: int,
+    blocked_requests: list[str],
+    target_url: str | None = None,
+    html_text: str | None = None,
+) -> tuple[Any, Any]:
+    """Load embedded assets into one isolated inspection page."""
+
+    context = page = None
+    try:
+        context = await browser.new_context(
+            viewport={"width": viewport_width, "height": viewport_height},
+            device_scale_factor=float(scale),
+        )
+        page = await context.new_page()
+
+        async def block_external_requests(route: Any) -> None:
+            url = route.request.url
+            document = (
+                target_url is not None
+                and url == target_url
+                and (route.request.resource_type == "document")
+            )
+            if document or url.startswith(("data:", "blob:")):
+                await route.continue_()
+            else:
+                blocked_requests.append(url)
+                await route.abort("blockedbyclient")
+
+        await page.route("**/*", block_external_requests)
+        if html_text is not None:
+            await page.set_content(html_text, wait_until="load")
+        else:
+            await page.goto(target_url, wait_until="load")
+        await page.evaluate(FONT_READY_JS)
+        return context, page
+    except BaseException:
+        await _close_quietly(page, "close")
+        await _close_quietly(context, "close")
+        raise
 
 
 def _positive_number(value: Any) -> bool:
@@ -541,16 +575,6 @@ def _finite_float(value: Any) -> float | None:
         return None
     number = float(value)
     return number if math.isfinite(number) else None
-
-
-def _hash_set(value: object) -> set[str]:
-    if not isinstance(value, (list, tuple, set, frozenset)):
-        return set()
-    return {
-        str(item).lower()
-        for item in value
-        if re.fullmatch(r"[0-9a-f]{64}", str(item).lower()) is not None
-    }
 
 
 def _typography_target_mm(role: str, metrics: dict[str, float]) -> float:
@@ -652,7 +676,7 @@ def _stage_error(
     message: str,
     exc: BaseException | None = None,
 ) -> dict[str, Any]:
-    result = poster_core.outcome_result(
+    result = poster_contract.outcome_result(
         code,
         summary=message,
         error=message,
@@ -668,7 +692,7 @@ async def _close_quietly(value: Any, method: str) -> None:
         return
     try:
         await getattr(value, method)()
-    except Exception:  # noqa: BLE001 - cleanup cannot replace the primary result
+    except Exception:  # noqa: BLE001,S110 - cleanup cannot replace primary result
         pass
 
 

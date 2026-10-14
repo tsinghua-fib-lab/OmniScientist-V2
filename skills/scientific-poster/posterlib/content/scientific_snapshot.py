@@ -81,6 +81,8 @@ class ScientificHtmlFacts:
     logo_sources: frozenset[str]
     source_figure_sha256s: frozenset[str]
     equation_latex: Mapping[str, tuple[str, ...]]
+    all_equation_structures: tuple[tuple[Any, ...], ...]
+    all_equation_latex: tuple[str, ...]
 
 
 class _ScientificContentParser(HTMLParser):
@@ -91,8 +93,14 @@ class _ScientificContentParser(HTMLParser):
         self.modules: list[dict[str, Any]] = []
         self.titles: list[list[str]] = []
         self.authors: list[list[str]] = []
+        self.affiliations: list[list[str]] = []
         self.venues: list[list[str]] = []
         self.venue_logos: list[tuple[str, str]] = []
+        self.identity_equation_structures: list[tuple[Any, ...]] = []
+        self.all_equation_structures: list[tuple[Any, ...]] = []
+        self.all_equation_latex: list[str] = []
+        self.unbound_equation_structures: list[tuple[Any, ...]] = []
+        self.unbound_text: list[str] = []
         self.title_band_text: list[str] = []
         self.author_text: list[str] = []
         self.author_marker_count = 0
@@ -173,11 +181,13 @@ class _ScientificContentParser(HTMLParser):
                         sorted(set(attributes.get("data-semantic-roles", "").split()))
                     ),
                     "priority": attributes.get("data-module-priority", "").strip(),
+                    "visual_kind": attributes.get("data-visual-kind", "").strip(),
                     "_text": [],
                     "_text_by_role": {},
+                    "_unscoped_text": [],
                     "source_labels": [],
-                    "focal_roles": [],
                     "source_figure_sha256s": [],
+                    "source_figure_geometry": [],
                     "equation_latex": [],
                     "equation_structures": [],
                 }
@@ -186,14 +196,15 @@ class _ScientificContentParser(HTMLParser):
         content_role = attributes.get("data-content-role", "").strip() or str(
             parent.get("content_role") or ""
         )
+        if not content_role and module_index is not None and tag in {"h2", "h3"}:
+            content_role = "heading"
         math_capture = parent.get("math_capture")
-        if (
-            tag == "math"
-            and contract_module_id
-            and contract_content_role == "equation"
-            and not contract_hidden
-        ):
-            math_capture = {"module_index": module_index, "tokens": []}
+        if not contract_hidden and "data-latex" in attributes:
+            self.all_equation_latex.append(_normalize_visible_text(attributes["data-latex"]))
+        if tag == "math" and not contract_hidden:
+            math_capture = {
+                "module_index": module_index, "identity": in_title_band, "tokens": [],
+            }
         if isinstance(math_capture, dict):
             tokens = math_capture.get("tokens")
             if isinstance(tokens, list):
@@ -210,6 +221,14 @@ class _ScientificContentParser(HTMLParser):
         ):
             author_index = len(self.authors)
             self.authors.append([])
+        affiliation_index = parent.get("affiliation_index")
+        if (
+            in_title_band
+            and attributes.get("data-poster-affiliations") == "verified"
+            and affiliation_index is None
+        ):
+            affiliation_index = len(self.affiliations)
+            self.affiliations.append([])
         venue_index = parent.get("venue_index")
         if (
             in_title_band
@@ -226,13 +245,18 @@ class _ScientificContentParser(HTMLParser):
             )
             if source_label:
                 module["source_labels"].append(source_label)
-            focal_role = attributes.get("data-focal-role", "").strip()
-            if focal_role:
-                module["focal_roles"].append(focal_role)
             if tag == "img":
                 digest = attributes.get("data-source-figure-sha256", "").strip()
                 if digest:
                     module["source_figure_sha256s"].append(digest.casefold())
+                    module["source_figure_geometry"].append(
+                        (
+                            digest.casefold(),
+                            attributes.get(
+                                "data-source-figure-aspect-ratio", ""
+                            ).strip(),
+                        )
+                    )
             if "data-latex" in attributes:
                 module["equation_latex"].append(
                     _normalize_visible_text(attributes["data-latex"])
@@ -253,11 +277,13 @@ class _ScientificContentParser(HTMLParser):
         frame = {
             "tag": tag,
             "hidden": hidden,
+            "in_body": bool(parent.get("in_body")) or tag == "body",
             "in_title_band": in_title_band,
             "module_index": module_index,
             "content_role": content_role,
             "title_index": title_index,
             "author_index": author_index,
+            "affiliation_index": affiliation_index,
             "venue_index": venue_index,
             "contract_module_id": contract_module_id,
             "contract_content_role": contract_content_role,
@@ -288,6 +314,8 @@ class _ScientificContentParser(HTMLParser):
         if not self._stack:
             return
         frame = self._stack[-1]
+        if frame.get("tag") == "style":
+            return
         if frame.get("in_title_band") and data.strip():
             self.title_band_text.append(data)
             if frame.get("author_index") is not None:
@@ -310,13 +338,22 @@ class _ScientificContentParser(HTMLParser):
         tokens.append(("end", tag))
         if tag != "math":
             return
+        self.all_equation_structures.append(tuple(tokens))
+        if capture.get("identity"):
+            self.identity_equation_structures.append(tuple(tokens))
         module_index = capture.get("module_index")
         if module_index is None:
+            if not capture.get("identity"):
+                self.unbound_equation_structures.append(tuple(tokens))
             return
         self.modules[int(module_index)]["equation_structures"].append(tuple(tokens))
 
     def _record_text(self, frame: Mapping[str, Any], text: str) -> None:
-        if frame.get("hidden") or not text:
+        if (
+            frame.get("hidden")
+            or not text
+            or isinstance(frame.get("math_capture"), dict)
+        ):
             return
         module_index = frame.get("module_index")
         if module_index is not None:
@@ -326,14 +363,24 @@ class _ScientificContentParser(HTMLParser):
             if content_role:
                 text_by_role = module["_text_by_role"]
                 text_by_role.setdefault(content_role, []).append(text)
-        for key, groups in (
+            else:
+                module["_unscoped_text"].append(text)
+        identity_groups = (
             ("title_index", self.titles),
             ("author_index", self.authors),
+            ("affiliation_index", self.affiliations),
             ("venue_index", self.venues),
-        ):
+        )
+        for key, groups in identity_groups:
             group_index = frame.get(key)
             if group_index is not None:
                 groups[int(group_index)].append(text)
+        if (
+            frame.get("in_body")
+            and module_index is None
+            and all(frame.get(key) is None for key, _groups in identity_groups)
+        ):
+            self.unbound_text.append(text)
 
 
 def parse_scientific_html(html_text: str) -> ScientificHtmlFacts:
@@ -355,6 +402,8 @@ def parse_scientific_html(html_text: str) -> ScientificHtmlFacts:
             module_id: tuple(values)
             for module_id, values in parser.contract_equation_latex.items()
         },
+        all_equation_structures=tuple(parser.all_equation_structures),
+        all_equation_latex=tuple(parser.all_equation_latex),
     )
 
 
@@ -376,22 +425,32 @@ def _snapshot_from_parser(parser: _ScientificContentParser) -> dict[str, Any]:
                 role: _normalize_visible_text("".join(chunks))
                 for role, chunks in sorted(raw["_text_by_role"].items())
             },
+            "unscoped_text": _normalize_visible_text(
+                "".join(raw["_unscoped_text"])
+            ),
             "source_labels": tuple(sorted(raw["source_labels"])),
             "semantic_roles": raw["semantic_roles"],
             "priority": raw["priority"],
-            "focal_roles": tuple(sorted(raw["focal_roles"])),
+            "visual_kind": raw["visual_kind"],
             "source_figure_sha256s": tuple(sorted(raw["source_figure_sha256s"])),
+            "source_figure_geometry": tuple(sorted(raw["source_figure_geometry"])),
             "equation_latex": tuple(raw["equation_latex"]),
             "equation_structure": tuple(raw["equation_structures"]),
         }
         modules.setdefault(str(raw["module_id"]), []).append(module)
     return {
         "schema": SCIENTIFIC_CONTENT_SNAPSHOT_SCHEMA,
+        "unbound_text": _normalize_visible_text("".join(parser.unbound_text)),
+        **({"unbound_equation_structure": tuple(parser.unbound_equation_structures)}
+           if parser.unbound_equation_structures else {}),
         "identity": {
             "title": tuple(_normalized_groups(parser.titles)),
             "authors": tuple(_normalized_groups(parser.authors)),
+            "affiliations": tuple(_normalized_groups(parser.affiliations)),
             "venue": tuple(_normalized_groups(parser.venues)),
             "venue_logos": tuple(sorted(parser.venue_logos)),
+            **({"equation_structure": tuple(parser.identity_equation_structures)}
+               if parser.identity_equation_structures else {}),
         },
         "modules": {
             module_id: tuple(sorted(entries, key=_module_snapshot_sort_key))
@@ -403,12 +462,12 @@ def _snapshot_from_parser(parser: _ScientificContentParser) -> dict[str, Any]:
 def scientific_content_snapshot_issues(
     reference: str | Mapping[str, Any],
     candidate: str | Mapping[str, Any],
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Compare poster HTML or snapshots and report frozen scientific-content changes."""
 
     expected = _coerce_scientific_snapshot(reference)
     observed = _coerce_scientific_snapshot(candidate)
-    issues: list[dict[str, str]] = []
+    issues = _unbound_text_issues(expected, observed)
     expected_identity = expected.get("identity")
     observed_identity = observed.get("identity")
     if expected_identity != observed_identity:
@@ -453,14 +512,21 @@ def scientific_content_snapshot_issues(
         if expected_entries == observed_entries:
             continue
         fields = _changed_module_fields(expected_entries, observed_entries)
-        issues.append(
-            _issue(
-                "scientific_module_changed",
-                f"Visual revision changed frozen field(s) in module {module_id!r}: "
-                + ", ".join(fields)
-                + ".",
-            )
+        issue: dict[str, Any] = _issue(
+            "scientific_module_changed",
+            f"Visual revision changed frozen field(s) in module {module_id!r}: "
+            + ", ".join(fields)
+            + ".",
         )
+        if isinstance(expected_entries, (list, tuple)) and isinstance(
+            observed_entries, (list, tuple)
+        ) and len(expected_entries) == len(observed_entries) == 1 and all(
+            isinstance(entry, Mapping) for entry in (expected_entries[0], observed_entries[0])
+        ):
+            issue["module_id"] = module_id
+            issue["expected"] = {field: expected_entries[0].get(field) for field in fields}
+            issue["observed"] = {field: observed_entries[0].get(field) for field in fields}
+        issues.append(issue)
     return issues
 
 
@@ -469,19 +535,21 @@ def grounded_replan_snapshot_issues(
     candidate: str | Mapping[str, Any],
     *,
     target_module_ids: frozenset[str] | set[str] | list[str],
-) -> list[dict[str, str]]:
+    editable_text_roles: frozenset[str] | set[str] | list[str] | None = None,
+) -> list[dict[str, Any]]:
     """Allow grounded copy edits while freezing every other poster fact.
 
-    Content replanning may alter only ``visible_text`` and ``text_by_role`` inside an
-    existing module instance. Source grounding and the HTML contract remain separate
-    gates; this comparator prevents the visual loop from using that freedom to replace
-    identity, evidence, equation, role, or module structure.
+    Content replanning may alter text only inside an existing target module. When
+    ``editable_text_roles`` is supplied, unscoped text and every other content role stay
+    frozen. Source grounding and the HTML contract remain separate gates; this comparator
+    prevents the visual loop from replacing identity, evidence, equations, roles, or
+    module structure.
     """
 
     expected = _coerce_scientific_snapshot(reference)
     observed = _coerce_scientific_snapshot(candidate)
     targets = {str(module_id).strip() for module_id in target_module_ids}
-    issues: list[dict[str, str]] = []
+    issues = _unbound_text_issues(expected, observed)
     if expected.get("identity") != observed.get("identity"):
         issues.append(
             _issue(
@@ -540,15 +608,14 @@ def grounded_replan_snapshot_issues(
             expected_instance = expected_instances[poster_id]
             observed_instance = observed_instances[poster_id]
             changed = (
-                _changed_module_fields_except_text(expected_instance, observed_instance)
+                _changed_module_fields_except_text(
+                    expected_instance,
+                    observed_instance,
+                    editable_text_roles=editable_text_roles,
+                )
                 if module_id in targets
                 else _changed_mapping_fields(expected_instance, observed_instance)
             )
-            if module_id in targets and (
-                expected_instance.get("text_by_role", {}).get("equation")
-                != observed_instance.get("text_by_role", {}).get("equation")
-            ):
-                changed = sorted(set(changed) | {"text_by_role.equation"})
             if changed:
                 issues.append(
                     _issue(
@@ -560,6 +627,25 @@ def grounded_replan_snapshot_issues(
                     )
                 )
     return issues
+
+
+def _unbound_text_issues(
+    expected: Mapping[str, Any], observed: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Preserve unowned copy's reading order, not its incidental DOM wrappers."""
+
+    before = (expected.get("unbound_text") or "", expected.get("unbound_equation_structure") or ())
+    after = (observed.get("unbound_text") or "", observed.get("unbound_equation_structure") or ())
+    if before == after:
+        return []
+    return [{
+        **_issue(
+            "scientific_unbound_text_changed",
+            "Revision changed visible text or mathematics outside scientific modules or verified identity.",
+        ),
+        "expected": before,
+        "observed": after,
+    }]
 
 
 def _coerce_scientific_snapshot(
@@ -608,13 +694,30 @@ def _module_instances_by_poster_id(value: Any) -> dict[str, Mapping[str, Any]] |
 def _changed_module_fields_except_text(
     expected: Mapping[str, Any],
     observed: Mapping[str, Any],
+    *,
+    editable_text_roles: frozenset[str] | set[str] | list[str] | None,
 ) -> list[str]:
-    allowed = {"visible_text", "text_by_role"}
-    return sorted(
+    allowed_fields = {"visible_text", "text_by_role"}
+    if editable_text_roles is None:
+        allowed_fields.add("unscoped_text")
+    changed = {
         str(key)
         for key in set(expected) | set(observed)
-        if key not in allowed and expected.get(key) != observed.get(key)
-    )
+        if key not in allowed_fields and expected.get(key) != observed.get(key)
+    }
+    if editable_text_roles is not None:
+        editable_roles = {str(role) for role in editable_text_roles}
+        expected_roles = expected.get("text_by_role")
+        observed_roles = observed.get("text_by_role")
+        expected_mapping = expected_roles if isinstance(expected_roles, Mapping) else {}
+        observed_mapping = observed_roles if isinstance(observed_roles, Mapping) else {}
+        changed.update(
+            f"text_by_role.{role}"
+            for role in set(expected_mapping) | set(observed_mapping)
+            if role not in editable_roles
+            and expected_mapping.get(role) != observed_mapping.get(role)
+        )
+    return sorted(changed)
 
 
 def _module_snapshot_sort_key(module: Mapping[str, Any]) -> tuple[str, ...]:
@@ -625,8 +728,9 @@ def _module_snapshot_sort_key(module: Mapping[str, Any]) -> tuple[str, ...]:
         repr(module.get("text_by_role")),
         repr(module.get("semantic_roles")),
         str(module.get("priority") or ""),
-        repr(module.get("focal_roles")),
+        str(module.get("visual_kind") or ""),
         repr(module.get("source_figure_sha256s")),
+        repr(module.get("source_figure_geometry")),
         repr(module.get("equation_latex")),
         repr(module.get("equation_structure")),
     )
@@ -645,7 +749,6 @@ def _element_is_hidden(tag: str, attributes: Mapping[str, str]) -> bool:
     return (
         tag in _NON_VISIBLE_TEXT_TAGS
         or "hidden" in attributes
-        or attributes.get("aria-hidden", "").casefold() == "true"
         or "display:none" in style
         or "visibility:hidden" in style
     )

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-import poster_core
+import poster_contract
 
 from posterlib.paths import SKILL_ROOT
 
@@ -24,5 +24,5 @@ def load(filename: str, *, bind_poster_selector: bool = False) -> str:
         )
     return script.replace(
         _POSTER_SELECTOR_MARKER,
-        json.dumps(poster_core.POSTER_ROOT_SELECTOR, ensure_ascii=False),
+        json.dumps(poster_contract.POSTER_ROOT_SELECTOR, ensure_ascii=False),
     )

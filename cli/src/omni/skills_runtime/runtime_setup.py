@@ -1,4 +1,4 @@
-"""Explicit setup for the owner-managed Node runtime used by research-pptx.
+"""Explicit setup for owner-managed bundled Skill runtimes.
 
 Task execution is deliberately side-effect free: engines may read the installed
 runtime but never invoke a package manager. Installation, ``omni init``, and
@@ -7,6 +7,9 @@ runtime but never invoke a package manager. Installation, ``omni init``, and
 The renderer installs into a single fixed cache directory. ``npm ci`` rebuilds
 ``node_modules`` from the pinned lockfile on every install/init/update, so there
 is no need to version the cache by lockfile hash or track a readiness marker.
+
+Scientific-poster's Python packages ship with Omni. This module only asks
+Playwright to prepare the matching Chromium build outside task execution.
 """
 
 from __future__ import annotations
@@ -14,12 +17,14 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 from omni.data import BUILTIN_SKILLS_DIR
 
 RESEARCH_PPTX_SETUP_COMMAND = "omni skills setup research-pptx"
+SCIENTIFIC_POSTER_SETUP_COMMAND = "omni skills setup scientific-poster"
 _RENDERER_PACKAGES = ("pptxgenjs", "sharp")
 
 # The pinned renderer bundles ``sharp`` (its ``engines`` requires ``>=20.9.0``).
@@ -31,6 +36,27 @@ _MIN_NODE_LABEL = f"{_MIN_NODE[0]}.{_MIN_NODE[1]}"
 
 class SkillRuntimeSetupError(RuntimeError):
     """A bundled Skill runtime could not be prepared by the owner CLI."""
+
+
+def setup_scientific_poster_runtime(*, force: bool = False) -> None:
+    """Install the Chromium build matched to Omni's Playwright package."""
+
+    command = [sys.executable, "-m", "playwright", "install"]
+    if force:
+        command.append("--force")
+    command.append("chromium")
+    try:
+        completed = subprocess.run(command, check=False)
+    except OSError as exc:
+        raise SkillRuntimeSetupError(
+            f"scientific-poster Chromium setup could not start Playwright: {exc}"
+        ) from exc
+    if int(getattr(completed, "returncode", 1)) != 0:
+        raise SkillRuntimeSetupError(
+            "scientific-poster Chromium setup failed "
+            f"(exit={getattr(completed, 'returncode', 'unknown')}). Retry with "
+            f"`{SCIENTIFIC_POSTER_SETUP_COMMAND}`."
+        )
 
 
 def _parse_node_version(raw: str) -> tuple[int, int, int] | None:

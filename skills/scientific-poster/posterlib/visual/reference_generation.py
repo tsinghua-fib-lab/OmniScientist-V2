@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
-from . import reference_seeds
+from . import reference_catalog
 
 _DEFAULT_TIMEOUT_S = 180.0
 _TRANSIENT_STATUS_CODES = frozenset({408, 409, 429, 500, 502, 503, 504})
@@ -35,6 +35,10 @@ GENERATION_FAILED_WARNING = (
 GENERATION_BUDGET_WARNING = (
     "Reference image generation was skipped to preserve the workflow budget; using a "
     "built-in seed."
+)
+GENERATION_UNUSED_WARNING = (
+    "Reference image generation was skipped because no pixel interpreter is available; "
+    "using a built-in seed."
 )
 
 
@@ -229,23 +233,23 @@ def image_config_from_env(
 
 
 def resolve_reference(
-    seed: reference_seeds.SeedSpec,
+    seed: reference_catalog.SeedSpec,
     *,
     prompt: str,
     output_dir: str | Path,
     environ: Mapping[str, str] | None = None,
     generator: ReferenceImageGenerator | None = None,
     generation_budget_s: float | None = None,
-) -> reference_seeds.ReferenceBundle:
+) -> reference_catalog.ReferenceBundle:
     """Generate a hash-bound reference or deterministically return the selected seed."""
 
-    registered_seed = reference_seeds.seed_by_id(seed.seed_id)
+    registered_seed = reference_catalog.seed_by_id(seed.seed_id)
     if seed != registered_seed:
-        raise reference_seeds.ReferenceSeedError(
+        raise reference_catalog.ReferenceSeedError(
             "reference seed must come from registry"
         )
     if generation_budget_s is not None and generation_budget_s < 10.0:
-        return reference_seeds.load_seed_bundle(
+        return reference_catalog.load_seed_bundle(
             seed,
             warning=GENERATION_BUDGET_WARNING,
         )
@@ -259,7 +263,7 @@ def resolve_reference(
         timeout_s=attempt_timeout,
     )
     if config is None:
-        return reference_seeds.load_seed_bundle(
+        return reference_catalog.load_seed_bundle(
             seed,
             warning=configuration_warning,
         )
@@ -272,7 +276,7 @@ def resolve_reference(
             orientation=seed.orientation,
         )
     except ReferenceGenerationError:
-        return reference_seeds.load_seed_bundle(
+        return reference_catalog.load_seed_bundle(
             seed,
             warning=GENERATION_FAILED_WARNING,
         )
@@ -281,7 +285,7 @@ def resolve_reference(
         f"generated-reference-{seed.seed_id}.png"
     )
     persisted = _persist_generated_reference(destination, image_bytes)
-    return reference_seeds.ReferenceBundle(
+    return reference_catalog.ReferenceBundle(
         image_path=str(persisted),
         image_sha256=_sha256_bytes(image_bytes),
         source_kind="generated",
@@ -398,6 +402,7 @@ __all__ = [
     "GENERATION_DISABLED_WARNING",
     "GENERATION_FAILED_WARNING",
     "GENERATION_INCOMPLETE_WARNING",
+    "GENERATION_UNUSED_WARNING",
     "HttpResponse",
     "ImageGenerationClient",
     "ImageGenerationConfig",

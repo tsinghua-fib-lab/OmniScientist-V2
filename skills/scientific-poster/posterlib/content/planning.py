@@ -10,14 +10,19 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from typing import Any
 
-import poster_assets
-import poster_core
+import image_assets
+import poster_contract
 
-from posterlib.content.equations import EquationSyntaxError, latex_to_mathml
+from posterlib.content.equations import (
+    EquationSyntaxError,
+    contains_inline_math,
+    latex_to_mathml,
+    validate_inline_math,
+    visible_inline_math_text,
+)
 
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _MODULE_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
-FOCAL_ROLES = frozenset({"source-figure", "method-flow", "result", "claim"})
 _VISUAL_KINDS = frozenset(
     {
         "claim",
@@ -30,36 +35,22 @@ _VISUAL_KINDS = frozenset(
         "provenance",
     }
 )
-_AUDIT_ROLE_BY_VISUAL_KIND = {
-    "claim": "claim",
-    "figure": "evidence",
-    "method-flow": "method",
-    "metrics": "evidence",
-    "comparison": "evidence",
-    "table": "evidence",
-    "text": "context",
-    "provenance": "provenance",
-}
-_WIDTHS_MM = (594.0, 841.0, 914.4)
+_WIDTHS_MM = (841.0, 914.4)
 _LANDSCAPE_PAGES_MM = (
-    (841.0, 594.0),
-    (914.4, 609.6),
     (1189.0, 841.0),
     (1219.2, 914.4),
 )
 _MIN_PORTRAIT_HEIGHT_RATIO = 1.10
 _MAX_PORTRAIT_HEIGHT_RATIO = 1.50
-_MAX_LANDSCAPE_ASPECT_RATIO = 1.50
-_TARGET_OCCUPANCY = 0.90
-_MAX_AUTO_OCCUPANCY = 1.0
+_MAX_LANDSCAPE_ASPECT_RATIO = 1.70
+TARGET_OCCUPANCY = 0.88
+_ADVISORY_FIT_OCCUPANCY = 1.0
 _MIN_OCCUPANCY = 0.72
-_COMPACT_LANDSCAPE_FLOW_RESERVE = 1.12
-_COMPACT_LANDSCAPE_MAX_WIDTH_MM = 1000.0
 _FIXED_VERTICAL_OVERHEAD_RATIO = 0.15
-_FIGURE_ORIENTATION_EXTENT_TARGET = 0.18
 _MIN_PAGE_DIMENSION_MM = 200.0
 _MAX_PAGE_DIMENSION_MM = 2000.0
 _MAX_EQUATION_LATEX_CHARS = 600
+POSTER_COLUMN_GAP_MM = 14.0
 
 
 class PlanningError(ValueError):
@@ -68,44 +59,6 @@ class PlanningError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(f"{code}: {message}")
         self.code = code
-
-
-def _derive_audit_roles(
-    raw_roles: object,
-    *,
-    visual_kind: str,
-    priority: str,
-    focal_role: str,
-) -> list[str]:
-    """Return system-owned audit metadata from the module's structural fields."""
-
-    roles: list[str] = []
-    if isinstance(raw_roles, list):
-        for value in raw_roles:
-            role = str(value).strip()
-            if role in poster_core.SEMANTIC_ROLES and role not in roles:
-                roles.append(role)
-
-    structural_role = _AUDIT_ROLE_BY_VISUAL_KIND.get(visual_kind)
-    if (
-        structural_role
-        and structural_role not in roles
-        and not (structural_role == "context" and (roles or priority == "focal"))
-    ):
-        roles.append(structural_role)
-    if priority == "focal":
-        focal_audit_role = {
-            "method-flow": "method",
-            "result": "evidence",
-            "source-figure": "evidence",
-        }.get(focal_role)
-        if focal_audit_role and focal_audit_role not in roles:
-            roles.append(focal_audit_role)
-        if "claim" not in roles:
-            roles.append("claim")
-    if priority == "footer" and "provenance" not in roles:
-        roles.append("provenance")
-    return roles or ["context"]
 
 
 @dataclass(frozen=True)
@@ -120,7 +73,6 @@ class PagePlan:
     orientation: str
     density_profile: str
     focal_role: str
-    layout_capacity: dict[str, float | int]
     content_contract: dict[str, Any]
     predicted_occupancy: float
     reasons: tuple[str, ...]
@@ -151,9 +103,8 @@ def _build_page_plan(
         min_height_mm=min_height_mm,
         max_height_mm=max_height_mm,
         orientation=orientation,
-        density_profile=_density_profile(budget),
+        density_profile=_density_profile(predicted_occupancy),
         focal_role=focal_role,
-        layout_capacity=layout_capacity(width_mm),
         content_contract=_content_contract(budget),
         predicted_occupancy=predicted_occupancy,
         reasons=reasons,
@@ -209,6 +160,18 @@ def typography_metrics(width_mm: float) -> dict[str, float]:
     }
 
 
+def poster_type_reference(width_mm: float, height_mm: float) -> dict[str, float]:
+    """Suggest display sizes for both the page width and its viewing height."""
+
+    metrics = typography_metrics(width_mm)
+    height = _positive_finite(height_mm, "height_mm")
+    return {
+        "title_mm": round(max(metrics["title_min_mm"], 0.020 * height), 1),
+        "heading_mm": round(max(metrics["section_heading_min_mm"], 0.010 * height), 1),
+        "body_mm": round(max(metrics["body_target_mm"], 0.0085 * height), 1),
+    }
+
+
 def display_width_units(value: str) -> float:
     """Estimate glyph advance using Unicode width, independent of language."""
 
@@ -259,16 +222,7 @@ def content_capacity_hint(
     """Describe the physical selection envelope before evidence is chosen."""
 
     if page is not None:
-        hint: dict[str, Any] = {
-            **page,
-            "figure_readability_reference": {
-                "minimum_orientation_extent_ratio": (_FIGURE_ORIENTATION_EXTENT_TARGET),
-                "policy": (
-                    "Select only figures that can remain interpretable at conference "
-                    "viewing scale; reduce redundant figures before shrinking them."
-                ),
-            },
-        }
+        hint: dict[str, Any] = {**page}
         width = page.get("width_mm")
         height = page.get("height_mm")
         if (
@@ -280,8 +234,9 @@ def content_capacity_hint(
             and height > 0
         ):
             capacity = layout_capacity(float(width))
+            preferred_columns = 2 if float(height) >= float(width) else 3
             typical_columns = min(
-                3,
+                preferred_columns,
                 int(capacity["maximum_readable_column_count"]),
             )
             typical_width = (
@@ -290,14 +245,8 @@ def content_capacity_hint(
             ) / typical_columns
             typography = typography_metrics(float(width))
             hint["readable_layout_reference"] = {
-                "typical_column_count": typical_columns,
-                "maximum_readable_column_count": int(
-                    capacity["maximum_readable_column_count"]
-                ),
                 "typical_column_width_mm": round(typical_width, 1),
-                "minimum_column_width_mm": float(
-                    capacity["minimum_column_width_mm"]
-                ),
+                "minimum_column_width_mm": float(capacity["minimum_column_width_mm"]),
                 "usable_body_depth_mm": round(
                     max(160.0, float(height) - _fixed_vertical_overhead(float(width))),
                     1,
@@ -314,6 +263,18 @@ def content_capacity_hint(
             (width, width * _MAX_PORTRAIT_HEIGHT_RATIO) for width in _WIDTHS_MM
         )
     elif normalized == "auto":
+        landscape_bounds = _LANDSCAPE_PAGES_MM
+        portrait_bounds = tuple(
+            (width, width * _MAX_PORTRAIT_HEIGHT_RATIO) for width in _WIDTHS_MM
+        )
+        typical_column_width = max(
+            _maximum_typical_column_width_mm(
+                landscape_bounds, preferred_column_count=3
+            ),
+            _maximum_typical_column_width_mm(
+                portrait_bounds, preferred_column_count=2
+            ),
+        )
         return {
             "strategy": "auto",
             "orientation": "auto",
@@ -324,23 +285,13 @@ def content_capacity_hint(
                     "max_height_mm": height,
                 }
                 for candidate_orientation, candidate_bounds in (
-                    ("landscape", _LANDSCAPE_PAGES_MM),
-                    (
-                        "portrait",
-                        tuple(
-                            (width, width * _MAX_PORTRAIT_HEIGHT_RATIO)
-                            for width in _WIDTHS_MM
-                        ),
-                    ),
+                    ("landscape", landscape_bounds),
+                    ("portrait", portrait_bounds),
                 )
                 for width, height in candidate_bounds
             ],
-            "figure_readability_reference": {
-                "minimum_orientation_extent_ratio": (_FIGURE_ORIENTATION_EXTENT_TARGET),
-                "policy": (
-                    "Select only figures that can remain interpretable at conference "
-                    "viewing scale; reduce redundant figures before shrinking them."
-                ),
+            "readable_layout_reference": {
+                "typical_column_width_mm": typical_column_width,
             },
         }
     else:
@@ -348,20 +299,44 @@ def content_capacity_hint(
             "invalid_page",
             "orientation must be auto, portrait, or landscape",
         )
+    typical_column_width = _maximum_typical_column_width_mm(
+        bounds,
+        preferred_column_count=3 if normalized == "landscape" else 2,
+    )
     return {
         "strategy": "auto",
         "orientation": normalized,
         "common_page_bounds_mm": [
             {"width_mm": width, "max_height_mm": height} for width, height in bounds
         ],
-        "figure_readability_reference": {
-            "minimum_orientation_extent_ratio": _FIGURE_ORIENTATION_EXTENT_TARGET,
-            "policy": (
-                "Select only figures that can remain interpretable at conference "
-                "viewing scale; reduce redundant figures before shrinking them."
-            ),
+        "readable_layout_reference": {
+            "typical_column_width_mm": typical_column_width,
         },
     }
+
+
+def _maximum_typical_column_width_mm(
+    bounds: tuple[tuple[float, float], ...],
+    *,
+    preferred_column_count: int,
+) -> float:
+    """Return the widest typical column across the candidate page bounds."""
+
+    widths: list[float] = []
+    for width, _height in bounds:
+        capacity = layout_capacity(width)
+        count = min(
+            preferred_column_count,
+            int(capacity["maximum_readable_column_count"]),
+        )
+        widths.append(
+            (
+                _printable_width(width)
+                - (count - 1) * float(capacity["gutter_mm"])
+            )
+            / count
+        )
+    return round(max(widths), 1)
 
 
 def bind_prepared_figure_geometry(
@@ -377,9 +352,9 @@ def bind_prepared_figure_geometry(
 
     bound_value = copy.deepcopy(value)
     ratios = {
-        str(asset.get("content_sha256") or ""): poster_assets.asset_aspect_ratio(asset)
+        str(asset.get("content_sha256") or ""): image_assets.asset_aspect_ratio(asset)
         for asset in assets
-        if asset.get("source_kind") == "pdf_figure"
+        if image_assets.is_source_figure_asset(asset)
         and str(asset.get("content_sha256") or "")
     }
     modules = bound_value.get("content_modules")
@@ -404,19 +379,12 @@ def bind_prepared_figure_geometry(
     return bound_value
 
 
-def _density_profile(plan: Mapping[str, Any]) -> str:
-    """Classify grounded content pressure without forcing every poster dense."""
+def _density_profile(predicted_occupancy: float) -> str:
+    """Classify visual pressure from the selected page's occupied area."""
 
-    raw_modules = plan.get("content_modules")
-    if not isinstance(raw_modules, list):
-        raw_modules = []
-    modules = [item for item in raw_modules if isinstance(item, Mapping)]
-    pressure = len(modules)
-    pressure += sum(bool(item.get("figure_sha256s")) for item in modules)
-    pressure += sum(bool(item.get("equations")) for item in modules)
-    if pressure <= 3:
+    if predicted_occupancy < _MIN_OCCUPANCY:
         return "open"
-    if pressure <= 7:
+    if predicted_occupancy <= TARGET_OCCUPANCY:
         return "balanced"
     return "dense"
 
@@ -425,6 +393,7 @@ def normalize_content_budget(
     value: object,
     *,
     source_figure_sha256s: set[str],
+    source_equations: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Validate source-grounded modules without prescribing visual sections."""
 
@@ -432,27 +401,76 @@ def normalize_content_budget(
         raise PlanningError(
             "invalid_content_budget", "content budget must be an object"
         )
+    unexpected_top_level = sorted(
+        set(value)
+        - {
+            "page_orientation",
+            "sections",
+            "content_modules",
+        }
+    )
+    if unexpected_top_level:
+        raise PlanningError(
+            "invalid_content_budget",
+            "content budget has unsupported fields: " + ", ".join(unexpected_top_level),
+        )
+    page_orientation = str(value.get("page_orientation") or "").strip().lower()
+    if page_orientation and page_orientation not in {"portrait", "landscape"}:
+        raise PlanningError(
+            "invalid_content_budget",
+            "page_orientation must be portrait or landscape",
+        )
     sections = _normalize_sections(value.get("sections"))
+    _validate_visible_math(
+        [section["label"] for section in sections],
+        location="section labels",
+    )
     section_ids = {item["id"] for item in sections}
     raw_modules = value.get("content_modules")
     if not isinstance(raw_modules, list) or not raw_modules:
         raise PlanningError(
             "invalid_content_budget", "content_modules must be a non-empty array"
         )
-    organization_mode, focal_role = _presentation_hints(value, raw_modules)
-
     allowed_figures = {str(item) for item in source_figure_sha256s}
     if any(_HASH_RE.fullmatch(item) is None for item in allowed_figures):
         raise PlanningError(
             "invalid_content_budget", "source figure manifest is invalid"
         )
+    equation_catalog = source_equation_catalog(source_equations)
 
     modules: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
+    figure_owners: dict[str, str] = {}
     for raw in raw_modules:
         if not isinstance(raw, Mapping):
             raise PlanningError(
                 "invalid_content_budget", "each module must be an object"
+            )
+        unsupported_fields = sorted(
+            set(raw)
+            - {
+                "id",
+                "section_id",
+                "title",
+                "semantic_roles",
+                "priority",
+                "visual_kind",
+                "text",
+                "source_label",
+                "figure_sha256s",
+                "figure_aspect_ratio",
+                "takeaway",
+                "equations",
+                "detail_points",
+                "flow_steps",
+                "table",
+            }
+        )
+        if unsupported_fields:
+            raise PlanningError(
+                "invalid_content_budget",
+                "content module has unsupported fields: "
+                + ", ".join(unsupported_fields),
             )
         module_id = str(raw.get("id") or "").strip()
         section_id = str(raw.get("section_id") or "").strip()
@@ -460,16 +478,38 @@ def normalize_content_budget(
         text = " ".join(str(raw.get("text") or "").split())
         takeaway = " ".join(str(raw.get("takeaway") or "").split())
         raw_detail_points = raw.get("detail_points")
-        detail_points = (
-            [
-                normalized
-                for item in raw_detail_points
-                if (normalized := " ".join(str(item).split()))
-            ]
-            if isinstance(raw_detail_points, list)
-            else []
+        if raw_detail_points is None:
+            detail_points = []
+        elif not isinstance(raw_detail_points, list) or any(
+            not isinstance(item, str) or not item.strip()
+            for item in raw_detail_points
+        ):
+            raise PlanningError(
+                "invalid_content_budget",
+                f"module {module_id} detail_points must be an array of non-empty strings",
+            )
+        else:
+            detail_points = [" ".join(item.split()) for item in raw_detail_points]
+        flow_steps = _normalize_flow_steps(raw.get("flow_steps"), module_id=module_id)
+        equations = _normalize_equations(
+            raw.get("equations"),
+            module_id=module_id,
+            equation_catalog=equation_catalog,
         )
-        equations = _normalize_equations(raw.get("equations"), module_id=module_id)
+        table = _normalize_table(raw.get("table"), module_id=module_id)
+        visible_math_values = [title, text, takeaway, *detail_points]
+        visible_math_values.extend(
+            value
+            for step in flow_steps
+            for value in (step["label"], step["detail"])
+        )
+        if table is not None:
+            visible_math_values.extend(table["columns"])
+            visible_math_values.extend(cell for row in table["rows"] for cell in row)
+        _validate_visible_math(
+            visible_math_values,
+            location=f"module {module_id or '<unknown>'}",
+        )
         raw_figures = raw.get("figure_sha256s")
         figures = (
             [str(item).strip() for item in raw_figures]
@@ -484,30 +524,77 @@ def normalize_content_budget(
                 "invalid_content_budget", "module claims an unknown source figure"
             )
         source_label = str(raw.get("source_label") or "").strip()
-        raw_priority = str(raw.get("priority") or "").strip()
-        priority = (
-            raw_priority
-            if raw_priority in poster_core.MODULE_PRIORITIES
-            else "supporting"
+        priority = str(raw.get("priority") or "").strip()
+        if priority not in poster_contract.MODULE_PRIORITIES:
+            raise PlanningError(
+                "invalid_content_budget",
+                f"module {module_id or '<unknown>'} priority must be one of: "
+                + ", ".join(sorted(poster_contract.MODULE_PRIORITIES)),
+            )
+        raw_roles = raw.get("semantic_roles")
+        roles = (
+            [str(raw_roles[0]).strip()]
+            if isinstance(raw_roles, list) and len(raw_roles) == 1
+            else []
         )
-        visual_kind = _derive_visual_kind(
-            raw.get("visual_kind"),
-            raw_roles=raw.get("semantic_roles"),
-            figures=figures,
-            equations=equations,
-        )
-        roles = _derive_audit_roles(
-            raw.get("semantic_roles"),
-            visual_kind=visual_kind,
-            priority=priority,
-            focal_role=focal_role,
-        )
+        if not roles or roles[0] not in poster_contract.SEMANTIC_ROLES:
+            raise PlanningError(
+                "invalid_content_budget",
+                f"module {module_id or '<unknown>'} semantic_roles must contain exactly "
+                "one supported role",
+            )
+        visual_kind = str(raw.get("visual_kind") or "").strip()
+        if visual_kind not in _VISUAL_KINDS:
+            raise PlanningError(
+                "invalid_content_budget",
+                f"module {module_id or '<unknown>'} visual_kind must be one of: "
+                + ", ".join(sorted(_VISUAL_KINDS)),
+            )
+        if bool(figures) != (visual_kind == "figure"):
+            raise PlanningError(
+                "invalid_content_budget",
+                f"module {module_id or '<unknown>'} must use visual_kind figure exactly "
+                "when it binds prepared figures",
+            )
+        if bool(table) != (visual_kind == "table"):
+            raise PlanningError(
+                "invalid_content_budget",
+                f"module {module_id or '<unknown>'} must use visual_kind table exactly "
+                "when it carries a table",
+            )
+        if visual_kind == "method-flow" and figures:
+            raise PlanningError(
+                "invalid_content_budget",
+                f"module {module_id} must use visual_kind figure for a prepared process figure",
+            )
+        if visual_kind == "method-flow" and not flow_steps:
+            raise PlanningError(
+                "invalid_content_budget",
+                f"module {module_id} with visual_kind method-flow requires flow_steps",
+            )
+        if visual_kind == "method-flow" and detail_points:
+            raise PlanningError(
+                "invalid_content_budget",
+                f"module {module_id} must use flow_steps instead of detail_points for method-flow",
+            )
+        if visual_kind != "method-flow" and flow_steps:
+            raise PlanningError(
+                "invalid_content_budget",
+                f"module {module_id} may use flow_steps only with visual_kind method-flow",
+            )
         field_validity = {
             "id": _MODULE_ID_RE.fullmatch(module_id) is not None,
             "section_id": section_id in section_ids,
             "source_label": bool(source_label),
             "meaningful visible content": bool(
-                title or text or takeaway or detail_points or figures or equations
+                title
+                or text
+                or takeaway
+                or detail_points
+                or flow_steps
+                or figures
+                or equations
+                or table
             ),
         }
         invalid_fields = [
@@ -525,6 +612,18 @@ def normalize_content_budget(
                 "invalid_content_budget", "content module ids must be unique"
             )
         seen_ids.add(module_id)
+        reused_figure = next(
+            (figure for figure in figures if figure in figure_owners),
+            None,
+        )
+        if reused_figure is not None:
+            raise PlanningError(
+                "invalid_content_budget",
+                f"source figure assigned to module {figure_owners[reused_figure]} "
+                f"cannot also be assigned to {module_id}; bind an immutable source "
+                "figure to one module and combine its related readings there",
+            )
+        figure_owners.update({figure: module_id for figure in figures})
         raw_aspect_ratio = raw.get("figure_aspect_ratio")
         aspect_ratio = (
             _positive_finite(
@@ -546,75 +645,98 @@ def normalize_content_budget(
             "source_label": source_label,
             "figure_sha256s": figures,
             "takeaway": takeaway,
-            "detail_points": detail_points,
             "equations": equations,
         }
+        if detail_points:
+            module["detail_points"] = detail_points
+        if flow_steps:
+            module["flow_steps"] = flow_steps
+        if table:
+            module["table"] = table
         if aspect_ratio is not None:
             module["figure_aspect_ratio"] = aspect_ratio
         modules.append(module)
 
-    _ensure_focal_module(modules, focal_role=focal_role)
+    focal_modules = [module for module in modules if module["priority"] == "focal"]
+    if len(focal_modules) != 1:
+        raise PlanningError(
+            "invalid_content_budget",
+            "content budget must identify exactly one focal module",
+        )
+    organization_mode, focal_role = _presentation_hints(modules)
 
-    return {
+    normalized = {
         "organization_mode": organization_mode,
         "focal_role": focal_role,
         "sections": sections,
         "content_modules": modules,
     }
+    if page_orientation:
+        normalized["page_orientation"] = page_orientation
+    return normalized
 
 
-def _ensure_focal_module(
-    modules: list[dict[str, Any]],
-    *,
-    focal_role: str,
-) -> None:
-    """Promote one evidence-led focal module when the plan omitted all hierarchy."""
+def _normalize_flow_steps(value: object, *, module_id: str) -> list[dict[str, str]]:
+    """Validate the semantic nodes of one model-authored method flow."""
 
-    if not modules or any(module["priority"] == "focal" for module in modules):
-        return
-
-    def score(module: Mapping[str, Any]) -> float:
-        visual_kind = str(module.get("visual_kind") or "")
-        roles = {str(role) for role in module.get("semantic_roles") or []}
-        figures = len(module.get("figure_sha256s") or [])
-        equations = len(module.get("equations") or [])
-        value = {"primary": 2.0, "supporting": 1.0, "footer": -10.0}.get(
-            str(module.get("priority") or ""),
-            0.0,
+    if value is None:
+        return []
+    if not isinstance(value, list) or not value:
+        raise PlanningError(
+            "invalid_content_budget",
+            f"module {module_id} flow_steps must be a non-empty array",
         )
-        if focal_role == "source-figure":
-            value += figures * 2.0 + (3.0 if visual_kind == "figure" else 0.0)
-        elif focal_role == "method-flow":
-            value += equations * 2.0 + (
-                3.0 if visual_kind == "method-flow" or "method" in roles else 0.0
+    steps: list[dict[str, str]] = []
+    for raw in value:
+        if not isinstance(raw, Mapping) or set(raw) != {"label", "detail"}:
+            raise PlanningError(
+                "invalid_content_budget",
+                f"module {module_id} flow_steps require exactly label and detail",
             )
-        elif focal_role == "result":
-            value += figures + (
-                3.0
-                if visual_kind in {"comparison", "metrics", "table"}
-                or "evidence" in roles
-                else 0.0
+        label = " ".join(str(raw.get("label") or "").split())
+        detail = " ".join(str(raw.get("detail") or "").split())
+        if not label or not detail:
+            raise PlanningError(
+                "invalid_content_budget",
+                f"module {module_id} flow step label and detail must be non-empty",
             )
-        else:
-            value += 3.0 if visual_kind == "claim" or "claim" in roles else 0.0
-        value += 0.5 if module.get("takeaway") else 0.0
-        return value
+        steps.append({"label": label, "detail": detail})
+    return steps
 
-    focal = max(modules, key=score)
-    focal["priority"] = "focal"
-    focal["semantic_roles"] = _derive_audit_roles(
-        focal.get("semantic_roles"),
-        visual_kind=str(focal["visual_kind"]),
-        priority="focal",
-        focal_role=focal_role,
-    )
+
+def _normalize_table(value: object, *, module_id: str) -> dict[str, Any] | None:
+    """Keep shared headers and literal cells together through HTML and PPTX authoring."""
+
+    if value is None:
+        return None
+    columns = value.get("columns") if isinstance(value, Mapping) else None
+    rows = value.get("rows") if isinstance(value, Mapping) else None
+    if (
+        not isinstance(columns, list)
+        or not columns
+        or not isinstance(rows, list)
+        or not rows
+        or any(not isinstance(row, list) or len(row) != len(columns) for row in rows)
+    ):
+        raise PlanningError(
+            "invalid_content_budget",
+            f"module {module_id} table requires columns and non-empty rectangular rows",
+        )
+    if any(not isinstance(cell, str) for row in [columns, *rows] for cell in row):
+        raise PlanningError(
+            "invalid_content_budget", f"module {module_id} table cells must be strings"
+        )
+    return {
+        "columns": [" ".join(cell.split()) for cell in columns],
+        "rows": [[" ".join(cell.split()) for cell in row] for row in rows],
+        **({"view": "comparison"} if value.get("view") == "comparison" else {}),
+    }
 
 
 def _presentation_hints(
-    value: Mapping[str, Any],
     raw_modules: list[object],
 ) -> tuple[str, str]:
-    """Return canonical optional hints, inferring them from focal evidence as needed."""
+    """Derive visual-reference hints from the selected focal evidence."""
 
     candidates = [item for item in raw_modules if isinstance(item, Mapping)]
     focal_candidates = [
@@ -644,37 +766,36 @@ def _presentation_hints(
         isinstance(item.get("equations"), list) and bool(item.get("equations"))
         for item in focal_candidates
     )
-    if has_figure or "figure" in visual_kinds:
+    if "method-flow" in visual_kinds or "method" in roles:
+        inferred_focal_role = "method-flow"
+    elif has_figure:
+        # Scientific roles describe the story; the selected carrier determines the
+        # physical stage.  A focal prepared figure must not collapse into a
+        # result/table layout merely because the model called its scientific job
+        # evidence.
         inferred_focal_role = "source-figure"
-    elif has_equation or "method-flow" in visual_kinds or "method" in roles:
+    elif has_equation:
         inferred_focal_role = "method-flow"
     elif visual_kinds.intersection({"comparison", "metrics"}) or "evidence" in roles:
         inferred_focal_role = "result"
     else:
         inferred_focal_role = "claim"
 
-    requested_focal_role = str(value.get("focal_role") or "").strip().lower()
-    focal_role = (
-        requested_focal_role
-        if requested_focal_role in FOCAL_ROLES
-        else inferred_focal_role
-    )
-    requested_organization_mode = (
-        str(value.get("organization_mode") or "").strip().lower()
-    )
-    organization_mode = (
-        requested_organization_mode
-        if requested_organization_mode in poster_core.ORGANIZATION_MODES
-        else {
-            "source-figure": "figure-led",
-            "method-flow": "method-led",
-            "result": "result-led",
-        }.get(focal_role, "scan-first")
-    )
+    focal_role = inferred_focal_role
+    organization_mode = {
+        "source-figure": "figure-led",
+        "method-flow": "method-led",
+        "result": "result-led",
+    }.get(focal_role, "scan-first")
     return organization_mode, focal_role
 
 
-def _normalize_equations(value: object, *, module_id: str) -> list[dict[str, str]]:
+def _normalize_equations(
+    value: object,
+    *,
+    module_id: str,
+    equation_catalog: Mapping[str, Mapping[str, str]] | None,
+) -> list[dict[str, str]]:
     """Validate optional source-located display equations for semantic MathML."""
 
     if value is None:
@@ -686,11 +807,23 @@ def _normalize_equations(value: object, *, module_id: str) -> list[dict[str, str
         )
     equations: list[dict[str, str]] = []
     for raw in value:
+        if isinstance(raw, Mapping) and set(raw) == {"source_ref"}:
+            reference = raw["source_ref"]
+            selected = (
+                (equation_catalog or {}).get(reference)
+                if isinstance(reference, str) else None
+            )
+            if selected is None:
+                raise PlanningError(
+                    "invalid_content_budget",
+                    f"module {module_id or '<unknown>'}: unknown prepared equation source_ref",
+                )
+            raw = {key: selected[key] for key in ("latex", "source_label")}
         if not isinstance(raw, Mapping) or set(raw) != {"latex", "source_label"}:
             raise PlanningError(
                 "invalid_content_budget",
-                f"module {module_id or '<unknown>'}: each equation needs latex and "
-                "source_label",
+                f"module {module_id or '<unknown>'}: each equation needs a prepared "
+                "source_ref or explicit latex and source_label",
             )
         latex = " ".join(str(raw.get("latex") or "").split())
         source_label = str(raw.get("source_label") or "").strip()
@@ -715,6 +848,57 @@ def _normalize_equations(value: object, *, module_id: str) -> list[dict[str, str
     return equations
 
 
+def _validate_visible_math(values: list[str], *, location: str) -> None:
+    """Keep mathematical markup both explicit and renderable in visible copy."""
+
+    if any(
+        not contains_inline_math(item)
+        and ("^" in item or re.search(r"\\[A-Za-z]+", item))
+        for item in values
+    ):
+        raise PlanningError(
+            "invalid_content_budget",
+            f"{location} contains unrendered mathematical syntax; wrap the "
+            "expression in explicit inline LaTeX delimiters",
+        )
+    for item in values:
+        try:
+            validate_inline_math(item)
+        except EquationSyntaxError as exc:
+            preview = item if len(item) <= 240 else item[:237] + "..."
+            raise PlanningError(
+                "invalid_content_budget",
+                f"{location} contains inline LaTeX that cannot be rendered: {exc}; "
+                f"offending value: {preview!r}",
+            ) from exc
+
+
+def source_equation_catalog(
+    value: list[dict[str, str]] | None,
+) -> dict[str, dict[str, str]] | None:
+    """Give each optional source expression a stable transcription shortcut."""
+
+    if value is None:
+        return None
+    catalog: dict[str, dict[str, str]] = {}
+    for index, raw in enumerate(value, start=1):
+        if not isinstance(raw, Mapping):
+            raise PlanningError(
+                "invalid_content_budget", "prepared source equations are invalid"
+            )
+        latex = " ".join(str(raw.get("latex") or "").split())
+        source_label = str(raw.get("source_label") or "").strip()
+        if not latex or not source_label:
+            raise PlanningError(
+                "invalid_content_budget", "prepared source equations are invalid"
+            )
+        catalog[f"equation://{index}"] = {
+            "latex": latex, "source_label": source_label,
+            "context": str(raw.get("context") or ""),
+        }
+    return catalog
+
+
 def _normalize_sections(value: object) -> list[dict[str, str]]:
     """Validate ordered poster scan sections without imposing a narrative arc."""
 
@@ -729,6 +913,11 @@ def _normalize_sections(value: object) -> list[dict[str, str]]:
         if not isinstance(raw, Mapping):
             raise PlanningError(
                 "invalid_content_budget", "each section must be an object"
+            )
+        if set(raw) != {"id", "label"}:
+            raise PlanningError(
+                "invalid_content_budget",
+                "each section must contain exactly id and label",
             )
         section_id = str(raw.get("id") or "").strip()
         label = " ".join(str(raw.get("label") or "").split())
@@ -746,47 +935,16 @@ def _normalize_sections(value: object) -> list[dict[str, str]]:
     return sections
 
 
-def _derive_visual_kind(
-    value: object,
-    *,
-    raw_roles: object,
-    figures: list[str],
-    equations: list[dict[str, str]],
-) -> str:
-    """Return an optional presentation hint inferred from scientific content."""
-
-    explicit = str(value or "").strip()
-    if explicit in _VISUAL_KINDS and (explicit != "figure" or figures):
-        return explicit
-    if figures:
-        return "figure"
-    if equations:
-        return "method-flow"
-    roles = (
-        {str(role).strip() for role in raw_roles if str(role).strip()}
-        if isinstance(raw_roles, list)
-        else set()
-    )
-    if "provenance" in roles:
-        return "provenance"
-    if "method" in roles:
-        return "method-flow"
-    if "evidence" in roles:
-        return "comparison"
-    if "claim" in roles:
-        return "claim"
-    return "text"
-
-
 def estimate_page(
     budget: Mapping[str, Any],
     page: Mapping[str, Any] | None = None,
     *,
     orientation: str | None = None,
+    figure_observations: Mapping[str, Mapping[str, str]] | None = None,
 ) -> PagePlan:
     """Choose a common academic page from grounded content pressure alone."""
 
-    focal_role = str(budget.get("focal_role") or "claim")
+    focal_role = str(budget["focal_role"])
     requested_orientation = str(orientation or "auto").strip().lower()
     if requested_orientation not in {"auto", "portrait", "landscape"}:
         raise PlanningError(
@@ -807,7 +965,12 @@ def estimate_page(
                 "page dimensions must be between 200 mm and 2000 mm",
             )
         orientation = "portrait" if height >= width else "landscape"
-        reserved_occupancy = _reserved_occupancy_for(budget, width, height)
+        reserved_occupancy = _raw_occupancy_for(
+            budget,
+            width,
+            height,
+            figure_observations=figure_observations,
+        )
         predicted_occupancy = reserved_occupancy
         reasons = ["Explicit physical page preserved exactly."]
         if reserved_occupancy < _MIN_OCCUPANCY:
@@ -815,7 +978,7 @@ def estimate_page(
                 f"Estimated occupancy is {reserved_occupancy:.0%}, below the advisory "
                 "72% planning target; review rendered space use."
             )
-        elif reserved_occupancy > _MAX_AUTO_OCCUPANCY:
+        elif reserved_occupancy > _ADVISORY_FIT_OCCUPANCY:
             reasons.append(
                 "Estimated occupancy exceeds the advisory fit target; review rendered "
                 "overflow and density."
@@ -833,24 +996,29 @@ def estimate_page(
             reasons=tuple(reasons),
         )
 
-    landscape = _prefer_standard_landscape_height(
-        budget,
-        _estimate_adaptive_page(
+    if requested_orientation == "auto":
+        requested_orientation = str(budget.get("page_orientation") or "").strip()
+        if requested_orientation not in {"portrait", "landscape"}:
+            raise PlanningError(
+                "invalid_content_budget",
+                "page_orientation is required when orientation is auto",
+            )
+
+    if requested_orientation == "landscape":
+        return _estimate_adaptive_page(
             budget,
             orientation="landscape",
             page_bounds=_LANDSCAPE_PAGES_MM,
             minimum_height_ratio=1.0 / _MAX_LANDSCAPE_ASPECT_RATIO,
             occupancy_probe_height_mm=_LANDSCAPE_PAGES_MM[0][1],
             focal_role=focal_role,
+            figure_observations=figure_observations,
             sizing_reason=(
-                "Uses a common landscape academic width with a 5 mm adaptive-height grid."
+                "Uses the selected landscape orientation with a common academic "
+                "width and a 5 mm adaptive-height grid."
             ),
-        ),
-    )
-    if requested_orientation == "landscape":
-        return landscape
-
-    portrait = _estimate_adaptive_page(
+        )
+    return _estimate_adaptive_page(
         budget,
         orientation="portrait",
         page_bounds=tuple(
@@ -859,112 +1027,12 @@ def estimate_page(
         minimum_height_ratio=_MIN_PORTRAIT_HEIGHT_RATIO,
         occupancy_probe_height_mm=_WIDTHS_MM[0] * _MIN_PORTRAIT_HEIGHT_RATIO,
         focal_role=focal_role,
-        sizing_reason="Uses a common academic width with a 5 mm adaptive-height grid.",
-    )
-    if requested_orientation == "portrait":
-        return portrait
-
-    orientation_candidates = (landscape, portrait)
-    target_capacity_candidates = tuple(
-        candidate
-        for candidate in orientation_candidates
-        if _capacity_pressure_for(
-            budget,
-            candidate.width_mm,
-            candidate.height_mm,
-        )
-        <= 1.0
-    )
-    chosen = min(
-        target_capacity_candidates or orientation_candidates,
-        key=lambda candidate: (
-            _auto_orientation_score(budget, candidate),
-            0 if candidate.orientation == "landscape" else 1,
+        figure_observations=figure_observations,
+        sizing_reason=(
+            "Uses the selected portrait orientation with a common academic "
+            "width and a 5 mm adaptive-height grid."
         ),
     )
-    plan = replace(
-        chosen,
-        reasons=(
-            *chosen.reasons,
-            (
-                "Compared common landscape and portrait bounds using predicted overflow, "
-                "occupancy, page area, and source-figure aspect ratios."
-            ),
-        ),
-    )
-    return plan
-
-
-def _prefer_standard_landscape_height(
-    budget: Mapping[str, Any],
-    plan: PagePlan,
-) -> PagePlan:
-    """Start on the full common format while retaining bounded later adaptation."""
-
-    standard_height = next(
-        (
-            height
-            for width, height in _LANDSCAPE_PAGES_MM
-            if math.isclose(width, plan.width_mm, abs_tol=0.01)
-        ),
-        plan.height_mm,
-    )
-    if math.isclose(standard_height, plan.height_mm, abs_tol=0.01):
-        return plan
-    return replace(
-        plan,
-        height_mm=standard_height,
-        predicted_occupancy=min(
-            1.0,
-            _reserved_occupancy_for(
-                budget,
-                plan.width_mm,
-                standard_height,
-            ),
-        ),
-        reasons=(
-            *plan.reasons,
-            (
-                "Starts on the full common landscape format; visual review may shorten "
-                "only within the existing common-proportion bounds."
-            ),
-        ),
-    )
-
-
-def _auto_orientation_score(
-    budget: Mapping[str, Any],
-    plan: PagePlan,
-) -> float:
-    """Rank an adaptive orientation without prescribing a fixed poster scaffold."""
-
-    occupancy = _reserved_occupancy_for(
-        budget,
-        plan.width_mm,
-        plan.height_mm,
-    )
-    overflow_penalty = max(0.0, occupancy - 1.0) * 8.0
-    underfill_penalty = max(0.0, _MIN_OCCUPANCY - occupancy) * 2.0
-    area_penalty = plan.width_mm * plan.height_mm / 10_000_000.0
-    aspect_ratios = [
-        float(raw.get("figure_aspect_ratio"))
-        for raw in budget.get("content_modules", [])
-        if isinstance(raw, Mapping)
-        and isinstance(raw.get("figure_aspect_ratio"), (int, float))
-        and not isinstance(raw.get("figure_aspect_ratio"), bool)
-        and float(raw.get("figure_aspect_ratio")) > 0
-        and raw.get("figure_sha256s")
-    ]
-    aspect_penalty = 0.0
-    if aspect_ratios:
-        mean_log_aspect = sum(math.log(value) for value in aspect_ratios) / len(
-            aspect_ratios
-        )
-        if plan.orientation == "landscape":
-            aspect_penalty = max(0.0, -mean_log_aspect) * 0.5
-        else:
-            aspect_penalty = max(0.0, mean_log_aspect) * 0.5
-    return overflow_penalty + underfill_penalty + area_penalty + aspect_penalty
 
 
 def _estimate_adaptive_page(
@@ -975,13 +1043,19 @@ def _estimate_adaptive_page(
     minimum_height_ratio: float,
     occupancy_probe_height_mm: float,
     focal_role: str,
+    figure_observations: Mapping[str, Mapping[str, str]] | None,
     sizing_reason: str,
 ) -> PagePlan:
     """Choose a bounded common page using occupancy only as a sizing heuristic."""
 
     smallest_width = page_bounds[0][0]
     sparse_at_smallest = (
-        _occupancy_for(budget, smallest_width, occupancy_probe_height_mm)
+        _occupancy_for(
+            budget,
+            smallest_width,
+            occupancy_probe_height_mm,
+            figure_observations=figure_observations,
+        )
         < _MIN_OCCUPANCY
     )
     candidates: list[PagePlan] = []
@@ -992,17 +1066,19 @@ def _estimate_adaptive_page(
             _round_up(width * minimum_height_ratio, 5.0),
             max_height,
         )
-        flow_reserve = _flow_reserve_for(width, orientation=orientation)
         target_height = _required_height_for(
             budget,
             width,
-            orientation=orientation,
+            figure_observations=figure_observations,
         )
         required_height = target_height
         height = min(max(_round_up(target_height, 5.0), min_height), max_height)
-        raw_occupancy = _raw_occupancy_for(budget, width, height)
-        flow_occupancy = raw_occupancy * flow_reserve
-        occupancy = min(1.0, flow_occupancy)
+        occupancy = _raw_occupancy_for(
+            budget,
+            width,
+            height,
+            figure_observations=figure_observations,
+        )
         reasons = [
             (
                 "Estimated from "
@@ -1011,39 +1087,30 @@ def _estimate_adaptive_page(
             "Reserves intrinsic height for contiguous column groups.",
             sizing_reason,
         ]
-        raw_modules = budget.get("content_modules")
-        if (
-            isinstance(raw_modules, list)
-            and _grouped_figure_flow_reserve(raw_modules) > 1.0
-        ):
-            reasons.append(
-                "Reserves flow depth for grouped figures that cannot pack as one "
-                "continuous area."
-            )
         if sparse_at_smallest and not candidates:
             reasons.append(
-                "Estimated occupancy is below the advisory 72% planning target; the "
-                "smallest bounded page is recommended for rendered review."
+                "At the standard maximum height, estimated occupancy is below the "
+                "72% minimum fill guide; reduce to the smallest bounded page before "
+                "rendered review."
             )
-        candidates.append(
-            _build_page_plan(
-                strategy="auto",
-                width_mm=width,
-                height_mm=height,
-                min_height_mm=min_height,
-                max_height_mm=max_height,
-                orientation=orientation,
-                focal_role=focal_role,
-                budget=budget,
-                predicted_occupancy=occupancy,
-                reasons=tuple(reasons),
-            )
+        candidate = _build_page_plan(
+            strategy="auto",
+            width_mm=width,
+            height_mm=height,
+            min_height_mm=min_height,
+            max_height_mm=max_height,
+            orientation=orientation,
+            focal_role=focal_role,
+            budget=budget,
+            predicted_occupancy=occupancy,
+            reasons=tuple(reasons),
         )
+        candidates.append(candidate)
         if sparse_at_smallest:
-            return candidates[0]
-        target_pressure = flow_occupancy / _TARGET_OCCUPANCY
+            return candidate
+        target_pressure = occupancy / TARGET_OCCUPANCY
         if target_pressure <= 1.0:
-            return candidates[-1]
+            return candidate
     largest = candidates[-1]
     required = _round_up(required_height, 5.0)
     return replace(
@@ -1059,21 +1126,32 @@ def _estimate_adaptive_page(
     )
 
 
-def _meaningful_content_area(budget: Mapping[str, Any], width_mm: float) -> float:
+def _meaningful_content_area(
+    budget: Mapping[str, Any],
+    width_mm: float,
+    *,
+    height_mm: float | None = None,
+    figure_observations: Mapping[str, Mapping[str, str]] | None = None,
+) -> float:
     """Estimate rendered text, figure, hierarchy, and spacing area in square mm."""
 
     modules = budget.get("content_modules")
     if not isinstance(modules, list):
         raise PlanningError("invalid_content_budget", "normalized modules are required")
     printable_width = _printable_width(width_mm)
-    metrics = _area_metrics(width_mm)
+    metrics = _area_metrics(width_mm, height_mm=height_mm)
     area = 0.0
     for raw in modules:
         if not isinstance(raw, Mapping):
             raise PlanningError(
                 "invalid_content_budget", "normalized modules are required"
             )
-        area += _module_content_area(raw, width_mm=width_mm, metrics=metrics)
+        area += _module_content_area(
+            raw,
+            width_mm=width_mm,
+            metrics=metrics,
+            figure_observations=figure_observations,
+        )
     if not any(
         isinstance(module, Mapping) and module.get("figure_sha256s")
         for module in modules
@@ -1082,33 +1160,57 @@ def _meaningful_content_area(budget: Mapping[str, Any], width_mm: float) -> floa
             "method-flow": 0.32,
             "result": 0.34,
             "claim": 0.24,
-        }.get(str(budget.get("focal_role") or ""), 0.0)
+        }[str(budget["focal_role"])]
         area += printable_width * width_mm * focal_area_ratio
-    return area * _grouped_figure_flow_reserve(modules)
+    return area
 
 
-def _area_metrics(width_mm: float) -> dict[str, float]:
+def module_area_estimates(
+    budget: Mapping[str, Any],
+    *,
+    width_mm: float,
+    height_mm: float,
+    figure_observations: Mapping[str, Mapping[str, str]] | None = None,
+) -> dict[str, int]:
+    """Expose each planned carrier's physical cost to the content auditor."""
+
+    metrics = _area_metrics(width_mm, height_mm=height_mm)
+    return {
+        str(module["id"]): round(
+            _module_content_area(
+                module,
+                width_mm=width_mm,
+                metrics=metrics,
+                figure_observations=figure_observations,
+            )
+        )
+        for module in budget["content_modules"]
+    }
+
+
+def _area_metrics(
+    width_mm: float, *, height_mm: float | None = None
+) -> dict[str, float]:
     typography = typography_metrics(width_mm)
-    body = typography["body_min_mm"]
+    body = (
+        poster_type_reference(width_mm, height_mm)["body_mm"]
+        if height_mm is not None
+        else typography["body_target_mm"]
+    )
     capacity = layout_capacity(width_mm)
     minimum_readable_width = float(capacity["minimum_column_width_mm"])
-    maximum_column_count = int(capacity["maximum_readable_column_count"])
-    planning_column_count = min(maximum_column_count, 3)
-    planning_column_width = (
-        _printable_width(width_mm)
-        - (planning_column_count - 1) * float(capacity["gutter_mm"])
-    ) / planning_column_count
+    preferred_columns = 3 if height_mm is not None and width_mm > height_mm else 2
+    columns = min(preferred_columns, int(capacity["maximum_readable_column_count"]))
+    typical_module_width = (
+        _printable_width(width_mm) - (columns - 1) * POSTER_COLUMN_GAP_MM
+    ) / columns
     return {
         **typography,
         "body": body,
         "line_height": body * 1.35,
         "char_width": body * 0.52,
         "minimum_readable_width": minimum_readable_width,
-        "minimum_readable_figure_width": max(
-            minimum_readable_width,
-            width_mm * _FIGURE_ORIENTATION_EXTENT_TARGET,
-            planning_column_width,
-        ),
+        "typical_module_width": typical_module_width,
     }
 
 
@@ -1117,19 +1219,60 @@ def _module_content_area(
     *,
     width_mm: float,
     metrics: Mapping[str, float],
+    figure_observations: Mapping[str, Mapping[str, str]] | None = None,
 ) -> float:
     title = str(raw.get("title") or "")
     text = " ".join(str(raw.get(name) or "") for name in ("text", "takeaway"))
     detail_points = raw.get("detail_points")
     if isinstance(detail_points, list):
         text = " ".join([text, *(str(item) for item in detail_points)])
-    area = display_width_units(text) * metrics["char_width"] * metrics["line_height"]
+    flow_steps = raw.get("flow_steps")
+    if isinstance(flow_steps, list):
+        text = " ".join(
+            [
+                text,
+                *(
+                    " ".join(
+                        str(step.get(field) or "") for field in ("label", "detail")
+                    )
+                    for step in flow_steps
+                    if isinstance(step, Mapping)
+                ),
+            ]
+        )
+    table = raw.get("table")
+    table_rows = [table["columns"], *table["rows"]] if table else []
+    if table_rows:
+        text = " ".join([text, *(cell for row in table_rows for cell in row)])
+    area = (
+        display_width_units(visible_inline_math_text(text))
+        * metrics["char_width"]
+        * metrics["line_height"]
+    )
     area += (
-        display_width_units(title)
+        display_width_units(visible_inline_math_text(title))
         * metrics["section_heading_min_mm"] ** 2
         * 0.55
     )
     area += metrics["minimum_readable_width"] * metrics["body"] * 1.7
+    if isinstance(flow_steps, list):
+        # Each native method node owns a distinct labeled row. The text estimate
+        # covers wrapping; this adds the row boundary that concatenated prose lacks.
+        area += (
+            len(flow_steps)
+            * metrics["minimum_readable_width"]
+            * metrics["line_height"]
+        )
+    if str(raw.get("visual_kind") or "") == "table":
+        # Text area above accounts for cell wrapping. A table row also owns one
+        # physical reading line plus the padding and rhythm emitted by the renderer;
+        # without that structural area, several full tables appear artificially cheap.
+        table_row_depth = metrics["body"] * 1.16 + 5.0 + 1.2
+        area += (
+            len(table_rows)
+            * metrics["typical_module_width"]
+            * table_row_depth
+        )
     equations = raw.get("equations")
     if isinstance(equations, list):
         area += (
@@ -1144,97 +1287,101 @@ def _module_content_area(
         "figure_aspect_ratio",
         code="invalid_content_budget",
     )
-    group_width = min(
+    base_group_width = min(
         _printable_width(width_mm),
-        metrics["minimum_readable_figure_width"]
-        * (1.45 if str(raw.get("priority") or "") == "focal" else 1.0),
+        metrics["typical_module_width"]
+        * (1.15 if str(raw.get("priority") or "") == "focal" else 1.0),
     )
-    grid_columns = 1 if len(figure_hashes) == 1 else 2
+    width_need_rank = {"column": 0, "wide": 1, "dominant": 2}
+    width_need = max(
+        (
+            str((figure_observations or {}).get(str(digest), {}).get("width_need") or "column")
+            for digest in figure_hashes
+        ),
+        key=lambda value: width_need_rank.get(value, 0),
+    )
+    printable_width = _printable_width(width_mm)
+    typical_width = metrics["typical_module_width"]
+    if width_need == "dominant":
+        grid_columns = 1
+        group_width = printable_width
+    elif len(figure_hashes) == 1:
+        grid_columns = 1
+        group_width = min(
+            printable_width,
+            base_group_width * (1.1 if width_need == "wide" else 1.0),
+        )
+    else:
+        grid_columns = min(2, len(figure_hashes))
+        group_width = min(
+            printable_width,
+            max(
+                base_group_width,
+                grid_columns * typical_width
+                + (grid_columns - 1) * POSTER_COLUMN_GAP_MM,
+            ),
+        )
     figure_width = group_width / grid_columns
     figure_height = min(figure_width / aspect_ratio, width_mm * 0.54)
     caption_height = metrics["provenance_min_mm"] * 2.5
     return area + len(figure_hashes) * figure_width * (figure_height + caption_height)
 
 
-def _grouped_figure_flow_reserve(modules: list[Any]) -> float:
-    """Account for atomic-module packing loss and grouped figure depth."""
-
-    additional_figures = 0
-    module_count = 0
-    for module in modules:
-        if not isinstance(module, Mapping):
-            continue
-        module_count += 1
-        raw_hashes = module.get("figure_sha256s")
-        if isinstance(raw_hashes, list):
-            additional_figures += max(0, len(raw_hashes) - 1)
-    atomic_packing = 0.10 if module_count > 1 else 0.0
-    return 1.0 + min(0.30, atomic_packing + additional_figures * 0.06)
-
-
 def _occupancy_for(
-    budget: Mapping[str, Any], width_mm: float, height_mm: float
+    budget: Mapping[str, Any],
+    width_mm: float,
+    height_mm: float,
+    *,
+    figure_observations: Mapping[str, Mapping[str, str]] | None = None,
 ) -> float:
-    return min(1.0, _reserved_occupancy_for(budget, width_mm, height_mm))
+    return min(
+        1.0,
+        _raw_occupancy_for(
+            budget,
+            width_mm,
+            height_mm,
+            figure_observations=figure_observations,
+        ),
+    )
 
 
 def _raw_occupancy_for(
-    budget: Mapping[str, Any], width_mm: float, height_mm: float
+    budget: Mapping[str, Any],
+    width_mm: float,
+    height_mm: float,
+    *,
+    figure_observations: Mapping[str, Mapping[str, str]] | None = None,
 ) -> float:
     """Return uncapped content pressure for fit decisions."""
 
     printable_width = _printable_width(width_mm)
     printable_height = max(1.0, height_mm - _fixed_vertical_overhead(width_mm))
-    return _meaningful_content_area(budget, width_mm) / (
+    return _meaningful_content_area(
+        budget,
+        width_mm,
+        height_mm=height_mm,
+        figure_observations=figure_observations,
+    ) / (
         printable_width * printable_height
     )
-
-
-def _reserved_occupancy_for(
-    budget: Mapping[str, Any],
-    width_mm: float,
-    height_mm: float,
-) -> float:
-    """Return content occupancy including compact-landscape packing loss."""
-
-    orientation = "landscape" if width_mm > height_mm else "portrait"
-    return _raw_occupancy_for(budget, width_mm, height_mm) * _flow_reserve_for(
-        width_mm,
-        orientation=orientation,
-    )
-
-
-def _capacity_pressure_for(
-    budget: Mapping[str, Any],
-    width_mm: float,
-    height_mm: float,
-) -> float:
-    """Return reserve-aware pressure relative to the readable density target."""
-
-    return _reserved_occupancy_for(budget, width_mm, height_mm) / _TARGET_OCCUPANCY
 
 
 def _required_height_for(
     budget: Mapping[str, Any],
     width_mm: float,
     *,
-    orientation: str,
+    figure_observations: Mapping[str, Mapping[str, str]] | None = None,
 ) -> float:
-    """Return height needed at the target density after packing reserve."""
+    """Return a coarse pre-layout height from the grounded content area."""
 
-    content_area = _meaningful_content_area(budget, width_mm)
-    flow_reserve = _flow_reserve_for(width_mm, orientation=orientation)
-    return content_area * flow_reserve / (
-        _printable_width(width_mm) * _TARGET_OCCUPANCY
+    content_area = _meaningful_content_area(
+        budget,
+        width_mm,
+        figure_observations=figure_observations,
+    )
+    return content_area / (
+        _printable_width(width_mm) * TARGET_OCCUPANCY
     ) + _fixed_vertical_overhead(width_mm)
-
-
-def _flow_reserve_for(width_mm: float, *, orientation: str) -> float:
-    """Return extra packing depth for compact landscape module groups."""
-
-    if orientation == "landscape" and width_mm < _COMPACT_LANDSCAPE_MAX_WIDTH_MM:
-        return _COMPACT_LANDSCAPE_FLOW_RESERVE
-    return 1.0
 
 
 def _printable_width(width_mm: float) -> float:

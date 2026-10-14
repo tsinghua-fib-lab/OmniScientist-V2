@@ -7,19 +7,21 @@ import os
 import re
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
 
 from posterlib.paths import SKILL_ROOT
-from posterlib.runtime.capability import (
+from posterlib.runtime.dependencies import (
     CAPABILITY_REQUIREMENTS,
+    PYMUPDF_REQUIREMENT,
     install_argv,
     probe_python_packages,
 )
 
-from .pptx_rubric import evaluate_scene
+from .pptx_checks import check_scene
 from .pptx_scene import SceneError, normalize_scene
 
 SCRIPTS_DIR = SKILL_ROOT / "scripts"
@@ -41,14 +43,30 @@ class ExportError(RuntimeError):
         self.details = details or {}
 
 
-def export_editable_pptx(source_html: Path, output_dir: Path) -> dict[str, Any]:
+def export_editable_pptx(
+    source_html: Path,
+    output_dir: Path,
+    *,
+    timeout_seconds: float | None = None,
+) -> dict[str, Any]:
     """Capture one validated poster HTML file and write native PPTX artifacts."""
 
+    if timeout_seconds is not None and timeout_seconds <= 0:
+        raise ExportError(
+            "pptx_export_failed",
+            "Editable PPTX export has no remaining runtime budget.",
+            details={"stage": "runtime"},
+        )
+    deadline = (
+        time.monotonic() + timeout_seconds
+        if timeout_seconds is not None
+        else None
+    )
     source = source_html.expanduser().resolve()
     output = output_dir.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
     try:
-        scene = normalize_scene(_capture_scene(source))
+        scene = normalize_scene(_capture_scene(source, deadline=deadline))
     except SceneError as exc:
         raise ExportError(
             "pptx_export_failed", str(exc), details={"stage": "scene"}
@@ -61,7 +79,7 @@ def export_editable_pptx(source_html: Path, output_dir: Path) -> dict[str, Any]:
         json.dumps(scene, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    rubric = evaluate_scene(scene)
+    rubric = check_scene(scene)
     rubric_path.write_text(
         json.dumps(rubric, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -77,7 +95,7 @@ def export_editable_pptx(source_html: Path, output_dir: Path) -> dict[str, Any]:
                 "rubric": rubric,
             },
         )
-    _render_scene(scene_path, pptx_path)
+    _render_scene(scene_path, pptx_path, deadline=deadline)
     _normalize_slide_object_ids(pptx_path)
     openxml = _verify_openxml(pptx_path, expected_objects=scene["objects"])
     return {
@@ -90,14 +108,22 @@ def export_editable_pptx(source_html: Path, output_dir: Path) -> dict[str, Any]:
     }
 
 
-def _capture_scene(source_html: Path) -> dict[str, Any]:
+def _capture_scene(
+    source_html: Path,
+    *,
+    deadline: float | None = None,
+) -> dict[str, Any]:
     command = [
         sys.executable,
         str(SCRIPTS_DIR / "capture_pptx_scene.py"),
         "--html",
         str(source_html),
     ]
-    result = _run(command, timeout=90, stage="capture")
+    result = _run(
+        command,
+        timeout=_remaining_stage_timeout(deadline),
+        stage="capture",
+    )
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
@@ -125,7 +151,12 @@ def _capture_scene(source_html: Path) -> dict[str, Any]:
     return scene
 
 
-def _render_scene(scene_path: Path, output_path: Path) -> None:
+def _render_scene(
+    scene_path: Path,
+    output_path: Path,
+    *,
+    deadline: float | None = None,
+) -> None:
     dependencies = list(CAPABILITY_REQUIREMENTS["pptx-export"])
     available = probe_python_packages()
     missing = [name for name in dependencies if not available.get(name, False)]
@@ -133,7 +164,7 @@ def _render_scene(scene_path: Path, output_path: Path) -> None:
         raise ExportError(
             "missing_capability",
             "Editable PPTX export requires python-pptx, mathml2omml, and "
-            "PyMuPDF>=1.24 in the active Python environment.",
+            f"{PYMUPDF_REQUIREMENT} in the active Python environment.",
             details={
                 "stage": "render",
                 "dependencies": dependencies,
@@ -148,7 +179,7 @@ def _render_scene(scene_path: Path, output_path: Path) -> None:
             str(scene_path),
             str(output_path),
         ],
-        timeout=90,
+        timeout=_remaining_stage_timeout(deadline),
         stage="render",
     )
     if not output_path.is_file() or output_path.stat().st_size < 1000:
@@ -187,7 +218,6 @@ def _verify_openxml(
     namespace = {
         "a14": "http://schemas.microsoft.com/office/drawing/2010/main",
         "m": "http://schemas.openxmlformats.org/officeDocument/2006/math",
-        "mc": "http://schemas.openxmlformats.org/markup-compatibility/2006",
         "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
     }
     nodes = root.findall(".//p:cNvPr", namespace)
@@ -211,22 +241,19 @@ def _verify_openxml(
         item.get("kind") == "equation" for item in expected_objects
     )
     native_equations = root.findall(".//a14:m", namespace)
-    equation_fallbacks = root.findall(".//mc:Fallback", namespace)
     office_math = root.findall(".//m:oMath", namespace)
     if (
         len(native_equations) < expected_equations
         or len(office_math) < expected_equations
-        or len(equation_fallbacks) < expected_equations
     ):
         raise ExportError(
             "pptx_export_failed",
-            "Generated deck lost native equations or their viewer fallbacks.",
+            "Generated deck lost native editable equations.",
             details={
                 "stage": "openxml",
                 "expected_equation_count": expected_equations,
                 "native_equation_count": len(native_equations),
                 "office_math_count": len(office_math),
-                "equation_fallback_count": len(equation_fallbacks),
             },
         )
     return {
@@ -235,7 +262,6 @@ def _verify_openxml(
         "verified_object_count": len(expected),
         "unique_object_id_count": len(set(object_ids)),
         "native_equation_count": len(native_equations),
-        "equation_fallback_count": len(equation_fallbacks),
     }
 
 
@@ -276,8 +302,23 @@ def _normalize_slide_object_ids(pptx_path: Path) -> None:
         ) from exc
 
 
+def _remaining_stage_timeout(deadline: float | None) -> float:
+    """Return one subprocess share of the caller's absolute export deadline."""
+
+    if deadline is None:
+        return 90.0
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ExportError(
+            "pptx_export_failed",
+            "Editable PPTX export reached its workflow runtime budget.",
+            details={"stage": "runtime"},
+        )
+    return min(90.0, remaining)
+
+
 def _run(
-    command: list[str], *, timeout: int, stage: str
+    command: list[str], *, timeout: float, stage: str
 ) -> subprocess.CompletedProcess[str]:
     try:
         completed = subprocess.run(

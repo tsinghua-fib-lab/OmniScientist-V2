@@ -41,11 +41,20 @@ dependencies = [
     "tzdata>=2024.1",
     # Active bundled Skills are ready after one normal installation. Their
     # platform-neutral Python runtimes are product dependencies, not task-time
-    # downloads; research-pptx's native Node modules are prepared by init/update.
+    # downloads; native browser/Node runtimes are prepared by init/update.
     "python-pptx>=1.0.2",
     "matplotlib>=3.8",
-    "pymupdf>=1.24",
+    "pymupdf>=1.28",
     "pymupdf4llm>=0.0.17",
+    "Pillow>=10",
+    "lxml>=5,<7",
+    "tinycss2>=1.4,<2",
+    "playwright>=1.49,<2",
+    "latex2mathml>=3.81,<4",
+    "pyparsing>=3.2,<4",
+    "markdown-it-py>=4,<5",
+    "mdit-py-plugins>=0.6,<0.7",
+    "mathml2omml==0.0.2",
     "json-repair>=0.61.6,<1",
 ]
 

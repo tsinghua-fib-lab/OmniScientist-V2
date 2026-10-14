@@ -6,7 +6,7 @@ from itertools import combinations
 from typing import Any
 
 
-def evaluate_scene(scene: dict[str, Any]) -> dict[str, Any]:
+def check_scene(scene: dict[str, Any]) -> dict[str, Any]:
     """Block broken editability while reporting visual-fidelity concerns."""
 
     page = scene["page"]
@@ -52,14 +52,14 @@ def evaluate_scene(scene: dict[str, Any]) -> dict[str, Any]:
                     "Export regions as native shapes and text; keep raster content to figures only.",
                 )
             )
-        if item["kind"] == "text" and item.get("fit") != "shrink":
+        if item["kind"] == "text" and item.get("fit") == "grow":
             failures.append(
                 _issue(
                     item["id"],
                     "text_fit_policy",
                     "error",
                     "Text box may grow beyond its captured HTML bounds after font substitution or wrapping.",
-                    "Use fixed-box shrink-to-fit so neighboring editable objects cannot be displaced or overlapped.",
+                    "Use fixed-box shrink-to-fit, or disable fitting for preflighted lines, so neighboring editable objects cannot be displaced or overlapped.",
                 )
             )
         if item["kind"] == "text" and not item.get("font_preflighted"):
@@ -77,7 +77,7 @@ def evaluate_scene(scene: dict[str, Any]) -> dict[str, Any]:
         item for item in objects if item["kind"] in {"equation", "table", "text"}
     ]
     for first, second in combinations(native_text, 2):
-        if not _overlap(first, second):
+        if _container_pair(first, second) or not _overlap(first, second):
             continue
         warnings.append(
             _issue(
@@ -95,6 +95,15 @@ def evaluate_scene(scene: dict[str, Any]) -> dict[str, Any]:
         "warnings": warnings,
         "summary": f"{len(failures)} hard failure(s), {len(warnings)} warning(s).",
     }
+
+
+def _container_pair(first: dict[str, Any], second: dict[str, Any]) -> bool:
+    """Return whether one object explicitly owns the other's scene geometry."""
+
+    return (
+        first.get("container_id") == second["id"]
+        or second.get("container_id") == first["id"]
+    )
 
 
 def _overlap(first: dict[str, Any], second: dict[str, Any]) -> bool:

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-import poster_core
+import poster_contract
 
 from . import browser_inspection
 
@@ -138,12 +138,43 @@ async def store_artifact(
                 f"{path.name}"
             )
     else:
-        stored_path = _local_snapshot(path, raw=raw, digest=digest).resolve()
-        uri = stored_path.as_uri()
+        return snapshot_artifact(
+            path,
+            kind=kind,
+            title=title,
+            fmt=fmt,
+            mime=mime,
+        )
     return {
         "title": title,
+        "kind": kind,
         "format": fmt,
         "uri": uri,
+        "path": str(stored_path),
+        "mime": mime,
+        "size_bytes": len(raw),
+        "sha256": digest,
+    }
+
+
+def snapshot_artifact(
+    path: Path,
+    *,
+    kind: str,
+    title: str,
+    fmt: str,
+    mime: str,
+) -> dict[str, Any]:
+    """Create an immutable local artifact when no host registration is available."""
+
+    raw = path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    stored_path = _local_snapshot(path, raw=raw, digest=digest).resolve()
+    return {
+        "title": title,
+        "kind": kind,
+        "format": fmt,
+        "uri": stored_path.as_uri(),
         "path": str(stored_path),
         "mime": mime,
         "size_bytes": len(raw),
@@ -162,24 +193,26 @@ async def inspect_preview(
     out_dir: Path,
     *,
     scale: float,
+    session: browser_inspection.ChromiumInspectionSession | None = None,
 ) -> dict[str, Any]:
     """Run the optional Chromium inspector and normalize its host outcome."""
 
     try:
-        result = await browser_inspection.inspect_document(
+        inspect = session.inspect_document if session is not None else browser_inspection.inspect_document
+        result = await inspect(
             html_path,
             out_dir,
             scale=scale,
         )
     except Exception as exc:  # noqa: BLE001 - browser tooling is optional
         return {
-            **poster_core.outcome_result(
+            **poster_contract.outcome_result(
                 "inspection_unavailable",
                 summary="Rendered inspection is unavailable; review HTML manually.",
             ),
             "warnings": [{"code": "inspection_unavailable", "message": str(exc)}],
         }
-    normalized = poster_core.normalize_outcome_result(
+    normalized = poster_contract.normalize_outcome_result(
         result,
         fallback_code="inspection_unavailable",
         fallback_summary="Rendered inspection returned an invalid result.",

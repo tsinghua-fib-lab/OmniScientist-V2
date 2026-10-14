@@ -395,10 +395,17 @@ def test_init_prepares_bundled_skill_runtimes(monkeypatch):
     from omni.cli.commands import init_cmd
 
     prepared: list[Path] = []
+    poster_prepared: list[bool] = []
     monkeypatch.setattr(
         init_cmd,
         "setup_research_pptx_runtime",
         lambda paths: prepared.append(paths.cache_dir),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        init_cmd,
+        "setup_scientific_poster_runtime",
+        lambda: poster_prepared.append(True),
         raising=False,
     )
 
@@ -406,6 +413,7 @@ def test_init_prepares_bundled_skill_runtimes(monkeypatch):
 
     assert res.exit_code == 0, res.output
     assert prepared == [init_cmd.user_home_resolution()[0] / "cache"]
+    assert poster_prepared == [True]
 
 
 def test_init_non_interactive_can_cold_start_embeddings():

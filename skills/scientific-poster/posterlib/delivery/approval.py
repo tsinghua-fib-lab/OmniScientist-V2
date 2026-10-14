@@ -14,11 +14,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import poster_core
+import poster_contract
 
-from posterlib.visual import visual_review
+from posterlib.visual import review_contract
 
-from .contracts import ContractError, validate_contract
+from .approval_contract import ApprovalContractError, validate_approval_receipt
 
 MAX_HTML_BYTES = 32 * 1024 * 1024
 MAX_APPROVAL_BYTES = 256 * 1024
@@ -94,7 +94,7 @@ def create_poster_approval(
             "approval requires a passing image-capable visual review receipt",
         )
     try:
-        visual_review.require_passing_receipt(
+        review_contract.require_passing_receipt(
             visual_review_path,
             html_path=source_html_path,
         )
@@ -103,7 +103,7 @@ def create_poster_approval(
             limit=MAX_APPROVAL_BYTES,
             code="visual_review_invalid",
         )
-    except visual_review.VisualReviewError as exc:
+    except review_contract.ReviewContractError as exc:
         _fail(exc.code, str(exc))
     visual_review_sha256 = _sha256(visual_review_bytes)
     try:
@@ -116,7 +116,7 @@ def create_poster_approval(
         _fail(
             "source_too_large", "approval grounding source exceeds the character limit"
         )
-    if poster_core.validate_poster_html(html_text).get("status") != "ok":
+    if poster_contract.validate_poster_html(html_text).get("status") != "ok":
         _fail(
             "approval_source_mismatch",
             "poster HTML does not satisfy the inert HTML contract",
@@ -125,7 +125,7 @@ def create_poster_approval(
         source_figure_hashes = tuple(
             sorted({str(value) for value in source_figure_sha256s})
         )
-        source_figure_manifest_sha256 = poster_core.source_figure_manifest_sha256(
+        source_figure_manifest_sha256 = poster_contract.source_figure_manifest_sha256(
             source_figure_hashes
         )
     except (TypeError, ValueError) as exc:
@@ -137,7 +137,7 @@ def create_poster_approval(
             "session_id is required and must be at most 256 characters",
         )
     grounding_source_sha256 = _sha256(source_text.encode("utf-8"))
-    phrase = poster_core.poster_approval_phrase(
+    phrase = poster_contract.poster_approval_phrase(
         actual_html_sha256,
         grounding_source_sha256,
         source_figure_manifest_sha256,
@@ -179,8 +179,8 @@ def create_poster_approval(
         "decision": decision,
     }
     try:
-        validated = validate_contract("scientific-poster.poster-approval.v2", receipt)
-    except ContractError as exc:
+        validated = validate_approval_receipt(receipt)
+    except ApprovalContractError as exc:
         _fail("approval_required", f"invalid approval receipt: {exc}")
     approval = _canonical_json(validated)
     bundle_sha256 = _bundle_sha256(html, approval, visual_review_bytes)
@@ -249,8 +249,8 @@ def load_poster_approval(approval_path: str | Path) -> PosterApprovalBundle:
         code="approval_receipt_untrusted",
     )
     try:
-        receipt = validate_contract("scientific-poster.poster-approval.v2", raw_receipt)
-    except ContractError as exc:
+        receipt = validate_approval_receipt(raw_receipt)
+    except ApprovalContractError as exc:
         _fail("approval_receipt_untrusted", f"invalid approval receipt: {exc}")
     html_sha256 = _sha256(html)
     if receipt["source_html_sha256"] != html_sha256:
@@ -261,14 +261,14 @@ def load_poster_approval(approval_path: str | Path) -> PosterApprovalBundle:
             "approval receipt does not match visual-review.json",
         )
     try:
-        visual_review.require_passing_receipt(
+        review_contract.require_passing_receipt(
             visual_review_path,
             html_path=html_path,
         )
-    except visual_review.VisualReviewError as exc:
+    except review_contract.ReviewContractError as exc:
         _fail(exc.code, str(exc))
     decision = receipt["decision"]
-    phrase = poster_core.poster_approval_phrase(
+    phrase = poster_contract.poster_approval_phrase(
         html_sha256,
         receipt["grounding_source_sha256"],
         receipt["source_figure_manifest_sha256"],
@@ -288,7 +288,7 @@ def load_poster_approval(approval_path: str | Path) -> PosterApprovalBundle:
             "approval bundle directory is not content-addressed",
         )
     try:
-        if poster_core.validate_poster_html(html.decode("utf-8")).get("status") != "ok":
+        if poster_contract.validate_poster_html(html.decode("utf-8")).get("status") != "ok":
             _fail(
                 "approval_source_mismatch",
                 "approved poster no longer satisfies the HTML contract",
@@ -320,7 +320,7 @@ def _bundle_sha256(html: bytes, approval: bytes, visual_review: bytes) -> str:
     for name, raw in (
         (b"poster.html", html),
         (b"approval.json", approval),
-        (b"visual-review.json", visual_review),
+        (b"visual-review.json", review_contract),
     ):
         digest.update(len(name).to_bytes(2, "big"))
         digest.update(name)
@@ -344,7 +344,7 @@ def _write_staged_bundle(
         for name, raw in (
             ("poster.html", html),
             ("approval.json", approval),
-            ("visual-review.json", visual_review),
+            ("visual-review.json", review_contract),
         ):
             path = temporary / name
             with path.open("xb") as handle:

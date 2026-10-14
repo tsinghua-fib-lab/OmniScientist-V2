@@ -3,22 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 from posterlib.runtime import runtime_io
-from posterlib.visual import visual_review
+from posterlib.visual import review_contract
 
-from . import runtime_budget, workflow_outcomes
+from . import revision_state, deadlines, outcomes
 
-# The workflow deadline is the authoritative end-to-end boundary.  Keep this
-# transport guard longer than that visual-loop share so a cold local reviewer is
-# not cancelled by a second, shorter timeout.
-_VLM_TIMEOUT_SECONDS = 600.0
-
-ReviewState = Literal["pending", "passed", "revision-required", "failed"]
+ReviewState = Literal["pending", "passed", "revision-required"]
 ReviewMode = Literal["vlm", "deterministic-only"]
 Reviewer = Callable[..., Awaitable[dict[str, Any]]]
 
@@ -34,13 +30,10 @@ _REQUEST_ARTIFACT_WARNING = (
     "The bound visual-review request artifact is unavailable; the rendered poster "
     "remains pending review."
 )
-NOOP_REVISION_WARNING = (
-    "The requested revision returned identical HTML; the active poster was preserved."
-)
 
 
 @dataclass(frozen=True)
-class VisualLoopRuntime:
+class ReviewRuntime:
     """Injected provider object for one offline-testable visual review."""
 
     client: Any
@@ -59,7 +52,7 @@ class VisualReviewOutcome:
 
 def runtime_from_env(
     environ: Mapping[str, str] | None = None,
-) -> VisualLoopRuntime | None:
+) -> ReviewRuntime | None:
     """Return a VLM runtime only for complete explicit environment config."""
 
     try:
@@ -69,19 +62,19 @@ def runtime_from_env(
     try:
         config = vlm_client.config_from_env(
             environ,
-            timeout_s=_VLM_TIMEOUT_SECONDS,
+            timeout_s=deadlines.WORKFLOW_RUNTIME_BUDGET_SECONDS,
         )
     except (ValueError, vlm_client.VlmError):
         return None
     if config is None:
         return None
-    return VisualLoopRuntime(client=vlm_client.VlmClient(config))
+    return ReviewRuntime(client=vlm_client.VlmClient(config))
 
 
 def runtime_from_context(
     ctx: Any,
     environ: Mapping[str, str] | None = None,
-) -> VisualLoopRuntime | None:
+) -> ReviewRuntime | None:
     """Prefer a usable host VLM, then use complete environment configuration."""
 
     try:
@@ -89,13 +82,13 @@ def runtime_from_context(
     except ImportError:
         return runtime_from_env(environ)
     client = vlm_client.client_from_context(ctx)
-    return VisualLoopRuntime(client=client) if client is not None else runtime_from_env(environ)
+    return ReviewRuntime(client=client) if client is not None else runtime_from_env(environ)
 
 
 def _review_configuration_present(
     ctx: Any,
     environ: Mapping[str, str] | None,
-    runtime: VisualLoopRuntime | None,
+    runtime: ReviewRuntime | None,
 ) -> bool:
     """Keep an unavailable configured reviewer distinct from no configuration."""
 
@@ -114,12 +107,12 @@ async def review_and_persist(
     output_dir: str | Path,
     ctx: Any = None,
     environ: Mapping[str, str] | None = None,
-    runtime: VisualLoopRuntime | None = None,
+    runtime: ReviewRuntime | None = None,
     reviewer: Reviewer | None = None,
 ) -> VisualReviewOutcome:
     """Review one bound request, atomically persist it, and reuse valid receipts."""
 
-    bound = visual_review.validate_request(request)
+    bound = review_contract.validate_request(request)
     destination = Path(output_dir).expanduser().resolve()
     receipt_path = destination / "visual-review.json"
     result_path = destination / "model-result.json"
@@ -143,13 +136,16 @@ async def review_and_persist(
         )
 
     try:
+        # Both workflow callers own the remaining execution deadline. The provider
+        # also owns its transport timeout; a second local timer can discard a live
+        # review while the workflow still has time to consume it.
         if reviewer is None:
-            from posterlib.visual.vlm_review import review_request
+            from posterlib.visual.vlm_review import review_bound_request
 
-            reviewer = review_request
-        async with asyncio.timeout(_VLM_TIMEOUT_SECONDS):
-            result = await reviewer(bound, client=active_runtime.client)
-        receipt = visual_review.validate_result(bound, result)
+            result, receipt = await review_bound_request(bound, client=active_runtime.client)
+        else:
+            result = await reviewer(copy.deepcopy(bound), client=active_runtime.client)
+            receipt = review_contract.build_receipt(bound, result)
         runtime_io.write_json_atomic(
             result_path,
             dict(result),
@@ -164,7 +160,7 @@ async def review_and_persist(
             sort_keys=True,
             allow_nan=False,
         )
-    except (OSError, ValueError, RuntimeError, visual_review.VisualReviewError) as exc:
+    except (OSError, ValueError, RuntimeError, review_contract.ReviewContractError) as exc:
         return VisualReviewOutcome(
             state="pending",
             review_mode="vlm",
@@ -179,37 +175,85 @@ async def review_and_persist(
     )
 
 
-async def complete(
+def prepare_candidate_review(
+    html_path: Path,
+    inspection: Mapping[str, Any],
+    *,
+    page_plan: dict[str, Any],
+    iteration: int = 0,
+    quality_reference: Mapping[str, Any] | None = None,
+    comparison_baseline: Mapping[str, Any] | None = None,
+    comparison_baseline_page: Mapping[str, Any] | None = None,
+    request_path: Path | None = None,
+) -> tuple[dict[str, Any], Path]:
+    """Bind browser measurements and pixels for independent visual review."""
+
+    brief = revision_state.visual_content_brief(page_plan, displayed_html=html_path.read_text(encoding="utf-8"))
+    brief["rendered_inspection"] = {
+        "status": inspection.get("status"),
+        "issues": [
+            item for item in inspection.get("warnings", []) if isinstance(item, Mapping)
+        ],
+    }
+    if quality_reference is not None:
+        brief["quality_reference"] = {
+            "path": quality_reference["image_path"],
+            "sha256": quality_reference["image_sha256"],
+        }
+    if comparison_baseline is not None:
+        brief["comparison_baseline"] = {
+            "path": comparison_baseline["path"],
+            "sha256": comparison_baseline["sha256"],
+        }
+        if comparison_baseline_page is not None:
+            brief["comparison_baseline_page"] = {
+                key: comparison_baseline_page[key]
+                for key in ("width_mm", "height_mm")
+                if key in comparison_baseline_page
+            }
+    request = review_contract.build_request(
+        html_path=html_path,
+        screenshot_path=str(inspection.get("screenshot_path") or ""),
+        reference_design_brief="",
+        content_brief=brief,
+        visual_evidence=inspection.get("visual_evidence", {}),
+        iteration=iteration,
+    )
+    path = request_path or (
+        html_path.parent
+        / "visual-review"
+        / f"iteration-{iteration}"
+        / "visual-review-request.json"
+    )
+    runtime_io.write_json_atomic(path, request, indent=2, sort_keys=True, allow_nan=False)
+    return request, path
+
+
+async def run_review(
     initial: dict[str, Any],
     *,
     progress_callback: Any,
     ctx: Any = None,
     deadline: float | None = None,
     environ: Mapping[str, str] | None = None,
-    runtime: VisualLoopRuntime | None = None,
+    runtime: ReviewRuntime | None = None,
     reviewer: Reviewer | None = None,
 ) -> dict[str, Any]:
     """Inspect once and review once; return feedback instead of rewriting HTML."""
 
     result = initial
-    if _inspection_is_blocked(result):
-        return workflow_outcomes.rendered_inspection_blocked(
-            result,
-            decision_reason="deterministic-layout-blocked",
-        )
-
     request = result.get("visual_review_request")
     if not isinstance(request, dict):
         return result
 
     loop = asyncio.get_running_loop()
     if deadline is None:
-        deadline = runtime_budget.visual_loop_deadline(ctx, loop.time())
+        deadline = deadlines.workflow_deadline(ctx, loop.time())
     review_configured = _review_configuration_present(ctx, environ, runtime)
     request_path = Path(str(result.get("visual_review_request_path") or ""))
     if not request_path.is_file():
         _mark_pending_review_mode(result, review_configured)
-        return workflow_outcomes.visual_review_unavailable(
+        return outcomes.visual_review_unavailable(
             result,
             _REQUEST_ARTIFACT_WARNING,
         )
@@ -217,7 +261,7 @@ async def complete(
     remaining = deadline - loop.time()
     if remaining <= 0:
         _mark_pending_review_mode(result, review_configured)
-        return workflow_outcomes.visual_loop_pending(result)
+        return outcomes.visual_loop_pending(result)
 
     await runtime_io.progress(
         progress_callback,
@@ -240,25 +284,27 @@ async def complete(
             review = await review_and_persist(request, **review_kwargs)
     except TimeoutError:
         _mark_pending_review_mode(result, review_configured)
-        return workflow_outcomes.visual_loop_pending(result)
+        return outcomes.visual_loop_pending(result)
 
     if review.warning:
-        workflow_outcomes.append_warning_once(result, review.warning)
+        outcomes.append_warning_once(result, review.warning)
     result["visual_review_mode"] = review.review_mode
     if review.state == "pending" or review.receipt is None:
-        return workflow_outcomes.visual_review_unavailable(result, review.warning)
+        return outcomes.visual_review_unavailable(result, review.warning)
 
     result["visual_review_path"] = str(review.receipt_path or "")
     result["visual_review"] = review.receipt
     result["visual_quality_state"] = review.state
     inspection = result.get("inspection")
     if not isinstance(inspection, Mapping) or inspection.get("status") != "ok":
-        return workflow_outcomes.rendered_inspection_blocked(
-            result,
+        result["visual_quality_state"] = "revision-required"
+        return outcomes.visual_outcome(
+            result, "visual_revision_required",
+            str(review.receipt.get("summary") or "Rendered geometry still requires revision."),
             decision_reason="deterministic-layout-blocked",
         )
     if review.state == "passed":
-        return workflow_outcomes.visual_outcome(
+        return outcomes.visual_outcome(
             result,
             "visual_review_passed",
             "The rendered inspection and image review passed for these exact "
@@ -267,18 +313,12 @@ async def complete(
 
     summary = str(review.receipt.get("summary") or "").strip()
     result["revision_feedback"] = summary
-    return workflow_outcomes.visual_outcome(
+    return outcomes.visual_outcome(
         result,
         "visual_revision_required",
         summary or "The visual reviewer requested a poster revision.",
         decision_reason="visual-review-revision-required",
     )
-
-
-def _inspection_is_blocked(result: Mapping[str, Any]) -> bool:
-    inspection = result.get("inspection")
-    outcome = inspection.get("outcome") if isinstance(inspection, Mapping) else None
-    return isinstance(outcome, Mapping) and outcome.get("code") == "inspection_blocked"
 
 
 def _mark_pending_review_mode(result: dict[str, Any], review_configured: bool) -> None:
@@ -292,12 +332,11 @@ def _reusable_receipt(
     if not path.is_file() or path.is_symlink():
         return None
     try:
-        receipt = visual_review.load_receipt(
+        receipt = review_contract.load_receipt(
             path,
             expected_html_sha256=str(request["candidate_html_sha256"]),
-            expected_reference_image_sha256=str(request["reference_image_sha256"]),
         )
-    except visual_review.VisualReviewError:
+    except review_contract.ReviewContractError:
         return None
     if (
         receipt["request_sha256"] != request["request_sha256"]
@@ -310,8 +349,8 @@ def _reusable_receipt(
 
 def _outcome_state(receipt: Mapping[str, Any]) -> ReviewState:
     state = str(receipt.get("quality_state") or "")
-    if state not in {"passed", "revision-required", "failed"}:
-        raise visual_review.VisualReviewError(
+    if state not in {"passed", "revision-required"}:
+        raise review_contract.ReviewContractError(
             "visual_review_invalid",
             "visual review receipt quality state is invalid",
         )
@@ -319,11 +358,10 @@ def _outcome_state(receipt: Mapping[str, Any]) -> ReviewState:
 
 
 __all__ = [
-    "NOOP_REVISION_WARNING",
-    "VisualLoopRuntime",
+    "ReviewRuntime",
     "VisualReviewOutcome",
-    "complete",
     "review_and_persist",
+    "run_review",
     "runtime_from_context",
     "runtime_from_env",
 ]

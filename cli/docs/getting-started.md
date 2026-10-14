@@ -6,6 +6,7 @@
 - **Python ≥ 3.11** (an isolated install does **not** touch your system Python).
 - [`uv`](https://docs.astral.sh/uv/) or [`pipx`](https://pipx.pypa.io/) for an isolated install. The repository installer downloads uv from Astral automatically when it is missing.
 - **Node.js ≥ 20.9** is required to *run* the lockfile-pinned research-pptx renderer. The first `omni skills setup research-pptx` (also run by `omni init` / `omni update`) additionally needs **npm** on PATH — pnpm is not a substitute for that `npm ci`. `ffmpeg` and LibreOffice remain optional for specific Skills.
+- Scientific-poster's matching Chromium build is prepared by `omni init` / `omni update`; use `omni skills setup scientific-poster` for an explicit repair.
 - **Windows tip:** use **Windows Terminal** (or any UTF-8 console) so login QR codes render; or pass `--no-qr` to print the link instead.
 
 ## Install
@@ -158,7 +159,7 @@ uv pip install -e "./cli[all,dev]" --python .venv
 
 `[all,dev]` matches CI (`uv sync --all-extras` from `cli/`). A narrower extra set that omits `tokens` skips the tokenizer tests and measures transcripts in different units than CI.
 
-The base install includes active built-in Skill Python runtimes. Run `omni init` once to configure Omni and prepare research-pptx's lockfile-pinned Node renderer. `omni update` refreshes both Python dependencies and that renderer; use `omni skills setup research-pptx` for an explicit repair. Skills never install packages inside a task.
+The base install includes active built-in Skill Python runtimes. Run `omni init` once to configure Omni and prepare the research-pptx Node renderer and scientific-poster Chromium. `omni update` refreshes Python dependencies and both runtimes; use `omni skills setup <name>` for an explicit repair. Skills never install packages inside a task.
 
 ## First run
 

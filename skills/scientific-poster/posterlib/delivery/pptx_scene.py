@@ -7,7 +7,7 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-SCHEMA = "scientific-poster.pptx-scene.v2"
+SCHEMA = "scientific-poster.pptx-scene.v3"
 OBJECT_KINDS = frozenset({"equation", "image", "shape", "table", "text"})
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 _COLOR_RE = re.compile(r"^[0-9A-F]{6}$")
@@ -45,6 +45,15 @@ def normalize_scene(value: object) -> dict[str, Any]:
         objects.append(normalized)
     if not objects:
         raise SceneError("empty_scene", "scene must contain at least one object")
+    for item in objects:
+        container_id = item.get("container_id")
+        if container_id is not None and (
+            container_id == item["id"] or container_id not in ids
+        ):
+            raise SceneError(
+                "invalid_container_id",
+                f"{item['id']}.container_id must name another scene object",
+            )
     return {"schema": SCHEMA, "page": page, "objects": objects}
 
 
@@ -90,6 +99,14 @@ def _normalize_object(value: object, *, index: int) -> dict[str, Any]:
     module_id = str(raw.get("module_id") or "").strip()
     if module_id:
         item["module_id"] = module_id
+    container_id = str(raw.get("container_id") or "").strip()
+    if container_id:
+        if not _ID_RE.fullmatch(container_id):
+            raise SceneError(
+                "invalid_container_id",
+                f"{object_id}.container_id must be a stable identifier",
+            )
+        item["container_id"] = container_id
     if kind == "text":
         item.update(_normalize_text(raw, object_id))
     elif kind == "equation":
@@ -115,6 +132,12 @@ def _normalize_object(value: object, *, index: int) -> dict[str, Any]:
                 ),
             }
         )
+        if "border_widths" in raw:
+            widths = _mapping(raw["border_widths"], f"{object_id}.border_widths")
+            item["border_widths"] = {
+                side: _nonnegative_number(widths.get(side), f"{object_id}.border_widths.{side}")
+                for side in ("top", "right", "bottom", "left")
+            }
     else:
         rows = raw.get("rows")
         if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)) or not rows:
@@ -135,6 +158,14 @@ def _normalize_object(value: object, *, index: int) -> dict[str, Any]:
                     "invalid_table_rows", f"{object_id}.rows must be rectangular"
                 )
             normalized_rows.append(cells)
+        try:
+            cell_styles = _normalize_table_styles(raw, normalized_rows, object_id)
+        except (IndexError, KeyError, TypeError, AttributeError) as exc:
+            raise SceneError(
+                "invalid_table_styles",
+                f"{object_id}.cell_styles must contain cell style objects matching rows",
+            ) from exc
+        cell_runs = _normalize_table_runs(raw, normalized_rows, object_id)
         item.update(
             {
                 "rows": normalized_rows,
@@ -150,32 +181,175 @@ def _normalize_object(value: object, *, index: int) -> dict[str, Any]:
                     total=item["w"],
                     label=f"{object_id}.column_widths",
                 ),
-                "font_size_pt": _positive_number(
-                    raw.get("font_size_pt"), f"{object_id}.font_size_pt"
-                ),
-                "font_face": str(raw.get("font_face") or "Arial").strip(),
-                "color": _color(raw.get("color", "111111"), f"{object_id}.color"),
-                "fill": _color(raw.get("fill", "FFFFFF"), f"{object_id}.fill"),
-                "line": _color(raw.get("line", "D8D8D8"), f"{object_id}.line"),
-                "header_fill": _color(
-                    raw.get("header_fill", raw.get("fill", "FFFFFF")),
-                    f"{object_id}.header_fill",
-                ),
-                "header_color": _color(
-                    raw.get("header_color", raw.get("color", "111111")),
-                    f"{object_id}.header_color",
-                ),
-                "body_fill": _color(
-                    raw.get("body_fill", raw.get("fill", "FFFFFF")),
-                    f"{object_id}.body_fill",
-                ),
-                "body_color": _color(
-                    raw.get("body_color", raw.get("color", "111111")),
-                    f"{object_id}.body_color",
-                ),
+                "cell_styles": cell_styles,
+                "cell_runs": cell_runs,
+                "merges": _normalize_table_merges(raw.get("merges", []), normalized_rows, object_id),
             }
         )
     return item
+
+
+def _normalize_font_style(raw: Mapping[str, Any], object_id: str) -> dict[str, Any]:
+    result = {
+        "font_size_pt": _positive_number(
+            raw.get("font_size_pt"), f"{object_id}.font_size_pt"
+        ),
+        "font_face": str(raw.get("font_face") or "Arial").strip(),
+        "color": _color(raw.get("color", "111111"), f"{object_id}.color"),
+        "bold": raw.get("bold") is True,
+        "italic": raw.get("italic") is True,
+    }
+    if "letter_spacing_pt" in raw:
+        result["letter_spacing_pt"] = _number(raw["letter_spacing_pt"], f"{object_id}.letter_spacing_pt")
+    if "line_height_pt" in raw:
+        result["line_height_pt"] = _nonnegative_number(raw["line_height_pt"], f"{object_id}.line_height_pt")
+    return result
+
+
+def _normalize_table_merges(
+    value: object, rows: list[list[str]], object_id: str
+) -> list[dict[str, int]]:
+    """Keep native cell spans within the rectangular grid without losing text."""
+
+    label = f"{object_id}.merges"
+    if not isinstance(value, list):
+        raise SceneError("invalid_table_merge", f"{label} must be an array")
+    merges = []
+    covered: set[tuple[int, int]] = set()
+    for index, item in enumerate(value):
+        raw = _mapping(item, f"{label}[{index}]")
+        span = {}
+        for field, minimum in (("row", 0), ("column", 0), ("row_span", 1), ("column_span", 1)):
+            number = raw.get(field)
+            if type(number) is not int or number < minimum:
+                raise SceneError("invalid_table_merge", f"{label}[{index}].{field} is invalid")
+            span[field] = number
+        row, column = span["row"], span["column"]
+        bottom, right = row + span["row_span"], column + span["column_span"]
+        if bottom > len(rows) or right > len(rows[0]):
+            raise SceneError("invalid_table_merge", f"{label}[{index}] extends outside the grid")
+        for r in range(row, bottom):
+            for c in range(column, right):
+                if (r, c) in covered or ((r, c) != (row, column) and rows[r][c]):
+                    raise SceneError("invalid_table_merge", f"{label}[{index}] overlaps cells or hides text")
+                covered.add((r, c))
+        merges.append(span)
+    return merges
+
+
+def _normalize_table_styles(
+    raw: Mapping[str, Any], rows: list[list[str]], object_id: str
+) -> list[list[dict[str, Any]]]:
+    """Validate the captured style for every native table cell."""
+
+    styles = raw.get("cell_styles")
+    if (
+        not isinstance(styles, Sequence)
+        or isinstance(styles, (str, bytes))
+        or len(styles) != len(rows)
+    ):
+        raise SceneError(
+            "invalid_table_styles",
+            f"{object_id}.cell_styles must match the table rows",
+        )
+    result: list[list[dict[str, Any]]] = []
+    for row_index, row in enumerate(rows):
+        row_styles = styles[row_index]
+        if (
+            not isinstance(row_styles, Sequence)
+            or isinstance(row_styles, (str, bytes))
+            or len(row_styles) != len(row)
+        ):
+            raise SceneError(
+                "invalid_table_styles",
+                f"{object_id}.cell_styles[{row_index}] must match the table columns",
+            )
+        output_row = []
+        for column_index, _ in enumerate(row):
+            label = f"{object_id}.cell_styles[{row_index}][{column_index}]"
+            style = dict(_mapping(row_styles[column_index], label))
+            padding = style.get("padding", {})
+            borders = style.get("borders", {})
+            output_row.append(
+                {
+                    **_normalize_font_style(style, label),
+                    "fill": _color(style.get("fill", "FFFFFF"), f"{label}.fill"),
+                    "align": style.get("align")
+                    if style.get("align") in {"center", "right"}
+                    else "left",
+                    "word_wrap": _boolean(
+                        style.get("word_wrap", True), f"{label}.word_wrap"
+                    ),
+                    "vertical_align": style.get("vertical_align")
+                    if style.get("vertical_align") in {"top", "bottom"}
+                    else "middle",
+                    "padding": {
+                        side: _nonnegative_number(
+                            padding.get(side, 0.04), f"{label}.padding.{side}"
+                        )
+                        for side in ("top", "right", "bottom", "left")
+                    },
+                    "borders": {
+                        side: {
+                            "color": _color(
+                                borders.get(side, {}).get(
+                                    "color", raw.get("line", "D8D8D8")
+                                ),
+                                f"{label}.borders.{side}.color",
+                            ),
+                            "width_pt": _nonnegative_number(
+                                borders.get(side, {}).get(
+                                    "width_pt", 0.5 if styles is None else 0
+                                ),
+                                f"{label}.borders.{side}.width_pt",
+                            ),
+                        }
+                        for side in ("top", "right", "bottom", "left")
+                    },
+                }
+            )
+        result.append(output_row)
+    return result
+
+
+def _normalize_table_runs(
+    raw: Mapping[str, Any], rows: list[list[str]], object_id: str
+) -> list[list[list[dict[str, Any]]]]:
+    """Keep optional origin-cell text runs exact and ordered."""
+
+    values = raw.get("cell_runs")
+    if values is None:
+        return [[[] for _ in row] for row in rows]
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        raise SceneError("invalid_table_runs", f"{object_id}.cell_runs must be an array")
+    if len(values) != len(rows):
+        raise SceneError("invalid_table_runs", f"{object_id}.cell_runs must match rows")
+    result = []
+    for row_index, row in enumerate(rows):
+        source_row = values[row_index]
+        if not isinstance(source_row, Sequence) or isinstance(source_row, (str, bytes)):
+            raise SceneError("invalid_table_runs", f"{object_id}.cell_runs[{row_index}] must be an array")
+        if len(source_row) != len(row):
+            raise SceneError("invalid_table_runs", f"{object_id}.cell_runs must match rows")
+        output_row = []
+        for column_index, text in enumerate(row):
+            source_runs = source_row[column_index]
+            label = f"{object_id}.cell_runs[{row_index}][{column_index}]"
+            if not isinstance(source_runs, Sequence) or isinstance(source_runs, (str, bytes)):
+                raise SceneError("invalid_table_runs", f"{label} must be an array")
+            runs = []
+            for run_index, value in enumerate(source_runs):
+                run_label = f"{label}[{run_index}]"
+                run = _mapping(value, run_label)
+                run_text = str(run.get("text") or "")
+                if not run_text:
+                    raise SceneError("invalid_table_runs", f"{run_label}.text must not be empty")
+                runs.append({"text": run_text, **_normalize_font_style(run, run_label)})
+            if runs and "".join(run["text"] for run in runs) != text:
+                raise SceneError("invalid_table_runs", f"{label} must reproduce the cell text")
+            output_row.append(runs)
+        result.append(output_row)
+    return result
 
 
 def _normalize_text(raw: Mapping[str, Any], object_id: str) -> dict[str, Any]:
@@ -186,26 +360,14 @@ def _normalize_text(raw: Mapping[str, Any], object_id: str) -> dict[str, Any]:
     if align not in {"center", "left", "right"}:
         align = "left"
     fit = str(raw.get("fit") or "grow").lower()
-    if fit not in {"grow", "shrink"}:
+    if fit not in {"grow", "shrink", "none"}:
         raise SceneError(
             "invalid_text_fit",
-            f"{object_id}.fit must be grow or shrink",
+            f"{object_id}.fit must be grow, shrink or none",
         )
-    font_scale = _positive_number(raw.get("font_scale", 1), f"{object_id}.font_scale")
-    if font_scale > 1:
-        raise SceneError(
-            "invalid_text_scale",
-            f"{object_id}.font_scale must not exceed 1",
-        )
-    return {
+    result = {
         "text": text,
-        "font_size_pt": _positive_number(
-            raw.get("font_size_pt"), f"{object_id}.font_size_pt"
-        ),
-        "font_face": str(raw.get("font_face") or "Arial").strip(),
-        "color": _color(raw.get("color", "111111"), f"{object_id}.color"),
-        "bold": raw.get("bold") is True,
-        "italic": raw.get("italic") is True,
+        **_normalize_font_style(raw, object_id),
         "align": align,
         "fit": fit,
         "word_wrap": _boolean(raw.get("word_wrap", True), f"{object_id}.word_wrap"),
@@ -213,8 +375,8 @@ def _normalize_text(raw: Mapping[str, Any], object_id: str) -> dict[str, Any]:
             raw.get("font_preflighted", False),
             f"{object_id}.font_preflighted",
         ),
-        "font_scale": font_scale,
     }
+    return result
 
 
 def _normalize_equation(raw: Mapping[str, Any], object_id: str) -> dict[str, Any]:
@@ -223,19 +385,12 @@ def _normalize_equation(raw: Mapping[str, Any], object_id: str) -> dict[str, Any
         raise SceneError(
             "invalid_equation_mathml", f"{object_id}.mathml must start with <math"
         )
-    fallback_src = str(raw.get("fallback_src") or "").strip()
-    if not fallback_src:
-        raise SceneError(
-            "missing_equation_fallback",
-            f"{object_id}.fallback_src is required for non-PowerPoint viewers",
-        )
     align = str(raw.get("align") or "center").lower()
     if align not in {"center", "left", "right"}:
         align = "center"
     return {
         "mathml": mathml,
         "latex": str(raw.get("latex") or "").strip(),
-        "fallback_src": fallback_src,
         "font_size_pt": _positive_number(
             raw.get("font_size_pt"), f"{object_id}.font_size_pt"
         ),
@@ -280,8 +435,7 @@ def _normalize_lengths(
             f"{label} must contain exactly {count} values",
         )
     lengths = [
-        _positive_number(item, f"{label}[{index}]")
-        for index, item in enumerate(value)
+        _positive_number(item, f"{label}[{index}]") for index, item in enumerate(value)
     ]
     scale = total / sum(lengths)
     return [length * scale for length in lengths]

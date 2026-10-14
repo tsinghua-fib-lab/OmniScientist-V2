@@ -341,10 +341,16 @@ def setup_cmd(
     force: bool = typer.Option(False, "--force", help="Reinstall even when the pinned runtime is ready."),
 ) -> None:
     """Prepare a bundled Skill runtime outside the Python installation."""
-    if name not in {"research-pptx", "builtin-personas", "all"}:
+    if name not in {
+        "research-pptx",
+        "scientific-poster",
+        "builtin-personas",
+        "all",
+    }:
         error(
             f"Skill '{name}' has no owner-managed setup. "
-            "Available setup targets: research-pptx, builtin-personas, all."
+            "Available setup targets: research-pptx, scientific-poster, "
+            "builtin-personas, all."
         )
         raise typer.Exit(2)
 
@@ -376,19 +382,30 @@ def setup_cmd(
         SkillRuntimeSetupError,
         research_pptx_runtime_dir,
         setup_research_pptx_runtime,
+        setup_scientific_poster_runtime,
     )
 
-    info("Preparing the lockfile-pinned research-pptx renderer runtime...")
-    try:
-        changed = setup_research_pptx_runtime(paths, force=force)
-    except SkillRuntimeSetupError as exc:
-        error(str(exc))
-        raise typer.Exit(1) from exc
-    runtime_dir = research_pptx_runtime_dir(paths)
-    if changed:
-        success(f"research-pptx renderer ready: {runtime_dir}")
-    else:
-        success(f"research-pptx renderer already ready: {runtime_dir}")
+    if name in {"research-pptx", "all"}:
+        info("Preparing the lockfile-pinned research-pptx renderer runtime...")
+        try:
+            changed = setup_research_pptx_runtime(paths, force=force)
+        except SkillRuntimeSetupError as exc:
+            error(str(exc))
+            raise typer.Exit(1) from exc
+        runtime_dir = research_pptx_runtime_dir(paths)
+        if changed:
+            success(f"research-pptx renderer ready: {runtime_dir}")
+        else:
+            success(f"research-pptx renderer already ready: {runtime_dir}")
+
+    if name in {"scientific-poster", "all"}:
+        info("Preparing scientific-poster Chromium...")
+        try:
+            setup_scientific_poster_runtime(force=force)
+        except SkillRuntimeSetupError as exc:
+            error(str(exc))
+            raise typer.Exit(1) from exc
+        success("scientific-poster Chromium is ready.")
 
 
 @app.command("list")

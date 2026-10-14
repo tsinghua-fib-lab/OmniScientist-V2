@@ -8,10 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from posterlib.runtime.runtime_io import write_json_atomic
-from posterlib.visual import reference_seeds, visual_design
+from posterlib.visual import reference_analysis, reference_catalog
 
 _FILENAME = "draft-checkpoint.json"
-_VERSION = 5
+_VERSION = 8
 _REFERENCE_STAGES = frozenset(
     {"reference-ready", "design-ready", "author-ready"}
 )
@@ -19,7 +19,6 @@ _DESIGN_STAGES = frozenset({"design-ready", "author-ready"})
 _STAGES = frozenset({"plan-ready", *_REFERENCE_STAGES})
 _PLAN_FIELDS = {
     "source_text": str,
-    "authoring_request": str,
     "asset_inputs": list,
     "asset_sha256s": list,
     "source_figure_sha256s": list,
@@ -29,6 +28,8 @@ _PLAN_FIELDS = {
     "page_plan": dict,
     "visual_preferences": dict,
     "visual_iteration": int,
+    "authoring_request": str,
+    "author_model_role": str,
 }
 
 
@@ -72,11 +73,44 @@ def load_path(path: Path) -> dict[str, Any] | None:
     return _validated_payload(payload)
 
 
+def restore(workspace: Path, source_path: Path) -> bool:
+    """Replace the task checkpoint with one validated candidate sidecar."""
+
+    state = load_path(source_path)
+    if state is None:
+        return False
+    try:
+        save(workspace, stage=str(state["stage"]), state=state)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def _validated_payload(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict) or value.get("version") != _VERSION:
         return None
     stage = value.get("stage")
     if stage not in _STAGES:
+        return None
+    optional_fields = {
+        "source_figure_observations",
+        "reference_image",
+        "editing_issue",
+    }
+    allowed_fields = {
+        "version",
+        "stage",
+        *_PLAN_FIELDS,
+        *optional_fields,
+    }
+    if stage in _REFERENCE_STAGES:
+        allowed_fields.add("design_reference")
+    if stage in _DESIGN_STAGES:
+        allowed_fields.add("visual_design")
+    if stage == "author-ready":
+        allowed_fields.add("html_template")
+    fields = set(value)
+    if not (allowed_fields - optional_fields <= fields <= allowed_fields):
         return None
     if any(
         not isinstance(value.get(name), expected)
@@ -85,11 +119,19 @@ def _validated_payload(value: Any) -> dict[str, Any] | None:
         return None
     if any(not isinstance(item, str) for item in value["warnings"]):
         return None
+    if value["author_model_role"] not in {"main", "vision"}:
+        return None
+    if "source_figure_observations" in value and not isinstance(
+        value["source_figure_observations"], dict
+    ):
+        return None
+    if "editing_issue" in value and not isinstance(value["editing_issue"], dict):
+        return None
     for field in ("asset_sha256s", "source_figure_sha256s"):
         if any(not isinstance(item, str) for item in value[field]):
             return None
     iteration = value["visual_iteration"]
-    if isinstance(iteration, bool) or not 0 <= iteration <= 2:
+    if isinstance(iteration, bool) or iteration < 0:
         return None
     raw_reference = value.get("design_reference")
     raw_reference_image = value.get("reference_image")
@@ -97,69 +139,43 @@ def _validated_payload(value: Any) -> dict[str, Any] | None:
         not isinstance(raw_reference_image, str) or not raw_reference_image.strip()
     ):
         return None
-    if raw_reference is not None and not _valid_reference(raw_reference):
-        return None
+    reference: reference_catalog.ReferenceBundle | None = None
+    if raw_reference is not None:
+        if not isinstance(raw_reference, Mapping):
+            return None
+        try:
+            reference = reference_catalog.ReferenceBundle.from_dict(dict(raw_reference))
+        except reference_catalog.ReferenceSeedError:
+            return None
     if stage in _REFERENCE_STAGES and raw_reference is None:
         return None
     raw_design = value.get("visual_design")
-    if raw_design is not None and not _valid_visual_design(raw_design):
-        return None
+    design: reference_analysis.ReferenceAnalysis | None = None
+    if raw_design is not None:
+        if not isinstance(raw_design, Mapping):
+            return None
+        try:
+            design = reference_analysis.ReferenceAnalysis.from_dict(dict(raw_design))
+        except reference_analysis.ReferenceAnalysisError:
+            return None
     if raw_design is not None and raw_reference is None:
         return None
     if (
-        raw_design is not None
-        and raw_reference is not None
-        and (
-            raw_design.get("reference_image_sha256")
-            != raw_reference.get("image_sha256")
-        )
+        design is not None
+        and reference is not None
+        and design.reference_image_sha256 != reference.image_sha256
     ):
         return None
     if stage in _DESIGN_STAGES and raw_design is None:
         return None
     if stage == "author-ready" and not isinstance(value.get("html_template"), str):
         return None
-    normalized = {
-        key: item
-        for key, item in value.items()
-        if key
-        not in {
-            "version",
-            "pending_visual_revision",
-            "inspection_repair_attempt",
-        }
-    }
-    if raw_reference is not None:
-        normalized["design_reference"] = reference_seeds.ReferenceBundle.from_dict(
-            dict(raw_reference)
-        ).to_dict()
-    if raw_design is not None:
-        normalized["visual_design"] = visual_design.VisualDesignPlan.from_dict(
-            dict(raw_design)
-        ).to_dict()
+    normalized = {key: item for key, item in value.items() if key != "version"}
+    if reference is not None:
+        normalized["design_reference"] = reference.to_dict()
+    if design is not None:
+        normalized["visual_design"] = design.to_dict()
     return normalized
 
 
-def _valid_reference(value: Any) -> bool:
-    if not isinstance(value, Mapping):
-        return False
-    raw = dict(value)
-    try:
-        reference_seeds.ReferenceBundle.from_dict(raw)
-        return True
-    except reference_seeds.ReferenceSeedError:
-        return False
-
-
-def _valid_visual_design(value: Any) -> bool:
-    if not isinstance(value, Mapping):
-        return False
-    raw = dict(value)
-    try:
-        visual_design.VisualDesignPlan.from_dict(raw)
-        return True
-    except visual_design.VisualDesignError:
-        return False
-
-
-__all__ = ["load", "load_path", "save", "save_path"]
+__all__ = ["load", "load_path", "restore", "save", "save_path"]

@@ -1,4 +1,4 @@
-"""Built-in visual seed selection and immutable reference bundles."""
+"""Hash-bound poster reference selection and custom-image bundles."""
 
 from __future__ import annotations
 
@@ -12,17 +12,12 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
 
-import poster_core
+import poster_contract
 
 from posterlib.paths import SKILL_ROOT
 
 Orientation = Literal["landscape", "portrait"]
 ReferenceSourceKind = Literal["custom", "generated", "seed"]
-SeedLeadPlacement = Literal["flow", "full-width", "center-lane"]
-SeedSectionStyle = Literal["open", "rule", "band", "outlined"]
-SeedModuleStyle = Literal["open", "outlined", "selective"]
-SeedMastheadScale = Literal["compact", "balanced", "prominent"]
-SeedMastheadAlignment = Literal["left", "center"]
 
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _SEED_ROOT = SKILL_ROOT / "seeds"
@@ -37,7 +32,7 @@ class ReferenceSeedError(ValueError):
 
 @dataclass(frozen=True)
 class SeedSpec:
-    """Transferable design properties for one conference-poster reference."""
+    """Content-shape metadata for selecting one reference image."""
 
     seed_id: str
     image_path: Path
@@ -46,15 +41,6 @@ class SeedSpec:
     organization_modes: tuple[str, ...]
     role_emphasis: str
     figure_preference: float
-    supports_equations: bool = False
-    supports_tables: bool = False
-    column_weights: tuple[float, ...] = ()
-    lead_placement: SeedLeadPlacement = "flow"
-    section_style: SeedSectionStyle = "rule"
-    module_style: SeedModuleStyle = "selective"
-    masthead_scale: SeedMastheadScale = "balanced"
-    masthead_alignment: SeedMastheadAlignment = "left"
-    accent_color: str = "#315f9d"
 
 
 @dataclass(frozen=True)
@@ -94,10 +80,8 @@ class ReferenceBundle:
             mime_type = mimetypes.guess_type(image.name)[0] or ""
             if not mime_type.startswith("image/"):
                 raise ReferenceSeedError("custom reference must use an image file")
-        else:
-            registered = SEED_REGISTRY.get(self.seed_id)
-            if registered is None:
-                raise ReferenceSeedError(f"unknown reference seed: {self.seed_id}")
+        elif self.seed_id not in SEED_REGISTRY:
+            raise ReferenceSeedError(f"unknown reference seed: {self.seed_id}")
         if self.source_kind == "seed":
             registered = SEED_REGISTRY[self.seed_id]
             try:
@@ -112,12 +96,14 @@ class ReferenceBundle:
                 )
         warning = None if self.warning is None else str(self.warning).strip()
         if self.warning is not None and not warning:
-            raise ReferenceSeedError("reference warning must be non-empty when present")
+            raise ReferenceSeedError(
+                "reference warning must be non-empty when present"
+            )
         object.__setattr__(self, "image_path", str(image))
         object.__setattr__(self, "warning", warning)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return a stable JSON-safe object kept separate from paper manifests."""
+        """Return a stable JSON-safe reference identity."""
 
         return {
             "image_path": self.image_path,
@@ -139,12 +125,7 @@ class ReferenceBundle:
             "warning",
         }
         fields = frozenset(value)
-        legacy_fields = {"orientation", "density", "non_authoritative_policy"}
-        if fields not in {
-            frozenset(required),
-            frozenset(required | {"orientation", "density"}),
-            frozenset(required | legacy_fields),
-        }:
+        if fields != frozenset(required):
             raise ReferenceSeedError("reference bundle fields are invalid")
         warning = value["warning"]
         if warning is not None and not isinstance(warning, str):
@@ -166,34 +147,15 @@ def _seed(
     organization_modes: tuple[str, ...],
     role_emphasis: str,
     figure_preference: float,
-    column_weights: tuple[float, ...],
-    lead_placement: SeedLeadPlacement,
-    section_style: SeedSectionStyle,
-    module_style: SeedModuleStyle,
-    masthead_scale: SeedMastheadScale,
-    masthead_alignment: SeedMastheadAlignment,
-    accent_color: str,
-    supports_equations: bool = False,
-    supports_tables: bool = False,
 ) -> SeedSpec:
-    filename = f"{seed_id}.png"
     return SeedSpec(
         seed_id=seed_id,
-        image_path=_SEED_ROOT / filename,
+        image_path=_SEED_ROOT / f"{seed_id}.png",
         orientation=orientation,
         density=density,
         organization_modes=organization_modes,
         role_emphasis=role_emphasis,
         figure_preference=figure_preference,
-        supports_equations=supports_equations,
-        supports_tables=supports_tables,
-        column_weights=column_weights,
-        lead_placement=lead_placement,
-        section_style=section_style,
-        module_style=module_style,
-        masthead_scale=masthead_scale,
-        masthead_alignment=masthead_alignment,
-        accent_color=accent_color,
     )
 
 
@@ -206,15 +168,6 @@ SEED_REGISTRY: Mapping[str, SeedSpec] = MappingProxyType(
             organization_modes=("scan-first", "figure-led"),
             role_emphasis="balanced",
             figure_preference=0.7,
-            column_weights=(1.0, 1.0, 1.0),
-            lead_placement="flow",
-            section_style="band",
-            module_style="outlined",
-            masthead_scale="compact",
-            masthead_alignment="center",
-            accent_color="#315f9d",
-            supports_equations=True,
-            supports_tables=True,
         ),
         "central-method-stage": _seed(
             "central-method-stage",
@@ -223,14 +176,6 @@ SEED_REGISTRY: Mapping[str, SeedSpec] = MappingProxyType(
             organization_modes=("method-led", "scan-first"),
             role_emphasis="method",
             figure_preference=0.4,
-            column_weights=(0.85, 1.3, 0.85),
-            lead_placement="center-lane",
-            section_style="rule",
-            module_style="selective",
-            masthead_scale="compact",
-            masthead_alignment="center",
-            accent_color="#1d4f91",
-            supports_equations=True,
         ),
         "claim-led-asymmetric": _seed(
             "claim-led-asymmetric",
@@ -239,13 +184,6 @@ SEED_REGISTRY: Mapping[str, SeedSpec] = MappingProxyType(
             organization_modes=("result-led", "narrative", "scan-first"),
             role_emphasis="claim",
             figure_preference=0.3,
-            column_weights=(1.12, 1.0, 0.88),
-            lead_placement="full-width",
-            section_style="open",
-            module_style="selective",
-            masthead_scale="compact",
-            masthead_alignment="left",
-            accent_color="#c91f1f",
         ),
         "open-evidence-gallery": _seed(
             "open-evidence-gallery",
@@ -254,31 +192,14 @@ SEED_REGISTRY: Mapping[str, SeedSpec] = MappingProxyType(
             organization_modes=("figure-led", "scan-first", "result-led"),
             role_emphasis="evidence",
             figure_preference=0.95,
-            column_weights=(0.9, 1.2, 0.9),
-            lead_placement="center-lane",
-            section_style="band",
-            module_style="open",
-            masthead_scale="compact",
-            masthead_alignment="center",
-            accent_color="#315f9d",
-            supports_tables=True,
         ),
         "portrait-image-grid": _seed(
             "portrait-image-grid",
             orientation="portrait",
             density="balanced",
-            organization_modes=tuple(poster_core.ORGANIZATION_MODES),
+            organization_modes=tuple(poster_contract.ORGANIZATION_MODES),
             role_emphasis="balanced",
             figure_preference=0.8,
-            column_weights=(1.0, 1.0),
-            lead_placement="flow",
-            section_style="band",
-            module_style="outlined",
-            masthead_scale="prominent",
-            masthead_alignment="center",
-            accent_color="#c81e1e",
-            supports_equations=True,
-            supports_tables=True,
         ),
     }
 )
@@ -299,24 +220,20 @@ def select_seed(
     organization_mode: str,
     figure_count: int,
     module_weights: Mapping[str, float],
-    has_equations: bool,
-    has_tables: bool,
     density: str,
 ) -> SeedSpec:
-    """Select one seed deterministically from grounded composition signals."""
+    """Select one reference from content-shape signals, never layout fit."""
 
     page_mode = str(orientation).strip().lower()
     if page_mode not in {"landscape", "portrait"}:
         raise ReferenceSeedError("orientation must be landscape or portrait")
     mode = str(organization_mode).strip().lower()
-    if mode not in poster_core.ORGANIZATION_MODES:
+    if mode not in poster_contract.ORGANIZATION_MODES:
         raise ReferenceSeedError("unsupported organization_mode")
     if isinstance(figure_count, bool) or not isinstance(figure_count, int):
         raise ReferenceSeedError("figure_count must be a non-negative integer")
     if figure_count < 0:
         raise ReferenceSeedError("figure_count must be a non-negative integer")
-    if not isinstance(has_equations, bool) or not isinstance(has_tables, bool):
-        raise ReferenceSeedError("equation and table signals must be booleans")
     weights = _normalize_weights(module_weights)
     density_mode = normalize_density(density)
 
@@ -333,9 +250,15 @@ def select_seed(
     else:
         method_share = claim_share = evidence_share = 0.0
 
-    figure_pressure = min(figure_count, 6) / 6.0
+    figure_pressure = figure_count / (figure_count + 1.0) if figure_count else 0.0
     role_shares = {
-        "balanced": (method_share + claim_share + evidence_share) / 3.0,
+        "balanced": (
+            method_share
+            + claim_share
+            + evidence_share
+            - max(method_share, claim_share, evidence_share)
+        )
+        / 2.0,
         "method": method_share,
         "claim": claim_share,
         "evidence": evidence_share,
@@ -354,20 +277,20 @@ def select_seed(
             raise ReferenceSeedError(
                 f"reference seed {seed.seed_id!r} has invalid role metadata"
             )
-        value = 3.0 if mode in seed.organization_modes else 0.0
-        value += 4.0 * role_shares[seed.role_emphasis]
-        value += 2.0 * (1.0 - abs(seed.figure_preference - figure_pressure))
+        value = 1.0 if mode in seed.organization_modes else 0.0
+        value += role_shares[seed.role_emphasis]
+        value += 1.0 - abs(seed.figure_preference - figure_pressure)
         density_distance = abs(
             density_index[normalize_density(seed.density)] - density_index[density_mode]
         )
-        value += max(0.0, 1.5 - density_distance)
-        if has_equations and seed.supports_equations:
-            value += 1.2
-        if has_tables and seed.supports_tables:
-            value += 0.8
-        return value
+        return value + 1.0 - density_distance / 2.0
 
-    return max(enumerate(candidates), key=lambda item: (score(item[1]), -item[0]))[1]
+    ranked = sorted(
+        enumerate(candidates),
+        key=lambda item: (score(item[1]), -item[0]),
+        reverse=True,
+    )
+    return ranked[0][1]
 
 
 def load_seed_bundle(
@@ -375,31 +298,30 @@ def load_seed_bundle(
     *,
     warning: str | None = None,
 ) -> ReferenceBundle:
-    """Load and hash a selected seed without treating it as a paper asset."""
+    """Load and hash a selected registered seed."""
 
     registered = seed_by_id(seed.seed_id)
     if seed != registered:
         raise ReferenceSeedError(
             "reference seed must match its complete registry entry"
         )
-    image = registered.image_path
     try:
-        resolved = image.resolve(strict=True)
+        image = registered.image_path.resolve(strict=True)
     except OSError as exc:
-        raise ReferenceSeedError(f"reference seed image is missing: {image}") from exc
+        raise ReferenceSeedError(
+            f"reference seed image is missing: {registered.image_path}"
+        ) from exc
     return ReferenceBundle(
-        image_path=str(resolved),
-        image_sha256=_sha256_file(resolved),
+        image_path=str(image),
+        image_sha256=_sha256_file(image),
         source_kind="seed",
         seed_id=registered.seed_id,
         warning=warning,
     )
 
 
-def load_custom_bundle(
-    image_path: str | Path,
-) -> ReferenceBundle:
-    """Bind an arbitrary reference, reusing registered grammar for registry assets."""
+def load_custom_bundle(image_path: str | Path) -> ReferenceBundle:
+    """Bind an explicit user reference without changing its provenance."""
 
     image = Path(image_path).expanduser()
     if image.is_symlink():
@@ -410,19 +332,26 @@ def load_custom_bundle(
         raise ReferenceSeedError(
             f"custom reference image is not readable: {image_path}"
         ) from exc
-    for seed in SEED_REGISTRY.values():
-        try:
-            registered_path = seed.image_path.resolve(strict=True)
-        except OSError:
-            continue
-        if registered_path == resolved:
-            return load_seed_bundle(seed)
     return ReferenceBundle(
         image_path=str(resolved),
         image_sha256=_sha256_file(resolved),
         source_kind="custom",
         seed_id=_CUSTOM_REFERENCE_ID,
     )
+
+
+def custom_reference_orientation(image_path: str | Path) -> Orientation:
+    """Read the physical orientation of an explicit poster image reference."""
+
+    import pymupdf
+
+    reference = load_custom_bundle(image_path)
+    try:
+        with pymupdf.open(reference.image_path) as document:
+            page = document[0]
+            return "portrait" if page.rect.height > page.rect.width else "landscape"
+    except (IndexError, OSError, RuntimeError, ValueError) as exc:
+        raise ReferenceSeedError("custom reference image has no readable dimensions") from exc
 
 
 def normalize_density(value: str) -> str:
@@ -447,7 +376,9 @@ def _normalize_weights(value: Mapping[str, float]) -> dict[str, float]:
         except (TypeError, ValueError) as exc:
             raise ReferenceSeedError("module_weights are invalid") from exc
         if not math.isfinite(weight) or weight < 0:
-            raise ReferenceSeedError("module_weights must be finite and non-negative")
+            raise ReferenceSeedError(
+                "module_weights must be finite and non-negative"
+            )
         normalized[key] = weight
     return normalized
 

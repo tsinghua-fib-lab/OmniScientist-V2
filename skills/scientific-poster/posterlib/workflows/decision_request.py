@@ -1,4 +1,4 @@
-"""Portable user-decision requests for exhausted automatic visual repair."""
+"""Portable user-decision requests for an exact reviewed poster version."""
 
 from __future__ import annotations
 
@@ -11,11 +11,10 @@ from typing import Any
 SCHEMA = "scientific-poster.decision-request.v2"
 _REASONS = frozenset(
     {
-        "automatic-revision-invalid",
-        "automatic-revision-noop",
-        "automatic-revision-regressed",
-        "automatic-revision-exhausted",
+        "deterministic-layout-blocked",
         "reviewer-unavailable",
+        "revision-inspection-blocked",
+        "visual-review-revision-required",
         "workflow-budget-exhausted",
     }
 )
@@ -41,12 +40,13 @@ def build_request(
         "source_html_uri": html_uri,
         "source_html_sha256": html_sha256,
     }
-    raw_modules = (result.get("content_budget") or {}).get("content_modules")
+    page_plan = result.get("page_plan") or {}
+    raw_modules = (page_plan.get("content_contract") or {}).get("modules")
     grounded_module_ids = (
         [
-            str(module.get("id") or "").strip()
+            str(module.get("module_id") or "").strip()
             for module in raw_modules
-            if isinstance(module, Mapping) and str(module.get("id") or "").strip()
+            if isinstance(module, Mapping) and str(module.get("module_id") or "").strip()
         ]
         if isinstance(raw_modules, list)
         else []
@@ -86,8 +86,8 @@ def build_request(
         "blocking": False,
         "reason": normalized_reason,
         "prompt": (
-            "Automatic visual repair could not safely choose between changing the "
-            "current poster and preserving it."
+            "Choose whether to revise the reviewed poster with bound feedback or "
+            "preserve the exact current version."
         ),
         "target": {
             "html_uri": html_uri,

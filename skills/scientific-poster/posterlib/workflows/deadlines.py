@@ -7,12 +7,11 @@ from typing import Any
 
 from posterlib.generation import model_runtime
 
-WORKFLOW_RUNTIME_BUDGET_SECONDS = 1790.0
-REFERENCE_PREFLIGHT_MAX_SECONDS = 150.0
-# Preserve one normal VLM-review window plus deterministic authoring, inspection,
-# persistence, and the host reserve. The former 140-second value belonged to the
-# removed model-authored HTML/repair loop and could starve reference interpretation.
-REFERENCE_DOWNSTREAM_RESERVE_SECONDS = 100.0
+WORKFLOW_RUNTIME_BUDGET_SECONDS = 3590.0
+REFERENCE_MAX_SECONDS = 300.0
+POST_PLANNING_RESERVE_SECONDS = 180.0
+POST_REFERENCE_RESERVE_SECONDS = 100.0
+PPTX_EXPORT_RESERVE_SECONDS = 90.0
 HOST_EXECUTION_RESERVE_SECONDS = 10.0
 VISUAL_LOOP_TIMEOUT_WARNING = (
     "The bounded automatic visual loop reached its runtime budget; the latest "
@@ -20,10 +19,29 @@ VISUAL_LOOP_TIMEOUT_WARNING = (
 )
 
 
-def reference_preflight_deadline(workflow_deadline: float, now: float) -> float:
+def reference_deadline(workflow_deadline: float, now: float) -> float:
     """Bound reference-pixel interpretation to its share of remaining time."""
 
     return now + reference_step_budget_seconds(workflow_deadline, now)
+
+
+def draft_planning_deadline(
+    workflow_deadline: float,
+    now: float,
+    *,
+    reserve_reference_phase: bool = True,
+) -> float:
+    """Stop semantic planning early enough to render and review one exact candidate."""
+
+    reference_reserve = (
+        REFERENCE_MAX_SECONDS if reserve_reference_phase else 0.0
+    )
+    return max(
+        now,
+        workflow_deadline
+        - reference_reserve
+        - POST_PLANNING_RESERVE_SECONDS,
+    )
 
 
 def reference_step_budget_seconds(workflow_deadline: float, now: float) -> float:
@@ -31,10 +49,10 @@ def reference_step_budget_seconds(workflow_deadline: float, now: float) -> float
 
     available = max(
         0.0,
-        workflow_deadline - now - REFERENCE_DOWNSTREAM_RESERVE_SECONDS,
+        workflow_deadline - now - POST_REFERENCE_RESERVE_SECONDS,
     )
     return min(
-        REFERENCE_PREFLIGHT_MAX_SECONDS,
+        REFERENCE_MAX_SECONDS,
         available,
     )
 
@@ -47,11 +65,11 @@ def workflow_timeout_seconds(input_data: dict[str, Any]) -> float:
         isinstance(value, bool)
         or not isinstance(value, (int, float))
         or not math.isfinite(value)
-        or not 0 < value <= 1800
+        or not 0 < value <= 3600
     ):
         raise model_runtime.ModelBoundaryError(
             "invalid_payload",
-            "workflow_timeout_seconds must be greater than 0 and at most 1800",
+            "workflow_timeout_seconds must be greater than 0 and at most 3600",
         )
     return float(value)
 
@@ -68,12 +86,11 @@ def workflow_deadline(
     )
 
 
-def visual_loop_deadline(
-    ctx: Any, now: float, input_data: dict[str, Any] | None = None
-) -> float:
-    """Leave a host-provided execution envelope enough time to persist a result."""
+def editing_deadline(workflow_deadline: float, now: float) -> float:
+    """Reserve delivery time once, before any planning, editing or visual review."""
 
-    return workflow_deadline(ctx, now, input_data)
+    remaining = max(0.0, workflow_deadline - now)
+    return workflow_deadline - min(PPTX_EXPORT_RESERVE_SECONDS, remaining * 0.2)
 
 
 def bounded_host_deadline(
@@ -88,13 +105,23 @@ def bounded_host_deadline(
     clock = getattr(ctx, "execution_clock", None)
     remaining = getattr(clock, "remaining", None)
     if callable(remaining):
-        seconds = remaining()
-        if (
-            isinstance(seconds, (int, float))
-            and not isinstance(seconds, bool)
-            and math.isfinite(seconds)
+        raw_remaining = remaining()
+        if not isinstance(raw_remaining, bool) and isinstance(
+            raw_remaining, (int, float)
         ):
-            return max(now, min(deadline, now + seconds - HOST_EXECUTION_RESERVE_SECONDS))
+            remaining_seconds = float(raw_remaining)
+            if math.isfinite(remaining_seconds):
+                if remaining_seconds <= 0:
+                    return now
+                return max(
+                    now,
+                    min(
+                        deadline,
+                        now
+                        + remaining_seconds
+                        - HOST_EXECUTION_RESERVE_SECONDS,
+                    ),
+                )
     raw_host_deadline = getattr(ctx, "execution_deadline", 0.0)
     if isinstance(raw_host_deadline, bool) or not isinstance(
         raw_host_deadline, (int, float)
@@ -109,15 +136,3 @@ def bounded_host_deadline(
         now,
         min(deadline, host_deadline - HOST_EXECUTION_RESERVE_SECONDS),
     )
-
-
-def host_llm(ctx: Any) -> Any:
-    """Return the callable host LLM or raise the stable boundary error."""
-
-    llm = getattr(ctx, "llm", None) if ctx is not None else None
-    if llm is None or not callable(getattr(llm, "chat", None)):
-        raise model_runtime.ModelBoundaryError(
-            "llm_unavailable",
-            "This host action requires an LLM supplied by the host runtime.",
-        )
-    return llm

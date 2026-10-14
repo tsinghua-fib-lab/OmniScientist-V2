@@ -32,6 +32,7 @@ from omni.personas.installer import BuiltinPersonaInstallError, install_builtin_
 from omni.skills_runtime.runtime_setup import (
     SkillRuntimeSetupError,
     setup_research_pptx_runtime,
+    setup_scientific_poster_runtime,
 )
 
 app = typer.Typer(help="Setup wizard for models, retrieval, workspaces, skills, and MCP.")
@@ -63,6 +64,12 @@ def _prepare_bundled_skill_runtimes(paths) -> None:  # noqa: ANN001
         success("research-pptx renderer dependencies installed.")
     else:
         info("research-pptx renderer dependencies are ready.")
+    try:
+        setup_scientific_poster_runtime()
+    except SkillRuntimeSetupError as exc:
+        error(str(exc))
+        raise typer.Exit(1) from exc
+    info("scientific-poster Chromium is ready.")
 
 
 # What ``/init`` sets → the command to adjust each item later, so users never
