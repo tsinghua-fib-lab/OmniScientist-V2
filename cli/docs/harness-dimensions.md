@@ -752,7 +752,7 @@ await tasks.append_event(
 
 ---
 
-## 8. Hooks and interceptors (hook / 拦截点)
+## 8. Hooks and interceptors
 
 ### 8.1 LLM event hook
 
@@ -830,7 +830,7 @@ The command runner (`hooks.py:240-277`) is strict:
 
 ---
 
-## 9. Error recovery and retry (错误恢复与重试)
+## 9. Error recovery and retry
 
 ### 9.1 Error classification
 

@@ -386,6 +386,9 @@ _USER_LANGUAGE_MATCHERS = frozenset(
 def _english_only_exempt(path: Path) -> bool:
     if path.name == "SKILL.md":
         return True
+    # ``*_cn.md`` companions are translations of the English control-plane docs.
+    if path.name.endswith("_cn.md"):
+        return True
     if path.name.startswith("user-walkthrough-results-"):
         return True
     relative = path.relative_to(ROOT.parent).as_posix()

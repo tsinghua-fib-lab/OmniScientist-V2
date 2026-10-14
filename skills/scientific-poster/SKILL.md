@@ -25,7 +25,7 @@ metadata:
     delivery_mode: async_task
     execution:
       effects: [user_files.write]
-      max_seconds: 3600
+      max_seconds: 1800
     engine:
       module: engine
       class: ScientificPosterEngine
