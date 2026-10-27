@@ -551,7 +551,10 @@ async def test_livefigure_prepares_and_injects_legacy_icon_assets(tmp_path: Path
             ) -> str:
                 assert reference_image_uri is not None
                 self.prompts.append(prompt)
-                if "Meaningful Visual Icons" in prompt:
+                if (
+                    "Meaningful Visual Icons" in prompt
+                    or "Select useful raster icon assets" in prompt
+                ):
                     return '["Database Cylinder", "User Avatar"]'
                 if "Extract visual descriptions" in prompt:
                     return (
@@ -588,7 +591,7 @@ async def test_livefigure_prepares_and_injects_legacy_icon_assets(tmp_path: Path
         source = result.code_path.read_text(encoding="utf-8")
         assert "slide.shapes.add_picture" in source
         generation_prompt = fake_vlm.prompts[-1]
-        assert "AVAILABLE PRE-GENERATED ICONS (USE THESE!)" in generation_prompt
+        assert "AVAILABLE RASTER ICON ASSETS" in generation_prompt
         assert all(str(path) in generation_prompt for path in result.icon_assets.asset_map.values())
     finally:
         sys.path.remove(str(skill_dir))

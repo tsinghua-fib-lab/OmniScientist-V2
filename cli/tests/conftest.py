@@ -478,8 +478,8 @@ def install_fake_dot(tmp_path, monkeypatch) -> None:  # noqa: ANN001
             "shift\r\n"
             "goto args\r\n"
             ":render\r\n"
-            "if /I \"%fmt%\"==\"svg\" "
-            "(>\"%out%\" echo ^<svg^>^</svg^>) else (>\"%out%\" echo png)\r\n",
+            "if /I \"%fmt%\"==\"svg\" (set \"payload=^<svg^>^</svg^>\") else (set \"payload=png\")\r\n"
+            "if defined out (echo %payload%>\"%out%\") else (echo %payload%)\r\n",
             encoding="utf-8",
         )
     else:
@@ -491,7 +491,8 @@ def install_fake_dot(tmp_path, monkeypatch) -> None:  # noqa: ANN001
             "  case \"$1\" in -T*) fmt=${1#-T} ;; -o) shift; out=$1 ;; esac\n"
             "  shift\n"
             "done\n"
-            "if [ \"$fmt\" = svg ]; then printf '<svg></svg>' > \"$out\"; else printf 'png' > \"$out\"; fi\n",
+            "if [ \"$fmt\" = svg ]; then payload='<svg></svg>'; else payload='png'; fi\n"
+            "if [ -n \"$out\" ]; then printf '%s' \"$payload\" > \"$out\"; else printf '%s' \"$payload\"; fi\n",
             encoding="utf-8",
         )
         exe.chmod(0o755)

@@ -1,6 +1,6 @@
 ---
 name: scientific-figure
-description: Use for Graphviz/DOT architecture diagrams and workflow flowcharts with explicit topology and SVG/PNG output. Choose by scientific fidelity, readability and editing needs; livefigure offers native PPTX. Original paper figures may be reused, poor drawings rejected. Complete posters use scientific-poster.
+description: Default for ordinary Graphviz/DOT architecture diagrams and workflow flowcharts with explicit topology and SVG/PNG output. Choose by scientific fidelity, readability and editing needs; livefigure offers an editable PPTX. Original paper figures may be reused, poor drawings rejected. Complete posters use scientific-poster.
 license: Apache-2.0
 metadata:
   helixforge:
@@ -24,6 +24,8 @@ metadata:
     deliverables:
       - artifact.figure
     default_for:
+      - architecture diagram
+      - workflow flowchart
       - graphviz diagram
       - DOT diagram
       - SVG diagram
@@ -149,6 +151,8 @@ metadata:
       phrases:
         - scientific figure
         - architecture diagram
+        - workflow flowchart
+        - ordinary workflow flowchart
         - graphviz diagram
         - DOT diagram
         - as DOT

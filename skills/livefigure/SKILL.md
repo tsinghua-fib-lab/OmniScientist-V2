@@ -1,6 +1,6 @@
 ---
 name: livefigure
-description: Use when a scientific, architecture or workflow figure benefits from visual composition or native editing in one PPTX slide. Requires VLM image input and output. Choose by scientific fidelity, readability and editing needs. Original paper figures may be reused, poor drawings rejected. Complete posters use scientific-poster.
+description: Use for one editable PPTX slide when a figure needs visual composition or native editing. Requires VLM image input and output. Ordinary SVG/PNG architecture diagrams stay scientific-figure. Complete posters use scientific-poster.
 license: Apache-2.0
 metadata:
   helixforge:
@@ -86,10 +86,7 @@ metadata:
         - single editable PPTX
         - editable PPTX scientific figure
         - one-slide editable scientific figure
-        - architecture diagram
-        - workflow diagram
-        - scientific schematic
-      when_to_use: "Scientific, architecture or workflow figure components; choose by fidelity, readability and native editing needs. Requires VLM image input and output. Reuse suitable paper originals; reject poor drawings."
+      when_to_use: "One editable PPTX slide with native editing. Requires VLM image input and output. Reuse suitable paper originals; reject poor drawings."
       when_not_to_use: "Exact DOT/SVG/PNG rendering (scientific-figure); complete posters (scientific-poster); multi-slide decks (research-pptx). A missing VLM blocks livefigure; explicit native PPTX requirements remain unmet."
     notification:
       display_label: "LiveFigure PPTX"
