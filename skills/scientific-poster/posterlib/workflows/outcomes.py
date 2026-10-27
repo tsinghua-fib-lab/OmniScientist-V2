@@ -7,9 +7,60 @@ from typing import Any
 
 import poster_contract
 
-from posterlib.sources import paper_extraction
+from posterlib.sources import PaperSourceError
 
-from . import decision_request, deadlines
+from . import deadlines, decision_request
+
+
+def workflow_issues(value: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Read phase-owned failures, including saved single-issue checkpoints."""
+
+    raw = value.get("workflow_issues")
+    issues = {str(phase): dict(issue) for phase, issue in raw.items()
+              if isinstance(issue, Mapping)} if isinstance(raw, Mapping) else {}
+    legacy = value.get("editing_issue")
+    if isinstance(legacy, Mapping):
+        phase = str(legacy.get("phase") or (
+            "planning" if legacy.get("code") == "content_audit_unavailable" else "editing"
+        ))
+        issues.setdefault(phase, dict(legacy))
+    return issues
+
+
+def _store_workflow_issues(state: dict[str, Any], issues: dict[str, dict[str, Any]]) -> None:
+    state.pop("editing_issue", None)
+    if issues:
+        state["workflow_issues"] = issues
+    else:
+        state.pop("workflow_issues", None)
+
+
+def update_workflow_issue(
+    state: dict[str, Any], phase: str, issue: Mapping[str, Any] | None,
+) -> None:
+    """Replace or resolve one stage while retaining every other unfinished stage."""
+
+    issues = workflow_issues(state)
+    if issue is None:
+        issues.pop(phase, None)
+    else:
+        issues[phase] = dict(issue)
+    _store_workflow_issues(state, issues)
+
+
+def merge_workflow_issues(target: dict[str, Any], source: Mapping[str, Any]) -> None:
+    """Carry unfinished stages and an editor boundary failure into a retained result."""
+
+    issues = {**workflow_issues(target), **workflow_issues(source)}
+    error = source.get("error_info")
+    if isinstance(error, Mapping):
+        issues[str(error.get("phase") or "editing")] = dict(error)
+    _store_workflow_issues(target, issues)
+    history = list(dict.fromkeys([
+        *target.get("warning_history", []), *source.get("warning_history", []),
+    ]))
+    if history:
+        target["warning_history"] = history
 
 
 def visual_outcome(
@@ -26,9 +77,9 @@ def visual_outcome(
         for key, value in result.items()
         if key not in {"status", "outcome", "summary", "blocking", "recoverable"}
     }
-    details["requires_approval"] = (
-        code == "visual_review_passed" and not details.get("editing_issue")
-    )
+    issues = workflow_issues(details)
+    _store_workflow_issues(details, issues)
+    details["requires_approval"] = False
     if decision_reason:
         try:
             details["decision_request"] = decision_request.build_request(
@@ -38,21 +89,22 @@ def visual_outcome(
         except ValueError:
             pass
     outcome = poster_contract.outcome_result(code, summary=summary, **details)
-    if outcome["status"] == "ok" and details.get("editing_issue"):
+    if outcome["status"] == "ok" and issues:
         outcome["status"] = "partial"
+        outcome["summary"] = summary + " Unresolved workflow stages: " + "; ".join(
+            f"{phase}: {issue.get('summary') or issue.get('code') or phase}"
+            for phase, issue in issues.items()
+        )
     return outcome
 
 
 def revision_model_timed_out(result: dict[str, Any]) -> bool:
     """Recognize a bounded model timeout without masking other model failures."""
 
-    outcome = result.get("outcome")
-    if not isinstance(outcome, dict) or outcome.get("code") != "llm_error":
-        return False
-    detail = " ".join(
-        str(result.get(field) or "") for field in ("error", "summary")
-    ).casefold()
-    return "timed out" in detail or "runtime budget was exhausted" in detail
+    issue = workflow_issues(result).get("editing") or result.get("error_info")
+    return isinstance(issue, Mapping) and issue.get("reason") in {
+        "model_timeout", "deadline_exhausted",
+    }
 
 
 def revision_timeout_error(
@@ -66,6 +118,7 @@ def revision_timeout_error(
     if detail:
         message = f"{message} {detail}"
     result = dict(best)
+    merge_workflow_issues(result, failure)
     diagnostic = failure.get("diagnostic_candidate")
     if isinstance(diagnostic, Mapping):
         result["diagnostic_candidate"] = dict(diagnostic)
@@ -172,11 +225,18 @@ def inspection_deadline_result() -> dict[str, Any]:
         ),
         requires_approval=False,
         visual_quality_state="not-reviewable",
+        error_info={
+            "code": "inspection_unavailable", "reason": "deadline_exhausted",
+            "phase": "editing",
+            "summary": "Poster work reached the shared workflow deadline.",
+        },
         warnings=[deadlines.VISUAL_LOOP_TIMEOUT_WARNING],
     )
 
 
-def error_result(code: str, message: str) -> dict[str, Any]:
+def error_result(
+    code: str, message: str, *, error_info: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build one stable scientific-poster error outcome."""
 
     result = poster_contract.outcome_result(
@@ -185,10 +245,12 @@ def error_result(code: str, message: str) -> dict[str, Any]:
     )
     if result["status"] == "error":
         result["error"] = message
+    if error_info is not None:
+        result["error_info"] = dict(error_info)
     return result
 
 
-def paper_source_failure(exc: paper_extraction.PaperSourceError) -> dict[str, Any]:
+def paper_source_failure(exc: PaperSourceError) -> dict[str, Any]:
     """Translate a paper-source failure into the public workflow outcome contract."""
 
     if exc.code == "missing_capability":

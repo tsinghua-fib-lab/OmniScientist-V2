@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
-import re
+import sys
 from collections.abc import Mapping
 from functools import lru_cache
 from html import escape
+from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
+
+if __package__ in {None, ""}:
+    for _candidate in Path(__file__).resolve().parents:
+        if (_candidate / "posterlib" / "paths.py").is_file():
+            sys.path.insert(0, str(_candidate))
+            break
+
+from posterlib.sources import tex_parser
 
 MATHML_NAMESPACE = "http://www.w3.org/1998/Math/MathML"
 ElementTree.register_namespace("", MATHML_NAMESPACE)
@@ -36,7 +45,10 @@ def latex_to_mathml(
         ) from exc
 
     try:
-        converted = convert(_without_resize_boxes(latex))
+        converted = convert(
+            _without_resize_boxes(latex),
+            display=(attributes or {}).get("display", "block"),
+        )
         root = ElementTree.fromstring(converted)
     except EquationRendererUnavailable:
         raise
@@ -47,10 +59,9 @@ def latex_to_mathml(
     # The backend emits unknown control sequences as literal identifier text.
     # That is a failed conversion, not a faithfully rendered mathematical symbol.
     for node in root.iter():
-        if _local_name(node.tag) == "mi" and re.fullmatch(r"\\[A-Za-z]+", node.text or ""):
+        if _local_name(node.tag) == "mi" and tex_parser.is_control_word(node.text or ""):
             raise EquationSyntaxError(f"Unsupported LaTeX command: {node.text}")
 
-    root.set("display", "block")
     for name, value in (attributes or {}).items():
         root.set(str(name), str(value))
     if root.get("display") == "block":
@@ -69,21 +80,11 @@ def _resize_box_parser() -> Any:
             "pyparsing is required to render source-scaled equations"
         ) from exc
 
-    comment = pp.Regex(r"%[^\n]*(?:\n|$)")
-    escaped = pp.Regex(r"\\(?:[A-Za-z]+|[\s\S])")
-    literal = pp.Regex(r"\\verb(?P<delimiter>.).*?(?P=delimiter)", flags=re.DOTALL)
-    group = pp.original_text_for(pp.nested_expr("{", "}", ignore_expr=literal | escaped | comment))
-    math_bodies = []
-    for opening, closing in (("$", "$"), (r"\(", r"\)")):
-        math_bodies.append(
-            pp.Suppress(opening)
-            + pp.SkipTo(closing, ignore=group | literal | comment | (~pp.Literal(closing) + escaped))
-            + pp.Suppress(closing)
-        )
-    math_body = pp.MatchFirst(math_bodies).ignore(comment)
+    comment, escaped, literal, group, _ = tex_parser.source_tokens()
+    math_body = tex_parser.math_body_parser(display=False).ignore(comment)
     gap = pp.ZeroOrMore(comment).suppress()
     box = (
-        pp.Suppress(pp.Regex(r"\\resizebox(?![A-Za-z])")) + gap
+        pp.Suppress(tex_parser.control_word_parser("resizebox")) + gap
         + pp.Opt(pp.Suppress("*") + gap)
         + pp.Suppress(group) + gap + pp.Suppress(group) + gap + group("body")
     )
@@ -97,7 +98,7 @@ def _resize_box_parser() -> Any:
     box.set_parse_action(unwrap)
     # Unrecognized/malformed boxes remain source text for the backend's existing
     # unsupported-command handling. Comments and escaped commands are not rewrites.
-    transform = box | literal | comment | escaped
+    transform = (literal | comment | box | escaped).parse_with_tabs()
     return transform
 
 
@@ -187,6 +188,12 @@ def contains_inline_math(value: str) -> bool:
     return bool(_inline_tokens(value))
 
 
+def remove_delimited_math(value: str) -> str:
+    """Keep surrounding prose while removing explicitly delimited source mathematics."""
+
+    return tex_parser.without_math(value)
+
+
 def validate_inline_math(value: str) -> None:
     """Require every explicitly delimited inline expression to render as MathML."""
 
@@ -238,6 +245,7 @@ __all__ = [
     "EquationSyntaxError",
     "contains_inline_math",
     "latex_to_mathml",
+    "remove_delimited_math",
     "render_inline_math",
     "validate_inline_math",
     "visible_inline_math_text",
@@ -248,8 +256,6 @@ def _main() -> int:
     """Expose the same converter to native file-editing hosts, without a model call."""
 
     import argparse
-    import sys
-    from pathlib import Path
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--latex-file", type=Path, required=True,

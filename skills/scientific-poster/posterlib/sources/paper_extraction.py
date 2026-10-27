@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import hashlib
-import re
 import unicodedata
 import urllib.request
 from dataclasses import dataclass, replace
+from math import isclose
 from pathlib import Path
 from typing import Any
 
 import image_assets
+import pyparsing as pp
 
 from posterlib.content.equations import (
     EquationRendererUnavailable,
@@ -19,52 +20,57 @@ from posterlib.content.equations import (
 )
 from posterlib.runtime.dependencies import PYMUPDF_REQUIREMENT, pymupdf_supported
 
-_CAPTION_PATTERN = re.compile(
-    r"^\s*(?:figure|fig\.?)\s*(\d+)(?![A-Za-z0-9])\s*[.:：]?\s*(.*)",
-    re.IGNORECASE | re.DOTALL,
+from . import PaperSourceError, paper_inputs
+from .tex_parser import strip_layout_skips
+
+_CARRIER_HEADERS = {
+    kind: name + pp.Word(pp.nums)("number")
+    for kind, name in (
+        ("Figure", pp.CaselessLiteral("figure") | (pp.CaselessLiteral("fig") + pp.Opt("."))),
+        ("Table", pp.CaselessLiteral("table")),
+        ("Algorithm", pp.CaselessLiteral("algorithm")),
+    )
+}
+_LETTER = pp.Char(pp.pyparsing_unicode.alphas).set_name("Unicode letter")
+_IDENTIFIER_CHARACTER = pp.Char(pp.pyparsing_unicode.alphanums + "_").set_name("identifier character")
+_CARRIER_NUMBER_END = ~_IDENTIFIER_CHARACTER.copy().leave_whitespace()
+_CARRIER_LABELS = {
+    (kind, strict): pp.Located(
+        header + _CARRIER_NUMBER_END
+        + (pp.Char(".:：-–—") if strict else pp.Opt(pp.Char(".:：")))
+    ).set_name(f"{kind} label").parse_with_tabs()
+    for kind, header in _CARRIER_HEADERS.items()
+    for strict in (False, True)
+}
+_CARRIER_REFERENCES = {
+    kind: (
+        pp.WordStart(word_chars=pp.pyparsing_unicode.alphanums + "_").set_name("reference start")
+        + header
+    ).set_name(f"{kind} reference")
+    for kind, header in _CARRIER_HEADERS.items()
+}
+_PSEUDOCODE_STEP = pp.Word(pp.nums) + ":"
+_ABSTRACT_HEADING = pp.CaselessKeyword("abstract") + pp.Opt(
+    pp.Char("—–:-") + pp.rest_of_line
 )
-_CAPTION_LINE_PATTERN = re.compile(
-    r"^\s*(?:figure|fig\.?)\s*(\d+)\s*[.:：\-–—]\s*(.*)",
-    re.IGNORECASE | re.DOTALL,
+_IDENTITY_DIGITS = pp.nums + "⁰¹²³⁴⁵⁶⁷⁸⁹"
+_IDENTITY_MARKERS = "*∗†‡§¶"
+_AUTHOR_MARKER = (
+    pp.Word(_IDENTITY_DIGITS)
+    + ~_LETTER.copy().leave_whitespace()
 )
-_TABLE_CARRIER_PATTERN = re.compile(
-    r"^\s*table\s*(\d+)(?![A-Za-z0-9])\s*[.:：]?\s*(.*)",
-    re.IGNORECASE | re.DOTALL,
+_AFFILIATION_PREFIX = (
+    pp.Word(_IDENTITY_DIGITS)
+    + pp.FollowedBy(_LETTER)
 )
-_ALGORITHM_CARRIER_PATTERN = re.compile(
-    r"^\s*algorithm\s*(\d+)(?![A-Za-z0-9])\s*[.:：]?\s*(.*)",
-    re.IGNORECASE | re.DOTALL,
-)
-_PSEUDOCODE_STEP_PATTERN = re.compile(r"^\s*(\d+)\s*:")
-_ABSTRACT_HEADING_PATTERN = re.compile(
-    r"^abstract(?:\s*[\u2014\u2013:\-]\s*.*)?$",
-    re.IGNORECASE,
-)
-_NON_AUTHOR_PATTERN = re.compile(
-    r"(?:@|https?://|\b(?:abstract|academy|arxiv|center|centre|college|company|"
-    r"conference|corporation|department|division|faculty|inc|institute|laborator(?:y|ies)|"
-    r"ltd|permission|research|school|university)\b)",
-    re.IGNORECASE,
-)
-_AUTHOR_MARKER_PATTERN = re.compile(r"[\s*∗†‡§¶⁰¹²³⁴⁵⁶⁷⁸⁹]+$")
-_AFFILIATION_TYPE_PATTERN = re.compile(
-    r"\b(?:academy|centre|center|college|company|department|faculty|inc\.?|"
-    r"institute|laborator(?:y|ies)|research|school|university)\b",
-    re.IGNORECASE,
-)
-_AFFILIATION_MARKER_PATTERN = re.compile(r"^[\s]*[0-9⁰¹²³⁴⁵⁶⁷⁸⁹]+(?=[A-Z])")
-_ATTRIBUTION_STOP_PATTERN = re.compile(
-    r"(?:correspondence\b|copyright\b|equal contribution\b|"
-    r"proceedings of\b|published as\b|work was done\b)",
-    re.IGNORECASE,
-)
+_AFFILIATION_SEPARATOR = (
+    pp.WordStart(word_chars=pp.pyparsing_unicode.alphanums).set_name("identity token start")
+    + _AFFILIATION_PREFIX
+).set_parse_action(lambda: "; ").parse_with_tabs()
 _TITLE_SIZE_MATCH_RATIO = 0.93
 _MIN_TITLE_SCALE_RATIO = 1.15
 _MAX_PDF_BYTES = 256 * 1024 * 1024
 _MAX_PAGES = 500
-_DEFAULT_MAX_FIGURE_CANDIDATES = 16
-_MAX_STRUCTURED_EQUATIONS = 32
-_MAX_STRUCTURED_EQUATION_CHARS = 600
 _MAX_ARXIV_HTML_BYTES = 16 * 1024 * 1024
 _FIGURE_RENDER_DPI = 450
 _PDF_POINTS_PER_INCH = 72
@@ -75,27 +81,19 @@ _RASTER_MIME_EXTENSIONS = {
     "image/png": "png",
     "image/webp": "webp",
 }
-_SVG_DATA_URI_RE = re.compile(
-    r"(?P<prefix>data:image/[A-Za-z0-9.+-]+;base64,)"
-    r"(?P<payload>[A-Za-z0-9+/=\s]+)",
-    re.IGNORECASE,
-)
-_ARXIV_ID_PATTERN = re.compile(
-    r"\barxiv\s*:\s*(\d{4}\.\d{4,5}(?:v\d+)?)\b",
-    re.IGNORECASE,
-)
-_LATEX_LAYOUT_COMMAND = re.compile(
-    r"\\vskip\s*[-+]?\d*\.?\d+\s*pt\s*",
-    re.IGNORECASE,
-)
 
 
-class PaperSourceError(RuntimeError):
-    """A PDF cannot be converted into a trustworthy poster source."""
+def _parse_carrier_label(
+    value: str, kind: str, *, require_separator: bool = False,
+) -> tuple[int, str] | None:
+    """Read a numbered label at a layout anchor and retain its caption text."""
 
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
-        self.code = code
+    grammar = _CARRIER_LABELS[kind, require_separator]
+    try:
+        parsed = grammar.parse_string("".join(" " if char.isspace() else char for char in value))
+    except pp.ParseBaseException:
+        return None
+    return int(parsed.value.number), value[parsed.locn_end:].strip()
 
 
 @dataclass(frozen=True)
@@ -161,15 +159,13 @@ def _primary_arxiv_identifier(source_text: str) -> str:
     """Read only the paper's first-page arXiv stamp, never cited identifiers."""
 
     first_page = source_text.split("[Page 2]", 1)[0]
-    match = _ARXIV_ID_PATTERN.search(first_page)
-    return match.group(1) if match is not None else ""
+    return paper_inputs.arxiv_stamp_identifier(first_page)
 
 
 def _download_arxiv_html(identifier: str) -> bytes:
     """Fetch one allowlisted arXiv HTML document with a bounded response."""
 
-    if re.fullmatch(r"\d{4}\.\d{4,5}(?:v\d+)?", identifier) is None:
-        raise ValueError("arXiv identifier is invalid")
+    identifier = paper_inputs.arxiv_identifier(identifier)
     request = urllib.request.Request(
         f"https://arxiv.org/html/{identifier}",
         headers={"User-Agent": "OmniScientist scientific-poster/1.0"},
@@ -227,7 +223,7 @@ def _structured_equations_from_arxiv_html(
 
     for owner, math_nodes in units.items():
         latex = _structured_equation_latex(owner, math_nodes)
-        if not latex or len(latex) > _MAX_STRUCTURED_EQUATION_CHARS:
+        if not latex:
             continue
         source_label, context = _structured_equation_provenance(owner)
         if not source_label:
@@ -249,8 +245,6 @@ def _structured_equations_from_arxiv_html(
                 "context": context,
             }
         )
-        if len(equations) >= _MAX_STRUCTURED_EQUATIONS:
-            break
     return tuple(equations)
 
 
@@ -424,7 +418,9 @@ def _node_text(node: Any) -> str:
 
 def _clean_html_text(value: str) -> str:
     text = " ".join(value.split())
-    return re.sub(r"\s+([,.;:])", r"\1", text).strip()
+    for punctuation in ",.;:":
+        text = text.replace(" " + punctuation, punctuation)
+    return text.strip()
 
 
 def _canonical_identity_text(value: str) -> str:
@@ -436,7 +432,7 @@ def _canonical_identity_text(value: str) -> str:
 
 
 def _normalize_structured_latex(value: str) -> str:
-    latex = _LATEX_LAYOUT_COMMAND.sub("", value.strip())
+    latex = strip_layout_skips(value.strip())
     return " ".join(latex.split())
 
 
@@ -444,7 +440,7 @@ def prepare_pdf(
     pdf_path: str | Path,
     output_dir: str | Path,
 ) -> PreparedPaper:
-    """Extract text and a bounded, document-wide set of native figures."""
+    """Extract text and all captioned native figure candidates from a bounded PDF."""
 
     try:
         import pymupdf
@@ -508,24 +504,16 @@ def prepare_pdf(
                 "source_read_failed",
                 "The PDF contains no extractable text; OCR is not provided by this Skill.",
             )
-        selected_candidates = _select_figure_candidates(
-            figure_candidates,
-            max_candidates=_DEFAULT_MAX_FIGURE_CANDIDATES,
-        )
-        warnings = ()
-        if len(selected_candidates) < len(figure_candidates):
-            warnings = (
-                "PDF figure materialization budget retained "
-                f"{len(selected_candidates)} of {len(figure_candidates)} captioned candidates; "
-                "document-wide coverage selection was used.",
-            )
-        for candidate in selected_candidates:
+        warnings = () if authors else ((
+            "PDF typography did not resolve the author band. The complete first-page "
+            "source remains available for paper identity extraction."
+        ),)
+        figures: list[dict[str, Any]] = []
+        for candidate in figure_candidates:
             candidate["context"] = _figure_context(
                 text,
                 int(candidate["figure_number"]),
             )
-        figures: list[dict[str, Any]] = []
-        for candidate in selected_candidates:
             figures.extend(
                 _extract_captioned_figures(
                     document[int(candidate["page_index"])],
@@ -601,7 +589,7 @@ def _first_page_identity(page: Any) -> tuple[str, str, tuple[str, ...]]:
 
     lines = _horizontal_text_lines(page)
     abstract = next(
-        (line for line in lines if _ABSTRACT_HEADING_PATTERN.fullmatch(line["text"])),
+        (line for line in lines if _ABSTRACT_HEADING.matches(line["text"])),
         None,
     )
     page_height = float(page.rect.height)
@@ -646,63 +634,84 @@ def _first_page_identity(page: Any) -> tuple[str, str, tuple[str, ...]]:
         for line in lines
         if title_bottom < float(line["bbox"][1]) < identity_bottom
     ]
-    bold_author_lines = [
-        line
-        for line in identity_lines
-        if _looks_like_author_copy(str(line["bold_text"]))
-    ]
-    author_lines = bold_author_lines or [
-        line
-        for line in identity_lines
-        if _looks_like_unstyled_author_copy(str(line["text"]))
-    ]
-    author_lines.sort(
-        key=lambda line: (round(float(line["bbox"][1]), 1), float(line["bbox"][0]))
+    rows: list[list[dict[str, Any]]] = []
+    for line in identity_lines:
+        text = str(line["text"])
+        if _is_contact_line(text):
+            break
+        if not _has_letters(text):
+            continue
+        if rows:
+            anchor = rows[-1][0]["bbox"]
+            bounds = line["bbox"]
+            overlap = min(anchor[3], bounds[3]) - max(anchor[1], bounds[1])
+            if overlap >= min(anchor[3] - anchor[1], bounds[3] - bounds[1]) * 0.5:
+                rows[-1].append(line)
+                continue
+        rows.append([line])
+    boundary = next(
+        (index for index, row in enumerate(rows)
+         if any(_affiliation_prefix(str(line["text"])) is not None for line in row)),
+        None,
     )
+    if boundary is None:
+        for index, row in enumerate(rows[1:], 1):
+            preceding = [line for previous in rows[:index] for line in previous]
+            smaller_row = (
+                max(float(line["size"]) for line in row) * _MIN_TITLE_SCALE_RATIO
+                <= min(float(line["size"]) for line in preceding)
+            )
+            regular_after_bold = (
+                all(line["bold_text"] for line in preceding)
+                and all(not line["bold_text"] for line in row)
+            )
+            if smaller_row or regular_after_bold:
+                boundary = index
+                break
+    author_lines = [line for row in rows[:boundary] for line in row]
+    # Preserve the PDF parser's reading order across superscript bounding boxes.
     authors = ", ".join(
-        _clean_author_copy(str(line["text"]))
+        _clean_author_copy(str(line.get("identity_text", line["text"])))
         for line in author_lines
     )
     if not author_lines:
         return title, authors, ()
-    last_author_top = max(float(line["bbox"][1]) for line in author_lines)
-    direct = [
-        str(line["text"])
-        for line in lines
-        if last_author_top < float(line["bbox"][1]) < identity_bottom
-        and _has_affiliation_evidence(str(line["text"]))
-    ]
+    direct: list[str] = []
+    if boundary is not None:
+        for row in rows[boundary:]:
+            if any(str(line["text"]).lstrip().startswith(tuple(_IDENTITY_MARKERS)) for line in row):
+                break
+            direct.extend(str(line["text"]) for line in row)
     affiliations = _clean_affiliation_parts(direct, join_wrapped=False)
     if not affiliations:
-        affiliations = _footer_affiliations(lines, page=page)
+        markers = {
+            str(int(unicodedata.normalize("NFKC", tokens[0])))
+            for line in author_lines
+            for tokens, _, _ in _AUTHOR_MARKER.scan_string(str(line["text"]))
+        }
+        affiliations = _footer_affiliations(lines, page=page, author_markers=markers)
+    if boundary is None and not affiliations:
+        # A uniform unmarked cover band needs semantic identity extraction.
+        return title, "", ()
     return title, authors, affiliations
 
 
-def _has_affiliation_evidence(value: str, *, require_marker: bool = False) -> bool:
-    """Recognize institution names before an inline contact or attribution tail."""
-
-    normalized = _ATTRIBUTION_STOP_PATTERN.split(
-        _normalize_identity_text(value), maxsplit=1,
-    )[0].strip(" ,;.*")
-    if not normalized or "@" in normalized:
-        return False
-    marked = bool(_AFFILIATION_MARKER_PATTERN.match(normalized))
-    if require_marker and not marked:
-        return False
-    without_marker = _AFFILIATION_MARKER_PATTERN.sub("", normalized).strip()
-    if _AFFILIATION_TYPE_PATTERN.search(without_marker):
-        return True
-    return bool(
-        marked
-        and all(
-            len(part) <= 40
-            and re.fullmatch(r"[A-Z][A-Za-z0-9&.\-]*(?:\s+[A-Z][A-Za-z0-9&.\-]*){0,3}", part)
-            for part in _clean_affiliation_parts([normalized], join_wrapped=False)
-        )
-    )
+def _is_contact_line(value: str) -> bool:
+    return "@" in value or "://" in value
 
 
-def _footer_affiliations(lines: list[dict[str, Any]], *, page: Any) -> tuple[str, ...]:
+def _affiliation_prefix(value: str) -> str | None:
+    """Read a printed numeric affiliation marker before its text."""
+
+    try:
+        return str(int(unicodedata.normalize("NFKC", _AFFILIATION_PREFIX.parse_string(value)[0])))
+    except pp.ParseBaseException:
+        return None
+
+
+def _footer_affiliations(
+    lines: list[dict[str, Any]], *, page: Any, author_markers: set[str],
+) -> tuple[str, ...]:
     """Read one marked affiliation footnote without crossing into body or venue text."""
 
     page_height = float(page.rect.height)
@@ -717,10 +726,7 @@ def _footer_affiliations(lines: list[dict[str, Any]], *, page: Any) -> tuple[str
             for index, line in enumerate(ordered)
             if float(line["bbox"][1]) >= page_height * 0.72
             and float(line["bbox"][0]) < page_width * 0.5
-            and _has_affiliation_evidence(
-                str(line["text"]),
-                require_marker=True,
-            )
+            and _affiliation_prefix(str(line["text"])) in author_markers
         ),
         None,
     )
@@ -733,11 +739,15 @@ def _footer_affiliations(lines: list[dict[str, Any]], *, page: Any) -> tuple[str
         if x0 >= page_width * 0.5:
             continue
         text = _normalize_identity_text(str(line["text"]))
-        stop = _ATTRIBUTION_STOP_PATTERN.search(text)
-        if stop is not None or "@" in text:
-            prefix = text[: stop.start()] if stop is not None else ""
-            if prefix.strip(" ,;."):
-                run.append(prefix)
+        first = ordered[start_index]
+        if (
+            _is_contact_line(text)
+            or text.lstrip().startswith(tuple(_IDENTITY_MARKERS))
+            or line.get("font") != first.get("font")
+            or abs(float(line["size"]) - float(first["size"])) > 0.5
+            or (run and line.get("block") != first.get("block")
+                and _affiliation_prefix(text) is None)
+        ):
             break
         if previous_bottom is not None and y0 - previous_bottom > 18.0:
             break
@@ -755,17 +765,12 @@ def _clean_affiliation_parts(
 
     raw_values = [_join_wrapped_identity_lines(values)] if join_wrapped else values
     parts: list[str] = []
-    marker = r"[0-9⁰¹²³⁴⁵⁶⁷⁸⁹]+"
     for raw in raw_values:
         normalized = _normalize_identity_text(raw)
-        normalized = re.sub(
-            rf"(?<![A-Za-z0-9]){marker}(?=[A-Z])",
-            "; ",
-            normalized,
-        )
+        normalized = _AFFILIATION_SEPARATOR.transform_string(normalized)
         for part in normalized.split(";"):
             value = part.strip(" ,;.*")
-            if not value or "@" in value or _ATTRIBUTION_STOP_PATTERN.match(value):
+            if not value or _is_contact_line(value):
                 continue
             parts.append(value)
     deduplicated: list[str] = []
@@ -787,7 +792,7 @@ def _join_wrapped_identity_lines(lines: list[str]) -> str:
         line = _normalize_identity_text(raw_line)
         if not line:
             continue
-        if joined and re.search(r"[A-Za-z]-$", joined) and re.match(r"[a-z]", line):
+        if len(joined) >= 2 and joined.endswith("-") and joined[-2].isalpha() and line[0].islower():
             joined = joined[:-1] + line
         else:
             joined = f"{joined} {line}".strip()
@@ -826,11 +831,7 @@ def _normalize_identity_text(value: str) -> str:
             continue
         normalized.append(character)
         index += 1
-    return re.sub(
-        r"\s+",
-        " ",
-        unicodedata.normalize("NFC", "".join(normalized)),
-    ).strip()
+    return " ".join(unicodedata.normalize("NFC", "".join(normalized)).split())
 
 
 def _horizontal_text_lines(page: Any) -> list[dict[str, Any]]:
@@ -841,7 +842,7 @@ def _horizontal_text_lines(page: Any) -> list[dict[str, Any]]:
     except Exception:
         return []
     lines: list[dict[str, Any]] = []
-    for block in blocks:
+    for block_index, block in enumerate(blocks):
         if block.get("type") != 0:
             continue
         for line in block.get("lines", []):
@@ -867,10 +868,22 @@ def _horizontal_text_lines(page: Any) -> list[dict[str, Any]]:
                     and float(span.get("size") or 0.0) >= size * 0.8
                 )
             )
+            identity_text = _normalize_identity_text("".join(
+                str(span["text"])
+                for span in spans
+                if str(span["text"]).isspace() or (
+                    not int(span.get("flags") or 0) & 1
+                    and float(span.get("size") or 0.0) >= size * 0.8
+                )
+            ))
+            dominant_span = max(spans, key=lambda span: len(str(span["text"])))
             lines.append(
                 {
                     "text": text,
                     "bold_text": bold_text,
+                    "identity_text": identity_text,
+                    "font": str(dominant_span.get("font") or ""),
+                    "block": block_index,
                     "size": size,
                     "bbox": tuple(
                         line.get("bbox") or block.get("bbox") or (0, 0, 0, 0)
@@ -884,60 +897,13 @@ def _has_letters(value: str) -> bool:
     return any(character.isalpha() for character in value)
 
 
-def _looks_like_author_copy(value: str) -> bool:
-    cleaned = _clean_author_copy(value).strip(" ,;")
-    if not cleaned or len(cleaned) > 300 or _NON_AUTHOR_PATTERN.search(cleaned):
-        return False
-    words = [token.strip(".,;:()[]{}") for token in cleaned.split()]
-    return sum(any(character.isalpha() for character in word) for word in words) >= 2
-
-
-def _looks_like_unstyled_author_copy(value: str) -> bool:
-    """Recognize an unbolded name line without admitting affiliation prose."""
-
-    cleaned = _clean_author_copy(value).strip(" ,;")
-    if not _looks_like_author_copy(cleaned) or any(char.isdigit() for char in cleaned):
-        return False
-    parts = [
-        part.strip()
-        for part in re.split(r"\s*(?:,|;|&|\band\b)\s*", cleaned)
-        if part.strip()
-    ]
-    if not parts:
-        return False
-    particles = {"al", "da", "de", "del", "der", "di", "la", "van", "von"}
-    for part in parts:
-        words = [word.strip(".()[]{}") for word in part.split() if word.strip()]
-        if not 1 <= len(words) <= 4:
-            return False
-        for word in words:
-            letters = "".join(char for char in word if char.isalpha())
-            if not letters or letters.casefold() in particles:
-                continue
-            if not letters[0].isupper() or (len(letters) > 1 and letters.isupper()):
-                return False
-    return True
-
-
 def _clean_author_copy(value: str) -> str:
     """Remove affiliation markers while preserving the visible author names."""
 
-    markers = r"0-9⁰¹²³⁴⁵⁶⁷⁸⁹"
-    cleaned = re.sub(
-        rf"(?<=[A-Za-z])[{markers}]+(?:\s*,\s*[{markers}]+)*",
-        ",",
-        value,
-    )
-    cleaned = re.sub(
-        rf"(?<!\w)[{markers}]+(?:\s+[{markers}]+)*(?!\w)",
-        ",",
-        cleaned,
-    )
-    cleaned = re.sub(r"[*∗†‡§¶]+", " ", cleaned)
-    cleaned = re.sub(r"\s*,\s*", ", ", cleaned)
-    cleaned = re.sub(r"(?:,\s*){2,}", ", ", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    cleaned = _AUTHOR_MARKER_PATTERN.sub("", cleaned).strip(" ,;")
+    marker = _AUTHOR_MARKER.copy().set_parse_action(lambda: ",")
+    cleaned = marker.parse_with_tabs().transform_string(value)
+    cleaned = cleaned.translate(str.maketrans({symbol: " " for symbol in _IDENTITY_MARKERS}))
+    cleaned = " ".join(cleaned.split()).strip(" ,;")
     return ", ".join(
         part.strip()
         for part in cleaned.split(",")
@@ -1093,7 +1059,7 @@ def _extract_layout_visual_carriers(
                 boxclass = str(box.get("boxclass") or "").casefold()
                 text = _layout_box_text(box)
                 table_match = (
-                    _TABLE_CARRIER_PATTERN.match(text)
+                    _parse_carrier_label(text, "Table")
                     if boxclass == "caption"
                     else None
                 )
@@ -1104,8 +1070,8 @@ def _extract_layout_visual_carriers(
                             {
                                 "page": page,
                                 "page_number": page_number,
-                                "number": int(table_match.group(1)),
-                                "caption": table_match.group(2).strip()[:600],
+                                "number": table_match[0],
+                                "caption": table_match[1][:600],
                                 "anchor": pymupdf.Rect(box["x0"], box["y0"], box["x1"], box["y1"]),
                                 "region": region,
                             }
@@ -1116,12 +1082,10 @@ def _extract_layout_visual_carriers(
                     boxclass in {"caption", "section-header", "text"}
                     and len(algorithm_lines) == 1
                 ):
-                    candidate_match = _ALGORITHM_CARRIER_PATTERN.match(
-                        algorithm_lines[0]
-                    )
+                    candidate_match = _parse_carrier_label(algorithm_lines[0], "Algorithm")
                     if (
                         candidate_match is not None
-                        and candidate_match.group(2).strip()
+                        and candidate_match[1]
                     ):
                         algorithm_match = candidate_match
                 if algorithm_match is not None:
@@ -1131,8 +1095,8 @@ def _extract_layout_visual_carriers(
                             {
                                 "page": page,
                                 "page_number": page_number,
-                                "number": int(algorithm_match.group(1)),
-                                "caption": algorithm_match.group(2).strip()[:600],
+                                "number": algorithm_match[0],
+                                "caption": algorithm_match[1][:600],
                                 "anchor": pymupdf.Rect(box["x0"], box["y0"], box["x1"], box["y1"]),
                                 "region": region,
                             }
@@ -1261,7 +1225,7 @@ def _algorithm_block_region(
             break
         lines = _layout_box_lines(box)
         structured = boxclass == "list-item" or any(
-            _PSEUDOCODE_STEP_PATTERN.match(line) for line in lines
+            _PSEUDOCODE_STEP.matches(line, parse_all=False) for line in lines
         )
         if not has_step:
             pending_prefix.append(rect)
@@ -1329,37 +1293,6 @@ def _write_layout_visual_carrier(
     }
 
 
-def _select_figure_candidates(
-    candidates: list[dict[str, Any]],
-    *,
-    max_candidates: int,
-) -> list[dict[str, Any]]:
-    """Apply one caller-owned materialization budget across the whole paper."""
-
-    if not candidates:
-        return []
-    ordered = sorted(
-        candidates,
-        key=lambda item: (
-            int(item.get("page_index") or 0),
-            int(item.get("figure_number") or 0),
-        ),
-    )
-    if max_candidates <= 0:
-        return []
-    if len(ordered) <= max_candidates:
-        return ordered
-
-    if max_candidates == 1:
-        selected_indices = {(len(ordered) - 1) // 2}
-    else:
-        selected_indices = {
-            round(slot * (len(ordered) - 1) / (max_candidates - 1))
-            for slot in range(max_candidates)
-        }
-    return [ordered[index] for index in sorted(selected_indices)]
-
-
 def _write_visual_region(
     page: Any,
     region: Any,
@@ -1392,22 +1325,24 @@ def _write_embedded_raster(
     output_stem: Path,
     pymupdf: Any,
 ) -> _FigureAsset | None:
-    """Extract one covering raster XObject without rendering it again."""
+    """Retain original raster bytes when their placement and pixels are equivalent."""
 
     try:
         candidates = []
         for image in page.get_image_info(xrefs=True):
             xref = int(image.get("xref") or 0)
             rect = pymupdf.Rect(image["bbox"])
-            if xref <= 0 or rect.is_empty or not rect.intersects(region):
+            if rect.is_empty or not rect.intersects(region):
                 continue
-            overlap = rect & region
-            if overlap.get_area() < rect.get_area() * 0.98:
-                continue
-            candidates.append((xref, rect))
+            candidates.append((xref, rect, image))
         if len(candidates) != 1:
             return None
-        xref, image_rect = candidates[0]
+        xref, image_rect, placement = candidates[0]
+        if (
+            xref <= 0 or not region.contains(image_rect)
+            or page.rotation or placement.get("has-mask")
+        ):
+            return None
         if image_rect.get_area() < region.get_area() * _MIN_EMBEDDED_RASTER_COVERAGE:
             return None
         if _region_has_vector_or_text_overlay(page, region, pymupdf):
@@ -1425,6 +1360,31 @@ def _write_embedded_raster(
         height = int(image.get("height") or 0)
         if width <= 0 or height <= 0:
             return None
+        a, b, c, d, _x, _y = placement["transform"]
+        if (
+            a <= 0 or d <= 0 or abs(b) > 1e-6 or abs(c) > 1e-6
+            or not isclose(a / width, d / height, rel_tol=1e-6)
+            or image.get("smask")
+        ):
+            return None
+        native = pymupdf.Pixmap(content)
+        if native.alpha:
+            return None
+        if native.colorspace != pymupdf.csRGB:
+            native = pymupdf.Pixmap(pymupdf.csRGB, native)
+        rendered = page.get_pixmap(
+            clip=image_rect,
+            matrix=pymupdf.Matrix(width / image_rect.width, height / image_rect.height),
+            colorspace=pymupdf.csRGB,
+            alpha=False,
+        )
+        # Graphics-state opacity, image masks and clipping live outside the
+        # XObject. Compare the native raster with the complete page renderer.
+        if (
+            rendered.width != native.width or rendered.height != native.height
+            or rendered.samples != native.samples
+        ):
+            return None
         output_path = output_stem.with_suffix(f".{extension}")
         output_path.write_bytes(content)
         return _FigureAsset(output_path, "embedded-raster")
@@ -1436,8 +1396,13 @@ def _region_has_vector_or_text_overlay(page: Any, region: Any, pymupdf: Any) -> 
     """Return whether lossless raster extraction would omit visible overlays."""
 
     try:
-        for _drawing, rect in _visible_page_drawings(page, pymupdf):
-            if rect.width >= 1 and rect.height >= 1 and rect.intersects(region):
+        for drawing, rect in _visible_page_drawings(page, pymupdf):
+            stroke = float(drawing.get("width") or 0) / 2
+            painted = pymupdf.Rect(
+                rect.x0 - stroke, rect.y0 - stroke,
+                rect.x1 + stroke, rect.y1 + stroke,
+            )
+            if painted.intersects(region):
                 return True
     except Exception:
         return True
@@ -1445,7 +1410,7 @@ def _region_has_vector_or_text_overlay(page: Any, region: Any, pymupdf: Any) -> 
         for block in page.get_text("blocks", sort=True):
             if len(block) < 7 or block[6] != 0:
                 continue
-            text = re.sub(r"\s+", " ", str(block[4])).strip()
+            text = " ".join(str(block[4]).split())
             rect = pymupdf.Rect(block[:4])
             if text and rect.intersects(region):
                 return True
@@ -1532,11 +1497,19 @@ def _write_vector_clip(
 def _normalize_svg_data_uris(svg_text: str) -> str:
     """Remove whitespace that MuPDF inserts inside embedded base64 payloads."""
 
-    def compact(match: re.Match[str]) -> str:
-        payload = re.sub(r"\s+", "", match.group("payload"))
-        return match.group("prefix") + payload
+    from lxml import etree
 
-    return _SVG_DATA_URI_RE.sub(compact, svg_text)
+    parser = etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False)
+    root = etree.fromstring(svg_text.encode("utf-8"), parser=parser)
+    for node in root.iter():
+        for name, value in node.attrib.items():
+            header, comma, payload = value.partition(",")
+            if (
+                comma and header.casefold().startswith("data:image/")
+                and header.casefold().endswith(";base64")
+            ):
+                node.set(name, header + comma + "".join(payload.split()))
+    return etree.tostring(root.getroottree(), encoding="unicode")
 
 
 def _write_raster_fallback(
@@ -1572,25 +1545,23 @@ def _caption_blocks(page: Any, pymupdf: Any) -> list[dict[str, Any]]:
             continue
         lines.extend(
             (
-                re.sub(
-                    r"\s+",
-                    " ",
+                " ".join(
                     "".join(
                         str(span.get("text") or "")
                         for span in line.get("spans", [])
-                    ),
-                ).strip(),
+                    ).split()
+                ),
                 pymupdf.Rect(line["bbox"]),
             )
             for line in block.get("lines", [])
             if line.get("bbox")
         )
     for line_index, (text, rect) in enumerate(lines):
-        match = _CAPTION_LINE_PATTERN.match(text)
+        match = _parse_carrier_label(text, "Figure", require_separator=True)
         if match is None:
             continue
         caption_rect = pymupdf.Rect(rect)
-        caption_text = match.group(2).strip()
+        caption_text = match[1]
         peers = sorted(
             (
                 (peer_text, peer_rect)
@@ -1614,7 +1585,7 @@ def _caption_blocks(page: Any, pymupdf: Any) -> list[dict[str, Any]]:
             )
         captions.append(
             {
-                "figure_number": int(match.group(1)),
+                "figure_number": match[0],
                 "caption": caption_text[:600],
                 "rect": caption_rect,
             }
@@ -1706,14 +1677,12 @@ def _figure_region(
             for line in block.get("lines", []):
                 if not line.get("bbox"):
                     continue
-                text = re.sub(
-                    r"\s+",
-                    " ",
+                text = " ".join(
                     "".join(
                         str(span.get("text") or "")
                         for span in line.get("spans", [])
-                    ),
-                ).strip()
+                    ).split()
+                )
                 rect = pymupdf.Rect(line["bbox"])
                 center = pymupdf.Point(
                     (rect.x0 + rect.x1) / 2,
@@ -1721,9 +1690,9 @@ def _figure_region(
                 )
                 if any(boundary.contains(center) for boundary in excluded_text_rects):
                     continue
-                if _TABLE_CARRIER_PATTERN.match(text):
+                if _parse_carrier_label(text, "Table"):
                     has_table_caption = True
-                caption_match = _CAPTION_LINE_PATTERN.match(text)
+                caption_match = _parse_carrier_label(text, "Figure", require_separator=True)
                 if caption_match is not None and rect.intersects(caption):
                     contains_anchor_caption = True
                 if text and caption_match is None:
@@ -2186,23 +2155,28 @@ def _figure_context(text: str, figure_number: int) -> str:
 def _carrier_context(text: str, label: str, number: int) -> str:
     """Return one bounded prose reference to a formally numbered visual carrier."""
 
-    reference = re.compile(
-        (
-            rf"(?:figure|fig\.?)\s*{number}(?!\d)"
-            if label == "Figure"
-            else rf"{re.escape(label)}\s*{number}(?!\d)"
-        ),
-        re.IGNORECASE,
-    )
-    for paragraph in re.split(r"\n\s*\n", text):
-        compact = re.sub(r"\s+", " ", paragraph).strip()
-        if not compact or _CAPTION_PATTERN.match(compact):
+    reference = _CARRIER_REFERENCES[label]
+    paragraphs: list[str] = []
+    lines: list[str] = []
+    for line in [*text.splitlines(), ""]:
+        if line.strip():
+            lines.append(line)
+        elif lines:
+            paragraphs.append(" ".join(lines))
+            lines = []
+    for paragraph in paragraphs:
+        compact = " ".join(paragraph.split())
+        if _parse_carrier_label(compact, "Figure"):
             continue
-        match = reference.search(compact)
+        match = next(
+            ((start, end) for tokens, start, end in reference.scan_string(compact)
+             if int(tokens.number) == number),
+            None,
+        )
         if match is None:
             continue
-        start = max(0, match.start() - 220)
-        end = min(len(compact), match.end() + 320)
+        start = max(0, match[0] - 220)
+        end = min(len(compact), match[1] + 320)
         return compact[start:end]
     return ""
 

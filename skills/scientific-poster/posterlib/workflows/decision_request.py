@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from collections.abc import Mapping
 from typing import Any
+
+from posterlib.runtime.identifiers import is_sha256
 
 SCHEMA = "scientific-poster.decision-request.v2"
 _REASONS = frozenset(
@@ -18,7 +19,6 @@ _REASONS = frozenset(
         "workflow-budget-exhausted",
     }
 )
-_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def build_request(
@@ -33,7 +33,7 @@ def build_request(
         raise ValueError(f"unsupported poster decision reason: {normalized_reason}")
     html_uri = str(result.get("html_uri") or "").strip()
     html_sha256 = str(result.get("html_sha256") or "").strip()
-    if not html_uri or _HASH_RE.fullmatch(html_sha256) is None:
+    if not html_uri or not is_sha256(html_sha256):
         raise ValueError("poster decision requires exact HTML identity")
     continuation = {
         "action": "revise",

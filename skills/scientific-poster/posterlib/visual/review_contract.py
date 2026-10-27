@@ -10,10 +10,12 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+
+from posterlib.runtime.identifiers import is_sha256
+from posterlib.visual.design_direction import GUIDANCE as DESIGN_GUIDANCE
 
 REQUEST_SCHEMA = "scientific-poster.visual-review-request.v9"
 RESULT_SCHEMA = "scientific-poster.visual-review-result.v9"
@@ -27,27 +29,34 @@ CRITERIA = (
     "poster_character",
 )
 
-_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _ISSUE_OPERATIONS = frozenset({"restyle", "reflow", "content-replan"})
 _RUBRIC = {
-    "hierarchy": "Can a standing reader quickly locate the contribution and decisive evidence?",
+    "hierarchy": (
+        "Can a standing reader quickly locate the contribution and decisive evidence, with "
+        "display emphasis distinct from comfortable continuous-reading body and table type?"
+    ),
     "information_structure": (
-        "Does the poster explain its contribution, essential method, evidence and scope with "
-        "concise headings, useful visual carriers and figure interpretation rather than "
-        "presenting the paper mainly as dense prose and formulas?"
+        "Can a visitor grasp one central claim, its essential mechanism and decisive evidence "
+        "by scanning the headings, explanations and visual carriers as connected groups, "
+        "with qualifications available for closer reading? How much paragraph reading, "
+        "equation decoding or table searching does that essential argument require? "
+        "Does all visible copy, including the footer, serve the study or scholarly "
+        "attribution? Identify any account of poster production occupying that space."
     ),
     "figure_readability": (
         "Are the important visual comparisons and equations interpretable at their actual "
         "physical size, with enough nearby explanation?"
     ),
     "space_use": (
-        "Does the composition use its page purposefully, with readable type and figures, "
-        "clear grouping, and no accidental voids, crowding or lost content? Inspect mid-page "
-        "empty grid cells beside taller or spanning modules as well as outer page margins."
+        "Does spacing keep each heading, explanation and its figure or table perceptually "
+        "connected, while separating distinct reader questions? Assess relationships within "
+        "modules as well as between them and across the page."
     ),
     "poster_character": (
         "Does this read as a composed academic conference poster with a clear masthead, "
-        "scanning hierarchy, purposeful visual synthesis and readable scientific detail?"
+        "scanning hierarchy, selective visual synthesis, integrated source-figure surfaces "
+        "and a clear distinction between the main argument and closer-reading detail? "
+        "Does its canvas and framing follow the bound design requirements?"
     ),
 }
 _INSTRUCTIONS = (
@@ -58,25 +67,71 @@ _INSTRUCTIONS = (
     "minor observations. "
     "The author already interpreted the reference and owns composition and source fidelity. "
     "Visual review does not certify scientific truth.\n\n"
+    "Read the purpose of visible copy across the title band, body, captions and footer, "
+    "including small print. Distinguish statements about the study from accounts of "
+    "assembling, sourcing, checking or exporting this poster. The workflow owns the latter "
+    "in separate production records. A visible account of poster production requires revise "
+    "under information_structure with content-replan, even on a legible, well-composed page. "
+    "Identify the affected passage and its purpose in the summary. Preserve author identity, "
+    "bibliographic references, acknowledgments and required reproduction credits. Retain "
+    "research provenance, experimental conditions and scientific qualifications when they "
+    "share a paragraph with production notes. Judge meaning in context.\n\n"
+    "Establish the candidate's absolute communication quality before comparing it with an "
+    "incumbent. The verdict answers whether the candidate is ready as an academic poster; "
+    "comparison answers whether it improved. An improved candidate can still require revision. "
+    "In the summary, identify the visible focal relationship and how the essential mechanism "
+    "and decisive comparison can be inspected from the image. Judge the actual carriers, "
+    "including their connections, alignment, meaningful contrast and relative scale. "
+    "A heading naming a mechanism or result establishes its topic; its visual organization "
+    "must communicate the relationship. A sequence reduced to disconnected prose fragments "
+    "or a decisive comparison buried in similarly weighted text warrants revision when it "
+    "leaves the main argument dependent on sustained reading. Use reflow for a sound carrier "
+    "whose visual organization fails, and content-replan when its selection or copy must change. "
+    "Assess retained information, so text-only inputs can succeed through editable schematics "
+    "and comparisons without a quota of source images.\n\n"
     "Use physical measurements for scale and the screenshot for reading impact. Measurements "
     "are evidence, not aesthetic thresholds. Judge type, contrast, title breaks, figure scale "
     "and space in their actual context. Independent groups may have different dimensions; "
     "a preferred alternative is not a defect. Empty or stretched panels do not compensate "
-    "for unreadable scientific content. Never request filler. Evaluate a visitor standing "
-    "about one metre from the printed page, not a reader zooming into an on-screen PDF. "
-    "The central claim, section headings, essential method and explanatory body copy must "
-    "be readable in that setting. If they require leaning in or magnification, revise. "
-    "Large plots do not compensate for tiny explanatory text or a method reduced to "
-    "unreadable detail. Use every rendered-inspection issue, including advisory measured "
-    "type observations, together with the image. When the current amount of copy or number "
-    "of carriers prevents conference-scale type, request content-replan for the exact modules "
-    "whose repeated or secondary explanation should be compressed, together with reflow when "
-    "the governing composition must change.\n\n"
-    "A light or white surface is not by itself unused space. Before reporting a void, locate "
-    "the empty region in the complete candidate and check it against the bound page/module "
-    "extents. Do not claim a large trailing or side void when the cited content bounds reach "
-    "that edge; use the measurements to distinguish whitespace inside a readable carrier from "
-    "an unoccupied layout region.\n\n"
+    "for unreadable scientific content. Evaluate a visitor standing about one metre from "
+    "the printed page. The central claim, section headings, essential method and explanatory "
+    "copy carrying the main argument must be readable in that setting; supporting detail "
+    "may invite closer inspection. Use every rendered-inspection issue, including advisory "
+    "measured type observations, together with the image. Read the module-scoped type "
+    "distributions to locate small explanatory copy, table labels and equations. Judge "
+    "essential expressions at their measured base size while allowing native mathematical "
+    "script scaling. Necessary conditions and limitations retain their reading role in "
+    "supporting and footer modules. Identify a material scale defect's module and reading "
+    "impact in the summary and issue route.\n\n"
+    "Assess typography by reading role. Display type establishes entry points and emphasis; "
+    "body and table type support sustained reading and comparison. Compare their visual "
+    "weight, width, spacing and rhythm in the screenshot. Heavy or compressed forms spread "
+    "across extended prose can flatten emphasis and make lines harder to track even at a "
+    "large measured size. Request restyle when that visible treatment materially burdens "
+    "reading or obscures the distinction between headings and explanation. Judge the "
+    "rendered relationship in context; the author chooses the font family and treatment.\n\n"
+    "Trace the quick-scan argument from contribution through essential mechanism to decisive "
+    "evidence. Headings that name those topics establish entry points; the connected "
+    "explanations and visual carriers must also make their relationship easy to grasp. "
+    "Assess that reading effort separately from type size and geometric fit. Sustained "
+    "paragraph reading, decoding several equations, or searching exhaustive result tables "
+    "can obscure the essential argument even on a fully legible page. Closer reading "
+    "supplies necessary detail after that argument is apparent. Request "
+    "content-replan for exact modules whose competing, repeated or secondary content obscures "
+    "this hierarchy, including when the page has no overflow. This gives the scientific "
+    "editor a reading-impact diagnosis for selecting or shortening content. Request reflow "
+    "when the governing composition also needs to change.\n\n"
+    "Judge whitespace by the information relationships it creates. Follow each heading to "
+    "its explanation, figure or table, and reading key within the module. Compare the gaps "
+    "inside that connected group with the separation between distinct groups. Spacing works "
+    "when related material reads together and distinct questions remain distinguishable. "
+    "Large internal gaps can detach a title, interpretation or caption from its evidence "
+    "and force the reader to reconnect them across empty bands. A shared panel surface or "
+    "content bounds reaching its edges establishes extent, not perceptual continuity. Locate "
+    "the affected relationship in the complete screenshot and use bound extents to check its "
+    "position; judge both internal separation and unoccupied page regions by their reading "
+    "impact. Request reflow for a material disconnect, leaving the composition to the author. "
+    "Purposeful breathing room supports grouping and emphasis; filler adds reading burden.\n\n"
     "When a QUALITY REFERENCE is supplied, it is the communication-quality floor on this "
     "rubric, not a layout template. Do not require its exact objects, styling or layout. "
     "Return revise when the candidate is clearly and materially weaker in scanning hierarchy, "
@@ -88,13 +143,37 @@ _INSTRUCTIONS = (
     "redrawn or internally edited. Judge the important comparative pattern and its reading key; "
     "not every original tick label must match poster body type. Static validation owns module "
     "uniqueness and asset binding; report visible loss or clipping using the browser evidence.\n\n"
+    "Assess source-figure background integration under poster_character. Inspect each "
+    "image's outer field and edges against its containing panel, caption and neighboring "
+    "page in the overview and detail crops. The measured surface_context runs from image "
+    "element outward to poster; CSS backgrounds describe boxes, while embedded image "
+    "backgrounds remain pixel evidence. A deliberate contrasting panel can provide clear "
+    "grouping through coherent framing, spacing and alignment. An accidental seam or "
+    "pasted-on island is actionable when it materially disrupts that grouping or finish. "
+    "Judge the complete relationship: color difference alone is insufficient, and matching "
+    "every surface is optional. Source immutability leaves the surrounding poster surfaces "
+    "and framing under author control. Request restyle for a material integration defect, "
+    "identify its module and visible impact, and leave the treatment to the author. Preserve "
+    "the full source-image extent, bytes and colors, including intrinsic margins; image "
+    "cropping, recoloring, background removal, filters, blend effects and masks fall outside "
+    "this correction authority.\n\n"
+    "Evaluate the bound design_requirements under poster_character. Use the same rules as "
+    "composition:\n" + DESIGN_GUIDANCE + "\n\n"
+    "A canvas tint, repeated decorative single-side borders or colored section cards "
+    "outside those requirements warrants restyle, even when the poster remains readable. "
+    "Identify the visible treatment and the applicable requirement. Honor explicit user "
+    "or custom-reference overrides in their scope. Judge source-image colors separately "
+    "from the surrounding page.\n\n"
     "Return revise for a specific material defect that impairs conference-scale reading, "
-    "hides evidence, breaks the composition or leaves the candidate materially below its "
+    "hides evidence, places production records in visible copy, breaks the composition "
+    "or leaves the candidate materially below its "
     "quality reference; otherwise pass. A failed rendered inspection requires revise. "
     "Describe the defect and its reading impact, leaving layout choices to "
     "the author. Use restyle for appearance, reflow for placement or scale, content-replan for "
-    "compressing existing grounded copy. Target exact supplied module ids, or poster for a "
-    "whole-page restyle/reflow. Group symptoms with one shared correction into one issue. "
+    "editorial selection or correction of visible copy. Target exact supplied module ids; "
+    "use poster for copy outside module ownership or for whole-page restyle/reflow. "
+    "The source-aware author resolves content ownership during drafting. "
+    "Group symptoms with one shared correction into one issue. "
     "Return only the requested JSON."
 )
 
@@ -189,6 +268,7 @@ def build_receipt(
     # Human-audit notes are optional; their omission cannot change the verdict.
     raw_result.setdefault("strengths", [])
     raw_result.setdefault("global_directives", [])
+    raw_result.setdefault("scores", {})
     required = {
         "schema",
         "request_sha256",
@@ -223,9 +303,8 @@ def build_receipt(
     review = _review_body(
         raw_result,
         has_comparison_baseline=baseline is not None,
-        content_replan_module_ids=_grounded_module_ids(
-            normalized_request["content_brief"]
-        ),
+        # Review locations are diagnostic hints. Public scoped edits validate
+        # their exact module authority when consuming the receipt.
         observations_by_id={
             str(observation["id"]): observation
             for observation in normalized_request["visual_evidence"]["observations"]
@@ -317,7 +396,7 @@ def _validate_receipt(
         raise ReviewContractError("visual_review_invalid", "unsupported receipt schema")
     digest = str(receipt["receipt_sha256"] or "")
     unsigned = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
-    if _HASH_RE.fullmatch(digest) is None or digest != document_sha256(unsigned):
+    if not is_sha256(digest) or digest != document_sha256(unsigned):
         raise ReviewContractError(
             "visual_review_invalid", "visual review receipt hash is invalid"
         )
@@ -325,14 +404,14 @@ def _validate_receipt(
     screenshot_digest = str(receipt["screenshot_sha256"] or "")
     evidence_digest = str(receipt["visual_evidence_sha256"] or "")
     if (
-        _HASH_RE.fullmatch(html_digest) is None
-        or _HASH_RE.fullmatch(screenshot_digest) is None
-        or _HASH_RE.fullmatch(evidence_digest) is None
+        not is_sha256(html_digest)
+        or not is_sha256(screenshot_digest)
+        or not is_sha256(evidence_digest)
     ):
         raise ReviewContractError(
             "visual_review_invalid", "visual review receipt bindings are invalid"
         )
-    if _HASH_RE.fullmatch(str(receipt["request_sha256"] or "")) is None:
+    if not is_sha256(receipt["request_sha256"]):
         raise ReviewContractError(
             "visual_review_invalid", "visual review request binding is invalid"
         )
@@ -346,7 +425,7 @@ def _validate_receipt(
             "visual_review_invalid", "visual review iteration is invalid"
         )
     baseline_sha256 = str(receipt["comparison_baseline_sha256"] or "")
-    if baseline_sha256 and _HASH_RE.fullmatch(baseline_sha256) is None:
+    if baseline_sha256 and not is_sha256(baseline_sha256):
         raise ReviewContractError(
             "visual_review_invalid", "visual review comparison binding is invalid"
         )
@@ -371,7 +450,6 @@ def _review_body(
     value: Mapping[str, Any],
     *,
     has_comparison_baseline: bool = False,
-    content_replan_module_ids: frozenset[str] | None = None,
     observations_by_id: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Normalize the common reviewer verdict carried by results and receipts."""
@@ -406,15 +484,18 @@ def _review_body(
             "visual review comparison does not match the request baseline",
         )
     scores = _scores(value.get("scores"))
-    summary = _short_text(value.get("summary"), label="review summary", limit=2000)
-    strengths = _text_list(value.get("strengths"), label="strengths", limit=8)
+    summary = _short_text(value.get("summary"), label="review summary", limit=None)
+    raw_strengths = value.get("strengths")
+    strengths = [
+        " ".join(item.split()) for item in raw_strengths
+        if isinstance(item, str) and item.strip()
+    ] if isinstance(raw_strengths, list) else []
     issues = _critical_issues(
         value.get("critical_issues"),
-        content_replan_module_ids=content_replan_module_ids,
         observations_by_id=observations_by_id,
     )
     directives = _text_list(
-        value.get("global_directives"), label="global_directives", limit=8
+        value.get("global_directives"), label="global_directives"
     )
     if verdict == "pass":
         if issues or directives:
@@ -451,32 +532,6 @@ def _quality_state(verdict: str) -> str:
     return "revision-required"
 
 
-def require_passing_receipt(
-    path: str | Path,
-    *,
-    html_path: str | Path,
-    screenshot_path: str | Path | None = None,
-) -> dict[str, Any]:
-    """Require a passing receipt for current candidate and optional bound assets."""
-
-    receipt = load_receipt(
-        path,
-        expected_html_sha256=sha256_file(html_path),
-    )
-    if screenshot_path is not None and receipt["screenshot_sha256"] != sha256_file(
-        screenshot_path
-    ):
-        raise ReviewContractError(
-            "visual_review_invalid",
-            "visual review receipt does not match the screenshot",
-        )
-    if receipt["quality_state"] != "passed" or receipt["verdict"] != "pass":
-        raise ReviewContractError(
-            "visual_review_failed", "poster has no passing visual review"
-        )
-    return receipt
-
-
 def format_revision_feedback(
     normalized: Mapping[str, Any],
 ) -> str:
@@ -488,6 +543,7 @@ def format_revision_feedback(
         )
     issues = normalized["critical_issues"]
     summary = str(normalized.get("summary") or "").strip()
+    scores = _scores(normalized.get("scores"))
     lines = [
         "Visual-review routing for the current editor session:",
         (
@@ -498,11 +554,9 @@ def format_revision_feedback(
         ),
         "Visible-defect summary from the reviewed screenshot:",
         summary,
-        "Diagnostic scores:",
-        *[
-            f"- {criterion}: {normalized['scores'][criterion]}/5"
-            for criterion in CRITERIA
-        ],
+        *(["Diagnostic scores:", *(
+            f"- {criterion}: {score}/5" for criterion, score in scores.items()
+        )] if scores else []),
         (
             "Preserve all scientific claims, source bindings, figures, and the exact "
             "rendered physical page dimensions. Recompose inside that canvas."
@@ -547,7 +601,7 @@ def _validate_request(value: Mapping[str, Any]) -> dict[str, Any]:
         raise ReviewContractError("visual_review_invalid", "unsupported request schema")
     digest = str(request["request_sha256"] or "")
     unsigned = {key: value for key, value in request.items() if key != "request_sha256"}
-    if _HASH_RE.fullmatch(digest) is None or digest != document_sha256(unsigned):
+    if not is_sha256(digest) or digest != document_sha256(unsigned):
         raise ReviewContractError(
             "visual_review_invalid", "visual review request hash is invalid"
         )
@@ -558,7 +612,7 @@ def _validate_request(value: Mapping[str, Any]) -> dict[str, Any]:
         "screenshot_sha256",
         "visual_evidence_sha256",
     ):
-        if _HASH_RE.fullmatch(str(request[field] or "")) is None:
+        if not is_sha256(request[field]):
             raise ReviewContractError("visual_review_invalid", f"{field} is invalid")
     normalized_evidence = _visual_evidence_object(request["visual_evidence"])
     if request["reference_design_brief"] != _optional_short_text(
@@ -606,36 +660,31 @@ def _validate_request(value: Mapping[str, Any]) -> dict[str, Any]:
     return request
 
 
-def _scores(value: Any) -> dict[str, int]:
-    scores = _json_object(value, label="scores")
-    _require_exact_fields(scores, set(CRITERIA), label="scores")
-    normalized: dict[str, int] = {}
+def _scores(value: Any) -> dict[str, int | float]:
+    """Retain available numeric observations without making them a verdict gate."""
+
+    if not isinstance(value, Mapping):
+        return {}
+    normalized: dict[str, int | float] = {}
     for criterion in CRITERIA:
-        score = scores[criterion]
+        score = value.get(criterion)
         if isinstance(score, bool) or not isinstance(score, (int, float)):
-            raise ReviewContractError(
-                "visual_review_invalid", f"{criterion} score must be a number"
-            )
+            continue
         number = float(score)
-        if not math.isfinite(number) or not number.is_integer() or not 1 <= number <= 5:
-            raise ReviewContractError(
-                "visual_review_invalid",
-                f"{criterion} score must be an integer from 1 to 5",
-            )
-        normalized[criterion] = int(number)
+        if math.isfinite(number) and 1 <= number <= 5:
+            normalized[criterion] = int(number) if number.is_integer() else number
     return normalized
 
 
 def _critical_issues(
     value: Any,
     *,
-    content_replan_module_ids: frozenset[str] | None = None,
     observations_by_id: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    if not isinstance(value, list) or len(value) > 8:
+    if not isinstance(value, list):
         raise ReviewContractError(
             "visual_review_invalid",
-            "critical_issues must be an array of at most 8 items",
+            "critical_issues must be an array",
         )
     issues: list[dict[str, Any]] = []
     for raw in value:
@@ -675,15 +724,6 @@ def _critical_issues(
                 for target in raw_targets
             )
         )
-        if content_replan_module_ids is not None:
-            allowed_targets = set(content_replan_module_ids)
-            if operation != "content-replan":
-                allowed_targets.add("poster")
-            if any(target not in allowed_targets for target in targets):
-                raise ReviewContractError(
-                    "visual_review_invalid",
-                    "critical issue targets must be grounded module ids or the editable poster root",
-                )
         if observations_by_id is not None:
             if model_supplied_observation_ids:
                 raw_observation_ids = item["observation_ids"]
@@ -775,10 +815,14 @@ def _issue_observations(
     targets: list[str],
     observations: Any,
 ) -> list[dict[str, Any]]:
-    """Bind deterministic measurements by issue meaning, never model-copied ids."""
+    """Bind rendered facts by issue meaning and measured ownership."""
 
     relevant_kinds = {
-        "figure_readability": {"source_figure_extent"},
+        "information_structure": {"rendered_copy"},
+        "figure_readability": {
+            "source_figure_extent", "native_carrier_extent", "typography_distribution",
+        },
+        "poster_character": {"source_figure_extent", "native_carrier_extent"},
         "space_use": {
             "module_content_extent",
             "container_trailing_space",
@@ -798,6 +842,12 @@ def _issue_observations(
         if not isinstance(raw, Mapping) or raw.get("kind") not in relevant_kinds:
             continue
         module_id = str(raw.get("module_id") or "")
+        if raw.get("kind") == "rendered_copy":
+            if (poster_target and not module_id) or (
+                module_id != "poster" and module_id in target_set
+            ):
+                matched.append(dict(raw))
+            continue
         module_ids = {
             str(value)
             for value in raw.get("module_ids") or []
@@ -805,25 +855,16 @@ def _issue_observations(
         }
         if (
             poster_target
+            or (
+                raw.get("kind") == "typography_distribution"
+                and not module_id and not module_ids
+            )
             or (criterion == "space_use" and raw.get("kind") == "page_trailing_space")
             or module_id in target_set
             or module_ids & target_set
         ):
             matched.append(dict(raw))
     return matched
-
-
-def validate_issue_targets(
-    value: Any,
-    *,
-    grounded_module_ids: frozenset[str],
-) -> None:
-    """Revalidate persisted repair ownership against the current grounded modules."""
-
-    _critical_issues(
-        value,
-        content_replan_module_ids=grounded_module_ids,
-    )
 
 
 def module_binding_brief(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -835,28 +876,12 @@ def module_binding_brief(value: Mapping[str, Any]) -> dict[str, Any]:
             {
                 key: module.get(key)
                 for key in (
-                    "id", "semantic_roles", "priority", "source_label", "figure_sha256s"
+                    "id", "semantic_roles", "priority", "visual_kind", "source_label", "figure_sha256s"
                 )
             }
             for module in modules if isinstance(module, Mapping)
         ] if isinstance(modules, list) else [],
     }
-
-
-def _grounded_module_ids(content_brief: Mapping[str, Any]) -> frozenset[str]:
-    """Read the immutable module ids exposed to the visual reviewer."""
-
-    authority = content_brief.get("grounded_authority")
-    modules = (
-        authority.get("content_modules") if isinstance(authority, Mapping) else None
-    )
-    if not isinstance(modules, list):
-        return frozenset()
-    return frozenset(
-        str(module.get("id") or "").strip()
-        for module in modules
-        if isinstance(module, Mapping) and str(module.get("id") or "").strip()
-    )
 
 
 def _visual_evidence_object(value: Any) -> dict[str, Any]:
@@ -902,7 +927,7 @@ def _visual_evidence_object(value: Any) -> dict[str, Any]:
         _image_binding(bundle["atlas"], label="evidence atlas")
     digest = str(bundle["bundle_sha256"] or "")
     unsigned = {key: item for key, item in bundle.items() if key != "bundle_sha256"}
-    if _HASH_RE.fullmatch(digest) is None or digest != document_sha256(unsigned):
+    if not is_sha256(digest) or digest != document_sha256(unsigned):
         raise ReviewContractError(
             "visual_review_invalid", "visual evidence bundle hash is invalid"
         )
@@ -916,7 +941,7 @@ def _image_binding(value: Any, *, label: str) -> dict[str, Any]:
             "visual_review_invalid", f"{label} requires path and sha256"
         )
     _bound_path_text(binding["path"], label=f"{label} path")
-    if _HASH_RE.fullmatch(str(binding["sha256"] or "")) is None:
+    if not is_sha256(binding["sha256"]):
         raise ReviewContractError("visual_review_invalid", f"{label} hash is invalid")
     return binding
 
@@ -941,22 +966,24 @@ def _observation_ids(bundle: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(ids)
 
 
-def _text_list(value: Any, *, label: str, limit: int) -> list[str]:
-    if not isinstance(value, list) or len(value) > limit:
+def _text_list(value: Any, *, label: str) -> list[str]:
+    if not isinstance(value, list):
         raise ReviewContractError(
             "visual_review_invalid",
-            f"{label} must be an array of at most {limit} items",
+            f"{label} must be an array",
         )
-    return [_short_text(item, label=label, limit=1000) for item in value]
+    return [_short_text(item, label=label, limit=None) for item in value]
 
 
-def _short_text(value: Any, *, label: str, limit: int = 200) -> str:
+def _short_text(value: Any, *, label: str, limit: int | None = 200) -> str:
     if not isinstance(value, str):
         raise ReviewContractError("visual_review_invalid", f"{label} must be a string")
     text = " ".join(value.split())
-    if not text or len(text) > limit:
+    if not text or (limit is not None and len(text) > limit):
         raise ReviewContractError(
-            "visual_review_invalid", f"{label} must contain 1 to {limit} characters"
+            "visual_review_invalid",
+            f"{label} must contain 1 to {limit} characters" if limit is not None
+            else f"{label} must contain text",
         )
     return text
 
@@ -1054,7 +1081,7 @@ def _comparison_baseline(content_brief: Mapping[str, Any]) -> dict[str, str] | N
     _require_exact_fields(baseline, {"path", "sha256"}, label="comparison baseline")
     path = _bound_path_text(baseline["path"], label="comparison baseline path")
     digest = str(baseline["sha256"] or "")
-    if _HASH_RE.fullmatch(digest) is None:
+    if not is_sha256(digest):
         raise ReviewContractError(
             "visual_review_invalid", "comparison baseline hash is invalid"
         )
@@ -1082,7 +1109,6 @@ __all__ = [
     "document_sha256",
     "load_receipt",
     "load_request",
-    "require_passing_receipt",
     "sha256_file",
     "validate_request",
     "validate_result",

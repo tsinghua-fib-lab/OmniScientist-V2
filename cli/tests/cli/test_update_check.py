@@ -248,6 +248,7 @@ def test_startup_update_action_uses_the_parameterless_public_command(monkeypatch
             "-m",
             "omni.cli.main",
             "update",
+            "--force",
         ]
     ]
 
@@ -259,7 +260,7 @@ def test_startup_update_menu_matches_codex_copy():
     assert "Update available!" in plain
     assert f"{__version__} -> 9.9.9" in plain
     assert update_check.RELEASE_NOTES_URL in plain
-    assert "Update now (runs `omni update`)" in plain
+    assert "Update now (runs `omni update --force`)" in plain
     assert "Skip until next version" in plain
     assert "Press Enter to continue" in plain
 
@@ -746,6 +747,38 @@ def test_source_checkout_short_circuits_when_current(monkeypatch):
     assert res.exit_code == 0, res.output
     assert "Source checkout is current" in res.output
     assert "No Python package download is required" in res.output
+
+
+def test_stale_snapshot_reinstalls_when_git_checkout_is_current(monkeypatch, tmp_path):
+    """A copied install must be replaced when the checkout version moved ahead."""
+    import omni.cli.commands.update_cmd as uc
+
+    repo = tmp_path / "repo"
+    cli = repo / "cli"
+    package = cli / "src" / "omni"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text('__version__ = "9.9.9"\n', encoding="utf-8")
+    monkeypatch.setattr(uc, "_source_checkout", lambda *_a, **_k: (repo, cli, False))
+    monkeypatch.setattr(uc, "_git_behind_count", lambda *_a, **_k: 0)
+    monkeypatch.setattr(uc, "_git_tree_is_dirty", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        uc,
+        "_prepare_bundled_skill_runtimes_with_updated_cli",
+        lambda _paths: None,
+    )
+    executed: list[dict] = []
+    monkeypatch.setattr(
+        uc,
+        "_execute_git_update",
+        lambda **kwargs: executed.append(kwargs),
+    )
+
+    res = runner.invoke(app, ["update", "--no-restart-serve"])
+    assert res.exit_code == 0, res.output
+    assert "No Python package download is required" not in res.output
+    assert executed == [
+        {"repo_root": repo, "src": cli, "editable": False, "ref": ""}
+    ]
 
 
 def test_source_checkout_aborts_on_dirty_tree(monkeypatch):

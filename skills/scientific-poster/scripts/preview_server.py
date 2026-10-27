@@ -10,8 +10,8 @@ import http.server
 import json
 import math
 import os
-import re
 import secrets
+import string
 import sys
 import tempfile
 import urllib.parse
@@ -25,10 +25,10 @@ if str(SKILL_DIR) not in sys.path:
     sys.path.insert(0, str(SKILL_DIR))
 
 import poster_contract  # noqa: E402
+from posterlib.content.html_contract import embed_math_font, inject_before_body_end  # noqa: E402
+from posterlib.runtime.identifiers import is_module_id, is_poster_id, is_sha256  # noqa: E402
 
 _MAX_SELECTION_BYTES = 64 * 1024
-_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
-_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{20,200}$")
 _INSPECTOR_SCRIPT_PATH = (
     Path(__file__).resolve().parent / "browser" / "preview_selection.js"
 )
@@ -279,7 +279,10 @@ def create_preview_server(
     if not 0 <= int(port) <= 65_535:
         raise ValueError("port must be between 0 and 65535")
     session_token = str(token) if token is not None else secrets.token_urlsafe(24)
-    if not _TOKEN_RE.fullmatch(session_token):
+    if not 20 <= len(session_token) <= 200 or any(
+        character not in string.ascii_letters + string.digits + "_-"
+        for character in session_token
+    ):
         raise ValueError("inspect token must be 20-200 URL-safe characters")
     return PosterPreviewServer(
         ("127.0.0.1", int(port)),
@@ -304,7 +307,7 @@ def _selection_source_hash(payload: Any) -> str:
     if not isinstance(payload, dict):
         raise ValueError("Selection payload must be a JSON object.")
     value = str(payload.get("source_html_sha256") or "")
-    if _HASH_RE.fullmatch(value) is None:
+    if not is_sha256(value):
         raise ValueError("source_html_sha256 must be a lowercase SHA-256 digest.")
     return value
 
@@ -312,20 +315,13 @@ def _selection_source_hash(payload: Any) -> str:
 def _normalize_selection(payload: Any) -> dict[str, Any]:
     source_hash = _selection_source_hash(payload)
     poster_id = _bounded_text(payload.get("poster_id"), 200)
-    if poster_contract.POSTER_ID_RE.fullmatch(poster_id) is None:
+    if not is_poster_id(poster_id):
         raise ValueError("poster_id is required and must be stable.")
-    poster_module = _bounded_text(payload.get("poster_module"), 200)
-    if poster_module and poster_contract.POSTER_MODULE_RE.fullmatch(poster_module) is None:
+    poster_module = str(payload.get("poster_module") or "").strip()
+    if poster_module and not is_module_id(poster_module):
         raise ValueError("poster_module is invalid.")
-    semantic_roles = _bounded_text(payload.get("semantic_roles"), 200)
-    role_tokens = semantic_roles.split()
-    if len(role_tokens) != len(set(role_tokens)) or any(
-        role not in poster_contract.SEMANTIC_ROLES for role in role_tokens
-    ):
-        raise ValueError("semantic_roles is invalid.")
-    module_priority = _bounded_text(payload.get("module_priority"), 32)
-    if module_priority and module_priority not in poster_contract.MODULE_PRIORITIES:
-        raise ValueError("module_priority is invalid.")
+    semantic_roles = str(payload.get("semantic_roles") or "").strip()
+    module_priority = str(payload.get("module_priority") or "").strip()
     rect_raw = payload.get("rect") or {}
     if not isinstance(rect_raw, dict):
         raise ValueError("rect must be an object.")
@@ -349,7 +345,7 @@ def _normalize_selection(payload: Any) -> dict[str, Any]:
         "source_html_sha256": source_hash,
         "poster_id": poster_id,
         "poster_module": poster_module,
-        "semantic_roles": " ".join(role_tokens),
+        "semantic_roles": semantic_roles,
         "module_priority": module_priority,
         "text_sample": _bounded_text(payload.get("text_sample"), 500),
         "rect": rect,
@@ -430,11 +426,7 @@ border:2px solid #ffcc66;background:#ffcc661f;box-sizing:border-box}}
 {inspector_script}
 </script>
 """
-    matches = list(re.finditer(r"</body\s*>", html_text, flags=re.IGNORECASE))
-    if not matches:
-        return f"{html_text}{injection}"
-    match = matches[-1]
-    return f"{html_text[: match.start()]}{injection}{html_text[match.start() :]}"
+    return inject_before_body_end(embed_math_font(html_text), injection)
 
 
 def _render_inspector_script(

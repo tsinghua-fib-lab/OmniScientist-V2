@@ -162,6 +162,7 @@ async def generate_pptx(
                     vlm_client,
                     reference_image_uri=reference_data_url,
                     output_dir=output_dir,
+                    requirement=requirement,
                 )
             except VlmError:
                 # Keep the established workflow's degradation behavior: icon
@@ -210,11 +211,13 @@ async def generate_pptx(
             stats={"attempt": attempt, "max_attempts": max_attempts},
         )
         code = _strip_fence(code)
-        code_path = output_dir / "generated_figure.py"
+        code_path = output_dir / f"generated_figure_{attempt}.py"
         code_path.write_text(code, encoding="utf-8")
         pptx_path = output_dir / "livefigure.pptx"
+        stage = "syntax"
         try:
             _validate_code(code)
+            stage = "execution"
             await _execute_code(
                 code_path,
                 output_dir,
@@ -222,6 +225,7 @@ async def generate_pptx(
                 image_environment=config.image_environment,
                 sandbox_prefix=config.sandbox_prefix,
             )
+            stage = "pptx"
             _validate_pptx(pptx_path)
             await _progress(
                 progress,
@@ -241,8 +245,12 @@ async def generate_pptx(
                 attempt,
             )
         except LiveFigureError as exc:
+            try:
+                code_path.with_suffix(".error.txt").write_text(f"{stage}: {exc}\n", encoding="utf-8")
+            except OSError as save_error:
+                exc.add_note(f"Could not save build error: {save_error}")
             last_error = exc
-            if attempt == max_attempts:
+            if attempt == max_attempts or not exc.retryable:
                 break
             try:
                 await _progress(
@@ -367,6 +375,8 @@ async def _execute_code(
     # When the host supplies a ``sandbox_prefix`` (seatbelt / bwrap), the
     # child additionally runs under kernel write-confinement.
     argv = [*sandbox_prefix, *_isolated_script_command(code_path, output_dir)]
+    proc = None
+    communication = None
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -375,20 +385,39 @@ async def _execute_code(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=75)
-    except TimeoutError:
-        if proc.returncode is None:
-            proc.kill()
-            await proc.wait()
-        raise LiveFigureError("PPTX code execution timed out after 75 seconds") from None
+        communication = asyncio.create_task(proc.communicate())
+        try:
+            _, stderr = await asyncio.wait_for(asyncio.shield(communication), timeout=75)
+        except TimeoutError:
+            raise LiveFigureError("PPTX code execution timed out after 75 seconds") from None
+        if proc.returncode != 0:
+            raise LiveFigureError(
+                f"PPTX code exited with code {proc.returncode}:\n"
+                + (stderr.decode("utf-8", "replace")[-3000:] or "PPTX code execution failed")
+            )
+        if not pptx_path.is_file():
+            raise LiveFigureError("Generated code did not create the required livefigure.pptx")
     except OSError as exc:
         raise LiveFigureError(f"Could not execute PPTX code: {exc}") from exc
-    if proc.returncode != 0:
-        raise LiveFigureError(
-            stderr.decode("utf-8", "replace")[-3000:] or "PPTX code execution failed"
-        )
-    if not pptx_path.is_file():
-        raise LiveFigureError("Generated code did not create the required livefigure.pptx")
+    finally:
+        pending_error = sys.exception()
+        if proc is not None:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            output = (await asyncio.gather(communication, return_exceptions=True))[0] if communication else None
+            try:
+                if isinstance(output, tuple):
+                    stdout, stderr = output
+                    code_path.with_suffix(".stdout.txt").write_bytes(stdout)
+                    code_path.with_suffix(".stderr.txt").write_bytes(stderr)
+                code_path.with_suffix(".returncode.txt").write_text(str(proc.returncode), encoding="utf-8")
+            except OSError as exc:
+                message = f"Could not save PPTX process diagnostics: {exc}"
+                if pending_error is not None:
+                    pending_error.add_note(message)
+                else:
+                    raise LiveFigureError(message, code="artifact_write_failed", retryable=False) from exc
 
 
 def _validate_pptx(path: Path) -> None:

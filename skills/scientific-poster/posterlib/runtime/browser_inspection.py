@@ -9,6 +9,8 @@ import math
 import sys
 from pathlib import Path
 from typing import Any, Self
+from urllib.parse import urlsplit
+from urllib.request import url2pathname
 
 if __package__ in {None, ""}:
     for _candidate in Path(__file__).resolve().parents:
@@ -39,12 +41,14 @@ FONT_SIZE_TOLERANCE_MM = 0.02
 
 DELIVERY_INTEGRITY_GEOMETRY_CODES = frozenset(
     {
+        "comparison_geometry_invalid",
         "element_content_overflow",
         "element_outside_poster",
         "module_clipped_by_ancestor",
         "module_overlap",
         "source_figure_text_overlap",
         "table_text_overlap",
+        "text_content_overlap",
     }
 )
 
@@ -57,6 +61,8 @@ HARD_BLOCKER_CODES = (
             "invalid_poster_measurement",
             "invalid_poster_root_count",
             "invalid_source_figure_hash",
+            "math_layout_override",
+            "native_background_image",
             "missing_poster",
             "missing_title_band",
             "missing_visible_content",
@@ -76,10 +82,7 @@ HARD_BLOCKER_CODES = (
 )
 
 FONT_READY_JS = browser_scripts.load("wait_for_assets.js")
-_PAINTED_IMAGE_SIZE_JS = browser_scripts.load("painted_image_size.js")
-INSPECT_JS = browser_scripts.load("inspect_dom.js", bind_poster_selector=True).replace(
-    "__PAINTED_IMAGE_SIZE__", _PAINTED_IMAGE_SIZE_JS
-)
+INSPECT_JS = browser_scripts.load("inspect_dom.js", bind_poster_selector=True)
 
 
 class LayoutMeasurementError(RuntimeError):
@@ -446,6 +449,7 @@ async def _inspect_target(
                         }
                     )
                     await page.evaluate(FONT_READY_JS)
+            await browser_scripts.capture_paint_facts(page)
             report = await page.evaluate(INSPECT_JS)
             if not isinstance(report, dict):
                 raise TypeError("Chromium returned a non-object report")
@@ -527,6 +531,8 @@ async def _open_document_page(
 ) -> tuple[Any, Any]:
     """Load embedded assets into one isolated inspection page."""
 
+    from posterlib.content.html_contract import embed_math_font
+
     context = page = None
     try:
         context = await browser.new_context(
@@ -549,10 +555,10 @@ async def _open_document_page(
                 await route.abort("blockedbyclient")
 
         await page.route("**/*", block_external_requests)
-        if html_text is not None:
-            await page.set_content(html_text, wait_until="load")
-        else:
+        if html_text is None:
+            html_text = Path(url2pathname(urlsplit(target_url).path)).read_text(encoding="utf-8")
             await page.goto(target_url, wait_until="load")
+        await page.set_content(embed_math_font(html_text), wait_until="load")
         await page.evaluate(FONT_READY_JS)
         return context, page
     except BaseException:

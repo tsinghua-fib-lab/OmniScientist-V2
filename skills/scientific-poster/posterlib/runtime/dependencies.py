@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-import re
 import shutil
 import sys
 from typing import Any
@@ -12,10 +11,13 @@ from typing import Any
 CAPABILITY_REQUIREMENTS = {
     "html-validation": ("tinycss2",),
     "pdf-reading": ("pymupdf",),
-    "structured-equation-source": ("lxml",),
-    "equation-rendering": ("latex2mathml", "pyparsing", "markdown-it-py", "mdit-py-plugins"),
+    "structured-equation-source": ("lxml", "pylatexenc"),
+    "equation-rendering": (
+        "latex2mathml", "pyparsing", "pylatexenc", "markdown-it-py", "mdit-py-plugins"
+    ),
     "browser-inspection": ("playwright", "chromium"),
-    "pptx-export": ("python-pptx", "mathml2omml", "pymupdf"),
+    "visual-review": ("httpx", "Pillow", "markdown-it-py"),
+    "pptx-export": ("python-pptx", "mathml2omml", "pymupdf", "skia-pathops", "fonttools"),
 }
 _MINIMUM_PYMUPDF_VERSION = (1, 28)
 PYMUPDF_REQUIREMENT = "pymupdf>=" + ".".join(map(str, _MINIMUM_PYMUPDF_VERSION))
@@ -24,11 +26,10 @@ PYMUPDF_REQUIREMENT = "pymupdf>=" + ".".join(map(str, _MINIMUM_PYMUPDF_VERSION))
 def pymupdf_supported(module: Any) -> bool:
     """Return whether an imported PyMuPDF module meets the PDF contract."""
 
-    match = re.match(r"^(\d+)\.(\d+)", str(getattr(module, "__version__", "")))
-    return bool(
-        match
-        and tuple(int(value) for value in match.groups()) >= _MINIMUM_PYMUPDF_VERSION
-    )
+    parts = str(getattr(module, "__version__", "")).split(".")
+    if len(parts) < 2 or any(not part.isdecimal() for part in parts[:2]):
+        return False
+    return tuple(int(part) for part in parts[:2]) >= _MINIMUM_PYMUPDF_VERSION
 
 
 def classify_chromium_failure(error: BaseException | str) -> str:
@@ -55,10 +56,10 @@ def install_argv(
     if capability == "pdf-reading":
         return [_package_install_argv(python, PYMUPDF_REQUIREMENT)]
     if capability == "structured-equation-source":
-        return [_package_install_argv(python, "lxml>=5,<7")]
+        return [_package_install_argv(python, "lxml>=5,<7", "pylatexenc>=2.10,<3")]
     if capability == "equation-rendering":
         return [_package_install_argv(
-            python, "latex2mathml>=3.81,<4", "pyparsing>=3.2,<4",
+            python, "latex2mathml>=3.81,<4", "pyparsing>=3.2,<4", "pylatexenc>=2.10,<3",
             "markdown-it-py>=4,<5", "mdit-py-plugins>=0.6,<0.7"
         )]
     if capability == "browser-inspection":
@@ -66,6 +67,10 @@ def install_argv(
             _package_install_argv(python, "playwright"),
             [python, "-m", "playwright", "install", "chromium"],
         ]
+    if capability == "visual-review":
+        return [_package_install_argv(
+            python, "httpx>=0.27", "Pillow>=10", "markdown-it-py>=4,<5"
+        )]
     if capability == "pptx-export":
         return [
             _package_install_argv(
@@ -73,6 +78,7 @@ def install_argv(
                 "python-pptx>=1.0",
                 "mathml2omml==0.0.2",
                 PYMUPDF_REQUIREMENT,
+                "skia-pathops>=0.9.2,<1", "fonttools>=4",
             )
         ]
     raise ValueError(f"unknown capability: {capability}")
@@ -118,16 +124,21 @@ def probe_python_packages() -> dict[str, bool]:
         "pymupdf4llm": importlib.util.find_spec("pymupdf4llm") is not None,
     }
     for dependency, module_name in (
+        ("httpx", "httpx"),
+        ("Pillow", "PIL"),
         ("tinycss2", "tinycss2"),
         ("pymupdf", "pymupdf"),
         ("latex2mathml", "latex2mathml.converter"),
         ("pyparsing", "pyparsing"),
+        ("pylatexenc", "pylatexenc"),
         ("markdown-it-py", "markdown_it"),
         ("mdit-py-plugins", "mdit_py_plugins"),
         ("lxml", "lxml.html"),
         ("playwright", "playwright.async_api"),
         ("python-pptx", "pptx"),
         ("mathml2omml", "mathml2omml"),
+        ("skia-pathops", "pathops"),
+        ("fonttools", "fontTools"),
     ):
         try:
             module = importlib.import_module(module_name)

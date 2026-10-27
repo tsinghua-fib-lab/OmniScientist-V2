@@ -9,10 +9,11 @@ from pathlib import Path
 from typing import Any
 
 import image_assets
+from image_assets import normalize_asset_inputs as normalize_asset_inputs
 
 from posterlib.runtime import runtime_io
 
-from . import latex_source, paper_extraction, paper_inputs, pdf_worker
+from . import PaperSourceError, latex_source, paper_identity, paper_inputs, pdf_worker
 
 
 @dataclass(frozen=True)
@@ -35,38 +36,49 @@ async def prepare_draft_source(
 ) -> DraftSource:
     """Prepare a complete local source before any HTML authoring model call."""
 
-    source_pdf = paper_path(input_data) or attachment_uri(input_data)
+    try:
+        identity = paper_identity.from_request(input_data)
+    except ValueError as exc:
+        raise PaperSourceError("invalid_payload", str(exc)) from exc
+    source_pdf = paper_path(input_data)
     latex_dir = str(input_data.get("latex_project_dir") or "").strip()
     arxiv_id = str(input_data.get("arxiv_id") or "").strip()
-    if input_data.get("main_tex") and not latex_dir:
-        raise paper_extraction.PaperSourceError(
-            "invalid_payload", "main_tex requires latex_project_dir"
-        )
-    if sum(bool(value) for value in (source_pdf, latex_dir, arxiv_id)) > 1:
-        raise paper_extraction.PaperSourceError(
-            "invalid_payload", "Supply one paper_path, latex_project_dir, or arxiv_id"
-        )
-    if not (source_pdf or latex_dir or arxiv_id):
+    if not (
+        source_pdf or latex_dir or arxiv_id
+        or _has_value(input_data.get("source")) or explicit_source_text(input_data)
+    ):
+        source_pdf = attachment_uri(input_data)
+    source_kind, source_value = paper_inputs.select_paper_source(
+        latex_project_dir=latex_dir, paper_path=source_pdf, arxiv_id=arxiv_id,
+        main_tex=str(input_data.get("main_tex") or ""),
+    )
+    if not source_kind:
         text = await resolve_explicit_source_text(input_data, ctx=ctx)
         return DraftSource(
             text=text,
             authoring_request=authoring_request(input_data),
             assets=(),
             warnings=(),
-            summary={"kind": "text", "character_count": len(text)},
+            summary={"kind": "text", "character_count": len(text), **identity},
         )
 
     await runtime_io.progress(progress_callback, "poster.prepare-source", 0.04)
-    if latex_dir:
-        project = Path(latex_dir).expanduser()
-        if not project.is_absolute() and input_data.get("cwd"):
-            project = Path(str(input_data["cwd"])) / project
+    prepared_latex = None
+    source_warnings: list[str] = []
+    if source_kind == "arxiv":
+        prepared_latex, source_warnings = await asyncio.to_thread(
+            paper_inputs.prepare_arxiv_latex, source_value, workspace / "arxiv-paper",
+        )
+    elif source_kind == "latex":
+        invocation_dir = input_data.get("cwd")
         prepared_latex = await asyncio.to_thread(
             latex_source.prepare_latex_project,
-            project,
+            Path(source_value),
             workspace / "latex-figures",
             main_tex=str(input_data.get("main_tex") or "").strip(),
+            base_dir=Path(str(invocation_dir)) if invocation_dir else None,
         )
+    if prepared_latex is not None:
         figures = prepared_latex["figures"]
         return DraftSource(
             text=str(prepared_latex["text"]),
@@ -74,6 +86,7 @@ async def prepare_draft_source(
             assets=tuple(
                 {
                     "path": figure["path"],
+                    "source_path": figure["source_path"],
                     "description": figure["caption"] or figure["carrier_label"],
                     "source_kind": "latex_figure",
                     "content_sha256": figure["sha256"],
@@ -91,27 +104,31 @@ async def prepare_draft_source(
                 "path": prepared_latex["path"],
                 "title": prepared_latex["title"],
                 "authors": prepared_latex["authors"],
-                "affiliations": list(prepared_latex["affiliations"]),
+                **paper_identity.merge(identity, prepared_latex),
+                "affiliations": list(identity.get("affiliations") or prepared_latex["affiliations"]),
+                "identity_diagnostics": prepared_latex["identity_diagnostics"],
                 "figure_count": len(figures),
                 "equation_count": len(prepared_latex["equations"]),
                 "equations": prepared_latex["equations"],
                 "figures": figures,
+                **({"source_archive": prepared_latex["source_archive"]}
+                   if "source_archive" in prepared_latex else {}),
             },
         )
-    if arxiv_id:
+    if source_kind == "arxiv":
         pdf_path = await asyncio.to_thread(
             paper_inputs.download_arxiv_pdf,
-            arxiv_id,
+            source_value,
             workspace / "arxiv-paper",
         )
     else:
         pdf_path = await runtime_io.resolve_path(
             ctx,
-            source_pdf,
+            source_value,
             base_dir=input_data.get("cwd"),
         )
     if pdf_path is None:
-        raise paper_extraction.PaperSourceError(
+        raise PaperSourceError(
             "source_not_found",
             f"The requested PDF could not be resolved: {source_pdf}",
         )
@@ -163,13 +180,16 @@ async def prepare_draft_source(
         text=prepared.text,
         authoring_request=authoring_request(input_data),
         assets=assets,
-        warnings=prepared.warnings + warnings,
+        warnings=tuple(source_warnings) + prepared.warnings + warnings,
         summary={
             "kind": "pdf",
             "path": str(pdf_path),
             "title": prepared.title,
             "authors": prepared.authors,
             "affiliations": list(prepared.affiliations),
+            **paper_identity.merge(identity, {
+                field: getattr(prepared, field) for field in paper_identity.FIELDS
+            }),
             "page_count": prepared.page_count,
             "figure_count": len(prepared.figures),
             "equation_count": len(prepared.equations),
@@ -205,14 +225,46 @@ async def prepare_assets(
 
     raw_values = normalize_asset_inputs(values)
     resolved: dict[str, Path | None] = {}
+    resolution_warnings: list[str] = []
     for value in raw_values:
-        source = _asset_source(value)
-        if source and source not in resolved:
-            resolved[source] = await runtime_io.resolve_path(ctx, source)
-    return image_assets.prepare_asset_manifest(
-        raw_values,
+        sources = [image_assets.asset_source(value)]
+        if isinstance(value, dict) and isinstance(value.get("preview_uri"), str):
+            sources.append(value["preview_uri"].strip())
+        for source in sources:
+            if source and source not in resolved:
+                try:
+                    resolved[source] = await runtime_io.resolve_path(ctx, source)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    resolved[source] = None
+                    resolution_warnings.append(f"Asset could not be resolved: {source}: {exc}")
+    assets, warnings = await asyncio.to_thread(
+        image_assets.prepare_asset_manifest, raw_values,
         resolve=lambda item: resolved.get(item),
     )
+    return assets, [*resolution_warnings, *warnings]
+
+
+def requested_asset_inputs(input_data: dict[str, Any]) -> list[Any]:
+    """Consume declared upstream drawing results without selecting their provider."""
+
+    assets = normalize_asset_inputs(input_data.get("assets"))
+    dependencies = input_data.get("depends_on_results") or {}
+    for result in dependencies.values():
+        if not isinstance(result, dict):
+            continue
+        artifacts = [item for item in result.get("artifacts") or [] if isinstance(item, dict)]
+        native = [item for item in artifacts if item.get("format") == "pptx"]
+        for item in native:
+            asset = {
+                "uri": str(item.get("uri") or item.get("path") or ""),
+                "description": str(item.get("title") or result.get("caption") or result.get("title") or ""),
+            }
+            if "preview_uri" in item:
+                asset["preview_uri"] = item["preview_uri"]
+            elif len(native) == 1 and "preview_uri" in result:
+                asset["preview_uri"] = result["preview_uri"]
+            assets.append(asset)
+    return [normalize_user_asset(item) for item in assets]
 
 
 def structured_source_equations(summary: dict[str, Any]) -> list[dict[str, str]]:
@@ -244,7 +296,7 @@ def paper_path(input_data: dict[str, Any]) -> str:
 
 
 def attachment_uri(input_data: dict[str, Any]) -> str:
-    """Return the CLI's canonical attached file when no paper_path was supplied."""
+    """Return the host attachment used when no explicit source was supplied."""
 
     value = input_data.get("file_uri")
     return value.strip() if isinstance(value, str) else ""
@@ -258,30 +310,22 @@ def has_draft_source(input_data: dict[str, Any]) -> bool:
         or attachment_uri(input_data)
         or _has_value(input_data.get("latex_project_dir"))
         or _has_value(input_data.get("arxiv_id"))
-        or any(
-            _has_value(input_data.get(name))
-            for name in ("source_text", "research")
-        )
+        or explicit_source_text(input_data)
         or _has_value(input_data.get("source"))
     )
 
 
 def explicit_source_text(input_data: dict[str, Any]) -> str:
-    """Return inline grounding fields; ``source`` is always a UTF-8 file."""
+    """Read explicit scientific text separately from research provenance."""
 
-    for key in ("source_text", "research"):
-        value = input_data.get(key)
-        if value in (None, "", {}, []):
-            continue
-        if isinstance(value, str):
-            return value.strip()
-        try:
-            return json.dumps(
-                value, ensure_ascii=False, sort_keys=True, allow_nan=False
-            )
-        except (TypeError, ValueError):
-            return str(value).strip()
-    return ""
+    value = input_data.get("source_text")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if _has_value(input_data.get("source")):
+        return ""
+    research = input_data.get("research")
+    value = research.get("text") if isinstance(research, dict) else research
+    return value.strip() if isinstance(value, str) else ""
 
 
 async def resolve_explicit_source_text(
@@ -298,7 +342,7 @@ async def resolve_explicit_source_text(
     if not _has_value(raw_source):
         return ""
     if not isinstance(raw_source, str):
-        raise paper_extraction.PaperSourceError(
+        raise PaperSourceError(
             "source_read_failed",
             "source must be a local path or artifact URI for a UTF-8 text file",
         )
@@ -308,14 +352,14 @@ async def resolve_explicit_source_text(
         base_dir=input_data.get("cwd"),
     )
     if path is None:
-        raise paper_extraction.PaperSourceError(
+        raise PaperSourceError(
             "source_not_found",
             f"The requested grounding file could not be resolved: {raw_source}",
         )
     try:
         return await asyncio.to_thread(path.read_text, encoding="utf-8")
     except (OSError, UnicodeError) as exc:
-        raise paper_extraction.PaperSourceError("source_read_failed", str(exc)) from exc
+        raise PaperSourceError("source_read_failed", str(exc)) from exc
 
 
 def authoring_request(input_data: dict[str, Any]) -> str:
@@ -337,19 +381,6 @@ def _has_value(value: Any) -> bool:
     if isinstance(value, (dict, list, tuple, set, frozenset)):
         return bool(value)
     return True
-
-
-def normalize_asset_inputs(values: Any) -> list[Any]:
-    """Normalize a scalar or iterable asset payload to a list."""
-
-    if values is None:
-        return []
-    if isinstance(values, (str, Path, dict)):
-        return [values]
-    try:
-        return list(values)
-    except TypeError:
-        return [values]
 
 
 def normalize_user_asset(value: Any) -> Any:
@@ -374,15 +405,6 @@ def _pdf_asset_description(figure: dict[str, Any]) -> str:
     return f"{label} from source PDF, page {figure['page']}"
 
 
-def _asset_source(value: Any) -> str:
-    if isinstance(value, dict):
-        for key in ("uri", "path", "source", "file"):
-            if value.get(key):
-                return str(value[key]).strip()
-        return ""
-    return str(value or "").strip()
-
-
 async def restore_checkpoint_assets(
     state: dict[str, Any], ctx: Any
 ) -> list[dict[str, Any]]:
@@ -401,7 +423,7 @@ async def restore_checkpoint_assets(
         unexpected_assets = sorted(set(asset_sha256s) - set(planned_asset_sha256s))
         missing_figures = sorted(set(planned_source_figures) - expected_figures)
         unexpected_figures = sorted(expected_figures - set(planned_source_figures))
-        raise paper_extraction.PaperSourceError(
+        raise PaperSourceError(
             "source_read_failed",
             "Prepared poster assets changed after the plan checkpoint: "
             + json.dumps(

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import copy
 import math
-import re
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import image_assets
@@ -20,9 +20,9 @@ from posterlib.content.equations import (
     validate_inline_math,
     visible_inline_math_text,
 )
+from posterlib.runtime.identifiers import is_module_id, is_sha256
+from posterlib.sources import paper_identity, source_locators
 
-_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
-_MODULE_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 _VISUAL_KINDS = frozenset(
     {
         "claim",
@@ -49,7 +49,6 @@ _MIN_OCCUPANCY = 0.72
 _FIXED_VERTICAL_OVERHEAD_RATIO = 0.15
 _MIN_PAGE_DIMENSION_MM = 200.0
 _MAX_PAGE_DIMENSION_MM = 2000.0
-_MAX_EQUATION_LATEX_CHARS = 600
 POSTER_COLUMN_GAP_MM = 14.0
 
 
@@ -72,7 +71,6 @@ class PagePlan:
     max_height_mm: float
     orientation: str
     density_profile: str
-    focal_role: str
     content_contract: dict[str, Any]
     predicted_occupancy: float
     reasons: tuple[str, ...]
@@ -91,7 +89,6 @@ def _build_page_plan(
     min_height_mm: float,
     max_height_mm: float,
     orientation: str,
-    focal_role: str,
     budget: Mapping[str, Any],
     predicted_occupancy: float,
     reasons: tuple[str, ...],
@@ -104,7 +101,6 @@ def _build_page_plan(
         max_height_mm=max_height_mm,
         orientation=orientation,
         density_profile=_density_profile(predicted_occupancy),
-        focal_role=focal_role,
         content_contract=_content_contract(budget),
         predicted_occupancy=predicted_occupancy,
         reasons=reasons,
@@ -124,8 +120,10 @@ def _content_contract(budget: Mapping[str, Any]) -> dict[str, Any]:
             raise PlanningError(
                 "invalid_content_budget", "normalized modules are required"
             )
+        native_components = list(raw.get("native_component_sha256s") or [])
         figure_hashes = [
             str(value) for value in raw.get("figure_sha256s") or [] if str(value)
+            and value not in native_components
         ]
         equations = raw.get("equations") or []
         equation_latex = [
@@ -139,6 +137,7 @@ def _content_contract(budget: Mapping[str, Any]) -> dict[str, Any]:
                 "module_id": str(raw.get("id") or ""),
                 "source_figure_sha256s": figure_hashes,
                 "equation_latex": equation_latex,
+                **({"native_component_sha256s": native_components} if native_components else {}),
             }
         )
     return {
@@ -354,7 +353,7 @@ def bind_prepared_figure_geometry(
     ratios = {
         str(asset.get("content_sha256") or ""): image_assets.asset_aspect_ratio(asset)
         for asset in assets
-        if image_assets.is_source_figure_asset(asset)
+        if (image_assets.is_source_figure_asset(asset) or asset.get("source_kind") == "native_component")
         and str(asset.get("content_sha256") or "")
     }
     modules = bound_value.get("content_modules")
@@ -394,6 +393,8 @@ def normalize_content_budget(
     *,
     source_figure_sha256s: set[str],
     source_equations: list[dict[str, str]] | None = None,
+    source_text: str | None = None,
+    source_assets: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Validate source-grounded modules without prescribing visual sections."""
 
@@ -404,7 +405,10 @@ def normalize_content_budget(
     unexpected_top_level = sorted(
         set(value)
         - {
+            "paper_identity",
             "page_orientation",
+            "organization_mode",
+            "focal_role",
             "sections",
             "content_modules",
         }
@@ -432,15 +436,20 @@ def normalize_content_budget(
             "invalid_content_budget", "content_modules must be a non-empty array"
         )
     allowed_figures = {str(item) for item in source_figure_sha256s}
-    if any(_HASH_RE.fullmatch(item) is None for item in allowed_figures):
+    if any(not is_sha256(item) for item in allowed_figures):
         raise PlanningError(
             "invalid_content_budget", "source figure manifest is invalid"
         )
+    native_components = {
+        str(item["content_sha256"])
+        for item in source_assets or []
+        if item.get("source_kind") == "native_component"
+    }
+    allowed_figures.update(native_components)
     equation_catalog = source_equation_catalog(source_equations)
 
     modules: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
-    figure_owners: dict[str, str] = {}
     for raw in raw_modules:
         if not isinstance(raw, Mapping):
             raise PlanningError(
@@ -458,6 +467,7 @@ def normalize_content_budget(
                 "text",
                 "source_label",
                 "figure_sha256s",
+                "native_component_sha256s",
                 "figure_aspect_ratio",
                 "takeaway",
                 "equations",
@@ -474,9 +484,9 @@ def normalize_content_budget(
             )
         module_id = str(raw.get("id") or "").strip()
         section_id = str(raw.get("section_id") or "").strip()
-        title = " ".join(str(raw.get("title") or "").split())
-        text = " ".join(str(raw.get("text") or "").split())
-        takeaway = " ".join(str(raw.get("takeaway") or "").split())
+        title = _normalize_copy(raw.get("title"))
+        text = _normalize_copy(raw.get("text"))
+        takeaway = _normalize_copy(raw.get("takeaway"))
         raw_detail_points = raw.get("detail_points")
         if raw_detail_points is None:
             detail_points = []
@@ -489,7 +499,7 @@ def normalize_content_budget(
                 f"module {module_id} detail_points must be an array of non-empty strings",
             )
         else:
-            detail_points = [" ".join(item.split()) for item in raw_detail_points]
+            detail_points = [_normalize_copy(item) for item in raw_detail_points]
         flow_steps = _normalize_flow_steps(raw.get("flow_steps"), module_id=module_id)
         equations = _normalize_equations(
             raw.get("equations"),
@@ -516,12 +526,12 @@ def normalize_content_budget(
             if isinstance(raw_figures, list)
             else []
         )
-        if len(figures) != len(set(figures)) or any(
-            _HASH_RE.fullmatch(figure) is None or figure not in allowed_figures
+        if any(
+            not is_sha256(figure) or figure not in allowed_figures
             for figure in figures
         ):
             raise PlanningError(
-                "invalid_content_budget", "module claims an unknown source figure"
+                "invalid_content_budget", "module claims an unknown source figure or native component"
             )
         source_label = str(raw.get("source_label") or "").strip()
         priority = str(raw.get("priority") or "").strip()
@@ -533,15 +543,14 @@ def normalize_content_budget(
             )
         raw_roles = raw.get("semantic_roles")
         roles = (
-            [str(raw_roles[0]).strip()]
-            if isinstance(raw_roles, list) and len(raw_roles) == 1
+            list(dict.fromkeys(role.strip() for role in raw_roles))
+            if isinstance(raw_roles, list) and all(isinstance(role, str) for role in raw_roles)
             else []
         )
-        if not roles or roles[0] not in poster_contract.SEMANTIC_ROLES:
+        if not roles or any(role not in poster_contract.SEMANTIC_ROLES for role in roles):
             raise PlanningError(
                 "invalid_content_budget",
-                f"module {module_id or '<unknown>'} semantic_roles must contain exactly "
-                "one supported role",
+                f"module {module_id or '<unknown>'} semantic_roles must contain supported roles",
             )
         visual_kind = str(raw.get("visual_kind") or "").strip()
         if visual_kind not in _VISUAL_KINDS:
@@ -550,40 +559,23 @@ def normalize_content_budget(
                 f"module {module_id or '<unknown>'} visual_kind must be one of: "
                 + ", ".join(sorted(_VISUAL_KINDS)),
             )
-        if bool(figures) != (visual_kind == "figure"):
+        if visual_kind == "figure" and not figures:
             raise PlanningError(
                 "invalid_content_budget",
-                f"module {module_id or '<unknown>'} must use visual_kind figure exactly "
-                "when it binds prepared figures",
+                f"module {module_id or '<unknown>'} with visual_kind figure requires prepared figures",
             )
-        if bool(table) != (visual_kind == "table"):
+        if visual_kind == "table" and not table:
             raise PlanningError(
                 "invalid_content_budget",
-                f"module {module_id or '<unknown>'} must use visual_kind table exactly "
-                "when it carries a table",
-            )
-        if visual_kind == "method-flow" and figures:
-            raise PlanningError(
-                "invalid_content_budget",
-                f"module {module_id} must use visual_kind figure for a prepared process figure",
+                f"module {module_id or '<unknown>'} with visual_kind table requires table data",
             )
         if visual_kind == "method-flow" and not flow_steps:
             raise PlanningError(
                 "invalid_content_budget",
                 f"module {module_id} with visual_kind method-flow requires flow_steps",
             )
-        if visual_kind == "method-flow" and detail_points:
-            raise PlanningError(
-                "invalid_content_budget",
-                f"module {module_id} must use flow_steps instead of detail_points for method-flow",
-            )
-        if visual_kind != "method-flow" and flow_steps:
-            raise PlanningError(
-                "invalid_content_budget",
-                f"module {module_id} may use flow_steps only with visual_kind method-flow",
-            )
         field_validity = {
-            "id": _MODULE_ID_RE.fullmatch(module_id) is not None,
+            "id": is_module_id(module_id),
             "section_id": section_id in section_ids,
             "source_label": bool(source_label),
             "meaningful visible content": bool(
@@ -612,18 +604,6 @@ def normalize_content_budget(
                 "invalid_content_budget", "content module ids must be unique"
             )
         seen_ids.add(module_id)
-        reused_figure = next(
-            (figure for figure in figures if figure in figure_owners),
-            None,
-        )
-        if reused_figure is not None:
-            raise PlanningError(
-                "invalid_content_budget",
-                f"source figure assigned to module {figure_owners[reused_figure]} "
-                f"cannot also be assigned to {module_id}; bind an immutable source "
-                "figure to one module and combine its related readings there",
-            )
-        figure_owners.update({figure: module_id for figure in figures})
         raw_aspect_ratio = raw.get("figure_aspect_ratio")
         aspect_ratio = (
             _positive_finite(
@@ -647,6 +627,9 @@ def normalize_content_budget(
             "takeaway": takeaway,
             "equations": equations,
         }
+        selected_components = [figure for figure in figures if figure in native_components]
+        if selected_components:
+            module["native_component_sha256s"] = selected_components
         if detail_points:
             module["detail_points"] = detail_points
         if flow_steps:
@@ -657,23 +640,76 @@ def normalize_content_budget(
             module["figure_aspect_ratio"] = aspect_ratio
         modules.append(module)
 
-    focal_modules = [module for module in modules if module["priority"] == "focal"]
-    if len(focal_modules) != 1:
-        raise PlanningError(
-            "invalid_content_budget",
-            "content budget must identify exactly one focal module",
-        )
-    organization_mode, focal_role = _presentation_hints(modules)
-
     normalized = {
-        "organization_mode": organization_mode,
-        "focal_role": focal_role,
         "sections": sections,
         "content_modules": modules,
     }
     if page_orientation:
         normalized["page_orientation"] = page_orientation
+    if "paper_identity" in value:
+        try:
+            normalized["paper_identity"] = paper_identity.normalize(value["paper_identity"])
+        except ValueError as exc:
+            raise PlanningError("invalid_content_budget", str(exc)) from exc
+    if source_text is not None:
+        validate_content_sources(
+            modules, source_text=source_text, source_equations=source_equations,
+            source_assets=source_assets,
+        )
     return normalized
+
+
+def validate_content_sources(
+    modules: list[dict[str, Any]],
+    *,
+    source_text: str,
+    source_equations: list[dict[str, str]] | None = None,
+    source_assets: list[dict[str, Any]] | None = None,
+) -> None:
+    """Check locator presence; the author interprets the supporting source."""
+
+    locators = source_locators.SourceLocators(source_text)
+    prepared_equations = {
+        (item["source_label"], item["latex"])
+        for item in (source_equation_catalog(source_equations) or {}).values()
+    }
+    prepared_figures = {
+        str(item.get("content_sha256") or item.get("sha256")): str(item.get("carrier_label") or "")
+        for item in source_assets or []
+        if image_assets.is_source_figure_asset(item)
+    }
+    for module in modules:
+        selected_labels = {
+            prepared_figures[digest]
+            for digest in module.get("figure_sha256s") or [] if digest in prepared_figures
+        }
+        selected_labels.update(
+            label for label, latex in prepared_equations
+            if latex in module.get("equation_latex", [])
+            or any(equation.get("latex") == latex for equation in module.get("equations") or [])
+        )
+        for entry in (module, *(module.get("equations") or [])):
+            label = str(entry.get("source_label") or "").strip()
+            if entry is module and label in selected_labels:
+                continue
+            if (label, entry.get("latex")) in prepared_equations:
+                continue
+            if not locators.contains(label):
+                raise PlanningError(
+                    "invalid_content_budget",
+                    f"module {module['id']}: source_label {label!r} has no matching "
+                    "locator in the supplied source. Copy its actual heading, caption "
+                    "label, printed equation identifier, or a short source excerpt. "
+                    "Keep the label's original wording; inspect the full source "
+                    "to confirm that this location supports the retained content.",
+                )
+
+
+def _normalize_copy(value: object) -> str:
+    """Normalize prose while retaining source whitespace in embedded mathematics."""
+
+    source = str(value or "").strip()
+    return source if contains_inline_math(source) else " ".join(source.split())
 
 
 def _normalize_flow_steps(value: object, *, module_id: str) -> list[dict[str, str]]:
@@ -693,8 +729,8 @@ def _normalize_flow_steps(value: object, *, module_id: str) -> list[dict[str, st
                 "invalid_content_budget",
                 f"module {module_id} flow_steps require exactly label and detail",
             )
-        label = " ".join(str(raw.get("label") or "").split())
-        detail = " ".join(str(raw.get("detail") or "").split())
+        label = _normalize_copy(raw.get("label"))
+        detail = _normalize_copy(raw.get("detail"))
         if not label or not detail:
             raise PlanningError(
                 "invalid_content_budget",
@@ -726,68 +762,56 @@ def _normalize_table(value: object, *, module_id: str) -> dict[str, Any] | None:
         raise PlanningError(
             "invalid_content_budget", f"module {module_id} table cells must be strings"
         )
-    return {
-        "columns": [" ".join(cell.split()) for cell in columns],
-        "rows": [[" ".join(cell.split()) for cell in row] for row in rows],
+    table = {
+        "columns": [_normalize_copy(cell) for cell in columns],
+        "rows": [[_normalize_copy(cell) for cell in row] for row in rows],
         **({"view": "comparison"} if value.get("view") == "comparison" else {}),
     }
+    if table.get("view") == "comparison":
+        comparison_values(table, module_id=module_id)
+    return table
 
 
-def _presentation_hints(
-    raw_modules: list[object],
-) -> tuple[str, str]:
-    """Derive visual-reference hints from the selected focal evidence."""
+def comparison_values(table: Mapping[str, Any], *, module_id: str = "") -> list[list[Decimal]]:
+    """Share numeric interpretation between planning and rendering."""
 
-    candidates = [item for item in raw_modules if isinstance(item, Mapping)]
-    focal_candidates = [
-        item
-        for item in candidates
-        if str(item.get("priority") or "").strip().lower() == "focal"
-    ] or candidates
-    roles = {
-        str(role).strip().lower()
-        for item in focal_candidates
-        for role in (
-            item.get("semantic_roles")
-            if isinstance(item.get("semantic_roles"), list)
-            else []
-        )
-        if str(role).strip()
-    }
-    visual_kinds = {
-        str(item.get("visual_kind") or "").strip().lower() for item in focal_candidates
-    }
-    has_figure = any(
-        isinstance(item.get("figure_sha256s"), list)
-        and bool(item.get("figure_sha256s"))
-        for item in focal_candidates
+    headers, rows = table["columns"], table["rows"]
+    message = (
+        f"{f'module {module_id} ' if module_id else ''}comparison view requires finite nonnegative "
+        "scalar value columns, each with a positive scale maximum. Keep source qualifications "
+        "and units explicit. Omit table.view for a literal table, or select a coherent "
+        "numeric comparison with its conditions preserved."
     )
-    has_equation = any(
-        isinstance(item.get("equations"), list) and bool(item.get("equations"))
-        for item in focal_candidates
-    )
-    if "method-flow" in visual_kinds or "method" in roles:
-        inferred_focal_role = "method-flow"
-    elif has_figure:
-        # Scientific roles describe the story; the selected carrier determines the
-        # physical stage.  A focal prepared figure must not collapse into a
-        # result/table layout merely because the model called its scientific job
-        # evidence.
-        inferred_focal_role = "source-figure"
-    elif has_equation:
-        inferred_focal_role = "method-flow"
-    elif visual_kinds.intersection({"comparison", "metrics"}) or "evidence" in roles:
-        inferred_focal_role = "result"
-    else:
-        inferred_focal_role = "claim"
-
-    focal_role = inferred_focal_role
-    organization_mode = {
-        "source-figure": "figure-led",
-        "method-flow": "method-led",
-        "result": "result-led",
-    }.get(focal_role, "scan-first")
-    return organization_mode, focal_role
+    if len(headers) < 2 or not rows:
+        raise PlanningError("invalid_content_budget", message)
+    values: list[list[Decimal]] = []
+    for row_index, row in enumerate(rows, start=1):
+        numbers = []
+        for column, cell in enumerate(row[1:], start=1):
+            detail = f" Row {row_index}, column {headers[column]!r}: {cell!r}."
+            if "," in cell:
+                mantissa, exponent_separator, exponent = cell.lower().partition("e")
+                integer, decimal_separator, fraction = mantissa.removeprefix("+").partition(".")
+                groups = integer.split(",")
+                if not (
+                    1 <= len(groups[0]) <= 3
+                    and all(group.isascii() and group.isdecimal() for group in groups)
+                    and all(len(group) == 3 for group in groups[1:])
+                    and (not decimal_separator or fraction.isascii() and fraction.isdecimal())
+                    and (not exponent_separator or exponent.lstrip("+-").isascii() and exponent.lstrip("+-").isdecimal())
+                ):
+                    raise PlanningError("invalid_content_budget", message + detail)
+            try:
+                number = Decimal(cell.replace(",", ""))
+            except InvalidOperation as exc:
+                raise PlanningError("invalid_content_budget", message + detail) from exc
+            if not number.is_finite() or number < 0:
+                raise PlanningError("invalid_content_budget", message + detail)
+            numbers.append(number)
+        values.append(numbers)
+    if any(max(column) == 0 for column in zip(*values, strict=True)):
+        raise PlanningError("invalid_content_budget", message)
+    return values
 
 
 def _normalize_equations(
@@ -822,17 +846,15 @@ def _normalize_equations(
         if not isinstance(raw, Mapping) or set(raw) != {"latex", "source_label"}:
             raise PlanningError(
                 "invalid_content_budget",
-                f"module {module_id or '<unknown>'}: each equation needs a prepared "
-                "source_ref or explicit latex and source_label",
+                f"module {module_id or '<unknown>'}: each equation uses exactly one "
+                'representation: {"source_ref": "catalog id"} alone, or '
+                '{"latex": "...", "source_label": "..."} alone. '
+                "Remove the other representation's fields; copy source_ref from the "
+                "prepared catalog independently of the printed equation number.",
             )
-        latex = " ".join(str(raw.get("latex") or "").split())
+        latex = str(raw.get("latex") or "").strip()
         source_label = str(raw.get("source_label") or "").strip()
-        if (
-            not latex
-            or len(latex) > _MAX_EQUATION_LATEX_CHARS
-            or "</" in latex
-            or not source_label
-        ):
+        if not latex or not source_label:
             raise PlanningError(
                 "invalid_content_budget",
                 f"module {module_id or '<unknown>'}: equation content is invalid",
@@ -849,18 +871,7 @@ def _normalize_equations(
 
 
 def _validate_visible_math(values: list[str], *, location: str) -> None:
-    """Keep mathematical markup both explicit and renderable in visible copy."""
-
-    if any(
-        not contains_inline_math(item)
-        and ("^" in item or re.search(r"\\[A-Za-z]+", item))
-        for item in values
-    ):
-        raise PlanningError(
-            "invalid_content_budget",
-            f"{location} contains unrendered mathematical syntax; wrap the "
-            "expression in explicit inline LaTeX delimiters",
-        )
+    """Validate expressions explicitly marked as mathematics by the author."""
     for item in values:
         try:
             validate_inline_math(item)
@@ -886,7 +897,7 @@ def source_equation_catalog(
             raise PlanningError(
                 "invalid_content_budget", "prepared source equations are invalid"
             )
-        latex = " ".join(str(raw.get("latex") or "").split())
+        latex = str(raw.get("latex") or "").strip()
         source_label = str(raw.get("source_label") or "").strip()
         if not latex or not source_label:
             raise PlanningError(
@@ -920,9 +931,9 @@ def _normalize_sections(value: object) -> list[dict[str, str]]:
                 "each section must contain exactly id and label",
             )
         section_id = str(raw.get("id") or "").strip()
-        label = " ".join(str(raw.get("label") or "").split())
+        label = _normalize_copy(raw.get("label"))
         if (
-            _MODULE_ID_RE.fullmatch(section_id) is None
+            not is_module_id(section_id)
             or section_id in seen_ids
             or not label
         ):
@@ -944,7 +955,6 @@ def estimate_page(
 ) -> PagePlan:
     """Choose a common academic page from grounded content pressure alone."""
 
-    focal_role = str(budget["focal_role"])
     requested_orientation = str(orientation or "auto").strip().lower()
     if requested_orientation not in {"auto", "portrait", "landscape"}:
         raise PlanningError(
@@ -990,7 +1000,6 @@ def estimate_page(
             min_height_mm=height,
             max_height_mm=height,
             orientation=orientation,
-            focal_role=focal_role,
             budget=budget,
             predicted_occupancy=predicted_occupancy,
             reasons=tuple(reasons),
@@ -1011,7 +1020,6 @@ def estimate_page(
             page_bounds=_LANDSCAPE_PAGES_MM,
             minimum_height_ratio=1.0 / _MAX_LANDSCAPE_ASPECT_RATIO,
             occupancy_probe_height_mm=_LANDSCAPE_PAGES_MM[0][1],
-            focal_role=focal_role,
             figure_observations=figure_observations,
             sizing_reason=(
                 "Uses the selected landscape orientation with a common academic "
@@ -1026,7 +1034,6 @@ def estimate_page(
         ),
         minimum_height_ratio=_MIN_PORTRAIT_HEIGHT_RATIO,
         occupancy_probe_height_mm=_WIDTHS_MM[0] * _MIN_PORTRAIT_HEIGHT_RATIO,
-        focal_role=focal_role,
         figure_observations=figure_observations,
         sizing_reason=(
             "Uses the selected portrait orientation with a common academic "
@@ -1042,7 +1049,6 @@ def _estimate_adaptive_page(
     page_bounds: tuple[tuple[float, float], ...],
     minimum_height_ratio: float,
     occupancy_probe_height_mm: float,
-    focal_role: str,
     figure_observations: Mapping[str, Mapping[str, str]] | None,
     sizing_reason: str,
 ) -> PagePlan:
@@ -1050,7 +1056,7 @@ def _estimate_adaptive_page(
 
     smallest_width = page_bounds[0][0]
     sparse_at_smallest = (
-        _occupancy_for(
+        _raw_occupancy_for(
             budget,
             smallest_width,
             occupancy_probe_height_mm,
@@ -1100,7 +1106,6 @@ def _estimate_adaptive_page(
             min_height_mm=min_height,
             max_height_mm=max_height,
             orientation=orientation,
-            focal_role=focal_role,
             budget=budget,
             predicted_occupancy=occupancy,
             reasons=tuple(reasons),
@@ -1138,7 +1143,6 @@ def _meaningful_content_area(
     modules = budget.get("content_modules")
     if not isinstance(modules, list):
         raise PlanningError("invalid_content_budget", "normalized modules are required")
-    printable_width = _printable_width(width_mm)
     metrics = _area_metrics(width_mm, height_mm=height_mm)
     area = 0.0
     for raw in modules:
@@ -1152,40 +1156,7 @@ def _meaningful_content_area(
             metrics=metrics,
             figure_observations=figure_observations,
         )
-    if not any(
-        isinstance(module, Mapping) and module.get("figure_sha256s")
-        for module in modules
-    ):
-        focal_area_ratio = {
-            "method-flow": 0.32,
-            "result": 0.34,
-            "claim": 0.24,
-        }[str(budget["focal_role"])]
-        area += printable_width * width_mm * focal_area_ratio
     return area
-
-
-def module_area_estimates(
-    budget: Mapping[str, Any],
-    *,
-    width_mm: float,
-    height_mm: float,
-    figure_observations: Mapping[str, Mapping[str, str]] | None = None,
-) -> dict[str, int]:
-    """Expose each planned carrier's physical cost to the content auditor."""
-
-    metrics = _area_metrics(width_mm, height_mm=height_mm)
-    return {
-        str(module["id"]): round(
-            _module_content_area(
-                module,
-                width_mm=width_mm,
-                metrics=metrics,
-                figure_observations=figure_observations,
-            )
-        )
-        for module in budget["content_modules"]
-    }
 
 
 def _area_metrics(
@@ -1263,7 +1234,7 @@ def _module_content_area(
             * metrics["minimum_readable_width"]
             * metrics["line_height"]
         )
-    if str(raw.get("visual_kind") or "") == "table":
+    if table_rows:
         # Text area above accounts for cell wrapping. A table row also owns one
         # physical reading line plus the padding and rhythm emitted by the renderer;
         # without that structural area, several full tables appear artificially cheap.
@@ -1325,24 +1296,6 @@ def _module_content_area(
     figure_height = min(figure_width / aspect_ratio, width_mm * 0.54)
     caption_height = metrics["provenance_min_mm"] * 2.5
     return area + len(figure_hashes) * figure_width * (figure_height + caption_height)
-
-
-def _occupancy_for(
-    budget: Mapping[str, Any],
-    width_mm: float,
-    height_mm: float,
-    *,
-    figure_observations: Mapping[str, Mapping[str, str]] | None = None,
-) -> float:
-    return min(
-        1.0,
-        _raw_occupancy_for(
-            budget,
-            width_mm,
-            height_mm,
-            figure_observations=figure_observations,
-        ),
-    )
 
 
 def _raw_occupancy_for(

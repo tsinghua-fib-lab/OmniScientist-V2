@@ -39,6 +39,9 @@ PPTX_BEST_PRACTICES = """
 
 5. **Text Frames**:
    - Always check `if shape.has_text_frame:` before accessing text properties.
+   - Give titles, captions, and column headings explicit `w` and `h` in inches when using `add_label`.
+   - `x` and `y` are the top-left corner. `align='center'` centers text within its box.
+   - Explicit label bounds use PowerPoint's native text-to-shape fitting. Allocate enough space for readable text and inspect the rendered slide.
 
 6. **Text Styling & Helper Functions**:
    - If you define a helper function like `def add_text(...)`, **DO NOT** use hypothetical arguments like `style='italic'` or `css='bold'` when calling it.
@@ -140,6 +143,9 @@ group_box = add_container(slide, x=0.5, y=1.0, w=4.0, h=5.0, title="Encoder Laye
 
 **Description**
 The **primary tool** for drawing nodes, boxes, steps, or components. Handles text centering, safe color filling, borders, and transparency automatically.
+Sets text-frame defaults for font size, color, bold and alignment, including empty nodes.
+These defaults survive `text_frame.clear()` and apply to later `add_paragraph()` / `add_run()` calls.
+Explicit paragraph/run formatting overrides the inherited defaults. Theme shadows are disabled.
 
 **Function Signature**
 
@@ -179,20 +185,21 @@ Draws text without background or borders. Use for titles, captions, or annotatio
 **Function Signature**
 
 ```python
-add_label(slide, text, x, y, w=None, h=None, font_size=12, color='000000', bold=False, align='center')
+add_label(slide, text, x, y, w, h, font_size=12, color='000000', bold=False, align='center')
 
 ```
 
 **Parameters**
 
-* **`w`** *(float, optional)*: If `None`, the text box will **auto-resize** to fit the content (`SHAPE_TO_FIT_TEXT`).
+* **`x`, `y`** *(float)*: Top-left corner in inches, including when text is center-aligned.
+* **`w`, `h`** *(float, required)*: Label width and height in inches. Both are required function arguments. Text wraps and uses native `TEXT_TO_FIT_SHAPE` inside these fixed bounds.
 * **`align`**: `'left'`, `'center'`, `'right'`.
 
 **Example**
 
 ```python
 # Add a main title
-add_label(slide, "Figure 1: Architecture", x=0.5, y=0.2, font_size=18, bold=True)
+add_label(slide, "Figure 1: Architecture", x=0.5, y=0.2, w=9.0, h=0.5, font_size=18, bold=True, align='left')
 
 ```
 
@@ -266,7 +273,7 @@ Draws an arrow between two arbitrary (x, y) coordinates.
 **Function Signature**
 
 ```python
-add_free_arrow(slide, start_x, start_y, end_x, end_y, type='straight', color='1F4E79', width=3.0, gradient_start=None, gradient_end=None)
+add_free_arrow(slide, start_x, start_y, end_x, end_y, type='straight', color='1F4E79', width=3.0, gradient_start=None, gradient_end=None, arrow_size=None)
 
 ```
 
@@ -277,6 +284,9 @@ add_free_arrow(slide, start_x, start_y, end_x, end_y, type='straight', color='1F
 * **`end_x`, `end_y**` *(float)*: Ending coordinates in **raw inches**.
 * **`type`** *(str)*: `'straight'` (Default), `'curve'`, `'elbow'`.
 * *(Style parameters `color`, `width`, `gradient_*` are same as `add_connector`)*
+* **`arrow_size`**: `'sm'`, `'med'`, or `'lg'`; `None` sizes the head from line width, as in `add_connector`.
+* For a plain divider, use a native `MSO_CONNECTOR.STRAIGHT` line or `add_custom_route_arrow(..., end_arrow=False)`.
+* Set arrowheads through the documented helper arguments. `python-pptx` has no `line.end_arrowhead_style`, `line.begin_arrowhead_style`, or `line.end_arrowhead_size` serialization API.
 
 **Example**
 
@@ -284,8 +294,10 @@ add_free_arrow(slide, start_x, start_y, end_x, end_y, type='straight', color='1F
 # 1. Annotation: Pointing from a text label (3.0, 2.0) to a detail (5.5, 4.0)
 add_free_arrow(slide, 3.0, 2.0, 5.5, 4.0, type='straight', color='FF0000')
 
-# 2. Divider Line: Drawing a horizontal gradient separator at the bottom
-add_free_arrow(slide, 1.0, 7.0, 12.0, 7.0, width=4.0, gradient_start='000000', gradient_end='CCCCCC')
+# 2. Plain divider with native editable geometry
+divider = slide.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, Inches(1), Inches(7), Inches(9), Inches(7))
+divider.line.width = Pt(0.75)
+divider.line.color.rgb = RGBColor.from_string('CCCCCC')
 
 ```
 
@@ -300,7 +312,7 @@ Draws a multi-segment arrow passing through a specific sequence of `(x, y)` coor
 **Function Signature**
 
 ```python
-add_custom_route_arrow(slide, points, color='333333', width=2.0, end_arrow=True)
+add_custom_route_arrow(slide, points, color='333333', width=2.0, end_arrow=True, arrow_size=None)
 
 ```
 
@@ -312,6 +324,7 @@ add_custom_route_arrow(slide, points, color='333333', width=2.0, end_arrow=True)
 * **`color`** *(str)*: Hex color code (e.g., `'FF0000'`).
 * **`width`** *(float)*: Line thickness in points.
 * **`end_arrow`** *(bool)*: Whether to add an arrow head at the last point. Default is `True`.
+* **`arrow_size`**: `'sm'`, `'med'`, or `'lg'`; `None` sizes the head from line width. Used when `end_arrow=True`.
 
 **🧠 How to Plan the Path (The "Lane" Strategy)**
 

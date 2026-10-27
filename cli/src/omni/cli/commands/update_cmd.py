@@ -331,6 +331,36 @@ def _git_tree_is_dirty(repo_root: Path) -> bool:
     return any(line and not line.startswith("??") for line in out.stdout.splitlines())
 
 
+_VERSION_RE = re.compile(r"""__version__\s*=\s*["']([^"']+)["']""")
+
+
+def _source_tree_version(src: Path) -> str:
+    """Read ``__version__`` from a checkout without importing that tree."""
+
+    init_py = src / "src" / "omni" / "__init__.py"
+    try:
+        text = init_py.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    match = _VERSION_RE.search(text)
+    return match.group(1) if match else ""
+
+
+def _snapshot_trails_source(src: Path, *, editable: bool, current: str) -> bool:
+    """A copied ``file://`` install can lag the checkout after git is current.
+
+    Editable installs import the checkout, so their running version cannot
+    diverge from it. A snapshot copies the tree at install time; once the
+    checkout moves on, git being up to date does not refresh that copy.
+    """
+
+    if editable:
+        return False
+    from omni.runtime import update_check
+
+    return update_check.newer_available(current, _source_tree_version(src))
+
+
 def _git_behind_count(repo_root: Path, ref: str = "") -> int | None:
     """How many commits ``HEAD`` is behind its target, or ``None`` if undeterminable.
 
@@ -862,16 +892,20 @@ def update_command(
     else:
         _kind, cmd, label = _plan(ref=ref, force_reinstall=force)
         if _kind == "git":
-            # Source checkout: git state — not the (static, unpublished) version
-            # string — decides freshness. When the branch is current and the tree
-            # is clean, there is nothing to do (unless --force forces a reinstall).
-            # ``--check`` only displays the plan, so it never probes the network
-            # (no ``git fetch``) or short-circuits here.
+            # Source checkout: git state decides whether to pull. A clean,
+            # up-to-date branch still reinstalls when the installed snapshot is
+            # older than the checkout (or when --force was requested). ``--check``
+            # only displays the plan, so it never probes the network or
+            # short-circuits here.
             if not check and not force:
                 checkout = _source_checkout()
                 if checkout is not None:
-                    repo_root, _src, _editable = checkout
-                    if _git_behind_count(repo_root, ref) == 0 and not _git_tree_is_dirty(repo_root):
+                    repo_root, src, editable = checkout
+                    if (
+                        _git_behind_count(repo_root, ref) == 0
+                        and not _git_tree_is_dirty(repo_root)
+                        and not _snapshot_trails_source(src, editable=editable, current=current)
+                    ):
                         package_change = False
                         cmd = []
                         label = "source checkout is current; converge managed runtime and service"

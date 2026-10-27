@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import math
-import re
 from pathlib import Path
 from typing import Any
 
 import poster_contract
+from lxml import html as lxml_html
 
 from posterlib.content import html_contract, planning, scientific_snapshot
+from posterlib.runtime.identifiers import is_asset_token, is_sha256
+from posterlib.sources import latex_identity, paper_identity
 from posterlib.visual import review_contract
 
-from . import draft_checkpoint
+from . import draft_checkpoint, outcomes
 
 
 class SelectionStateError(ValueError):
@@ -54,12 +56,56 @@ def revision_checkpoint_state(
     if sidecar is not None and sidecar.get("stage") == "author-ready":
         checkpoint_template = str(sidecar.get("html_template") or "")
         if checkpoint_template == bound_template:
+            refresh_paper_identity(sidecar)
             return {
                 **sidecar,
                 "html_sha256": html_sha256,
                 "artifact_path": str(source_path),
             }
     return None
+
+
+def is_content_carrier(html_template: str) -> bool:
+    """Identify the neutral scaffold awaiting its first authored composition."""
+
+    return bool(lxml_html.document_fromstring(html_template).xpath(
+        "//*[@data-poster-root][@data-content-carrier]"
+    ))
+
+
+def refresh_paper_identity(state: dict[str, Any]) -> None:
+    """Reconcile bibliographic evidence for draft and revision checkpoint consumers."""
+    prepared = state["paper_source"]
+    identity = paper_identity.merge(prepared, state["content_budget"].get("paper_identity", {}))
+    diagnostics = prepared.get("identity_diagnostics", {})
+    owned = list(state.get("identity_warnings", diagnostics.values()))
+    if "identity_warnings" not in state:
+        issue = outcomes.workflow_issues(state).get("identity", {})
+        if issue.get("summary"):
+            owned.append(str(issue["summary"]))
+    # An empty diagnostic map also records a completed source parse; optional
+    # affiliations can be absent from that result. Legacy snapshots are parsed once.
+    if prepared.get("kind") == "latex" and "identity_diagnostics" not in prepared:
+        recovered, diagnostics = latex_identity.extract_identity(state["source_text"])
+        identity = paper_identity.merge(identity, recovered)
+    state["paper_source"] = {**state["paper_source"], **identity, "identity_diagnostics": diagnostics}
+    state["content_budget"] = {**state["content_budget"], "paper_identity": identity}
+    previous = list(state.get("warnings") or [])
+    history = list(state.get("warning_history") or [])
+    missing = paper_identity.warnings(identity)
+    current = [
+        warning for field, warning in diagnostics.items() if not identity.get(field)
+    ] + missing
+    history.extend(warning for warning in owned if warning not in current)
+    state["identity_warnings"] = current
+    state["warnings"] = list(dict.fromkeys([
+        *(warning for warning in previous if warning not in owned), *current,
+    ]))
+    if history:
+        state["warning_history"] = list(dict.fromkeys(history))
+    outcomes.update_workflow_issue(state, "identity", {
+        "code": "paper_identity_incomplete", "summary": missing[0],
+    } if missing else None)
 
 
 def persist_revision_sidecar(
@@ -129,7 +175,10 @@ def revision_checkpoint_payload(
         "html_template": html_template,
         "visual_iteration": visual_iteration,
     }
-    for name in ("source_figure_observations", "reference_image", "editing_issue"):
+    for name in (
+        "source_figure_observations", "reference_image", "workflow_issues", "editing_issue",
+        "identity_warnings", "warning_history",
+    ):
         if name in state:
             payload[name] = state[name]
     return payload
@@ -138,16 +187,16 @@ def revision_checkpoint_payload(
 def checkpoint_template_signature(html_template: str) -> str:
     """Ignore only deterministic asset annotations added during publication."""
 
-    without_figure_hashes = re.sub(
-        r"\s+data-source-figure-sha256=(?:\"[0-9a-f]{64}\"|'[0-9a-f]{64}')",
-        "",
-        html_template,
-        flags=re.IGNORECASE,
-    )
-    return re.sub(
-        r"(?:asset-sha256://[0-9a-f]{64}|asset://\d+)",
-        "asset://*",
-        without_figure_hashes,
+    def normalize(value: str) -> str:
+        if is_asset_token(value) or (
+            value.startswith("asset-sha256://")
+            and is_sha256(value.removeprefix("asset-sha256://"))
+        ):
+            return "asset://*"
+        return value
+
+    return html_contract.map_html_asset_references(
+        html_template, normalize, remove_source_hashes=True,
     )
 
 
@@ -157,12 +206,12 @@ def bind_asset_tokens(
 ) -> str:
     """Bind each durable image position to the bytes published at that position."""
 
-    bound = html_template
-    for asset in sorted(assets, key=lambda item: len(item["token"]), reverse=True):
-        bound = bound.replace(
-            asset["token"], f"asset-sha256://{asset['content_sha256']}"
-        )
-    return bound
+    bindings = {
+        asset["token"]: f"asset-sha256://{asset['content_sha256']}" for asset in assets
+    }
+    return html_contract.map_html_asset_references(
+        html_template, lambda value: bindings.get(value, value),
+    )
 
 
 def visual_content_brief(
@@ -190,6 +239,7 @@ def visual_content_brief(
                     "id": module_id,
                     "semantic_roles": entry["semantic_roles"],
                     "priority": entry["priority"],
+                    "visual_kind": entry["visual_kind"],
                     "source_label": "; ".join(entry["source_labels"]),
                     "figure_sha256s": list(entry["source_figure_sha256s"]),
                 }
@@ -212,7 +262,6 @@ def visual_revision_feedback(
     receipt_path: str,
     *,
     parent_html_sha256: str,
-    content_budget: dict[str, Any] | None,
 ) -> tuple[
     str,
     int,
@@ -226,12 +275,12 @@ def visual_revision_feedback(
         receipt_path,
         expected_html_sha256=parent_html_sha256,
     )
-    review_contract.validate_issue_targets(
-        receipt.get("critical_issues"),
-        grounded_module_ids=_content_module_ids(content_budget),
-    )
-    feedback = review_contract.format_revision_feedback(receipt)
-    next_iteration = int(receipt["iteration"]) + 1
+    if receipt["quality_state"] == "revision-required":
+        feedback = review_contract.format_revision_feedback(receipt)
+        next_iteration = int(receipt["iteration"]) + 1
+    else:
+        feedback = "Previous visual review passed.\n" + str(receipt["summary"])
+        next_iteration = 0
     operations = frozenset(
         str(issue["operation"]) for issue in receipt["critical_issues"]
     )
@@ -255,18 +304,20 @@ def validate_content_replan_targets(
     *,
     content_budget: dict[str, Any] | None,
 ) -> frozenset[str]:
-    """Bind explicit copy-edit authority to existing grounded module ids."""
+    """Resolve optional copy scope to current modules and unowned poster prose."""
 
+    valid_ids = {"poster", *_content_module_ids(content_budget)}
+    if value is None:
+        return frozenset(valid_ids)
     if not isinstance(value, (list, tuple)) or not value:
         raise ValueError("content_replan_targets must be a non-empty array")
     if any(not isinstance(target, str) or not target.strip() for target in value):
         raise ValueError("content_replan_targets must contain non-empty strings")
-    valid_ids = set(_content_module_ids(content_budget))
     targets = {target.strip() for target in value}
     unknown = sorted(targets - valid_ids)
     if unknown:
         raise ValueError(
-            "content-replan targets must be grounded module ids: " + ", ".join(unknown),
+            "content-replan targets must be grounded module ids or poster: " + ", ".join(unknown),
         )
     return frozenset(targets)
 
@@ -294,10 +345,6 @@ def vlm_revision_mode(
     normalized = {str(operation) for operation in operations}
     if "content-replan" in normalized:
         return "content-replan"
-    if "reflow" in normalized:
-        # Reflow needs layout-shell authority because wrapper topology may change
-        # while the scientific snapshot remains frozen.
-        return "full-layout"
     return "full-layout"
 
 
@@ -306,7 +353,7 @@ def manual_revision_mode(value: object) -> str:
 
     requested = str(value or "").strip()
     if not requested:
-        return "full-layout"
+        return "content-replan"
     if requested in {"full-layout", "content-replan"}:
         return requested
     raise ValueError("revision_mode must be full-layout or content-replan")

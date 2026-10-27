@@ -5,26 +5,27 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import re
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
+
+import image_assets
 
 from posterlib.content import html_contract, planning
 from posterlib.generation import authoring, model_runtime
 from posterlib.runtime import browser_inspection, runtime_io
-from posterlib.sources import source_preparation
+from posterlib.sources import paper_identity, source_preparation
 from posterlib.visual import (
+    design_direction,
     figure_analysis,
     inspection_feedback,
     reference_analysis,
     reference_catalog,
-    reference_generation,
     venue_branding,
 )
 
 from . import (
-    deadlines,
     draft_checkpoint,
     outcomes,
     request_normalization,
@@ -65,9 +66,6 @@ async def run_draft(
     workspace = resume_workspace or runtime_io.create_workspace(input_data, ctx)
     persisted = resume_workspace is not None or _has_persisted_identity(ctx)
     checkpoint = draft_checkpoint.load(workspace) if persisted else None
-    if checkpoint is not None and "author_model_role" not in input_data:
-        input_data["author_model_role"] = checkpoint["author_model_role"]
-
     state: dict[str, Any] | None = None
     assets: list[dict[str, Any]] = []
     last_candidate: tuple[dict[str, Any], dict[str, Any]] | None = None
@@ -77,6 +75,8 @@ async def run_draft(
     ) -> dict[str, Any]:
         """Deliver authored bytes with their actual check results, including defects."""
 
+        if not revision_state.is_content_carrier(candidate_state["html_template"]):
+            outcomes.update_workflow_issue(candidate_state, "planning", None)
         result = await publish_version(
             html_text=html_contract.embed_assets(candidate_state["html_template"], assets),
             source_text=candidate_state["source_text"],
@@ -92,8 +92,7 @@ async def run_draft(
         )
         result["paper_source"] = dict(candidate_state["paper_source"])
         result["author_model_role"] = str(candidate_state["author_model_role"])
-        if isinstance(candidate_state.get("editing_issue"), Mapping):
-            result["editing_issue"] = dict(candidate_state["editing_issue"])
+        outcomes.merge_workflow_issues(result, candidate_state)
         return result
 
     stage = (
@@ -115,6 +114,11 @@ async def run_draft(
                     visual_client=visual_client,
                     deadline=deadline,
                 )
+                effective, requested_feedback = request_normalization.effective_authoring_request(
+                    input_data, state,
+                )
+                state.update(effective)
+                input_data["author_model_role"] = effective["author_model_role"]
                 if persisted:
                     draft_checkpoint.save(
                         workspace, stage="plan-ready", state=state
@@ -131,46 +135,30 @@ async def run_draft(
                     ctx=ctx,
                     max_source_chars=max_source_chars,
                 )
-                state["author_model_role"] = (
-                    request_normalization.author_model_role(input_data)
+                effective, requested_feedback = request_normalization.effective_authoring_request(
+                    input_data, state,
                 )
+                state.update(effective)
+                input_data["author_model_role"] = effective["author_model_role"]
                 if rendered_feedback is not None:
                     if stage != "author-ready":
                         raise DraftPipelineError(
                             "invalid_payload",
-                            "Rendered content planning requires an authored draft checkpoint.",
+                            "Rendered feedback requires an authored draft checkpoint.",
                         )
-                    await _replan_after_render(
-                        state,
-                        assets=assets,
-                        feedback=rendered_feedback,
-                        input_data=input_data,
-                        llm=planning_llm(ctx),
-                        visual_client=visual_client,
-                        deadline=deadline,
-                    )
-                    stage = "design-ready"
-                    draft_checkpoint.save(workspace, stage=stage, state=state)
+                    requested_feedback = "\n\n".join(filter(None, (
+                        requested_feedback,
+                        json.dumps(dict(rendered_feedback), ensure_ascii=False),
+                    )))
                 elif persisted:
                     draft_checkpoint.save(
                         workspace,
                         stage=str(checkpoint["stage"]),
                         state=state,
                     )
-            reference_phase_deadline = (
-                deadlines.reference_deadline(
-                    deadline,
-                    asyncio.get_running_loop().time(),
-                )
-                if deadline is not None
-                else None
-            )
             if stage == "plan-ready":
                 design_reference = await _reference_stage(
                     state,
-                    workspace=workspace,
-                    deadline=reference_phase_deadline,
-                    generate_pixels=visual_client is not None,
                 )
                 state["design_reference"] = design_reference.to_dict()
                 if design_reference.source_kind == "custom":
@@ -201,7 +189,7 @@ async def run_draft(
                     state,
                     reference=design_reference,
                     client=visual_client,
-                    deadline=reference_phase_deadline,
+                    deadline=deadline,
                 )
                 if persisted:
                     draft_checkpoint.save(workspace, stage="design-ready", state=state)
@@ -219,6 +207,11 @@ async def run_draft(
                 )
                 state["visual_design"] = reference_brief.to_dict()
 
+            design_requirements = design_direction.context(
+                reference_source_kind=design_reference.source_kind,
+                user_direction=state["authoring_request"],
+                visual_preferences=state["visual_preferences"],
+            )
             expected_figures = set(state["source_figure_sha256s"])
             page_plan = dict(state["page_plan"])
             if input_data.get("visual_iteration") is not None:
@@ -228,8 +221,6 @@ async def run_draft(
             accepted_inspection = None
             inspected_authored: list[tuple[str, bool]] = []
             timeout_seconds, transport_retries = request_normalization.authoring_transport_options(input_data)
-            requested_feedback = str(input_data.get("feedback") or "").strip()
-
             async def inspect_authored(
                 candidate: str, *, candidate_page_plan: Mapping[str, Any] | None = None,
             ) -> dict[str, Any]:
@@ -249,13 +240,14 @@ async def run_draft(
                 candidate_state = {
                     **state, "html_template": candidate, "page_plan": candidate_page,
                 }
+                authored = not revision_state.is_content_carrier(candidate)
                 revision_state.persist_revision_sidecar(
                     artifact_path=candidate_path, html_text=embedded,
                     checkpoint_state=candidate_state,
                 )
                 # Static validation already passed. Keep the authored HTML even
                 # if rendering consumes the remaining editing time.
-                if last_candidate is None:
+                if authored and last_candidate is None:
                     last_candidate = (
                         candidate_state, outcomes.inspection_deadline_result()
                     )
@@ -277,7 +269,7 @@ async def run_draft(
                         ),
                     ))
                 previous = last_candidate[1] if last_candidate is not None else {}
-                if (
+                if authored and (
                     previous.get("status") != "ok"
                     or (
                         measured.get("status") == "ok"
@@ -300,13 +292,13 @@ async def run_draft(
                         budget=budget,
                         page_plan=page_plan,
                         paper_source=dict(state["paper_source"]),
+                        source_text=state["source_text"],
                         authoring_request=state["authoring_request"],
                         reference_brief=reference_brief,
+                        design_requirements=design_requirements,
                         source_figure_observations=figure_analysis.normalize_observations(
                             state.get("source_figure_observations"),
-                            selected_sha256s=set(
-                                figure_analysis.selected_figure_sha256s(budget)
-                            ),
+                            selected_sha256s=set(state["asset_sha256s"]),
                         ),
                         llm=author_llm(ctx),
                         timeout_seconds=timeout_seconds,
@@ -319,14 +311,7 @@ async def run_draft(
                         raise
                     candidate_state, accepted_inspection = last_candidate
                     html_template = candidate_state["html_template"]
-                    authoring_issue = (
-                        {
-                            "code": "authoring_unavailable",
-                            "summary": str(exc)[:300],
-                        }
-                        if html_template == inspected_authored[0][0]
-                        else None
-                    )
+                    authoring_issue = {**exc.as_issue(), "phase": "editing"}
                 if (
                     page_plan.get("strategy") == "auto"
                     and len(inspected_authored) > 1
@@ -364,9 +349,8 @@ async def run_draft(
                                     "width_mm": float(page_plan["width_mm"]),
                                     "height_mm": maximum_height,
                                 },
-                                content_contract=page_plan.get("content_contract"),
                                 paper_identity=paper_identity,
-                                reference_html=inspected_authored[0][0],
+                                reference_html=authored_candidate,
                             )
                             if report.get("status") != "ok":
                                 continue
@@ -375,7 +359,7 @@ async def run_draft(
                             )
                             if checked.get("status") == "ok":
                                 html_template = expanded
-                                accepted_inspection = checked["_accepted_inspection"]
+                                accepted_inspection = checked["_rendered_inspection"]
                                 authoring_issue = None
                                 page_plan = expanded_page
                                 break
@@ -383,7 +367,7 @@ async def run_draft(
                 page_plan["content_contract"] = html_contract.authored_content_contract(html_template, assets)
                 state["page_plan"] = dict(page_plan)
                 state["html_template"] = html_template
-                _update_authoring_issue(state, authoring_issue)
+                outcomes.update_workflow_issue(state, "editing", authoring_issue)
                 if persisted:
                     draft_checkpoint.save(workspace, stage="author-ready", state=state)
                     await runtime_io.progress(
@@ -399,20 +383,24 @@ async def run_draft(
                     page_plan=page_plan, paper_identity=paper_identity,
                 )
                 checked = await inspect_authored(html_template)
-                if requested_feedback or checked["status"] != "ok":
+                if requested_feedback or revision_state.is_content_carrier(html_template) or checked["status"] != "ok":
                     html_template, accepted_inspection, authoring_issue = await _author_stage(
                         progress_callback, assets=assets, expected_figures=expected_figures,
                         budget=budget, page_plan=page_plan, paper_source=paper_identity,
+                        source_text=state["source_text"],
                         authoring_request=state["authoring_request"],
                         reference_brief=reference_brief, llm=author_llm(ctx),
+                        design_requirements=design_requirements,
+                        source_figure_observations=state.get("source_figure_observations"),
                         timeout_seconds=timeout_seconds, max_transport_retries=transport_retries,
                         source_html=html_template,
-                        feedback="\n\n".join(filter(None, [requested_feedback, json.dumps({k:v for k,v in checked.items() if not k.startswith("_")})])),
+                        feedback=requested_feedback,
+                        initial_inspection=checked,
                         inspect=inspect_authored, deadline=deadline,
                     )
-                    _update_authoring_issue(state, authoring_issue)
+                    outcomes.update_workflow_issue(state, "editing", authoring_issue)
                 else:
-                    accepted_inspection = checked["_accepted_inspection"]
+                    accepted_inspection = checked["_rendered_inspection"]
                 page_plan["content_contract"] = html_contract.authored_content_contract(html_template, assets)
                 state = {**state, "html_template": html_template, "page_plan": page_plan}
 
@@ -421,23 +409,36 @@ async def run_draft(
             ).hexdigest() == resume_html_sha256:
                 return outcomes.error_result(
                     "candidate_validation_failed",
-                    "Rendered content planning did not change the selected poster HTML.",
+                    "Draft editing did not change the selected poster HTML.",
                 )
             return await publish_candidate(state, accepted_inspection)
-    except (DraftPipelineError, model_runtime.ModelBoundaryError, planning.PlanningError) as exc:
+    except asyncio.CancelledError as cancelled:
+        if persisted and stage != "author-ready" and last_candidate is not None:
+            try:
+                draft_checkpoint.save(workspace, stage="author-ready", state=last_candidate[0])
+            except OSError as exc:
+                cancelled.add_note(f"Poster checkpoint could not be saved: {exc}")
+        raise
+    except model_runtime.ModelBoundaryError as exc:
+        result = outcomes.error_result(exc.code, str(exc), error_info=exc.as_issue())
+    except (DraftPipelineError, planning.PlanningError) as exc:
         result = outcomes.error_result(exc.code, str(exc))
+    except reference_analysis.ReferenceAnalysisError as exc:
+        result = outcomes.error_result("invalid_payload", str(exc))
     except browser_inspection.LayoutMeasurementError as exc:
         result = dict(exc.result)
     except TimeoutError:
         result = outcomes.inspection_deadline_result()
     if last_candidate is not None:
         candidate_state, inspection = last_candidate
-        delivered = await publish_candidate(candidate_state, inspection)
-        delivered["editing_issue"] = {
+        issue = result.get("error_info") or {
             "code": result["outcome"]["code"],
             "summary": "Editing stopped before all checks passed; the authored draft is included.",
         }
-        outcomes.append_warning_once(delivered, delivered["editing_issue"]["summary"])
+        candidate_state = dict(candidate_state)
+        outcomes.update_workflow_issue(candidate_state, "editing", issue)
+        delivered = await publish_candidate(candidate_state, inspection)
+        outcomes.append_warning_once(delivered, issue["summary"])
         return delivered
     recovered = draft_checkpoint.load(workspace) if persisted else None
     result.update(
@@ -453,174 +454,6 @@ async def run_draft(
     if state is not None and stage != "author-ready":
         result["content_budget"] = dict(state["content_budget"])
     return result
-
-
-def render_capacity_feedback(result: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Identify a rendered draft whose carrier area cannot fit the page envelope."""
-
-    inspection = result.get("inspection")
-    page_plan = result.get("page_plan")
-    if not isinstance(inspection, Mapping) or not isinstance(page_plan, Mapping):
-        return None
-    warnings = inspection.get("warnings")
-    if not isinstance(warnings, list) or not any(
-        isinstance(item, Mapping)
-        and item.get("code") in PAGE_OVERFLOW_CODES
-        for item in warnings
-    ):
-        return None
-    report = inspection.get("report")
-    report = report if isinstance(report, Mapping) else {}
-    poster = report.get("poster")
-    modules = report.get("modules")
-    if not isinstance(poster, Mapping) or not isinstance(modules, list):
-        return None
-    try:
-        px_per_mm = float(poster["width"]) / float(poster["width_mm"])
-        page_height = float(page_plan["height_mm"])
-        max_height = float(page_plan["max_height_mm"])
-        page_width = float(page_plan["width_mm"])
-        measured = {
-            str(item["module_id"]): {
-                "width_mm": round(float(item["rect"]["width"]) / px_per_mm, 1),
-                "height_mm": round(float(item["rect"]["height"]) / px_per_mm, 1),
-                "bottom_mm": round(
-                    (float(item["rect"]["top"]) + float(item["rect"]["height"]))
-                    / px_per_mm, 1,
-                ),
-            }
-            for item in modules
-            if isinstance(item, Mapping)
-            and isinstance(item.get("module_id"), str)
-            and isinstance(item.get("rect"), Mapping)
-        }
-    except (KeyError, TypeError, ValueError, ZeroDivisionError):
-        return None
-    if not measured:
-        return None
-    observed_bottom = max(item["bottom_mm"] for item in measured.values())
-    observed_area = sum(
-        item["width_mm"] * item["height_mm"] for item in measured.values()
-    )
-    if (
-        observed_bottom <= max_height
-        or observed_area <= planning.TARGET_OCCUPANCY * page_width * page_height
-    ):
-        return None
-    review = result.get("visual_review")
-    return {
-        "page_width_mm": page_width,
-        "page_height_mm": page_height,
-        "maximum_page_height_mm": max_height,
-        "observed_content_bottom_mm": round(observed_bottom, 1),
-        "overflow_beyond_maximum_mm": round(observed_bottom - max_height, 1),
-        "observed_module_area_mm2": round(observed_area),
-        "module_count": len(measured),
-        "rendered_modules": measured,
-        "visual_review_summary": str(review.get("summary") or "")[:1200]
-        if isinstance(review, Mapping) else "",
-    }
-
-
-async def _replan_after_render(
-    state: dict[str, Any],
-    *,
-    assets: list[dict[str, Any]],
-    feedback: Mapping[str, Any],
-    input_data: Mapping[str, Any],
-    llm: Any,
-    visual_client: Any | None,
-    deadline: float | None,
-) -> None:
-    """Let the main model edit the scientific carrier after measured overflow."""
-
-    current_budget = dict(state["content_budget"])
-    previous_page = dict(state["page_plan"])
-    observations = state.get("source_figure_observations") or {}
-    width = float(previous_page["width_mm"])
-    height = float(previous_page["height_mm"])
-    source_equations = source_preparation.structured_source_equations(
-        state["paper_source"]
-    )
-    page = {
-        "strategy": previous_page["strategy"],
-        "width_mm": width,
-        "height_mm": height,
-        "max_height_mm": float(previous_page["max_height_mm"]),
-        "draft_capacity_observation": {
-            "predicted_occupancy": float(previous_page["predicted_occupancy"]),
-            "module_area_mm2": planning.module_area_estimates(
-                current_budget,
-                width_mm=width,
-                height_mm=height,
-                figure_observations=observations,
-            ),
-        },
-    }
-    budget = await model_runtime.request_content_plan(
-        llm,
-        source_text=str(state["source_text"]),
-        assets=assets,
-        source_figure_sha256s=set(state["source_figure_sha256s"]),
-        authoring_request=str(state["authoring_request"]),
-        source_equations=(
-            source_equations if state["paper_source"].get("kind") == "pdf" else None
-        ),
-        page=page,
-        orientation=str(previous_page["orientation"]),
-        draft_budget=current_budget,
-        figure_observations=observations,
-        rendered_feedback=feedback,
-        max_repair_attempts=request_normalization.repair_attempts(dict(input_data)),
-        deadline=deadline,
-    )
-    if budget == current_budget:
-        raise DraftPipelineError(
-            "candidate_validation_failed",
-            "Rendered content planning returned the unchanged evidence budget.",
-        )
-    added_figures = [
-        digest for digest in figure_analysis.selected_figure_sha256s(budget)
-        if digest not in observations
-    ]
-    if added_figures and visual_client is not None:
-        added_observations, warning = await figure_analysis.analyze_figures(
-            added_figures,
-            assets,
-            client=visual_client,
-            deadline=deadline,
-        )
-        observations = {**observations, **added_observations}
-        if warning:
-            _append_warning_once(state["warnings"], warning)
-    new_page = planning.estimate_page(
-        budget,
-        page={"width_mm": width, "height_mm": height},
-        orientation=str(previous_page["orientation"]),
-        figure_observations=observations,
-    ).to_dict()
-    # Retain the measured sheet while changing its scientific load. Shrinking it
-    # from the same undercounted estimate can recreate the original overflow.
-    new_page["strategy"] = previous_page["strategy"]
-    new_page["min_height_mm"] = previous_page["min_height_mm"]
-    new_page["max_height_mm"] = previous_page["max_height_mm"]
-    if previous_page["strategy"] == "auto":
-        new_page["reasons"] = [
-            "Retained the measured adaptive sheet while revising its content."
-        ]
-    new_page["requested_orientation"] = previous_page.get(
-        "requested_orientation", "auto"
-    )
-    budget["page_orientation"] = str(new_page["orientation"])
-    state["source_figure_observations"] = figure_analysis.normalize_observations(
-        observations,
-        selected_sha256s=set(figure_analysis.selected_figure_sha256s(budget)),
-    )
-    state["content_budget"] = budget
-    state["page_plan"] = new_page
-    state["visual_iteration"] = int(state["visual_iteration"]) + 1
-    state.pop("html_template", None)
-    state.pop("editing_issue", None)
 
 
 async def _plan_stage(
@@ -643,15 +476,9 @@ async def _plan_stage(
     _validate_source_size(source.text, max_source_chars)
     asset_inputs = [
         *source.assets,
-        *[
-            source_preparation.normalize_user_asset(item)
-            for item in source_preparation.normalize_asset_inputs(input_data.get("assets"))
-        ],
+        *source_preparation.requested_asset_inputs(input_data),
     ]
-    requested_venue = _resolve_requested_venue(
-        input_data,
-        authoring_request=source.authoring_request,
-    )
+    requested_venue = _resolve_requested_venue(input_data)
     venue_asset_input = _venue_brand_asset_input(requested_venue)
     if venue_asset_input is not None:
         asset_inputs.append(venue_asset_input)
@@ -673,31 +500,37 @@ async def _plan_stage(
         except reference_catalog.ReferenceSeedError as exc:
             raise DraftPipelineError("invalid_payload", str(exc)) from exc
     supplied_budget = input_data.get("content_budget")
-    planning_deadline: float | None = None
     planning_warnings: list[str] = []
-    planner_completed = supplied_budget is not None
     planning_issue: dict[str, str] | None = None
     if supplied_budget is not None:
-        supplied_budget = planning.bind_prepared_figure_geometry(
-            dict(supplied_budget),
-            assets=assets,
-        )
+        if isinstance(supplied_budget, Mapping):
+            supplied_budget = planning.bind_prepared_figure_geometry(
+                dict(supplied_budget),
+                assets=assets,
+            )
         budget = planning.normalize_content_budget(
             supplied_budget,
             source_figure_sha256s=expected_figures,
             source_equations=source_equations,
+            source_text=source.text,
+            source_assets=assets,
+        )
+    elif (
+        input_data.get("page") is not None
+        and source.summary.get("title")
+        and source.summary.get("authors")
+    ):
+        # Prepared identity and fixed geometry permit joint evidence/composition.
+        # Text sources with missing identity still use the existing planner.
+        budget = _source_carrier_budget(
+            source_text=source.text,
+            source_kind=str(source.summary.get("kind") or ""),
+            source_figure_sha256s=expected_figures,
+            source_equations=source_equations,
+            orientation=requested_orientation,
         )
     else:
         await runtime_io.progress(progress_callback, "poster.plan-content", 0.10)
-        planning_deadline = (
-            deadlines.draft_planning_deadline(
-                deadline,
-                asyncio.get_running_loop().time(),
-                reserve_reference_phase=visual_client is not None,
-            )
-            if deadline is not None
-            else None
-        )
         try:
             budget = await model_runtime.request_content_plan(
                 planning_llm(ctx),
@@ -705,16 +538,17 @@ async def _plan_stage(
                 assets=assets,
                 source_figure_sha256s=expected_figures,
                 authoring_request=source.authoring_request,
+                prepared_identity=source.summary,
                 max_repair_attempts=request_normalization.repair_attempts(input_data),
                 source_equations=source_equations,
                 page=input_data.get("page"),
                 orientation=requested_orientation,
-                deadline=planning_deadline,
+                deadline=deadline,
             )
-            planner_completed = True
         except model_runtime.ModelBoundaryError as exc:
-            budget = _grounded_fallback_budget(
+            budget = _source_carrier_budget(
                 source_text=source.text,
+                source_kind=str(source.summary.get("kind") or ""),
                 source_figure_sha256s=expected_figures,
                 source_equations=source_equations,
                 orientation=requested_orientation,
@@ -725,19 +559,25 @@ async def _plan_stage(
             )
             planning_issue = {
                 "code": "content_planning_unavailable",
-                "summary": "Content planning did not produce an audited scientific carrier.",
+                "summary": "Initial evidence planning did not produce a usable proposal.",
             }
     page_plan = planning.estimate_page(
         budget,
         page=input_data.get("page"),
         orientation=requested_orientation,
     ).to_dict()
-    draft_figure_hashes = figure_analysis.selected_figure_sha256s(budget)
+    # Joint composition chooses among available figures; observation must precede
+    # that choice, including when no separate content plan is needed.
+    draft_figure_hashes = list(dict.fromkeys(
+        str(asset["content_sha256"])
+        for asset in assets
+        if image_assets.is_source_figure_asset(asset)
+        or asset.get("source_kind") == "native_component"
+    ))
     figure_observations: dict[str, dict[str, str]] = {}
     figure_warning: str | None = None
     if (
         supplied_budget is None
-        and planner_completed
         and visual_client is not None
         and draft_figure_hashes
     ):
@@ -751,110 +591,10 @@ async def _plan_stage(
                 draft_figure_hashes,
                 assets,
                 client=visual_client,
-                deadline=planning_deadline,
+                deadline=deadline,
             )
         )
-    if supplied_budget is None and planner_completed:
-        page_plan = planning.estimate_page(
-            budget,
-            page=input_data.get("page"),
-            orientation=requested_orientation,
-            figure_observations=figure_observations,
-        ).to_dict()
-        selected_page = {
-            "width_mm": float(page_plan["width_mm"]),
-            "height_mm": float(page_plan["height_mm"]),
-            "max_height_mm": float(page_plan["max_height_mm"]),
-            "strategy": str(page_plan["strategy"]),
-        }
-        draft_pressure = planning.estimate_page(
-            budget,
-            page=selected_page,
-            orientation=str(page_plan["orientation"]),
-            figure_observations=figure_observations,
-        ).to_dict()
-        selected_page["draft_capacity_observation"] = {
-            "predicted_occupancy": float(draft_pressure["predicted_occupancy"]),
-            "module_area_mm2": planning.module_area_estimates(
-                budget,
-                width_mm=selected_page["width_mm"],
-                height_mm=selected_page["height_mm"],
-                figure_observations=figure_observations,
-            ),
-        }
-        selected_page["viewing_type_reference_mm"] = planning.poster_type_reference(
-            selected_page["width_mm"], selected_page["height_mm"]
-        )
-        observed_figures = set(draft_figure_hashes)
-        previous_pressure = float(draft_pressure["predicted_occupancy"])
-        audits_completed = 0
-        while True:
-            try:
-                audited_budget = await model_runtime.request_content_plan(
-                    planning_llm(ctx),
-                    source_text=source.text,
-                    assets=assets,
-                    source_figure_sha256s=expected_figures,
-                    authoring_request=source.authoring_request,
-                    max_repair_attempts=request_normalization.repair_attempts(input_data),
-                    source_equations=source_equations,
-                    page=selected_page,
-                    orientation=requested_orientation,
-                    draft_budget=budget,
-                    figure_observations=figure_observations,
-                    deadline=planning_deadline,
-                )
-            except model_runtime.ModelBoundaryError as exc:
-                planning_warnings.append(
-                    "Page-aware content audit stopped before returning a valid revision; "
-                    f"the last valid content plan was retained. ({exc})"
-                )
-                if not audits_completed:
-                    planning_issue = {
-                        "code": "content_audit_unavailable",
-                        "summary": "The final main-model scientific audit did not complete.",
-                    }
-                break
-            budget = audited_budget
-            audits_completed += 1
-            added_figures = [
-                digest
-                for digest in figure_analysis.selected_figure_sha256s(budget)
-                if digest not in observed_figures
-            ]
-            observed_figures.update(added_figures)
-            if added_figures and visual_client is not None:
-                added_observations, added_warning = await figure_analysis.analyze_figures(
-                    added_figures,
-                    assets,
-                    client=visual_client,
-                    deadline=planning_deadline,
-                )
-                figure_observations.update(added_observations)
-                if added_warning:
-                    planning_warnings.append(added_warning)
-            draft_pressure = planning.estimate_page(
-                budget,
-                page=selected_page,
-                figure_observations=figure_observations,
-            ).to_dict()
-            current_pressure = float(draft_pressure["predicted_occupancy"])
-            if (
-                selected_page["height_mm"] < selected_page["max_height_mm"]
-                or current_pressure <= planning.TARGET_OCCUPANCY
-                or current_pressure >= previous_pressure
-            ):
-                break
-            selected_page["draft_capacity_observation"] = {
-                "predicted_occupancy": current_pressure,
-                "module_area_mm2": planning.module_area_estimates(
-                    budget,
-                    width_mm=selected_page["width_mm"],
-                    height_mm=selected_page["height_mm"],
-                    figure_observations=figure_observations,
-                ),
-            }
-            previous_pressure = current_pressure
+    if figure_observations:
         page_plan = planning.estimate_page(
             budget,
             page=input_data.get("page"),
@@ -863,7 +603,7 @@ async def _plan_stage(
         ).to_dict()
     figure_observations = figure_analysis.normalize_observations(
         figure_observations,
-        selected_sha256s=set(figure_analysis.selected_figure_sha256s(budget)),
+        selected_sha256s=set(draft_figure_hashes),
     )
     budget["page_orientation"] = str(page_plan["orientation"])
     # Retain request authority separately from the estimator's chosen geometry.
@@ -875,6 +615,8 @@ async def _plan_stage(
             *page_plan["reasons"],
             "Matched the adaptive page orientation to the supplied poster reference.",
         ]
+    identity = paper_identity.merge(source.summary, budget.get("paper_identity", {}))
+    budget["paper_identity"] = identity
     state = {
         "source_text": source.text,
         "authoring_request": source.authoring_request,
@@ -887,8 +629,9 @@ async def _plan_stage(
             *([figure_warning] if figure_warning else []),
             *planning_warnings,
         ],
+        "identity_warnings": list(source.summary.get("identity_diagnostics", {}).values()),
         "paper_source": _bind_paper_identity(
-            source.summary,
+            {**source.summary, **identity},
             assets,
             requested_venue=requested_venue,
         ),
@@ -900,8 +643,9 @@ async def _plan_stage(
         "author_model_role": request_normalization.author_model_role(input_data),
         "visual_iteration": 0,
     }
+    revision_state.refresh_paper_identity(state)
     if planning_issue is not None:
-        state["editing_issue"] = planning_issue
+        outcomes.update_workflow_issue(state, "planning", planning_issue)
     if figure_observations:
         state["source_figure_observations"] = figure_observations
     reference_image = str(input_data.get("reference_image") or "").strip()
@@ -937,16 +681,17 @@ def _preserve_custom_reference(value: str, *, workspace: Path) -> str:
         ) from exc
 
 
-def _grounded_fallback_budget(
+def _source_carrier_budget(
     *,
     source_text: str,
+    source_kind: str,
     source_figure_sha256s: set[str],
     source_equations: list[dict[str, str]],
     orientation: str,
 ) -> dict[str, Any]:
-    """Build one delivery-only carrier from a bounded prefix of the exact source."""
+    """Seed joint composition with a bounded excerpt of the exact source."""
 
-    excerpt = _source_excerpt(source_text)
+    excerpt = _source_excerpt(source_text, source_kind=source_kind)
     if not excerpt:
         raise DraftPipelineError(
             "source_read_failed",
@@ -967,7 +712,7 @@ def _grounded_fallback_budget(
                     "priority": "focal",
                     "visual_kind": "text",
                     "text": excerpt,
-                    "source_label": "Source text",
+                    "source_label": " ".join(source_text.split()[:12]),
                     "figure_sha256s": [],
                     "equations": [],
                 }
@@ -975,20 +720,45 @@ def _grounded_fallback_budget(
         },
         source_figure_sha256s=source_figure_sha256s,
         source_equations=source_equations,
+        source_text=source_text,
     )
 
 
-def _source_excerpt(source_text: str) -> str:
+def _source_excerpt(source_text: str, *, source_kind: str) -> str:
     """Return a bounded plain-text prefix without selecting scientific evidence."""
 
-    plain = re.sub(r"\$\$.*?\$\$|\\\[.*?\\\]", " ", source_text, flags=re.DOTALL)
-    plain = re.sub(r"\$[^$]*\$|\\\([^)]*\\\)", " ", plain, flags=re.DOTALL)
-    text = " ".join(
+    from posterlib.content.equations import remove_delimited_math
+
+    if source_kind == "latex":
+        from pylatexenc import latex2text
+
+        from posterlib.sources import tex_parser
+
+        document = next(tex_parser.environments(source_text, ("document",)), None)
+        body = document.body if document is not None else source_text
+        text_context = latex2text.get_default_latex_context_db()
+        # Bibliographic fields already own the title band. Suppress generated
+        # title matter, including maketitle's implicit current date.
+        text_context.add_context_category(
+            "poster-source-carrier",
+            macros=[latex2text.MacroTextSpec("maketitle", discard=True)],
+            prepend=True,
+        )
+        plain = latex2text.LatexNodes2Text(
+            latex_context=text_context, math_mode="remove",
+        ).latex_to_text(body)
+    else:
+        plain = remove_delimited_math(source_text)
+    text = " ".join(" ".join(
         line.strip()
         for line in plain.splitlines()
-        if line.strip() and not re.fullmatch(r"\[Page \d+\]", line.strip())
-    )
-    return text[:1600].rsplit(" ", 1)[0].strip()
+        if line.strip() and not (
+            line.strip().startswith("[Page ")
+            and line.strip().endswith("]")
+            and line.strip()[6:-1].isdecimal()
+        )
+    ).split())
+    return text if len(text) <= 1600 else text[:1600].rsplit(" ", 1)[0].strip()
 
 
 async def _restore_state(
@@ -1000,6 +770,7 @@ async def _restore_state(
     state = dict(checkpoint)
     source_text = str(state["source_text"])
     _validate_source_size(source_text, max_source_chars)
+    revision_state.refresh_paper_identity(state)
     assets = await source_preparation.restore_checkpoint_assets(state, ctx)
     if "html_template" in state:
         for asset in assets:
@@ -1011,34 +782,24 @@ async def _restore_state(
         state["paper_source"]
     )
     budget = planning.normalize_content_budget(
-        {
-            key: value
-            for key, value in state["content_budget"].items()
-            if key not in {"organization_mode", "focal_role"}
-        },
+        state["content_budget"],
         source_figure_sha256s=expected_figures,
-        source_equations=(
-            source_equations
-            if state["paper_source"].get("kind") == "pdf"
-            else None
-        ),
+        source_text=source_text,
+        source_equations=source_equations,
+        source_assets=assets,
     )
     state["content_budget"] = budget
     state["source_figure_observations"] = figure_analysis.normalize_observations(
         state.get("source_figure_observations"),
-        selected_sha256s=set(figure_analysis.selected_figure_sha256s(budget)),
+        selected_sha256s={str(asset["content_sha256"]) for asset in assets},
     )
     return state, assets
 
 
 async def _reference_stage(
     state: Mapping[str, Any],
-    *,
-    workspace: Path,
-    deadline: float | None,
-    generate_pixels: bool = True,
 ) -> reference_catalog.ReferenceBundle:
-    """Resolve one content-free reference after planning and before authoring."""
+    """Resolve an explicit reference or one published academic example."""
 
     custom_image = str(state.get("reference_image") or "").strip()
     if custom_image:
@@ -1048,43 +809,14 @@ async def _reference_stage(
             )
         except reference_catalog.ReferenceSeedError as exc:
             raise DraftPipelineError("invalid_payload", str(exc)) from exc
-    signals = reference_signals(
-        dict(state["content_budget"]),
-        dict(state["page_plan"]),
-    )
-    selection = signals["selection"]
+    page = state["page_plan"]
+    orientation = str(page.get("orientation") or "").strip().lower()
+    if orientation not in {"landscape", "portrait"}:
+        orientation = "landscape" if page["width_mm"] >= page["height_mm"] else "portrait"
     seed = reference_catalog.select_seed(
-        orientation=str(selection["orientation"]),
-        organization_mode=str(selection["organization_mode"]),
-        figure_count=int(selection["figure_count"]),
-        module_weights=dict(selection["module_weights"]),
-        density=str(selection["density"]),
+        orientation=orientation,
     )
-    if not generate_pixels:
-        _config, warning = reference_generation.image_config_from_env()
-        return reference_catalog.load_seed_bundle(
-            seed,
-            warning=(
-                warning
-                if warning is not None
-                else reference_generation.GENERATION_UNUSED_WARNING
-            ),
-        )
-    prompt = reference_generation_prompt(signals)
-    generation_budget_s: float | None = None
-    if deadline is not None:
-        remaining = max(0.0, deadline - asyncio.get_running_loop().time())
-        # Generated pixels still need interpretation before they become executable
-        # grammar.  Keep half of the shared phase for that consumer instead of
-        # allowing two image-generation attempts to exhaust the entire deadline.
-        generation_budget_s = remaining / 2.0
-    return await asyncio.to_thread(
-        reference_generation.resolve_reference,
-        seed,
-        prompt=prompt,
-        output_dir=workspace / "design-reference",
-        generation_budget_s=generation_budget_s,
-    )
+    return reference_catalog.load_seed_bundle(seed)
 
 
 async def _reference_analysis_stage(
@@ -1096,143 +828,30 @@ async def _reference_analysis_stage(
 ) -> reference_analysis.ReferenceAnalysis:
     """Ask the visual model for a reference brief without compiling a layout."""
 
-    plan = await reference_analysis.analyze_reference(
-        reference,
-        client=client,
-        preferences=dict(state["visual_preferences"]),
-        deadline=deadline,
-    )
+    try:
+        reference = replace(reference, image_path=str(reference.verified_image_path()))
+    except reference_catalog.ReferenceSeedError as exc:
+        plan = reference_analysis.ReferenceAnalysis(
+            reference_image_sha256=reference.image_sha256,
+            planner="adaptive",
+            warning=f"Visual reference image is unavailable; composition uses the paper and user direction. ({exc})",
+        )
+    else:
+        plan = await reference_analysis.analyze_reference(
+            reference,
+            client=client,
+            preferences=dict(state["visual_preferences"]),
+            deadline=deadline,
+        )
     if plan.warning:
         state["warnings"].append(plan.warning)
     state["visual_design"] = plan.to_dict()
     return plan
 
 
-def reference_signals(
-    content_budget: Mapping[str, Any],
-    page_plan: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Derive deterministic design-only signals without copying paper content."""
-
-    modules = list(content_budget["content_modules"])
-    figure_hashes: set[str] = set()
-    role_weights: dict[str, float] = {}
-    aspect_ratios: list[float] = []
-    equation_profiles: list[dict[str, Any]] = []
-    has_equations = False
-    has_tables = False
-    priority_weights = {
-        "focal": 3.0,
-        "primary": 2.0,
-        "supporting": 1.0,
-        "footer": 0.5,
-    }
-    for module in modules:
-        module_figures = [str(value) for value in module["figure_sha256s"]]
-        figure_hashes.update(module_figures)
-        priority = str(module["priority"])
-        weight = priority_weights[priority]
-        for role in module["semantic_roles"]:
-            key = str(role)
-            role_weights[key] = role_weights.get(key, 0.0) + weight
-        equations = module["equations"]
-        has_equations |= bool(equations)
-        for equation in equations:
-            latex = str(equation["latex"])
-            equation_profiles.append(
-                {
-                    "latex_characters": len(latex),
-                    "priority": priority,
-                }
-            )
-        visual_kind = str(module["visual_kind"])
-        # Comparisons and metric summaries may become prose, callouts, or charts.
-        # Only an explicit table should bias reference selection toward a
-        # table-oriented seed.
-        has_tables |= visual_kind == "table"
-        raw_ratio = module.get("figure_aspect_ratio")
-        if (
-            module_figures
-            and isinstance(raw_ratio, (int, float))
-            and not isinstance(raw_ratio, bool)
-            and raw_ratio > 0
-        ):
-            aspect_ratios.append(round(float(raw_ratio), 3))
-
-    width = float(page_plan.get("width_mm") or 0)
-    height = float(page_plan.get("height_mm") or 0)
-    orientation = str(page_plan.get("orientation") or "").strip().lower()
-    if orientation not in {"landscape", "portrait"}:
-        orientation = "landscape" if width >= height else "portrait"
-    organization_mode = str(content_budget["organization_mode"])
-    density = str(page_plan.get("density_profile") or "balanced")
-    selection = {
-        "orientation": orientation,
-        "organization_mode": organization_mode,
-        "figure_count": len(figure_hashes),
-        "module_weights": role_weights,
-        "has_equations": has_equations,
-        "has_tables": has_tables,
-        "density": density,
-    }
-    return {
-        "selection": selection,
-        "module_count": len(modules),
-        "section_count": len(content_budget.get("sections") or []),
-        "figure_width_to_height_ratios": sorted(aspect_ratios),
-        "equation_profiles": equation_profiles,
-        "page_aspect_ratio": (
-            round(width / height, 3) if width > 0 and height > 0 else 1.0
-        ),
-    }
-
-
-def reference_generation_prompt(signals: Mapping[str, Any]) -> str:
-    """Build a content-free poster mockup prompt from layout signals only."""
-
-    selection = dict(signals["selection"])
-    safe_shape = {
-        "orientation": selection["orientation"],
-        "density": reference_catalog.normalize_density(str(selection["density"])),
-        "organization_mode": selection["organization_mode"],
-        "module_count": int(signals["module_count"]),
-        "section_count": int(signals["section_count"]),
-        "figure_count": int(selection["figure_count"]),
-        "figure_width_to_height_ratios": list(
-            signals["figure_width_to_height_ratios"]
-        ),
-        "equation_profiles": list(signals["equation_profiles"]),
-        "page_aspect_ratio": signals["page_aspect_ratio"],
-        "has_equations": bool(selection["has_equations"]),
-        "has_comparison_or_table": bool(selection["has_tables"]),
-    }
-    return (
-        "Generate a content-free visual reference for an editable top-conference academic "
-        "poster. Show only abstract typographic texture, neutral diagram placeholders, and "
-        "generic chart silhouettes. Use no readable claims, numbers, equations, authors, "
-        "affiliations, citations, logos, venue names, or paper figures. The image supplies "
-        "layout grammar only. Respect these design-only signals:\n"
-        + json.dumps(safe_shape, ensure_ascii=False, sort_keys=True)
-    )
-
-
 def _append_warning_once(warnings: list[Any], warning: str) -> None:
     if warning not in warnings:
         warnings.append(warning)
-
-
-def _update_authoring_issue(
-    state: dict[str, Any],
-    issue: dict[str, str] | None,
-) -> None:
-    """Replace or clear only the recoverable initial-author fallback marker."""
-
-    if issue is not None:
-        state["editing_issue"] = issue
-    elif isinstance(state.get("editing_issue"), Mapping) and state[
-        "editing_issue"
-    ].get("code") == "authoring_unavailable":
-        state.pop("editing_issue", None)
 
 
 async def _author_stage(
@@ -1243,17 +862,20 @@ async def _author_stage(
     budget: dict[str, Any],
     page_plan: dict[str, Any],
     paper_source: dict[str, Any],
+    source_text: str,
     reference_brief: reference_analysis.ReferenceAnalysis,
     llm: Any,
     source_figure_observations: Mapping[str, Mapping[str, str]] | None = None,
     authoring_request: str = "",
+    design_requirements: Mapping[str, Any] | None = None,
     source_html: str | None = None,
     feedback: str = "",
-    timeout_seconds: float = model_runtime.DEFAULT_AUTHORING_TIMEOUT_SECONDS,
+    timeout_seconds: float | None = None,
     max_transport_retries: int = model_runtime.DEFAULT_AUTHORING_TRANSPORT_RETRIES,
     deadline: float | None = None,
     inspect: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
-) -> tuple[str, dict[str, Any] | None, dict[str, str] | None]:
+    initial_inspection: dict[str, Any] | None = None,
+) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None]:
     """Let the model compose and inspect a draft before the pipeline's visual review."""
 
     expected_page = {
@@ -1267,6 +889,7 @@ async def _author_stage(
         page_plan=page_plan,
         paper_source=paper_source,
     )
+    initial_composition = source_html is None or revision_state.is_content_carrier(content_carrier)
 
     def validate(candidate: str) -> dict[str, Any]:
         report = html_contract.validate_candidate(
@@ -1274,12 +897,12 @@ async def _author_stage(
             assets=assets,
             required_source_figure_sha256s=expected_figures,
             expected_page=expected_page,
-            content_contract=page_plan.get("content_contract"),
             paper_identity=paper_source,
-            reference_html=content_carrier,
+            source_text=source_text,
+            source_equations=source_preparation.structured_source_equations(paper_source),
         )
         if (
-            source_html is None
+            initial_composition
             and candidate == content_carrier
             and report.get("status") == "ok"
         ):
@@ -1312,53 +935,45 @@ async def _author_stage(
                 "Grounded content carrier violated the poster contract: "
                 + json.dumps(report.get("issues") or [], ensure_ascii=False),
             )
-    if source_html is None:
-        system, user = authoring.layout_composition_prompt(
-            feedback="Create a complete conference poster from the grounded carrier.",
-            content_brief=budget,
-            page_plan=page_plan,
-            authoring_request=authoring_request,
-            reference_brief=reference_brief,
-            source_figure_observations=source_figure_observations or {},
-            initial_composition=True,
-        )
-    else:
-        system, user = authoring.revision_prompt(
-            source_html=source_html,
-            feedback=feedback,
-            selection=None,
-            page_plan=page_plan,
-            content_brief=revision_state.visual_content_brief(
-                page_plan, displayed_html=source_html,
-                user_direction=authoring_request,
-            ),
-            reference_brief=reference_brief,
-        )
-    authored, _report, inspection = await model_runtime.request_html_revision(
+    system, user = authoring.layout_composition_prompt(
+        feedback=feedback or "Compose the scientific argument from the complete paper.",
+        content_brief=budget,
+        page_plan=page_plan,
+        authoring_request=authoring_request,
+        reference_brief=reference_brief,
+        design_requirements=design_requirements,
+        source_figure_observations=source_figure_observations or {},
+        initial_composition=initial_composition,
+        source_text=source_text,
+        assets=assets,
+    )
+    edit = await model_runtime.request_html_revision(
         llm,
         source_html=content_carrier,
         system=system,
         user=user,
         validate=validate,
         inspect=inspect,
-        initial_composition=source_html is None,
-        compact_layout=source_html is None,
-        include_rendered_image=bool(
-            getattr(llm, "supports_image_input", False)
-        ),
+        initial_inspection=initial_inspection,
+        initial_composition=initial_composition,
+        compact_layout=True,
+        include_rendered_image=model_runtime.supports_image_input(llm),
         timeout_seconds=timeout_seconds,
         max_transport_retries=max_transport_retries,
         deadline=deadline,
     )
-    authoring_issue = (
+    authored = edit.candidate.html
+    inspection = edit.candidate.inspection
+    authoring_issue = edit.issue or (
         {
             "code": "authoring_unavailable",
+            "phase": "editing",
             "summary": (
                 "The author did not replace the grounded starter composition; "
                 "its rendered version remains available for visual review."
             ),
         }
-        if source_html is None and authored == content_carrier
+        if initial_composition and authored == content_carrier
         else None
     )
     return authored, inspection, authoring_issue
@@ -1432,25 +1047,13 @@ def _bind_paper_identity(
 
 def _resolve_requested_venue(
     input_data: Mapping[str, Any],
-    *,
-    authoring_request: str,
 ) -> venue_branding.VenueBranding | None:
     """Resolve one venue identity explicitly supplied by the user."""
 
     conference = input_data.get("conference")
     if isinstance(conference, str) and conference.strip():
         return venue_branding.resolve_venue_branding(conference)
-    targets: list[str] = []
-    for value in (
-        authoring_request,
-        input_data.get("input"),
-        input_data.get("instructions"),
-    ):
-        text = " ".join(str(value or "").split())
-        if text and text not in targets:
-            targets.append(text)
-    requested = venue_branding.resolve_venue_branding("\n".join(targets))
-    return requested
+    return None
 
 
 def _venue_brand_asset_input(
@@ -1488,7 +1091,5 @@ def _has_persisted_identity(ctx: Any) -> bool:
 
 __all__ = [
     "DraftPipelineError",
-    "reference_generation_prompt",
-    "reference_signals",
     "run_draft",
 ]

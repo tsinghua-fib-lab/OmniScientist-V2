@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+from collections import Counter
 from collections.abc import Mapping
 from typing import Any
 
@@ -11,6 +12,8 @@ from . import vlm_client
 
 _TEXT_FIELDS = ("structure", "embedded_text", "legibility_pressure")
 _WIDTH_NEEDS = frozenset({"column", "wide", "dominant"})
+# Two-by-two panes fit the existing bounded image transport while retaining labels.
+_FIGURES_PER_BATCH = 4
 
 
 async def analyze_figures(
@@ -20,7 +23,7 @@ async def analyze_figures(
     client: Any | None,
     deadline: float | None = None,
 ) -> tuple[dict[str, dict[str, str]], str | None]:
-    """Describe selected figures' visual complexity without choosing evidence."""
+    """Describe selected figures' readable labels, complexity and surfaces."""
 
     if not selected or client is None:
         return {}, None
@@ -31,51 +34,34 @@ async def analyze_figures(
         if str(asset.get("content_sha256") or "") in selected
     }
     ordered_hashes = [digest for digest in selected if digest in assets_by_hash]
-    images = tuple(
-        _vlm_image(index, assets_by_hash[digest])
-        for index, digest in enumerate(ordered_hashes, start=1)
-    )
-    if not images:
+    if not ordered_hashes:
         return {}, None
 
-    try:
-        request_images = (
-            (vlm_client.labeled_montage(
-                images,
-                label="SELECTED SOURCE FIGURES — panes F1 through "
-                f"F{len(images)}",
-            ),)
-            if len(images) > 1
-            else images
-        )
-        raw = await _generate(
-            client,
-            _prompt(ordered_hashes),
-            images=request_images,
-            deadline=deadline,
-        )
-        return _parse_response(raw, ordered_hashes), None
-    except (TimeoutError, TypeError, ValueError, vlm_client.VlmError) as exc:
-        return {}, (
-            "Selected source-figure visual analysis was unavailable "
-            f"({type(exc).__name__}: {exc})."
-        )
-
-
-def selected_figure_sha256s(budget: Mapping[str, Any]) -> list[str]:
-    """Return selected figure hashes once, in content scan order."""
-
-    selected: list[str] = []
-    modules = budget.get("content_modules")
-    for module in modules if isinstance(modules, list) else []:
-        if not isinstance(module, Mapping):
-            continue
-        hashes = module.get("figure_sha256s")
-        for value in hashes if isinstance(hashes, list) else []:
-            digest = str(value or "").strip().lower()
-            if digest and digest not in selected:
-                selected.append(digest)
-    return selected
+    observations: dict[str, dict[str, str]] = {}
+    for start in range(0, len(ordered_hashes), _FIGURES_PER_BATCH):
+        batch = ordered_hashes[start:start + _FIGURES_PER_BATCH]
+        try:
+            images = tuple(
+                _vlm_image(index, assets_by_hash[digest])
+                for index, digest in enumerate(batch, start=1)
+            )
+            request_images = (
+                (vlm_client.labeled_montage(
+                    images, label=f"SOURCE FIGURES — panes F1 through F{len(images)}",
+                    columns=2,
+                ),)
+                if len(images) > 1 else images
+            )
+            raw = await _generate(
+                client, _prompt(len(batch)), images=request_images, deadline=deadline,
+            )
+            observations.update(_parse_response(raw, batch))
+        except (TimeoutError, TypeError, ValueError, vlm_client.VlmError) as exc:
+            return observations, (
+                "Source-figure visual analysis stopped; available observations were retained "
+                f"({type(exc).__name__}: {exc})."
+            )
+    return observations, None
 
 
 def normalize_observations(
@@ -83,7 +69,7 @@ def normalize_observations(
     *,
     selected_sha256s: set[str] | None = None,
 ) -> dict[str, dict[str, str]]:
-    """Normalize checkpointed observations and discard entries no longer selected."""
+    """Normalize observed reading keys and optional advice for the selected figures."""
 
     if not isinstance(value, Mapping):
         return {}
@@ -96,14 +82,15 @@ def normalize_observations(
         if not isinstance(raw_observation, Mapping):
             continue
         fields = {
-            field: _observation_text(raw_observation.get(field), label=field)
-            for field in _TEXT_FIELDS
+            field: " ".join(text.split())
+            for field in (*_TEXT_FIELDS, "surface")
+            if isinstance(text := raw_observation.get(field), str) and text.strip()
         }
-        width_need = str(raw_observation.get("width_need") or "column").strip()
-        fields["width_need"] = (
-            width_need if width_need in _WIDTH_NEEDS else "column"
-        )
-        normalized[digest] = fields
+        width_need = str(raw_observation.get("width_need") or "").strip()
+        if width_need in _WIDTH_NEEDS:
+            fields["width_need"] = width_need
+        if fields:
+            normalized[digest] = fields
     return normalized
 
 
@@ -125,39 +112,47 @@ async def _generate(
     )
 
 
-def _prompt(ordered_hashes: list[str]) -> str:
-    figures = [
-        {
-            "id": f"F{index}",
-            "sha256": digest,
-        }
-        for index, digest in enumerate(ordered_hashes, start=1)
-    ]
+def _prompt(figure_count: int) -> str:
+    figure_ids = [f"F{index}" for index in range(1, figure_count + 1)]
     return (
-        "Inspect only the attached source figures' internal visual complexity. "
-        "The paper editor has already selected them for scientific reasons. Do not rank "
-        "importance, choose content, interpret results, verify claims, or recommend another "
-        "figure. Describe what remains visually demanding when each intact image is reduced "
+        "Inspect the attached source figures' reading keys, visual complexity and outer surfaces. "
+        "These are the editor's proposed carriers. Describe visible defects even when a "
+        "figure has already been selected: the source-aware author can replace or drop it. "
+        "Assess visible communication; scientific verification belongs to that author. "
+        "Describe what remains visually demanding when each intact image is reduced "
         "for a printed academic poster. Multiple figures appear as panes labeled F1, F2, "
         "and so on in one attached montage.\n\n"
         "Return exactly one JSON object with this shape: "
         '{"figures":[{"id":"F1","structure":"...",'
-        '"embedded_text":"...","legibility_pressure":"...",'
+        '"embedded_text":"...","legibility_pressure":"...","surface":"...",'
         '"width_need":"column|wide|dominant"}]}. '
-        "Return one entry for every supplied id in the same order. In structure, state the "
+        "Use the supplied ids and include observations you can make from the image. "
+        "Leave unavailable observations absent. In structure, state the "
         "visible panel count and arrangement or that it is a single view. In embedded_text, "
-        "describe the visible density of axes, ticks, legends, labels, annotations, or prose. "
-        "Do not transcribe their wording, values, or scientific conclusions. "
+        "record clearly legible panel titles, axis quantities and units, and legend identities "
+        "needed to interpret the image, together with their visual density. Associate reading "
+        "keys with their panels so the author can distinguish separate measurements from an "
+        "explicitly plotted aggregate. Mark unreadable labels as unknown; keep point values "
+        "and scientific conclusions for the source-aware author to verify. "
         "In legibility_pressure, state which reading keys or comparisons would disappear "
         "first when reduced and whether the intact figure needs a large continuous region. "
+        "Include visibly confusing connections, missing reading keys or density that "
+        "limits its usefulness. Distinguish observed defects from details too small to judge. "
+        "In surface, describe the visible outer field, margins and edge treatment that the "
+        "author must integrate with the surrounding poster. Distinguish visible appearance "
+        "from unknown image transparency when the viewing background obscures it. Treat "
+        "these as intact source-image properties; the author controls the surrounding "
+        "surfaces and framing while preserving the image bytes. "
         "Keep each description to one or two sentences. "
-        "Set width_need to column for a simple figure that remains interpretable in a "
+        "When the image supports a width recommendation, set the optional width_need "
+        "to column for a simple figure that remains interpretable in a "
         "normal poster column, wide when it needs one generous continuous column, or "
         "dominant only when essential panels or reading keys require most of the "
-        "printable page width. Multiple panels alone do not make a figure dominant. "
+        "printable page width. Omit width_need when the recommendation is uncertain. "
+        "Multiple panels alone do not make a figure dominant. "
         "Use observations rather than numeric scores or scientific conclusions.\n\n"
-        "Figure bindings:\n"
-        + json.dumps(figures, ensure_ascii=False, sort_keys=True)
+        "Figure ids in the attached image:\n"
+        + json.dumps(figure_ids, ensure_ascii=False)
     )
 
 
@@ -168,37 +163,20 @@ def _parse_response(
     if not isinstance(raw, str):
         raise TypeError("source-figure analysis must be returned as JSON text")
     parsed = vlm_client.parse_json_object(raw)
-    if set(parsed) != {"figures"} or not isinstance(parsed["figures"], list):
-        raise ValueError("source-figure analysis must contain only a figures array")
+    if not isinstance(parsed.get("figures"), list):
+        raise TypeError("source-figure analysis requires a figures array")
     figures = parsed["figures"]
-    if len(figures) != len(ordered_hashes):
-        raise ValueError("source-figure analysis must describe every selected figure")
-    observations: dict[str, dict[str, str]] = {}
-    for index, (digest, raw_figure) in enumerate(
-        zip(ordered_hashes, figures, strict=True),
-        start=1,
-    ):
-        if not isinstance(raw_figure, Mapping):
-            raise TypeError("each source-figure observation must be an object")
-        expected_fields = {"id", "width_need", *_TEXT_FIELDS}
-        if set(raw_figure) != expected_fields or raw_figure.get("id") != f"F{index}":
-            raise ValueError("source-figure observation ids or fields are invalid")
-        width_need = str(raw_figure.get("width_need") or "").strip()
-        if width_need not in _WIDTH_NEEDS:
-            raise ValueError("source-figure width_need is invalid")
-        observations[digest] = {
-            field: _observation_text(raw_figure.get(field), label=field)
-            for field in _TEXT_FIELDS
-        }
-        observations[digest]["width_need"] = width_need
-    return observations
-
-
-def _observation_text(value: Any, *, label: str) -> str:
-    text = " ".join(str(value or "").split())
-    if not text:
-        raise ValueError(f"source-figure {label} must not be empty")
-    return text
+    hashes_by_id = {f"F{index}": digest for index, digest in enumerate(ordered_hashes, start=1)}
+    identified = [
+        item for item in figures
+        if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+    ]
+    counts = Counter(item["id"] for item in identified)
+    return normalize_observations({
+        hashes_by_id[item["id"]]: item
+        for item in identified
+        if item["id"] in hashes_by_id and counts[item["id"]] == 1
+    })
 
 
 def _vlm_image(index: int, asset: Mapping[str, Any]) -> vlm_client.VlmImage:
@@ -223,5 +201,4 @@ def _vlm_image(index: int, asset: Mapping[str, Any]) -> vlm_client.VlmImage:
 __all__ = [
     "analyze_figures",
     "normalize_observations",
-    "selected_figure_sha256s",
 ]

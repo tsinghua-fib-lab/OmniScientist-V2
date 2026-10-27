@@ -10,13 +10,11 @@ from contextlib import redirect_stdout, suppress
 from dataclasses import asdict, replace
 from pathlib import Path
 
+from . import PaperSourceError
 from .paper_extraction import (
-    _ALGORITHM_CARRIER_PATTERN,
-    _CAPTION_PATTERN,
-    _TABLE_CARRIER_PATTERN,
-    PaperSourceError,
     PreparedPaper,
     _extract_layout_visual_carriers,
+    _parse_carrier_label,
     enrich_structured_equations,
 )
 
@@ -134,10 +132,10 @@ def _complete_pdf_visuals(
                     for line in box.get("textlines") or []
                     for span in line.get("spans") or []
                 )
-                match = _CAPTION_PATTERN.match(" ".join(text.split()))
-                if match is None or int(match.group(1)) != figure["figure_number"]:
+                match = _parse_carrier_label(" ".join(text.split()), "Figure")
+                if match is None or match[0] != figure["figure_number"]:
                     continue
-                caption = match.group(2).strip()
+                caption = match[1]
                 if caption:
                     area = (box["x1"] - box["x0"]) * (box["y1"] - box["y0"])
                     candidates.append((area, caption))
@@ -180,9 +178,7 @@ def _layout_pages(paper: PreparedPaper) -> list[int]:
                 current_page = int(line[6:-1]) - 1
             except ValueError:
                 continue
-        elif _TABLE_CARRIER_PATTERN.match(line) or _ALGORITHM_CARRIER_PATTERN.match(
-            line
-        ):
+        elif _parse_carrier_label(line, "Table") or _parse_carrier_label(line, "Algorithm"):
             pages.add(current_page)
     return sorted(page for page in pages if 0 <= page < paper.page_count)
 

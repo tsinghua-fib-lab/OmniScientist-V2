@@ -4,6 +4,24 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) and semanti
 
 ## Unreleased
 
+## [2.0.0rc10] - 2026-10-27
+
+### Fixed
+
+- Accepting the startup update prompt now runs `omni update --force`, so a
+  copied source install is reinstalled even when its git checkout is already
+  current. A plain `omni update` also reinstalls when that snapshot's version
+  is older than the checkout.
+- ``scientific-poster`` keeps the bibliography, validated inputs, selected
+  state, native math, and native graphics through authoring, recovery, and
+  PPTX export. Browser paint and selection follow the same contracts.
+- Tool-call reasoning is preserved, and the host output allowance is visible
+  to the model. Bound skill prompts include each skill's declared input schema.
+
+### Changed
+
+- Bumped the release candidate to `2.0.0rc10` (Git tag `v2.0.0rc10`).
+
 ## [2.0.0rc9] - 2026-10-14
 
 ### Changed

@@ -16,8 +16,8 @@ from lxml import html as lxml_html
 from posterlib.content import html_contract
 from posterlib.generation import authoring, model_runtime
 from posterlib.runtime import runtime_io
-from posterlib.sources import source_preparation
 from posterlib.visual import (
+    design_direction,
     inspection_feedback,
     reference_analysis,
     reference_catalog,
@@ -38,8 +38,6 @@ _REVISION_REPAIRABLE_SOURCE_ISSUES = frozenset(
         "math_layout_override",
     }
 )
-_REVIEW_COPY_ROLES = frozenset({"text", "detail-points", "flow-detail"})
-_MANUAL_COPY_ROLES = frozenset({*_REVIEW_COPY_ROLES, "heading", "takeaway"})
 
 
 def _tokenize_math(html_text: str) -> tuple[str, dict[str, str]]:
@@ -103,23 +101,6 @@ def _restore_math(html_text: str, frozen: Mapping[str, str]) -> str:
         method="html",
         pretty_print=True,
         doctype="<!doctype html>",
-    )
-
-
-def _with_current_inspection(user: str, inspection: Mapping[str, Any]) -> str:
-    """Attach the current browser facts before the editor makes its first change."""
-
-    public = {
-        key: value
-        for key, value in inspection.items()
-        if not str(key).startswith("_")
-    }
-    return (
-        f"{user}\n\nCURRENT CHECKED BROWSER STATE BEFORE THE FIRST EDIT\n"
-        "These are measurements of the current source, not target sizes or a "
-        "host-chosen layout. Use them to identify the governing CSS relationship "
-        "before editing.\n"
-        f"{json.dumps(public, ensure_ascii=False, default=str)}"
     )
 
 
@@ -332,16 +313,13 @@ async def run_revision(
         except revision_state.SelectionStateError as exc:
             return outcomes.error_result(exc.code, str(exc))
 
-    original_direction = state["authoring_request"]
-    caller_direction = source_preparation.authoring_request(input_data)
-    caller_feedback = "\n\n".join(
-        dict.fromkeys(
-            item for item in (
-                caller_direction if caller_direction != original_direction else "",
-                str(input_data.get("feedback") or "").strip(),
-            ) if item
+    try:
+        effective, caller_feedback = request_normalization.effective_authoring_request(
+            input_data, state,
         )
-    )
+    except (reference_analysis.ReferenceAnalysisError, model_runtime.ModelBoundaryError) as exc:
+        return outcomes.error_result("invalid_payload", str(exc))
+    input_data["author_model_role"] = effective["author_model_role"]
     feedback = caller_feedback
     visual_review_path = str(input_data.get("visual_review_path") or "").strip()
     visual_receipt: dict[str, Any] | None = None
@@ -358,21 +336,33 @@ async def run_revision(
             ) = revision_state.visual_revision_feedback(
                 visual_review_path,
                 parent_html_sha256=parent_sha256,
-                content_budget=content_budget,
             )
-            feedback = f"Image-review diagnostics:\n{visual_feedback}"
+            feedback = f"Review of the selected poster:\n{visual_feedback}"
             if caller_feedback:
                 feedback += f"\n\nCurrent user revision:\n{caller_feedback}"
         except review_contract.ReviewContractError as exc:
             return outcomes.error_result(exc.code, str(exc))
-        input_data["visual_iteration"] = visual_iteration
+        input_data["visual_iteration"] = 0 if caller_feedback else visual_iteration
     else:
         # A normal user/harness revision starts a fresh bounded visual-review
         # cycle.  Do not inherit an exhausted iteration from the source draft.
         input_data["visual_iteration"] = 0
+    automatic_feedback = str(input_data.get("_visual_review_feedback") or "").strip()
+    if automatic_feedback:
+        feedback += "\n\nAdditional review diagnostics:\n" + automatic_feedback
+    if not (caller_feedback or receipt_operations or automatic_feedback):
+        return {
+            **outcomes.error_result(
+                "missing_input",
+                "Describe the requested change in input or feedback, or provide a review requesting revision.",
+            ),
+            "html_path": str(source_path), "html_uri": source_uri, "html_sha256": parent_sha256,
+            **({"visual_quality_state": visual_receipt["quality_state"]} if visual_receipt else {}),
+        }
     html_template, embedded_assets = html_contract.tokenize_embedded_images(source_html)
     editor_html, frozen_math = _tokenize_math(html_template)
     html_template = _restore_math(editor_html, frozen_math)
+    source_editor_html = editor_html
     required_source_figure_sha256s = html_contract.source_figure_sha256s(
         embedded_assets
     )
@@ -395,7 +385,7 @@ async def run_revision(
         reference_brief = reference_analysis.ReferenceAnalysis.from_dict(
             dict(raw_visual_design)
         )
-        revision_warnings: list[str] = []
+        revision_warnings = list(dict.fromkeys(state["warnings"]))
     except (TypeError, reference_catalog.ReferenceSeedError):
         return outcomes.error_result(
             "source_read_failed",
@@ -418,61 +408,52 @@ async def run_revision(
         stored_page_plan=stored_page_plan,
         page=page,
     )
-    checkpoint_source = state
+    current_direction = effective["authoring_request"]
+    checkpoint_source = {**state, **effective}
+    design_requirements = design_direction.context(
+        reference_source_kind=design_reference.source_kind,
+        user_direction=current_direction,
+        visual_preferences=effective["visual_preferences"],
+    )
     caller_mode = str(input_data.get("revision_mode") or "").strip()
-    if not visual_review_path and caller_mode == "content-replan":
-        try:
-            content_replan_targets = revision_state.validate_content_replan_targets(
-                input_data.get("content_replan_targets"),
-                content_budget=content_budget,
-            )
-        except ValueError as exc:
-            return outcomes.error_result("invalid_payload", str(exc))
+    explicit_targets = "content_replan_targets" in input_data
     try:
         revision_mode = (
-            revision_state.vlm_revision_mode(
-                receipt_operations,
-            )
-            if visual_review_path
-            else revision_state.manual_revision_mode(caller_mode)
+            revision_state.manual_revision_mode(caller_mode)
+            if caller_mode or caller_feedback or explicit_targets or not receipt_operations else
+            revision_state.vlm_revision_mode(receipt_operations)
         )
+        if explicit_targets and revision_mode != "content-replan":
+            raise ValueError("content_replan_targets require revision_mode=content-replan")
+        if revision_mode == "content-replan":
+            content_replan_targets = revision_state.validate_content_replan_targets(
+                input_data.get("content_replan_targets")
+                if explicit_targets or caller_mode or caller_feedback or not content_replan_targets
+                else sorted(content_replan_targets),
+                content_budget=content_budget,
+            )
     except ValueError as exc:
         return outcomes.error_result("invalid_payload", str(exc))
+    user_copy_edit = revision_mode == "content-replan" and bool(
+        caller_mode or explicit_targets or caller_feedback
+    )
+    if revision_mode == "full-layout":
+        content_replan_targets = frozenset()
+        if "content-replan" in receipt_operations:
+            feedback += (
+                "\n\nUser edit authority is full-layout. Preserve all scientific copy "
+                "while addressing the review's composition diagnostics."
+            )
     required_visual_operation = (
+        "" if user_copy_edit else
         "reflow"
         if "reflow" in receipt_operations
         else "restyle"
         if "restyle" in receipt_operations
         else ""
     )
-    if visual_review_path and revision_mode == "content-replan":
-        copy_inventory = authoring.copy_channel_inventory(
-            editor_html,
-            sorted(content_replan_targets),
-        )
-        editable_targets = frozenset(
-            module_id
-            for module_id, channels in copy_inventory.items()
-            if channels
-        )
-        unavailable_targets = sorted(content_replan_targets - editable_targets)
-        if unavailable_targets:
-            required_visual_operation = "reflow"
-            feedback += (
-                "\n\nThese review targets have no editable explanatory-copy channel: "
-                + ", ".join(unavailable_targets)
-                + ". Keep their scientific content unchanged and solve their visible "
-                "defect through composition and layout."
-            )
-        content_replan_targets = editable_targets
-        if not content_replan_targets:
-            revision_mode = "full-layout"
-    content_brief = revision_state.visual_content_brief(
-        revision_page_plan,
-        displayed_html=html_template,
-        user_direction=original_direction,
-    )
     raw_figure_observations = state.get("source_figure_observations")
+    embedded_asset_hashes = {str(asset["content_sha256"]) for asset in embedded_assets}
     retained_figure_observations = {
         digest: dict(observation)
         for digest, observation in (
@@ -480,7 +461,7 @@ async def run_revision(
             if isinstance(raw_figure_observations, Mapping)
             else ()
         )
-        if digest in required_source_figure_sha256s
+        if digest in embedded_asset_hashes
         and isinstance(observation, Mapping)
     }
     compact_layout = bool(
@@ -488,39 +469,6 @@ async def run_revision(
         and revision_mode == "full-layout"
         and required_visual_operation == "reflow"
     )
-    if compact_layout:
-        assert visual_receipt is not None
-        compact_feedback = json.dumps({
-            "summary": visual_receipt["summary"],
-            "scores": visual_receipt["scores"],
-            "issues": [
-                {key: issue[key] for key in ("criterion", "targets", "operation")}
-                for issue in visual_receipt["critical_issues"]
-            ],
-            "current_user_revision": caller_feedback,
-        }, ensure_ascii=False)
-        system, user = authoring.layout_composition_prompt(
-            feedback=compact_feedback,
-            page_plan=revision_page_plan,
-            content_brief=content_brief,
-            authoring_request=original_direction,
-            source_figure_observations=retained_figure_observations,
-        )
-    else:
-        system, user = authoring.revision_prompt(
-            source_html=editor_html,
-            feedback=feedback,
-            selection=selection,
-            page_plan=revision_page_plan,
-            content_brief=content_brief,
-            revision_mode=revision_mode,
-            content_replan_targets=sorted(content_replan_targets),
-            source_text=source_text,
-            source_figure_observations=retained_figure_observations,
-            allow_source_corrections=not bool(visual_review_path),
-            required_visual_operation=required_visual_operation,
-            reference_brief=reference_brief,
-        )
 
     def restore_math(candidate: str) -> str:
         try:
@@ -557,11 +505,6 @@ async def run_revision(
                 if revision_mode == "content-replan"
                 else None
             ),
-            editable_text_roles=(
-                _REVIEW_COPY_ROLES
-                if visual_review_path
-                else _MANUAL_COPY_ROLES
-            ),
         )
         if require_change and report.get("status") == "ok" and restored == html_template:
             return {
@@ -588,11 +531,15 @@ async def run_revision(
     async def inspect_candidate(candidate: str) -> dict[str, Any]:
         nonlocal diagnostic_candidate, source_figure_baseline
         restored = restore_math(candidate)
-        embedded = html_contract.embed_assets(restored, embedded_assets)
+        is_revision_source = candidate == source_editor_html
+        embedded = source_html if is_revision_source else html_contract.embed_assets(
+            restored, embedded_assets,
+        )
         digest = hashlib.sha256(embedded.encode("utf-8")).hexdigest()
         edit_dir = workspace / ".candidates" / digest
-        edit_path = edit_dir / "poster.html"
-        runtime_io.replace_file_atomic(edit_path, embedded.encode("utf-8"))
+        edit_path = source_path if is_revision_source else edit_dir / "poster.html"
+        if not is_revision_source:
+            runtime_io.replace_file_atomic(edit_path, embedded.encode("utf-8"))
         inspection_call = runtime_io.inspect_preview(
             edit_path,
             edit_dir / "inspection",
@@ -613,7 +560,6 @@ async def run_revision(
             except TimeoutError:
                 return {"status": "error", "layout_feedback": ["inspection timed out"]}
         evidence = inspection.get("visual_evidence")
-        is_revision_source = candidate == editor_html
         if is_revision_source and isinstance(evidence, Mapping):
             source_figure_baseline = _source_figure_extent_baseline(evidence)
         result = inspection_feedback.editor_feedback(
@@ -633,17 +579,18 @@ async def run_revision(
                 "baseline": source_figure_baseline_kind,
                 "figures": extent_changes,
             }
-        screenshot_path = Path(str(inspection.get("screenshot_path") or ""))
-        diagnostic_candidate = _persist_diagnostic_candidate(
-            candidate_path=edit_path,
-            html_text=embedded,
-            html_sha256=digest,
-            checkpoint_state=checkpoint_for(candidate, revision_page_plan),
-            screenshot_path=screenshot_path,
-        )
-        diagnostic_candidate["inspection_status"] = str(
-            inspection.get("status") or "error"
-        )
+        if not is_revision_source:
+            screenshot_path = Path(str(inspection.get("screenshot_path") or ""))
+            diagnostic_candidate = _persist_diagnostic_candidate(
+                candidate_path=edit_path,
+                html_text=embedded,
+                html_sha256=digest,
+                checkpoint_state=checkpoint_for(candidate, revision_page_plan),
+                screenshot_path=screenshot_path,
+            )
+            diagnostic_candidate["inspection_status"] = str(
+                inspection.get("status") or "error"
+            )
         return result
 
     def checkpoint_for(
@@ -656,20 +603,28 @@ async def run_revision(
             if visual_review_path
             else 0
         )
-        return revision_state.revision_checkpoint_payload(
+        checkpoint = revision_state.revision_checkpoint_payload(
             checkpoint_source,
             html_template=revision_state.bind_asset_tokens(restored, embedded_assets),
             page_plan=candidate_page_plan,
             visual_iteration=visual_iteration,
         )
+        outcomes.update_workflow_issue(checkpoint, "editing", None)
+        return checkpoint
 
     async def publish_template(
         candidate_template: str,
         candidate_page_plan: dict[str, Any],
         *,
         inspection: dict[str, Any] | None,
+        editing_issue: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         restored = restore_math(candidate_template)
+        checkpoint = checkpoint_for(candidate_template, candidate_page_plan)
+        if editing_issue is not None:
+            outcomes.update_workflow_issue(checkpoint, "editing", editing_issue)
+        if not revision_state.is_content_carrier(restored):
+            outcomes.update_workflow_issue(checkpoint, "planning", None)
         result = await publish_version(
             html_text=html_contract.embed_assets(restored, embedded_assets),
             source_text=source_text,
@@ -683,19 +638,12 @@ async def run_revision(
             page_plan=candidate_page_plan,
             design_reference=design_reference,
             reference_brief=reference_brief,
-            visual_preferences=dict(state["visual_preferences"]),
-            checkpoint_state=checkpoint_for(
-                candidate_template,
-                candidate_page_plan,
-            ),
+            visual_preferences=dict(effective["visual_preferences"]),
+            checkpoint_state=checkpoint,
             deadline=deadline,
         )
-        editing_issue = state.get("editing_issue")
-        if (
-            isinstance(editing_issue, Mapping)
-            and editing_issue.get("code") != "authoring_unavailable"
-        ):
-            result["editing_issue"] = dict(editing_issue)
+        result["author_model_role"] = effective["author_model_role"]
+        outcomes.merge_workflow_issues(result, checkpoint)
         return result
 
     source_diagnostics = validate(editor_html, require_change=False)
@@ -704,7 +652,42 @@ async def run_revision(
         if source_diagnostics.get("status") == "ok"
         else {"status": "error", "diagnostics": source_diagnostics}
     )
-    initial_feedback = _with_current_inspection("", initial_inspection)
+    source_inspection = initial_inspection.get("_rendered_inspection", initial_inspection)
+
+    def retain_source(issue: Mapping[str, Any]) -> dict[str, Any]:
+        summary = "Editing stopped before the requested candidate was ready; the source version remains selected."
+        result = poster_contract.outcome_result(
+            "visual_revision_required",
+            summary=summary,
+            html_path=str(source_path), html_uri=source_uri, html_sha256=parent_sha256,
+            parent_html_sha256=parent_sha256, workspace=str(workspace),
+            preview_uri=source_path.resolve().as_uri(),
+            source_figure_sha256s=sorted(required_source_figure_sha256s),
+            page_plan=dict(state["page_plan"]),
+            design_reference=design_reference.to_dict(), visual_design=reference_brief.to_dict(),
+            visual_preferences=dict(state["visual_preferences"]),
+            author_model_role=state["author_model_role"],
+            visual_iteration=state.get("visual_iteration", 0),
+            visual_quality_state="revision-required",
+            visual_review_mode="vlm" if visual_receipt is not None else "not-run",
+            inspection=source_inspection,
+            screenshot_path=source_inspection.get("screenshot_path"),
+            revision_state_persisted=True, requires_approval=False,
+            warnings=[*revision_warnings, f"{summary} ({issue['summary']})"],
+        )
+        outcomes.merge_workflow_issues(result, state)
+        outcomes.update_workflow_issue(result, "editing", issue)
+        if visual_receipt is not None:
+            result.update(
+                visual_review=visual_receipt, visual_review_path=visual_review_path,
+                visual_quality_state=visual_receipt["quality_state"],
+            )
+        if diagnostic_candidate is not None:
+            result["diagnostic_candidate"] = dict(diagnostic_candidate)
+            result["retry_from_checkpoint"] = bool(
+                diagnostic_candidate.get("revision_state_persisted")
+            )
+        return result
 
     space_only = bool(
         compact_layout
@@ -725,6 +708,7 @@ async def run_revision(
         and warning.get("code") in {"element_outside_poster", "module_clipped_by_ancestor"}
         for warning in initial_report.get("warnings") or []
     )
+    prepared_geometry: tuple[str, dict[str, Any]] | None = None
     if original_strategy == "auto" and page_overflow:
         current_height = float(revision_page_plan["height_mm"])
         maximum_height = float(
@@ -747,21 +731,11 @@ async def run_revision(
                 if validate(expanded).get("status") == "ok":
                     measured = await inspect_candidate(expanded)
                     if measured.get("status") == "ok":
-                        return await publish_template(
-                            expanded, revision_page_plan,
-                            inspection=measured.get("_accepted_inspection"),
-                        )
-                revision_page_plan.clear()
-                revision_page_plan.update(previous_plan)
-    if space_only and original_strategy == "auto":
-        report = initial_inspection.get("report")
-        measured_modules = report.get("modules") if isinstance(report, Mapping) else None
-        heights = {
-            str(module["module_id"]): float(module["rect"]["height"])
-            for module in measured_modules or []
-            if isinstance(module, Mapping) and isinstance(module.get("rect"), Mapping)
-        }
-        balanced = authoring.balance_two_column_modules(editor_html, heights)
+                        prepared_geometry = expanded, measured
+                if prepared_geometry is None:
+                    revision_page_plan.clear()
+                    revision_page_plan.update(previous_plan)
+    if prepared_geometry is None and space_only and original_strategy == "auto":
         current_height = float(revision_page_plan["height_mm"])
         minimum_height = float(
             stored_page_plan.get(
@@ -770,11 +744,9 @@ async def run_revision(
         )
         if minimum_height < current_height:
             previous_plan = dict(revision_page_plan)
-            source_layout = balanced or editor_html
-
             async def try_height(height_mm: float) -> tuple[str, dict[str, Any]] | None:
                 resized = authoring.resize_page_height(
-                    source_layout, current_height, height_mm
+                    editor_html, current_height, height_mm
                 )
                 if resized is None:
                     return None
@@ -814,91 +786,105 @@ async def run_revision(
                     "min_height_mm": best_height,
                     "max_height_mm": best_height,
                 })
-                return await publish_template(
-                    best[0], revision_page_plan,
-                    inspection=best[1].get("_accepted_inspection"),
-                )
-            revision_page_plan.clear()
-            revision_page_plan.update(previous_plan)
+                prepared_geometry = best
+            else:
+                revision_page_plan.clear()
+                revision_page_plan.update(previous_plan)
+
+    if prepared_geometry is not None:
+        editor_html, initial_inspection = prepared_geometry
+        html_template = restore_math(editor_html)
+        source_diagnostics = validate(editor_html, require_change=False)
+        if caller_feedback and space_only:
+            compact_layout = False
+            required_visual_operation = ""
+    content_brief = revision_state.visual_content_brief(
+        revision_page_plan,
+        displayed_html=html_template,
+        user_direction=current_direction,
+    )
+    if compact_layout:
+        assert visual_receipt is not None
+        compact_feedback = json.dumps({
+            "summary": visual_receipt["summary"],
+            "scores": visual_receipt["scores"],
+            "issues": [
+                {key: issue[key] for key in ("criterion", "targets", "operation")}
+                for issue in visual_receipt["critical_issues"]
+            ],
+            "current_user_revision": caller_feedback,
+            "additional_review_diagnostics": automatic_feedback,
+        }, ensure_ascii=False)
+        system, user = authoring.layout_composition_prompt(
+            feedback=compact_feedback,
+            page_plan=revision_page_plan, content_brief=content_brief,
+            authoring_request=current_direction,
+            source_figure_observations=retained_figure_observations,
+            reference_brief=reference_brief, design_requirements=design_requirements,
+            assets=embedded_assets,
+        )
+    else:
+        system, user = authoring.revision_prompt(
+            source_html=editor_html, feedback=feedback, selection=selection,
+            page_plan=revision_page_plan, content_brief=content_brief,
+            revision_mode=revision_mode,
+            content_replan_targets=sorted(content_replan_targets),
+            source_text=source_text,
+            source_figure_observations=retained_figure_observations,
+            required_visual_operation=required_visual_operation,
+            reference_brief=reference_brief, design_requirements=design_requirements,
+        )
+    if (
+        prepared_geometry is not None
+        and not caller_feedback
+        and revision_mode == "full-layout"
+        and (not visual_review_path or space_only)
+    ):
+        return await publish_template(
+            editor_html, revision_page_plan,
+            inspection=initial_inspection.get("_rendered_inspection"),
+        )
 
     try:
         await runtime_io.progress(progress_callback, "poster.revise", 0.18)
-        selected_author_role = request_normalization.author_model_role(
-            {
-                "author_model_role": input_data.get(
-                    "author_model_role",
-                    state["author_model_role"],
-                )
-            }
-        )
-        author_role = (
-            "main" if revision_mode == "content-replan" else selected_author_role
-        )
-        llm = model_runtime.require_author_llm(ctx, author_role)
+        llm = model_runtime.require_author_llm(ctx, effective["author_model_role"])
         timeout_seconds, transport_retries = (
             request_normalization.authoring_transport_options(input_data)
         )
-        (
-            revised_template,
-            _revision_report,
-            accepted_inspection,
-        ) = await model_runtime.request_html_revision(
+        edit = await model_runtime.request_html_revision(
             llm,
             source_html=editor_html,
             system=system,
             user=user,
-            initial_feedback=initial_feedback,
             validate=validate,
             inspect=inspect_candidate,
             initial_validation=source_diagnostics,
             initial_inspection=initial_inspection,
-            required_copy_targets=(
-                content_replan_targets
-                if visual_review_path and revision_mode == "content-replan"
-                else None
-            ),
-            required_visual_operation=required_visual_operation,
             compact_layout=compact_layout,
-            include_rendered_image=bool(
-                getattr(llm, "supports_image_input", False)
-            ),
+            include_rendered_image=model_runtime.supports_image_input(llm),
             timeout_seconds=timeout_seconds,
             max_transport_retries=transport_retries,
             deadline=deadline,
         )
     except model_runtime.ModelBoundaryError as exc:
-        accepted_source = initial_inspection.get("_accepted_inspection")
-        failure = await publish_template(
-            editor_html,
-            revision_page_plan,
-            inspection=(
-                accepted_source if isinstance(accepted_source, dict) else initial_inspection
-            ),
-        )
-        failure["author_model_role"] = author_role
-        failure["editing_issue"] = {
-            "code": exc.code,
-            "summary": (
-                "Editing stopped before a changed candidate was ready; the current "
-                "poster version remains selected."
-            ),
-        }
-        outcomes.append_warning_once(
-            failure,
-            f"{failure['editing_issue']['summary']} ({exc})",
-        )
-        if diagnostic_candidate is not None:
-            failure["diagnostic_candidate"] = dict(diagnostic_candidate)
-            failure["retry_from_checkpoint"] = bool(
-                diagnostic_candidate.get("revision_state_persisted")
-            )
-        return failure
+        return retain_source(exc.as_issue())
+    revised_template = edit.candidate.html
+    accepted_inspection = edit.candidate.inspection
+    if revised_template == editor_html or (
+        isinstance(accepted_inspection, Mapping) and accepted_inspection.get("status") != "ok"
+    ):
+        return retain_source(edit.issue or {
+            "code": "candidate_validation_failed",
+            "reason": "candidate_not_ready",
+            "summary": "The editor retained its starting state or a candidate with outstanding layout checks.",
+            "last_check": edit.candidate.feedback,
+        })
     result = await publish_template(
         revised_template,
         revision_page_plan,
         inspection=accepted_inspection,
+        editing_issue=edit.issue,
     )
-    result["author_model_role"] = author_role
     return result
 
 

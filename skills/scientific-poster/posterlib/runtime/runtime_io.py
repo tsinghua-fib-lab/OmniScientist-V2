@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
-import re
+import string
 import uuid
 from collections.abc import Mapping
+from itertools import groupby
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -294,7 +295,12 @@ async def progress(callback: Any, stage: str, pct: float, **data: Any) -> None:
 
 
 def _slug(value: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_-]+", "-", value).strip("-_").lower()[:48]
+    allowed = frozenset(string.ascii_letters + string.digits + "_-")
+    parts = (
+        "".join(group) if valid else "-"
+        for valid, group in groupby(value, key=lambda character: character in allowed)
+    )
+    return "".join(parts).strip("-_").lower()[:48]
 
 
 def _local_snapshot(path: Path, *, raw: bytes, digest: str) -> Path:

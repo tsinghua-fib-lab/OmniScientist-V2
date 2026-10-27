@@ -9,7 +9,8 @@ from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
 from pptx.enum.text import MSO_ANCHOR, MSO_AUTO_SIZE, PP_ALIGN
 from pptx.oxml import parse_xml
-from pptx.oxml.ns import nsdecls
+from pptx.oxml.ns import nsdecls, qn
+from pptx.text.text import Font
 from pptx.util import Inches, Pt
 
 GEMINI_API_URL = os.getenv("LIVEFIGURE_GEMINI_IMAGE_URL", "")
@@ -29,7 +30,10 @@ __all__ = [
 ]
 
 
-def _apply_arrow_xml(connector, end_arrow=True, size="med"):
+def _apply_arrow_xml(connector, end_arrow=True, size=None):
+    if size is None:
+        width = connector.line.width.pt
+        size = "sm" if width < 2.0 else "med" if width <= 4.5 else "lg"
     ln = connector.line._get_or_add_ln()
     arrow_xml = (
         f'<a:tailEnd xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
@@ -172,8 +176,6 @@ def add_connector(
     else:
         connector.line.color.rgb = _parse_color(color)
 
-    if arrow_size is None:
-        arrow_size = "sm" if width < 2.0 else "med" if width <= 4.5 else "lg"
     _apply_arrow_xml(connector, end_arrow=True, size=arrow_size)
     return connector
 
@@ -189,6 +191,7 @@ def add_free_arrow(
     width=3.0,
     gradient_start=None,
     gradient_end=None,
+    arrow_size=None,
 ):
     type_map = {"curve": MSO_CONNECTOR.CURVE, "elbow": MSO_CONNECTOR.ELBOW, "straight": MSO_CONNECTOR.STRAIGHT}
     connector = slide.shapes.add_connector(
@@ -203,11 +206,11 @@ def add_free_arrow(
         _apply_gradient_xml(connector, gradient_start.lstrip("#"), gradient_end.lstrip("#"))
     else:
         connector.line.color.rgb = _parse_color(color)
-    _apply_arrow_xml(connector, end_arrow=True, size="lg")
+    _apply_arrow_xml(connector, end_arrow=True, size=arrow_size)
     return connector
 
 
-def add_custom_route_arrow(slide, points, color="333333", width=2.0, end_arrow=True):
+def add_custom_route_arrow(slide, points, color="333333", width=2.0, end_arrow=True, arrow_size=None):
     if not points or len(points) < 2:
         return None
     start_x, start_y = points[0]
@@ -219,7 +222,7 @@ def add_custom_route_arrow(slide, points, color="333333", width=2.0, end_arrow=T
     shape.line.width = Pt(width)
     shape.line.color.rgb = _parse_color(color)
     if end_arrow:
-        _apply_arrow_xml(shape, end_arrow=True, size="lg")
+        _apply_arrow_xml(shape, end_arrow=True, size=arrow_size)
     return shape
 
 
@@ -252,11 +255,19 @@ def add_block(
         shape.line.width = Pt(1.5)
     else:
         shape.line.fill.background()
+    shape.shadow.inherit = False
 
+    tf = shape.text_frame
+    tf.word_wrap = True
+    tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+    # Text-body defaults survive clear() and apply to later paragraphs/runs.
+    defaults = parse_xml(f'<a:defPPr {nsdecls("a")} algn="ctr"><a:defRPr/></a:defPPr>')
+    font = Font(defaults.find(qn("a:defRPr")))
+    font.size = Pt(font_size)
+    font.color.rgb = _parse_color(font_color)
+    font.bold = bold
+    tf._txBody.find(qn("a:lstStyle")).append(defaults)
     if text:
-        tf = shape.text_frame
-        tf.word_wrap = True
-        tf.vertical_anchor = MSO_ANCHOR.MIDDLE
         p = tf.paragraphs[0] if tf.paragraphs else tf.add_paragraph()
         p.text = str(text)
         p.alignment = PP_ALIGN.CENTER
@@ -266,14 +277,14 @@ def add_block(
     return shape
 
 
-def add_label(slide, text, x, y, w=None, h=None, font_size=12, color="000000", bold=False, align="center"):
-    width_in = Inches(w) if w else Inches(2.0)
-    height_in = Inches(h) if h else Inches(0.5)
+def add_label(slide, text, x, y, w, h, font_size=12, color="000000", bold=False, align="center"):
+    """Fit text inside caller-supplied bounds using native PowerPoint autofit."""
+    width_in = Inches(w)
+    height_in = Inches(h)
     textbox = slide.shapes.add_textbox(Inches(x), Inches(y), width_in, height_in)
     tf = textbox.text_frame
     tf.word_wrap = True
-    if w is None:
-        tf.auto_size = MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT
+    tf.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
     p = tf.paragraphs[0] if tf.paragraphs else tf.add_paragraph()
     p.text = str(text)
     p.font.size = Pt(font_size)

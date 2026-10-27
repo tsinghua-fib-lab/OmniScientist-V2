@@ -6,13 +6,15 @@ import base64
 import hashlib
 import io
 import math
-import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote_to_bytes, urlsplit
 from xml.etree import ElementTree
 
+import tinycss2
 from css_validation import offline_css_issues
+from lxml import etree
 
 MAX_EMBEDDED_ASSET_BYTES = 8 * 1024 * 1024
 SOURCE_FIGURE_KINDS = frozenset(
@@ -46,13 +48,53 @@ ACTIVE_CONTENT_TAGS = frozenset(
     }
 )
 
-_REMOTE_RE = re.compile(
-    r"^(?:https?:)?//|^file:|^javascript:|^vbscript:", re.IGNORECASE
-)
-_DATA_IMAGE_RE = re.compile(
-    r"^data:image/(?:png|jpeg|gif|webp|svg\+xml);base64,([A-Za-z0-9+/=]+)$",
-    re.IGNORECASE,
-)
+def _decode_data_image(value: str) -> bytes | None:
+    """Return image bytes through the shared inert resource boundary."""
+
+    resource = _decode_data_resource(value)
+    return resource[1] if resource is not None and resource[0].startswith("image/") else None
+
+
+def _decode_data_resource(value: str) -> tuple[str, bytes] | None:
+    """Decode bounded image/font bytes and verify the declared media type."""
+
+    try:
+        uri = urlsplit(value.strip())
+        metadata, separator, payload = uri.path.partition(",")
+        media_type, *parameters = metadata.lower().split(";")
+        if (
+            uri.scheme != "data" or uri.netloc or uri.query or uri.fragment
+            or not separator or parameters != ["base64"]
+        ):
+            return None
+        if len(payload) > 3 * 4 * ((MAX_EMBEDDED_ASSET_BYTES + 2) // 3):
+            return None
+        encoded = unquote_to_bytes(payload).translate(None, b"\t\n\f\r ")
+        content = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError):
+        return None
+    font_mime = {
+        b"\x00\x01\x00\x00": "font/ttf", b"OTTO": "font/otf",
+        b"wOFF": "font/woff", b"wOF2": "font/woff2",
+    }.get(content[:4])
+    if len(content) > MAX_EMBEDDED_ASSET_BYTES or (font_mime or image_asset_mime(content)) != media_type:
+        return None
+    if media_type == "image/svg+xml" and not svg_asset_is_safe(content):
+        return None
+    return media_type, content
+
+
+def normalize_asset_inputs(values: Any) -> list[Any]:
+    """Normalize a scalar or iterable asset payload to a list."""
+
+    if values is None:
+        return []
+    if isinstance(values, (str, Path, dict)):
+        return [values]
+    try:
+        return list(values)
+    except TypeError:
+        return [values]
 
 
 def prepare_asset_manifest(
@@ -62,19 +104,15 @@ def prepare_asset_manifest(
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Resolve supplied or bundled image assets into bounded, inert records."""
 
-    if values is None:
-        items: list[Any] = []
-    elif isinstance(values, (str, Path, dict)):
-        items = [values]
-    else:
-        try:
-            items = list(values)
-        except TypeError:
-            items = [values]
+    items = normalize_asset_inputs(values)
     manifest: list[dict[str, Any]] = []
     warnings: list[str] = []
     for index, value in enumerate(items, start=1):
-        source, description = _asset_source_and_description(value)
+        source = asset_source(value)
+        description = (
+            str(value.get("description") or value.get("alt") or "").strip()
+            if isinstance(value, dict) else ""
+        )
         token = f"asset://{index}"
         if not source:
             warnings.append(f"{token}: asset source is missing.")
@@ -95,6 +133,31 @@ def prepare_asset_manifest(
             continue
         if len(content) > MAX_EMBEDDED_ASSET_BYTES:
             warnings.append(f"{token}: asset exceeds the embedded-image byte limit.")
+            continue
+        if path.suffix.lower() == ".pptx":
+            try:
+                from posterlib.sources.pptx_assets import prepare_pptx_asset
+
+                preview_uri = value.get("preview_uri") if isinstance(value, dict) else None
+                if not isinstance(preview_uri, str) or not preview_uri.strip():
+                    raise ValueError(
+                        "native PPTX component is missing preview_uri; "
+                        "provide a producer-supplied SVG or PNG preview."
+                    )
+                previews, preview_warnings = prepare_asset_manifest(preview_uri, resolve=resolve)
+                if not previews:
+                    raise ValueError("invalid native PPTX preview_uri: " + " ".join(preview_warnings))
+                preview = previews[0]
+                if preview["mime"] not in {"image/svg+xml", "image/png"}:
+                    raise ValueError("native PPTX preview_uri must supply SVG or PNG.")
+                component = prepare_pptx_asset(content, preview=preview)
+            except Exception as exc:  # noqa: BLE001 -- reject an optional candidate at its decoding boundary
+                warnings.append(f"{token}: native PPTX candidate could not be prepared: {exc}")
+                continue
+            manifest.append({
+                "token": token, "source": source, "filename": path.name,
+                "description": description, **component,
+            })
             continue
         mime = image_asset_mime(content)
         if mime is None:
@@ -138,6 +201,8 @@ def prepare_asset_manifest(
                 "evidence_uri": evidence_uri,
             }
         if isinstance(value, dict) and is_source_figure_asset(value):
+            if value.get("source_path"):
+                figure_provenance["source_path"] = str(value["source_path"])
             extraction_mode = str(value.get("extraction_mode") or "").strip()
             if extraction_mode and extraction_mode not in {
                 "embedded-raster",
@@ -161,6 +226,12 @@ def prepare_asset_manifest(
             if isinstance(carrier_number, int) and not isinstance(carrier_number, bool):
                 figure_provenance["carrier_number"] = carrier_number
             measured_size = _image_natural_size(content, mime)
+            if measured_size is None and mime == "image/svg+xml":
+                warnings.append(
+                    f"{token}: source SVG dimensions could not be resolved; "
+                    "provide absolute dimensions or an intrinsic viewBox ratio."
+                )
+                continue
             if measured_size is not None:
                 (
                     figure_provenance["natural_width_px"],
@@ -196,14 +267,8 @@ def prepare_asset_manifest(
 def data_image_sha256(value: str) -> str | None:
     """Hash one bounded embedded image URI, or return ``None`` when invalid."""
 
-    match = _DATA_IMAGE_RE.fullmatch(value.strip())
-    if match is None:
-        return None
-    try:
-        content = base64.b64decode(match.group(1), validate=True)
-    except (ValueError, TypeError):
-        return None
-    if len(content) > MAX_EMBEDDED_ASSET_BYTES or image_asset_mime(content) is None:
+    content = _decode_data_image(value)
+    if content is None:
         return None
     return hashlib.sha256(content).hexdigest()
 
@@ -230,6 +295,13 @@ def asset_aspect_ratio(asset: dict[str, Any]) -> float:
             and natural_height > 0
         ):
             return round(natural_width / natural_height, 4)
+
+    # Restored HTML carries image bytes rather than preparation metadata.
+    content = _decode_data_image(str(asset.get("data_uri") or ""))
+    if content is not None:
+        dimensions = _image_natural_size(content, image_asset_mime(content) or "")
+        if dimensions is not None:
+            return round(dimensions[0] / dimensions[1], 4)
 
     bbox = asset.get("crop_bbox")
     if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
@@ -268,13 +340,30 @@ def _image_natural_size(content: bytes, mime: str) -> tuple[float, float] | None
     if mime == "image/svg+xml":
         try:
             root = ElementTree.fromstring(content)
-            width = _unitless_svg_length(root.get("width"))
-            height = _unitless_svg_length(root.get("height"))
-        except ElementTree.ParseError:
+            width = _svg_intrinsic_length(root.get("width"))
+            height = _svg_intrinsic_length(root.get("height"))
+        except (ElementTree.ParseError, ValueError):
             return None
         if width is None or height is None:
-            return None
-        return max(1.0, width), max(1.0, height)
+            try:
+                viewbox = [
+                    float(item) for item in root.get("viewBox", "").replace(",", " ").split()
+                ]
+            except ValueError:
+                return None
+            if (
+                len(viewbox) != 4 or not all(math.isfinite(item) for item in viewbox)
+                or viewbox[2] <= 0 or viewbox[3] <= 0
+            ):
+                return None
+            ratio = viewbox[2] / viewbox[3]
+            if width is not None:
+                height = width / ratio
+            elif height is not None:
+                width = height * ratio
+            else:
+                width, height = viewbox[2:]
+        return width, height
     try:
         from PIL import Image
     except ImportError:
@@ -289,18 +378,31 @@ def _image_natural_size(content: bytes, mime: str) -> tuple[float, float] | None
     return float(width), float(height)
 
 
-def _unitless_svg_length(value: str | None) -> float | None:
-    """Parse the unitless or CSS-pixel dimensions emitted by PDF extraction."""
+def _svg_intrinsic_length(value: str | None) -> float | None:
+    """Resolve absolute SVG lengths, distinguishing absent from unsupported values."""
 
-    match = re.fullmatch(
-        r"\s*([0-9]+(?:\.[0-9]+)?)\s*(?:px)?\s*",
-        str(value or ""),
-        flags=re.IGNORECASE,
-    )
-    if match is None:
+    if value is None:
         return None
-    length = float(match.group(1))
-    return length if math.isfinite(length) and length > 0 else None
+    tokens = tinycss2.parse_component_value_list(value, skip_comments=True)
+    tokens = [token for token in tokens if token.type != "whitespace"]
+    if len(tokens) != 1:
+        raise ValueError("SVG length requires one CSS value")
+    token = tokens[0]
+    if token.type == "ident" and token.lower_value == "auto":
+        return None
+    # Absolute CSS units share a fixed 96px/in relationship. Percentage lengths
+    # supply no intrinsic dimension; the viewBox may still supply their ratio.
+    scale = 1.0 if token.type in {"number", "percentage"} else (
+        {"px": 1.0, "in": 96.0, "cm": 96 / 2.54, "mm": 96 / 25.4,
+         "q": 96 / 101.6, "pt": 96 / 72, "pc": 16.0}.get(token.lower_unit)
+        if token.type == "dimension" else None
+    )
+    if scale is None:
+        raise ValueError("SVG length requires an absolute unit")
+    length = float(token.value) * scale
+    if not math.isfinite(length) or length <= 0:
+        raise ValueError("SVG length must be finite and positive")
+    return None if token.type == "percentage" else length
 
 
 def svg_asset_is_safe(content: bytes) -> bool:
@@ -309,13 +411,20 @@ def svg_asset_is_safe(content: bytes) -> bool:
     if len(content) > MAX_EMBEDDED_ASSET_BYTES:
         return False
     try:
-        text = content.decode("utf-8-sig")
-        root = ElementTree.fromstring(text)
-    except (ElementTree.ParseError, UnicodeDecodeError):
+        root = etree.fromstring(
+            content, parser=etree.XMLParser(resolve_entities=False, no_network=True),
+        )
+    except etree.XMLSyntaxError:
         return False
-    if "<!doctype" in text.lower() or "<?xml-stylesheet" in text.lower():
+    if (
+        root.tag.rsplit("}", 1)[-1].lower() != "svg"
+        or root.getroottree().docinfo.doctype
+        or root.getroottree().xpath('//processing-instruction("xml-stylesheet")')
+    ):
         return False
     for element in root.iter():
+        if not isinstance(element.tag, str):
+            continue
         tag = element.tag.rsplit("}", 1)[-1].lower()
         if tag in ACTIVE_CONTENT_TAGS:
             return False
@@ -347,36 +456,18 @@ def safe_embedded_reference(value: str) -> bool:
     candidate = value.strip()
     if not candidate or candidate.startswith("#"):
         return True
-    if _REMOTE_RE.search(candidate):
-        return False
-    match = _DATA_IMAGE_RE.fullmatch(candidate)
-    if match is None:
-        return False
-    try:
-        decoded = base64.b64decode(match.group(1), validate=True)
-    except ValueError:
-        return False
-    if len(decoded) > MAX_EMBEDDED_ASSET_BYTES:
-        return False
-    if candidate.lower().startswith("data:image/svg+xml"):
-        return svg_asset_is_safe(decoded)
-    return image_asset_mime(decoded) is not None
+    return _decode_data_resource(candidate) is not None
 
 
-def _asset_source_and_description(value: Any) -> tuple[str, str]:
+def asset_source(value: Any) -> str:
+    """Return the first supplied source in portable asset field order."""
+
     if isinstance(value, dict):
-        source = next(
-            (
-                value.get(key)
-                for key in ("uri", "path", "source", "file")
-                if value.get(key)
-            ),
-            "",
-        )
-        return str(source).strip(), str(
-            value.get("description") or value.get("alt") or ""
-        ).strip()
-    return str(value or "").strip(), ""
+        for key in ("uri", "path", "source", "file"):
+            if value.get(key):
+                return str(value[key]).strip()
+        return ""
+    return str(value or "").strip()
 
 
 def safe_svg_css(css: str) -> bool:
@@ -390,9 +481,11 @@ __all__ = [
     "MAX_EMBEDDED_ASSET_BYTES",
     "SOURCE_FIGURE_KINDS",
     "asset_aspect_ratio",
+    "asset_source",
     "data_image_sha256",
     "image_asset_mime",
     "is_source_figure_asset",
+    "normalize_asset_inputs",
     "prepare_asset_manifest",
     "safe_embedded_reference",
     "safe_svg_css",

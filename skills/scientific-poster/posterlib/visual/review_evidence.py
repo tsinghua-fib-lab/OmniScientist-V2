@@ -5,14 +5,23 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import re
 from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from posterlib.runtime.identifiers import is_sha256
+
 MAX_CROPS = 3
-_FIGURE_PRIORITY_ORDER = ("focal", "primary", "supporting", "footer")
+OVERVIEW_MAX_EDGE_PX = 1_920
+_DETAIL_PRIORITY_ORDER = ("focal", "primary", "supporting", "footer")
+_ATLAS_GAP_PX = 24
+_ATLAS_LABEL_HEIGHT_PX = 54
+# Fit all detail tiles into one existing 1920 x 2160 montage pane.
+_ATLAS_TILE_SIZE = (
+    OVERVIEW_MAX_EDGE_PX - 2 * _ATLAS_GAP_PX,
+    (2_160 - _ATLAS_GAP_PX) // MAX_CROPS - _ATLAS_LABEL_HEIGHT_PX - _ATLAS_GAP_PX,
+)
 
 
 def file_sha256(path: Path) -> str:
@@ -54,10 +63,19 @@ def build_evidence(
     content_rects_by_module: dict[str, list[dict[str, float]]] = {}
     for item in (*text_runs, *occupancy_targets):
         item_rects = _item_rects(item)
-        content_rects.extend(item_rects)
         module_id = str(item.get("module_id") or "").strip()
-        if module_id and item_rects:
+        if module_id:
             content_rects_by_module.setdefault(module_id, []).extend(item_rects)
+        else:
+            content_rects.extend(item_rects)
+    for module in _records(report.get("modules")):
+        internal = module.get("internal_space")
+        if isinstance(internal, dict):
+            bounds = _rect(internal.get("content_bounds_px"))
+            content_rects_by_module[str(module.get("module_id") or "")] = (
+                [bounds] if bounds is not None else []
+            )
+    content_rects.extend(rect for values in content_rects_by_module.values() for rect in values)
     space_observations = _space_observations(
         report=report,
         page_width=width,
@@ -67,17 +85,16 @@ def build_evidence(
         content_rects=content_rects,
         content_rects_by_module=content_rects_by_module,
     )
+    figures = _figure_observations(report, width, height, width_mm, height_mm)
     observations = _select_observations(
         space_observations=space_observations,
-        figure_observations=_figure_observations(
-            report,
-            width,
-            height,
-            width_mm,
-            height_mm,
-        ),
-        typography=_typography_summary(report),
+        detail_observations=[
+            *figures,
+            *_native_observations(report, space_observations, figures, width, height, width_mm, height_mm),
+        ],
+        typography=_typography_observations(report),
     )
+    observations.extend(_rendered_copy_observations(text_runs))
 
     overview = {
         "path": str(screenshot_path),
@@ -111,21 +128,46 @@ def build_evidence(
 def _select_observations(
     *,
     space_observations: list[dict[str, Any]],
-    figure_observations: list[dict[str, Any]],
-    typography: dict[str, Any],
+    detail_observations: list[dict[str, Any]],
+    typography: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Keep all module measurements and bounded source-figure detail."""
+    """Keep measured carriers available to the shared detail selection."""
 
     return [
-        {
-            "id": "typography:distribution",
-            "kind": "typography_distribution",
-            "salience": 1.0,
-            "facts": typography,
-        },
+        *typography,
         *space_observations,
-        *sorted(figure_observations, key=_figure_order)[:4],
+        *sorted(detail_observations, key=_detail_order),
     ]
+
+
+def _rendered_copy_observations(text_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group browser-visible text fragments with their painted locations and owners."""
+
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for run in text_runs:
+        text = run.get("text")
+        rects = [
+            dict(rect) for rect in _records(run.get("rects"))
+            if _number(rect.get("width")) is not None
+            and _number(rect.get("height")) is not None
+        ]
+        if not isinstance(text, str) or not text.strip() or not rects:
+            continue
+        module_id = str(run.get("module_id") or "").strip()
+        poster_id = str(run.get("poster_id") or "").strip()
+        owner = (module_id, "" if module_id else poster_id)
+        if owner not in groups:
+            identity = {"module_id": owner[0], "poster_id": owner[1]}
+            groups[owner] = {
+                "id": f"copy:{len(groups) + 1}",
+                "kind": "rendered_copy",
+                **identity,
+                "facts": {"runs": []},
+            }
+        groups[owner]["facts"]["runs"].append({
+            "text": text, "poster_id": poster_id, "rects": rects,
+        })
+    return list(groups.values())
 
 
 def _space_observations(
@@ -187,6 +229,8 @@ def _space_observations(
                 "content_bounds_px": content_bounds,
                 "module_width_mm": frame["width"] * page_width_mm / page_width,
                 "module_height_mm": frame["height"] * page_height_mm / page_height,
+                **({"internal_space": module["internal_space"]}
+                   if isinstance(module.get("internal_space"), dict) else {}),
             },
         })
     return observations
@@ -202,7 +246,7 @@ def _figure_observations(
     source = report.get("source_figures")
     details = _records(source.get("details")) if isinstance(source, dict) else []
     identities = [
-        digest[:12] if re.fullmatch(r"[0-9a-f]{64}", digest) else str(index)
+        digest[:12] if is_sha256(digest) else str(index)
         for index, item in enumerate(details)
         for digest in [str(item.get("sha256") or "")]
     ]
@@ -243,6 +287,7 @@ def _figure_observations(
             "figure_wrapper_width_mm": _number(
                 item.get("figure_wrapper_width_mm")
             ),
+            "figure_wrapper_rect": _rect(item.get("figure_wrapper_rect")),
             "module_width_mm": _number(item.get("module_width_mm")),
             "group_source_figure_count": int(
                 item.get("group_source_figure_count") or 0
@@ -255,6 +300,8 @@ def _figure_observations(
             "height_ratio": painted_rect["height"] / page_height,
         }
         raw_image_style = item.get("image_computed_style")
+        if isinstance(item.get("surface_context"), list):
+            facts["surface_context"] = _records(item["surface_context"])
         if isinstance(raw_image_style, dict):
             facts["image_computed_style"] = {
                 key: str(raw_image_style.get(key) or "")
@@ -280,15 +327,121 @@ def _figure_observations(
     return observations
 
 
-def _figure_order(item: dict[str, Any]) -> tuple[int, float, str]:
+def _native_observations(
+    report: dict[str, Any],
+    space_observations: list[dict[str, Any]],
+    figures: list[dict[str, Any]],
+    page_width: float,
+    page_height: float,
+    page_width_mm: float,
+    page_height_mm: float,
+) -> list[dict[str, Any]]:
+    """Reuse browser targets and content bounds for editable scientific carriers."""
+
+    priorities = {
+        str(item.get("module_id") or ""): str(item.get("module_priority") or "")
+        for item in _records(report.get("typography"))
+    }
+    targets = []
+    for target in _records(report.get("visual_targets")):
+        module_id = str(target.get("module_id") or "").strip()
+        rect = _rect(target.get("rect"))
+        if not module_id or rect is None:
+            continue
+        if target.get("kind") not in {"img", "svg", "canvas", "table", "math", "pre", "figure"}:
+            continue
+        if any(
+            figure["module_id"] == module_id and (
+                _contains_rect(rect, figure["rect"])
+                or _contains_rect(figure["rect"], rect)
+            )
+            for figure in figures
+        ):
+            continue
+        targets.append({**target, "module_id": module_id, "rect": rect})
+    for module in space_observations:
+        if module["kind"] != "module_content_extent":
+            continue
+        rectangles = [
+            _rect(module["facts"].get("content_bounds_px")) or module["rect"],
+            *[
+                rect for target in _records(report.get("visual_targets"))
+                if target.get("module_id") == module["module_id"]
+                and (rect := _rect(target.get("rect"))) is not None
+            ],
+        ]
+        left = min(rect["left"] for rect in rectangles)
+        top = min(rect["top"] for rect in rectangles)
+        targets.append({
+            "target_id": module["id"], "kind": "module", "module_id": module["module_id"],
+            "rect": {
+                "left": left, "top": top,
+                "width": max(_right(rect) for rect in rectangles) - left,
+                "height": max(_bottom(rect) for rect in rectangles) - top,
+            },
+        })
+    return [
+        {
+            "id": "carrier:" + _document_sha256({
+                "target_id": target["target_id"], "module_id": target["module_id"], "rect": target["rect"],
+            }),
+            "kind": "native_carrier_extent",
+            "module_id": target["module_id"],
+            "module_priority": priorities.get(target["module_id"], ""),
+            "rect": target["rect"],
+            "salience": target["rect"]["width"] * target["rect"]["height"] / (page_width * page_height),
+            "facts": {
+                "target_id": target["target_id"], "carrier_kind": target["kind"],
+                "width_mm": target["rect"]["width"] * page_width_mm / page_width,
+                "height_mm": target["rect"]["height"] * page_height_mm / page_height,
+            },
+        }
+        for target in targets
+    ]
+
+
+def _contains_rect(outer: dict[str, float], inner: dict[str, float]) -> bool:
+    return (
+        outer["left"] <= inner["left"] and outer["top"] <= inner["top"]
+        and _right(outer) >= _right(inner) and _bottom(outer) >= _bottom(inner)
+    )
+
+
+def _detail_order(item: dict[str, Any]) -> tuple[int, float, str]:
     """Keep the existing scientific priority ladder ahead of crop area."""
 
     priority = str(item.get("module_priority") or "").strip().lower()
     try:
-        priority_rank = _FIGURE_PRIORITY_ORDER.index(priority)
+        priority_rank = _DETAIL_PRIORITY_ORDER.index(priority)
     except ValueError:
-        priority_rank = len(_FIGURE_PRIORITY_ORDER)
+        priority_rank = len(_DETAIL_PRIORITY_ORDER)
     return priority_rank, -float(item["salience"]), str(item["id"])
+
+
+def _typography_observations(report: dict[str, Any]) -> list[dict[str, Any]]:
+    """Keep page context and each module's measured reading roles addressable."""
+
+    observations = [{
+        "id": "typography:distribution",
+        "kind": "typography_distribution",
+        "salience": 1.0,
+        "facts": _typography_summary(report),
+    }]
+    by_module: dict[str, list[dict[str, Any]]] = {}
+    for item in _records(report.get("typography")):
+        module_id = str(item.get("module_id") or "").strip()
+        if module_id:
+            by_module.setdefault(module_id, []).append(item)
+    for module_id, records in by_module.items():
+        observations.append({
+            "id": f"typography:module:{module_id}",
+            "kind": "typography_distribution",
+            "salience": 1.0,
+            "module_id": module_id,
+            "module_priority": _weighted_mode(records, "module_priority"),
+            "facts": _typography_summary({**report, "typography": records}),
+        })
+    return observations
 
 
 def _typography_summary(report: dict[str, Any]) -> dict[str, Any]:
@@ -317,7 +470,9 @@ def _typography_summary(report: dict[str, Any]) -> dict[str, Any]:
         median = _weighted_quantile(role_values, 0.5)
         by_role[role] = {
             "character_count": sum(weight for _, weight in role_values),
+            "weighted_p10_mm": _weighted_quantile(role_values, 0.1),
             "weighted_median_mm": median,
+            "weighted_p90_mm": _weighted_quantile(role_values, 0.9),
         }
         if height_mm and median is not None:
             by_role[role]["median_percent_of_page_height"] = round(
@@ -480,35 +635,62 @@ def _write_crops(
         (
             item
             for item in observations
-            if item.get("kind") == "source_figure_extent"
+            if item.get("kind") in {"source_figure_extent", "native_carrier_extent"}
             if _rect(item.get("rect")) is not None
             and _number(item.get("salience"), allow_zero=True) is not None
         ),
-        key=_figure_order,
-    )[:MAX_CROPS]
+        key=_detail_order,
+    )
     crops = []
+    selected_regions: list[dict[str, float]] = []
     with Image.open(screenshot_path) as image:
         scale_x = image.width / page_width
         scale_y = image.height / page_height
-        for index, observation in enumerate(selected, start=1):
+        overview_scale = min(1.0, OVERVIEW_MAX_EDGE_PX / max(image.size))
+        for observation in selected:
             rect = _rect(observation.get("rect"))
             assert rect is not None
+            extents = [rect]
+            wrapper = _rect(observation["facts"].get("figure_wrapper_rect"))
+            if wrapper is not None:
+                left = min(rect["left"], wrapper["left"])
+                top = min(rect["top"], wrapper["top"])
+                extents.insert(0, {
+                    "left": left,
+                    "top": top,
+                    "width": max(_right(rect), _right(wrapper)) - left,
+                    "height": max(_bottom(rect), _bottom(wrapper)) - top,
+                })
             padding_x = page_width * 0.015
             padding_y = page_height * 0.015
-            box = (
-                max(0, math.floor((rect["left"] - padding_x) * scale_x)),
-                max(0, math.floor((rect["top"] - padding_y) * scale_y)),
-                min(
-                    image.width,
-                    math.ceil((_right(rect) + padding_x) * scale_x),
-                ),
-                min(
-                    image.height,
-                    math.ceil((_bottom(rect) + padding_y) * scale_y),
-                ),
-            )
-            if box[2] <= box[0] or box[3] <= box[1]:
+            for rect in extents:
+                box = (
+                    max(0, math.floor((rect["left"] - padding_x) * scale_x)),
+                    max(0, math.floor((rect["top"] - padding_y) * scale_y)),
+                    min(image.width, math.ceil((_right(rect) + padding_x) * scale_x)),
+                    min(image.height, math.ceil((_bottom(rect) + padding_y) * scale_y)),
+                )
+                if box[2] <= box[0] or box[3] <= box[1]:
+                    continue
+                if box == (0, 0, image.width, image.height):
+                    continue
+                detail_scale = min(
+                    1.0,
+                    _ATLAS_TILE_SIZE[0] / (box[2] - box[0]),
+                    _ATLAS_TILE_SIZE[1] / (box[3] - box[1]),
+                )
+                if overview_scale < 1.0 and detail_scale <= overview_scale:
+                    continue
+                break
+            else:
                 continue
+            # Carrier extents distinguish nested evidence from shared crop padding.
+            if any(
+                _contains_rect(selected_rect, rect) or _contains_rect(rect, selected_rect)
+                for selected_rect in selected_regions
+            ):
+                continue
+            index = len(crops) + 1
             path = out_dir / f"visual-evidence-{index:02d}.png"
             image.crop(box).save(path)
             crops.append(
@@ -519,6 +701,9 @@ def _write_crops(
                     "mime_type": "image/png",
                 }
             )
+            selected_regions.append(rect)
+            if len(crops) == MAX_CROPS:
+                break
     return crops
 
 
@@ -539,12 +724,12 @@ def _write_atlas(
             with Image.open(str(crop["path"])) as opened:
                 raster = ImageOps.exif_transpose(opened).convert("RGB")
                 raster.load()
-                raster.thumbnail((1200, 760), Image.Resampling.LANCZOS)
+                raster.thumbnail(_ATLAS_TILE_SIZE, Image.Resampling.LANCZOS)
                 tiles.append((str(crop["observation_id"]), raster.copy()))
     except (OSError, ValueError, KeyError):
         return None
-    gap = 24
-    label_height = 54
+    gap = _ATLAS_GAP_PX
+    label_height = _ATLAS_LABEL_HEIGHT_PX
     width = max(tile.width for _, tile in tiles)
     height = sum(tile.height + label_height + gap for _, tile in tiles) + gap
     atlas = Image.new("RGB", (width + 2 * gap, height), "#e5e7eb")

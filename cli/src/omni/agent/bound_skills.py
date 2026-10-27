@@ -108,7 +108,7 @@ def resolve_bound_skills(
 
 
 def render_bound_skill_block(bindings: Iterable[BoundSkill]) -> str:
-    """Compact Codex-style injection: name, availability, and the run_skill call."""
+    """Surface availability, declared inputs, and the existing run_skill call."""
     items = [item for item in bindings if item.skill]
     if not items:
         return ""
@@ -124,6 +124,8 @@ def render_bound_skill_block(bindings: Iterable[BoundSkill]) -> str:
         reason = str(card.get("unavailable_reason") or "").strip()
         status = f"{availability}: {reason}" if reason else availability
         lines.append(f"- {item.skill} pays {item.output} ({status})")
+        if "input_schema" in card:
+            lines.append(f"  input_schema: {json.dumps(card['input_schema'], ensure_ascii=False)}")
         call = card.get("call")
         if isinstance(call, dict) and call:
             lines.append(f"  call: run_skill {json.dumps(call, ensure_ascii=False)}")

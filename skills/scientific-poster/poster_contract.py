@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
-import re
 from collections import Counter
 from html.parser import HTMLParser
 from pathlib import Path
@@ -12,7 +9,12 @@ from types import MappingProxyType
 from typing import Any
 
 import image_assets
-from css_validation import generated_content_declarations, offline_css_issues
+from css_validation import (
+    generated_content_declarations,
+    inline_style_is_hidden,
+    offline_css_issues,
+)
+from posterlib.runtime.identifiers import is_module_id, is_poster_id, is_sha256
 
 ACTION_DRAFT = "draft"
 ACTION_PREPARE = "prepare"
@@ -133,9 +135,6 @@ SEMANTIC_ROLES = frozenset(
     {"claim", "context", "method", "evidence", "limitation", "provenance"}
 )
 MODULE_PRIORITIES = frozenset({"focal", "primary", "supporting", "footer"})
-ORGANIZATION_MODES = frozenset(
-    {"scan-first", "figure-led", "method-led", "result-led", "narrative"}
-)
 _INTERACTIVE_ATTRIBUTES = {
     "autofocus",
     "contenteditable",
@@ -185,19 +184,6 @@ _SVG_PRESENTATION_ATTRIBUTES = {
     "mask",
     "stroke",
 }
-_MATH_LAYOUT_OVERRIDE_RE = re.compile(
-    r"(?:(?:^|[,\s>+~])math(?=[\s>+~.#:[,{])"
-    r"|\[\s*data-content-role\s*=\s*['\"]?equation['\"]?\s*\]"
-    r"|\[\s*data-latex(?:\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\]\s]+))?\s*\])"
-    r"[^{}]*\{[^{}]*\bdisplay\s*:\s*(?:block|flex|grid|inline-block)\s*(?:;|})",
-    re.IGNORECASE | re.DOTALL,
-)
-_UNESCAPED_MATH_LESS_THAN_RE = re.compile(
-    r"<(?:mi|mn|mo|mtext|ms)\b[^>]*>\s*<\s*</",
-    re.IGNORECASE,
-)
-POSTER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$")
-POSTER_MODULE_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 
 
 def normalize_action(value: Any, *, default: str = ACTION_DRAFT) -> str:
@@ -226,35 +212,6 @@ def outcome_result(code: str, *, summary: str, **details: Any) -> dict[str, Any]
         }
     )
     return result
-
-
-def source_figure_manifest_sha256(values: Any) -> str:
-    """Hash a canonical set of prepared PDF-figure identities."""
-
-    try:
-        hashes = sorted({str(value) for value in values})
-    except TypeError as exc:
-        raise ValueError("source-figure manifest must be iterable") from exc
-    if any(re.fullmatch(r"[0-9a-f]{64}", value) is None for value in hashes):
-        raise ValueError("source-figure manifest contains an invalid SHA-256")
-    raw = json.dumps(hashes, separators=(",", ":")).encode("ascii")
-    return hashlib.sha256(b"scientific-poster-source-figures-v1\0" + raw).hexdigest()
-
-
-def poster_approval_phrase(
-    html_sha256: str,
-    grounding_source_sha256: str,
-    source_figure_manifest_sha256: str,
-) -> str:
-    """Return the exact approval phrase bound to HTML, source, and source figures."""
-
-    hashes = (html_sha256, grounding_source_sha256, source_figure_manifest_sha256)
-    if any(re.fullmatch(r"[0-9a-f]{64}", value) is None for value in hashes):
-        raise ValueError("approval phrase hashes must be lowercase SHA-256 digests")
-    return (
-        f"APPROVE SCIENTIFIC-POSTER poster {html_sha256} "
-        f"source {grounding_source_sha256} figures {source_figure_manifest_sha256}"
-    )
 
 
 def normalize_outcome_result(
@@ -385,9 +342,7 @@ class ParsedPosterHtml(HTMLParser):
                     "interactive_html", f"<{tag}> contains an interactive attribute."
                 )
             )
-        hidden = "display:none" in attr.get("style", "").replace(" ", "").lower() or (
-            "visibility:hidden" in attr.get("style", "").replace(" ", "").lower()
-        )
+        hidden = "hidden" in attr or inline_style_is_hidden(attr.get("style", ""))
         equation_role = attr.get("data-content-role", "").strip() == "equation"
         if tag != "math" and (equation_role or "data-latex" in attr):
             self.issues.append(
@@ -400,7 +355,7 @@ class ParsedPosterHtml(HTMLParser):
         poster_id = attr.get("data-poster-id", "").strip()
         if poster_id:
             self.poster_ids.append(poster_id)
-            if POSTER_ID_RE.fullmatch(poster_id) is None:
+            if not is_poster_id(poster_id):
                 self.issues.append(
                     _issue(
                         "poster_id",
@@ -408,7 +363,7 @@ class ParsedPosterHtml(HTMLParser):
                     )
                 )
         module_id = attr.get("data-poster-module", "").strip()
-        if "data-poster-module" in attr and POSTER_MODULE_RE.fullmatch(module_id) is None:
+        if "data-poster-module" in attr and not is_module_id(module_id):
             self.issues.append(
                 _issue(
                     "module_id",
@@ -498,7 +453,7 @@ class ParsedPosterHtml(HTMLParser):
             claimed_figure_sha256 = attr["data-source-figure-sha256"].strip()
             actual_figure_sha256 = image_assets.data_image_sha256(attr.get("src", ""))
             if (
-                re.fullmatch(r"[0-9a-f]{64}", claimed_figure_sha256) is None
+                not is_sha256(claimed_figure_sha256)
                 or actual_figure_sha256 != claimed_figure_sha256
             ):
                 self.issues.append(
@@ -552,6 +507,15 @@ class ParsedPosterHtml(HTMLParser):
         if self._style_depth:
             self._check_css(data)
             return
+        if self._stack and self._stack[-1][0] in {"mi", "mn", "mo", "mtext", "ms"}:
+            # HTMLParser reports literal '<' as data; entities retain their raw
+            # source offset so &lt; stays a valid, editable MathML operator.
+            raw = self._source[self._source_offset():self._source_offset() + len(data)]
+            if "<" in raw:
+                self.issues.append(_issue(
+                    "malformed_mathml_operator",
+                    "Escape a MathML less-than operator as &lt; to preserve equation structure.",
+                ))
         text = " ".join(data.split())
         if not text or any(hidden for _, _, hidden in self._stack):
             return
@@ -567,7 +531,7 @@ class ParsedPosterHtml(HTMLParser):
         )
         if "unsafe_syntax" in issues:
             self.issues.append(
-                _issue("unsafe_css", "CSS escapes and ambiguous syntax are forbidden.")
+                _issue("unsafe_css", "CSS must have valid, unambiguous token syntax.")
             )
         if "active_construct" in issues:
             self.issues.append(
@@ -592,16 +556,6 @@ class ParsedPosterHtml(HTMLParser):
                     declarations=generated_content_declarations(css),
                 )
             )
-        if _MATH_LAYOUT_OVERRIDE_RE.search(css):
-            self.issues.append(
-                _issue(
-                    "math_layout_override",
-                    "Do not set MathML to ordinary block, flex, or grid display; use "
-                    'the native <math display="block"> layout so fractions and '
-                    "scripts remain typeset.",
-                )
-            )
-
 
 def _page_size_mm(stylesheets: list[str]) -> tuple[float, float] | None:
     """Resolve global literal-mm page sizes by importance and source order.
@@ -673,14 +627,6 @@ def validate_poster_html(
     if "asset://" in html_text:
         issues.append(
             _issue("asset_token", "Poster contains an unresolved asset token.")
-        )
-    if _UNESCAPED_MATH_LESS_THAN_RE.search(html_text):
-        issues.append(
-            _issue(
-                "malformed_mathml_operator",
-                "Escape a MathML less-than operator as &lt;; a literal < inside a "
-                "math token corrupts the equation structure.",
-            )
         )
     parsed = facts or parse_poster_html(html_text)
     if parsed.parse_error:

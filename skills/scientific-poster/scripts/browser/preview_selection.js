@@ -1,4 +1,12 @@
 (() => {
+  const normalizeText = (value) => {
+    let text = '', space = false;
+    for (const character of String(value || '')) {
+      if (!character.trim()) space = Boolean(text);
+      else { text += (space ? ' ' : '') + character; space = false; }
+    }
+    return text;
+  };
   const token = __POSTER_PREVIEW_TOKEN_JSON__;
   const sourceHash = __POSTER_SOURCE_HASH_JSON__;
   const highlight = document.getElementById(__POSTER_HIGHLIGHT_ID_JSON__);
@@ -10,7 +18,14 @@
     'grid-template-rows','gap','align-items','justify-content','text-align','overflow',
     'border-radius','opacity','transform'];
   const targetFor = event => event.target instanceof Element
-    ? event.target.closest('[data-poster-id],[data-poster-module]') : null;
+    ? event.target.closest('[data-poster-id]') : null;
+  const inheritedMetadata = (element, attribute) => {
+    for (let current = element; current; current = current.parentElement) {
+      const value = (current.getAttribute(attribute) || '').trim();
+      if (value) return value;
+    }
+    return '';
+  };
   const show = element => {
     if (!element) { highlight.hidden = true; return; }
     const rect = element.getBoundingClientRect();
@@ -25,17 +40,16 @@
     if (panel.contains(event.target)) return;
     const element = targetFor(event); if (!element) return;
     event.preventDefault(); event.stopPropagation(); show(element);
-    const module = element.closest('[data-poster-module]');
     const rect = element.getBoundingClientRect();
     const computed = getComputedStyle(element); const styles = {};
     for (const name of styleNames) styles[name] = computed.getPropertyValue(name).slice(0,300);
-    selectedId = element.dataset.posterId || element.dataset.posterModule || '';
+    selectedId = (element.dataset.posterId || '').trim();
     label.textContent = `Selected: ${selectedId}`;
     const payload = {source_html_sha256:sourceHash,poster_id:selectedId,
-      poster_module:module?.dataset.posterModule || '',
-      semantic_roles:module?.dataset.semanticRoles || '',
-      module_priority:module?.dataset.modulePriority || '',
-      text_sample:(element.innerText || '').replace(/\s+/g,' ').trim().slice(0,500),
+      poster_module:inheritedMetadata(element, 'data-poster-module'),
+      semantic_roles:inheritedMetadata(element, 'data-semantic-roles'),
+      module_priority:inheritedMetadata(element, 'data-module-priority'),
+      text_sample:normalizeText(element.innerText).slice(0,500),
       rect:{x:rect.x,y:rect.y,width:rect.width,height:rect.height},styles};
     try {
       const response = await fetch(`/__poster_selection?token=${encodeURIComponent(token)}`, {

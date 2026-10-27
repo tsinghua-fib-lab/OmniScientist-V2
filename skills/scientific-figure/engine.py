@@ -13,13 +13,16 @@ from typing import Any
 
 
 class ScientificFigureEngine:
-    @staticmethod
-    def validate_params(*, arguments: dict | None = None, input_data: dict | None = None) -> dict | None:
+    def validate_params(self, *, arguments: dict | None = None, input_data: dict | None = None) -> dict | None:
         data = arguments or input_data or {}
+        ctx = getattr(self, "ctx", None)
+        source_dot, source_error = _source_dot(data, working_dir=getattr(ctx, "working_dir", None))
+        if source_error:
+            return source_error
         prompt = str(data.get("input") or data.get("query") or data.get("prompt") or "")
-        if not prompt and not _source_dot(data):
+        if not prompt and not source_dot:
             return {"error": "input is required"}
-        if str(data.get("revision_mode") or "").strip() and not _source_dot(data):
+        if str(data.get("revision_mode") or "").strip() and not source_dot:
             return {
                 "error": "source_artifact_required",
                 "summary": "A figure revision requires source_artifact_path or source_artifact_dot.",
@@ -29,16 +32,17 @@ class ScientificFigureEngine:
         return None
 
     async def execute(self, progress_callback: Any = None, **input_data: Any) -> dict[str, Any]:
+        ctx = getattr(self, "ctx", None)
         prompt = str(input_data.get("input") or input_data.get("query") or input_data.get("prompt") or "")
-        source_dot = _source_dot(input_data)
+        source_dot, source_error = _source_dot(input_data, working_dir=getattr(ctx, "working_dir", None))
+        if source_error:
+            return source_error
         revision_mode = str(input_data.get("revision_mode") or "").strip()
         if not revision_mode and isinstance(input_data.get("revision_constraints"), dict):
             revision_mode = "major"
         authored = bool(source_dot) and not revision_mode
         source_title = str(input_data.get("source_artifact_title") or (_dot_title(source_dot) if source_dot else ""))
         title = str(input_data.get("title") or source_title or "Scientific Figure")
-        ctx = getattr(self, "ctx", None)
-
         await _progress(progress_callback, "plan figure", 0.1)
         revision: dict[str, Any] = {}
         requested_figure_kind = _figure_kind(input_data)
@@ -115,6 +119,8 @@ class ScientificFigureEngine:
 
         await _progress(progress_callback, "render graphviz", 0.35)
         rendered = await _render_graphviz(dot)
+        rendering = {key: value for key, value in rendered.items() if key not in {"svg", "png"}}
+        render_status = rendering["status"]
 
         await _progress(progress_callback, "save artifacts", 0.55)
         artifacts = []
@@ -129,10 +135,10 @@ class ScientificFigureEngine:
         )
         if dot_art:
             artifacts.append(dot_art)
-        svg_bytes = rendered.get("svg") or _fallback_svg(figure_kind, title).encode("utf-8")
-        svg_art = await _store_artifact(ctx, svg_bytes, title=f"{title} SVG", fmt="svg", mime="image/svg+xml", meta=artifact_meta)
-        if svg_art:
-            artifacts.append(svg_art)
+        if rendered.get("svg"):
+            svg_art = await _store_artifact(ctx, rendered["svg"], title=f"{title} SVG", fmt="svg", mime="image/svg+xml", meta=artifact_meta)
+            if svg_art:
+                artifacts.append(svg_art)
         if rendered.get("png"):
             png_art = await _store_artifact(ctx, rendered["png"], title=f"{title} PNG", fmt="png", mime="image/png", meta=artifact_meta)
             if png_art:
@@ -149,6 +155,7 @@ class ScientificFigureEngine:
                     "effective_inputs": effective_inputs,
                     "revision_mode": revision.get("mode", ""),
                     "source_task_id": revision.get("source_task_id", ""),
+                    **({"source_artifact_dot": source_dot} if source_dot else {}),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -164,7 +171,9 @@ class ScientificFigureEngine:
             artifacts.append(input_art)
 
         await _progress(progress_callback, "record provenance", 0.75)
-        research = await _record_provenance(ctx, figure_kind, title, artifacts, rendered.get("cmd", ""))
+        research = await _record_provenance(
+            ctx, "generic" if authored else figure_kind, title, artifacts, rendered.get("cmd", ""), rendering=rendering,
+        )
         figure_bundle = await _build_figure_bundle(
             ctx,
             title=title,
@@ -186,6 +195,7 @@ class ScientificFigureEngine:
             artifacts=artifacts,
             research=research,
             figure_bundle=figure_bundle,
+            rendering=rendering,
             meta=artifact_meta,
         )
         if provenance_art:
@@ -193,14 +203,6 @@ class ScientificFigureEngine:
 
         formats = ", ".join(
             a["format"].upper() for a in artifacts if a.get("format") in {"dot", "svg", "png"}
-        )
-        await _progress(
-            progress_callback,
-            "done",
-            1.0,
-            stage_id="figure.done",
-            milestone="Figure rendered and checked",
-            stats={"formats": formats} if formats else {},
         )
         gate_code = str(kind_gate.get("code") or "")
         warning = ""
@@ -230,12 +232,38 @@ class ScientificFigureEngine:
             matched_summary = warning
         else:
             matched_summary = f"Effective figure template `{figure_kind}` matched the provider check."
+        summary = f"Generated an auditable, reproducible {title} ({formats})."
+        caption = "" if authored else _caption(figure_kind, instruction_graph=instruction_graph)
+        render_failure: dict[str, Any] = {}
+        if render_status != "ok":
+            status = render_status
+            summary = rendering["message"]
+            matched_summary = summary
+            kind_gate = {**kind_gate, "code": rendering["code"]}
+            gate_code = rendering["code"]
+            render_failure = {
+                "recoverable": render_status == "partial",
+                "blocking": render_status == "error",
+                "error_info": {
+                    "code": rendering["code"],
+                    "message": summary,
+                    "retryable": False,
+                    "diagnostics": rendering["diagnostics"],
+                },
+            }
+            if render_status == "error":
+                render_failure["error"] = summary
+                warning = ""
+                caption = ""
+            else:
+                warning = " ".join(part for part in (summary, warning) if part)
+                caption = "A partial rendering of the Graphviz source; see renderer diagnostics for missing formats."
         assessment = _figure_assessment(
             ctx,
             input_data,
             effective_inputs=effective_inputs,
             kind_gate=kind_gate,
-            status="degraded" if warning else "passed",
+            status="failed" if render_status == "error" else "degraded" if warning else "passed",
             summary=warning or matched_summary,
             evidence_refs=[
                 str(artifact.get("uri") or "")
@@ -243,17 +271,27 @@ class ScientificFigureEngine:
                 if artifact.get("uri")
             ],
         )
+        await _progress(
+            progress_callback,
+            "done" if render_status == "ok" else render_status,
+            1.0,
+            stage_id="figure.done" if render_status == "ok" else f"figure.{render_status}",
+            milestone="Figure rendered and checked" if render_status == "ok" else summary,
+            stats={"formats": formats} if formats else {},
+        )
         return {
             "status": status,
             **({"outcome": kind_gate} if gate_code else {}),
             **({"warning": warning, "recoverable": True} if warning else {}),
+            **render_failure,
             "title": title,
             "figure_kind": figure_kind,
             "requested_figure_kind": requested_figure_kind,
             "effective_inputs": effective_inputs,
             "deliverable_assessment": assessment,
-            "summary": f"Generated an auditable, reproducible {title} ({formats}).",
-            "caption": _caption(figure_kind, instruction_graph=instruction_graph),
+            "summary": summary,
+            "caption": caption,
+            "rendering": rendering,
             "artifacts": artifacts,
             "dot_uri": _first_uri(artifacts, "dot"),
             "svg_uri": _first_uri(artifacts, "svg"),
@@ -597,17 +635,43 @@ def _figure_dot(kind: str, title: str) -> str:
     return _generic_dot(title)
 
 
-def _source_dot(input_data: dict[str, Any]) -> str:
+def _source_dot(
+    input_data: dict[str, Any], *, working_dir: Path | None = None,
+) -> tuple[str, dict[str, Any] | None]:
+    """Read explicit DOT against the host's working directory, preserving read errors."""
     inline = str(input_data.get("source_artifact_dot") or "")
     if inline.strip():
-        return inline
-    path = str(input_data.get("source_artifact_path") or "").strip()
-    if not path:
-        return ""
+        return inline, None
+    source_path = str(input_data.get("source_artifact_path") or "").strip()
+    if not source_path:
+        return "", None
     try:
-        return Path(path).expanduser().read_text(encoding="utf-8")
-    except OSError:
-        return ""
+        path = Path(source_path).expanduser()
+        if not path.is_absolute():
+            if working_dir is None:
+                raise ValueError("Relative source_artifact_path requires ctx.working_dir.")
+            path = working_dir / path
+        source = path.read_text(encoding="utf-8")
+        if not source.strip():
+            raise ValueError(f"DOT source file is empty: {path}")
+        return source, None
+    except (OSError, ValueError) as exc:
+        message = f"Could not read source_artifact_path {source_path!r}: {exc}"
+        return "", {
+            "status": "error",
+            "outcome": {"code": "missing_input"},
+            "error": message,
+            "summary": message,
+            "recoverable": False,
+            "blocking": True,
+            "error_info": {
+                "code": "missing_input",
+                "field": "source_artifact_path",
+                "path": source_path,
+                "message": message,
+                "retryable": False,
+            },
+        }
 
 
 def _dot_title(dot: str) -> str:
@@ -833,28 +897,54 @@ def _generic_dot(title: str) -> str:
 async def _render_graphviz(dot: str) -> dict[str, Any]:
     dot_bin = shutil.which("dot")
     if not dot_bin:
-        return {"cmd": "dot not found; used SVG fallback"}
-    out: dict[str, Any] = {"cmd": f"{dot_bin} -Tsvg/-Tpng"}
+        return {
+            "cmd": "dot -Tsvg/-Tpng",
+            "status": "error",
+            "code": "renderer_unavailable",
+            "message": "Graphviz executable 'dot' was not found on PATH. DOT source was retained.",
+            "diagnostics": {"error": "Graphviz executable 'dot' was not found on PATH."},
+        }
+    diagnostics: dict[str, Any] = {}
+    out: dict[str, Any] = {"cmd": f"{dot_bin} -Tsvg/-Tpng", "diagnostics": diagnostics}
     for fmt in ("svg", "png"):
+        command = [dot_bin, f"-T{fmt}"]
         try:
             proc = await asyncio.create_subprocess_exec(
-                dot_bin,
-                f"-T{fmt}",
+                *command,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
         except OSError as exc:
             # Windows can discover a PATH shim through PATHEXT yet still reject
-            # it at CreateProcess time. Missing Graphviz is optional: callers
-            # already synthesize an SVG fallback when no rendered bytes exist.
-            out[f"{fmt}_error"] = str(exc)[:500]
+            # it at CreateProcess time. Preserve the launch error for repair.
+            diagnostics[fmt] = {
+                "command": command,
+                "code": "renderer_unavailable",
+                "error": str(exc),
+            }
             continue
         stdout, stderr = await proc.communicate(dot.encode("utf-8"))
+        diagnostics[fmt] = {
+            "command": command,
+            "returncode": proc.returncode,
+            "stderr": stderr.decode("utf-8", "replace"),
+            "stdout_bytes": len(stdout),
+        }
         if proc.returncode == 0 and stdout:
             out[fmt] = stdout
         else:
-            out[f"{fmt}_error"] = stderr.decode("utf-8", "replace")[:500]
+            diagnostics[fmt]["code"] = "render_failed"
+    failed_formats = [fmt for fmt in ("svg", "png") if fmt not in out]
+    out["status"] = "error" if len(failed_formats) == 2 else "partial" if failed_formats else "ok"
+    if failed_formats:
+        out["code"] = (
+            "renderer_unavailable"
+            if all(diagnostics[fmt]["code"] == "renderer_unavailable" for fmt in failed_formats)
+            else "render_failed"
+        )
+        formats = ", ".join(fmt.upper() for fmt in failed_formats)
+        out["message"] = f"Graphviz rendering failed for {formats}. DOT source and renderer diagnostics were retained."
     return out
 
 
@@ -904,6 +994,7 @@ async def _write_provenance(
     artifacts: list[dict[str, str]],
     research: dict[str, Any],
     figure_bundle: dict[str, Any],
+    rendering: dict[str, Any],
     meta: dict[str, Any] | None,
 ) -> dict[str, str] | None:
     """Write a self-contained ``<figure>.provenance.json`` beside the figure.
@@ -932,6 +1023,7 @@ async def _write_provenance(
         "effective_inputs": dict(effective_inputs),
         "prompt": prompt,
         "command": command or "graphviz dot render",
+        "rendering": rendering,
         "files": [
             {
                 "name": Path(str(a.get("path") or "")).name,
@@ -1125,7 +1217,17 @@ async def _record_rag_provenance(ctx: Any, title: str, artifacts: list[dict[str,
         return {"source_ids": [], "claim_ids": [], "evidence_ids": [], "run_id": "", "error": str(exc)}
 
 
-async def _record_provenance(ctx: Any, kind: str, title: str, artifacts: list[dict[str, str]], cmd: str) -> dict[str, Any]:
+async def _record_provenance(
+    ctx: Any,
+    kind: str,
+    title: str,
+    artifacts: list[dict[str, str]],
+    cmd: str,
+    *,
+    rendering: dict[str, Any],
+) -> dict[str, Any]:
+    if rendering["status"] != "ok":
+        return await _record_generic_provenance(ctx, title, artifacts, cmd, rendering=rendering)
     if kind == "rag":
         return await _record_rag_provenance(ctx, title, artifacts, cmd)
     if kind == "transformer":
@@ -1138,6 +1240,8 @@ async def _record_generic_provenance(
     title: str,
     artifacts: list[dict[str, str]],
     cmd: str,
+    *,
+    rendering: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if ctx is None or getattr(ctx, "db", None) is None:
         return {"source_ids": [], "claim_ids": [], "evidence_ids": [], "run_id": ""}
@@ -1156,8 +1260,8 @@ async def _record_generic_provenance(
         ),
         env_lock=capture_env_lock(),
         output_uris=output_uris,
-        metrics={"artifact_count": len(output_uris)},
-        status="succeeded",
+        metrics={"artifact_count": len(output_uris), **({"rendering": rendering} if rendering else {})},
+        status={"ok": "succeeded", "partial": "partial", "error": "failed"}[rendering["status"]] if rendering else "succeeded",
     )
     return {"source_ids": [], "claim_ids": [], "evidence_ids": [], "run_id": run.id}
 
@@ -1227,82 +1331,3 @@ def _caption(kind: str, *, instruction_graph: bool = False) -> str:
             "connections, layer normalization, feed-forward networks, masked attention, and cross-attention."
         )
     return "The figure shows the main relationships among inputs, methods, validation, and outputs."
-
-
-def _fallback_svg(kind: str, title: str) -> str:
-    if kind == "rag":
-        return _rag_fallback_svg(title)
-    if kind == "generic":
-        return _generic_fallback_svg(title)
-    return _transformer_fallback_svg(title)
-
-
-def _transformer_fallback_svg(title: str) -> str:
-    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="960" height="520" viewBox="0 0 960 520">
-  <rect width="100%" height="100%" fill="white"/>
-  <text x="480" y="36" text-anchor="middle" font-family="Helvetica" font-size="24">{title}</text>
-  <rect x="80" y="90" width="280" height="340" rx="10" fill="#f8fafc" stroke="#0f766e" stroke-width="3"/>
-  <text x="220" y="125" text-anchor="middle" font-family="Helvetica" font-size="18">Encoder stack (N x)</text>
-  <text x="120" y="180" font-family="Helvetica" font-size="16">Input Embedding + Pos Encoding</text>
-  <text x="120" y="235" font-family="Helvetica" font-size="16">Multi-head Self-Attention</text>
-  <text x="120" y="290" font-family="Helvetica" font-size="16">Add &amp; LayerNorm</text>
-  <text x="120" y="345" font-family="Helvetica" font-size="16">Feed Forward + Add &amp; Norm</text>
-  <rect x="600" y="90" width="280" height="340" rx="10" fill="#faf5ff" stroke="#7c3aed" stroke-width="3"/>
-  <text x="740" y="125" text-anchor="middle" font-family="Helvetica" font-size="18">Decoder stack (N x)</text>
-  <text x="640" y="175" font-family="Helvetica" font-size="16">Shifted Output Embedding</text>
-  <text x="640" y="225" font-family="Helvetica" font-size="16">Masked Self-Attention</text>
-  <text x="640" y="275" font-family="Helvetica" font-size="16">Cross-Attention</text>
-  <text x="640" y="325" font-family="Helvetica" font-size="16">Feed Forward + Add &amp; Norm</text>
-  <text x="640" y="375" font-family="Helvetica" font-size="16">Linear + Softmax</text>
-  <line x1="360" y1="275" x2="600" y2="275" stroke="#475569" stroke-width="3" marker-end="url(#arrow)"/>
-  <defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="5" refY="3" orient="auto"><path d="M0,0 L0,6 L6,3 z" fill="#475569"/></marker></defs>
-</svg>"""
-
-
-def _rag_fallback_svg(title: str) -> str:
-    labels = [
-        "User Query",
-        "Vector DB",
-        "Retriever",
-        "Reranker",
-        "Grounded Context",
-        "LLM",
-        "Citation Verification",
-        "Answer",
-    ]
-    width = 160 * len(labels) + 80
-    boxes = []
-    arrows = []
-    for index, label in enumerate(labels):
-        x = 40 + index * 160
-        boxes.append(
-            f'<rect x="{x}" y="130" width="130" height="58" rx="8" fill="#f8fafc" stroke="#334155"/>'
-            f'<text x="{x + 65}" y="155" text-anchor="middle" font-family="Helvetica" font-size="13">{label}</text>'
-        )
-        if index < len(labels) - 1:
-            arrows.append(
-                f'<line x1="{x + 130}" y1="159" x2="{x + 156}" y2="159" '
-                'stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>'
-            )
-    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="320" viewBox="0 0 {width} 320">
-  <defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="5" refY="3" orient="auto"><path d="M0,0 L0,6 L6,3 z" fill="#475569"/></marker></defs>
-  <rect width="100%" height="100%" fill="white"/>
-  <text x="{width / 2:.0f}" y="54" text-anchor="middle" font-family="Helvetica" font-size="24">{title}</text>
-  {''.join(boxes)}
-  {''.join(arrows)}
-</svg>"""
-
-
-def _generic_fallback_svg(title: str) -> str:
-    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="760" height="260" viewBox="0 0 760 260">
-  <defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="5" refY="3" orient="auto"><path d="M0,0 L0,6 L6,3 z" fill="#475569"/></marker></defs>
-  <rect width="100%" height="100%" fill="white"/>
-  <text x="380" y="48" text-anchor="middle" font-family="Helvetica" font-size="22">{title}</text>
-  <rect x="60" y="120" width="120" height="58" rx="8" fill="#f8fafc" stroke="#334155"/><text x="120" y="154" text-anchor="middle" font-family="Helvetica" font-size="14">Inputs</text>
-  <rect x="240" y="120" width="120" height="58" rx="8" fill="#f8fafc" stroke="#334155"/><text x="300" y="154" text-anchor="middle" font-family="Helvetica" font-size="14">Method</text>
-  <rect x="420" y="120" width="120" height="58" rx="8" fill="#f8fafc" stroke="#334155"/><text x="480" y="154" text-anchor="middle" font-family="Helvetica" font-size="14">Validation</text>
-  <rect x="600" y="120" width="120" height="58" rx="8" fill="#f8fafc" stroke="#334155"/><text x="660" y="154" text-anchor="middle" font-family="Helvetica" font-size="14">Outputs</text>
-  <line x1="180" y1="149" x2="238" y2="149" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
-  <line x1="360" y1="149" x2="418" y2="149" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
-  <line x1="540" y1="149" x2="598" y2="149" stroke="#475569" stroke-width="2" marker-end="url(#arrow)"/>
-</svg>"""

@@ -68,6 +68,8 @@ def normalize_tool_transcript(messages: list[dict[str, Any]]) -> NormalizedToolT
 
         message = {key: value for key, value in raw.items() if key in _MESSAGE_KEYS and value is not None}
         message["role"] = role
+        if role == "assistant" and raw.get("reasoning_content") is not None:
+            message["reasoning_content"] = raw["reasoning_content"]
         if role != "assistant" or not raw.get("tool_calls"):
             if "content" in message:
                 message["content"] = _content_text(message.get("content"))

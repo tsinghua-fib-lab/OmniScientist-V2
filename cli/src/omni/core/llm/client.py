@@ -223,6 +223,9 @@ class LLMClient(ABC):
     """Minimal async LLM surface used across OmniScientist."""
 
     model: str = ""
+    # Configured clients expose the host-resolved output allowance to consumers
+    # that own an inner model loop. Standalone clients may leave it unset.
+    max_output_tokens: int
 
     @abstractmethod
     async def chat_with_tools(
@@ -665,6 +668,8 @@ def create_llm_client(settings: Any) -> LLMClient:
     :class:`FallbackLLMClient` so a hard primary outage degrades to the fallback
     provider; otherwise the primary is wrapped in :class:`RetryingLLMClient`.
     """
+    from omni.config.settings import resolve_max_output_tokens
+
     model = settings.model
     mem = settings.memory
     # ``embeddings_enabled`` is the master switch. Endpoint/provider fields may
@@ -689,20 +694,23 @@ def create_llm_client(settings: Any) -> LLMClient:
         mem=mem,
     )
     if not (model.fallback_provider or "").strip():
-        return RetryingLLMClient(primary, policy=retry_policy, idle_s=idle_s)
-    fallback = _make_provider(
-        model.fallback_provider,
-        base_url=model.fallback_base_url or model.base_url,
-        api_key=model.fallback_api_key or model.api_key,
-        model_name=model.fallback_model or model.model,
-        timeout_s=http_timeout,
-        emb_on=emb_on,
-        mem=mem,
-    )
-    return FallbackLLMClient(
-        primary, [fallback], max_retries=retries, base_delay=retry_policy.base_delay,
-        idle_s=idle_s,
-    )
+        client: LLMClient = RetryingLLMClient(primary, policy=retry_policy, idle_s=idle_s)
+    else:
+        fallback = _make_provider(
+            model.fallback_provider,
+            base_url=model.fallback_base_url or model.base_url,
+            api_key=model.fallback_api_key or model.api_key,
+            model_name=model.fallback_model or model.model,
+            timeout_s=http_timeout,
+            emb_on=emb_on,
+            mem=mem,
+        )
+        client = FallbackLLMClient(
+            primary, [fallback], max_retries=retries, base_delay=retry_policy.base_delay,
+            idle_s=idle_s,
+        )
+    client.max_output_tokens = resolve_max_output_tokens(model)
+    return client
 
 
 async def check_connectivity(settings: Any, *, timeout_s: float = 20.0) -> tuple[bool, str]:

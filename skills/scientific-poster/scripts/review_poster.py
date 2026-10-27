@@ -80,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--endpoint", default="")
     parser.add_argument("--model", default="")
-    parser.add_argument("--timeout", type=float, default=1800.0)
+    parser.add_argument("--timeout", type=float, help="Optional timeout for the review request in seconds.")
     args = parser.parse_args(argv)
     try:
         result_path = asyncio.run(_invoke(args))

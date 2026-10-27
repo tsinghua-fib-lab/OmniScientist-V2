@@ -4,28 +4,29 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import sys
 import time
 import zipfile
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
 
+from lxml import etree
+
 from posterlib.paths import SKILL_ROOT
 from posterlib.runtime.dependencies import (
     CAPABILITY_REQUIREMENTS,
-    PYMUPDF_REQUIREMENT,
     install_argv,
     probe_python_packages,
 )
 
 from .pptx_checks import check_scene
+from .pptx_math import NativeMathError, complete_math_paragraphs, complete_math_text_sizes
 from .pptx_scene import SceneError, normalize_scene
 
 SCRIPTS_DIR = SKILL_ROOT / "scripts"
-_CNVPR_ID_RE = re.compile(rb'(<p:cNvPr\b[^>]*\bid=")\d+("[^>]*>)')
 
 
 class ExportError(RuntimeError):
@@ -62,6 +63,20 @@ def export_editable_pptx(
         if timeout_seconds is not None
         else None
     )
+    dependencies = list(CAPABILITY_REQUIREMENTS["pptx-export"])
+    available = probe_python_packages()
+    missing = [name for name in dependencies if not available.get(name, False)]
+    if missing:
+        raise ExportError(
+            "missing_capability",
+            "Editable PPTX export requires these missing dependencies: " + ", ".join(missing),
+            details={
+                "stage": "dependencies",
+                "dependencies": dependencies,
+                "missing": missing,
+                "install_argv": install_argv("pptx-export"),
+            },
+        )
     source = source_html.expanduser().resolve()
     output = output_dir.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -96,7 +111,9 @@ def export_editable_pptx(
             },
         )
     _render_scene(scene_path, pptx_path, deadline=deadline)
-    _normalize_slide_object_ids(pptx_path)
+    _normalize_slide_object_ids(pptx_path, equation_items=[
+        item for item in scene["objects"] if item["kind"] == "equation"
+    ])
     openxml = _verify_openxml(pptx_path, expected_objects=scene["objects"])
     return {
         "pptx_path": str(pptx_path),
@@ -157,21 +174,6 @@ def _render_scene(
     *,
     deadline: float | None = None,
 ) -> None:
-    dependencies = list(CAPABILITY_REQUIREMENTS["pptx-export"])
-    available = probe_python_packages()
-    missing = [name for name in dependencies if not available.get(name, False)]
-    if missing:
-        raise ExportError(
-            "missing_capability",
-            "Editable PPTX export requires python-pptx, mathml2omml, and "
-            f"{PYMUPDF_REQUIREMENT} in the active Python environment.",
-            details={
-                "stage": "render",
-                "dependencies": dependencies,
-                "missing": missing,
-                "install_argv": install_argv("pptx-export"),
-            },
-        )
     _run(
         [
             sys.executable,
@@ -238,7 +240,8 @@ def _verify_openxml(
             details={"stage": "openxml", "missing_object_ids": missing},
         )
     expected_equations = sum(
-        item.get("kind") == "equation" for item in expected_objects
+        sum("mathml" in run for run in item["runs"]) if item.get("runs") else 1
+        for item in expected_objects if item.get("kind") == "equation"
     )
     native_equations = root.findall(".//a14:m", namespace)
     office_math = root.findall(".//m:oMath", namespace)
@@ -265,10 +268,13 @@ def _verify_openxml(
     }
 
 
-def _normalize_slide_object_ids(pptx_path: Path) -> None:
-    """Assign unique numeric non-visual IDs within every slide XML part."""
+def _normalize_slide_object_ids(
+    pptx_path: Path, *, equation_items: Collection[dict[str, Any]] = (),
+) -> None:
+    """Finalize native slide identities and mathematical paragraph alignment."""
 
     temporary = pptx_path.with_name(f".{pptx_path.name}.normalize.tmp")
+    equations = {item["id"]: item for item in equation_items}
     try:
         with (
             zipfile.ZipFile(pptx_path, "r") as source,
@@ -279,21 +285,29 @@ def _normalize_slide_object_ids(pptx_path: Path) -> None:
                 if info.filename.startswith(
                     "ppt/slides/slide"
                 ) and info.filename.endswith(".xml"):
-                    next_id = 0
-
-                    def replace_id(match: re.Match[bytes]) -> bytes:
-                        nonlocal next_id
-                        next_id += 1
-                        return (
-                            match.group(1)
-                            + str(next_id).encode("ascii")
-                            + match.group(2)
-                        )
-
-                    data = _CNVPR_ID_RE.sub(replace_id, data)
+                    root = etree.fromstring(
+                        data, parser=etree.XMLParser(resolve_entities=False, no_network=True),
+                    )
+                    presentation = "http://schemas.openxmlformats.org/presentationml/2006/main"
+                    for shape in root.iter(f"{{{presentation}}}sp"):
+                        identity = shape.find(f"{{{presentation}}}nvSpPr/{{{presentation}}}cNvPr")
+                        if identity is not None and identity.get("name") in equations:
+                            complete_math_paragraphs(shape)
+                            complete_math_text_sizes(shape, equations[identity.get("name")])
+                    name = "{http://schemas.openxmlformats.org/presentationml/2006/main}cNvPr"
+                    remapped = {}
+                    for next_id, node in enumerate(root.iter(name), start=1):
+                        remapped[node.get("id")] = str(next_id)
+                        node.set("id", str(next_id))
+                    drawing = "http://schemas.openxmlformats.org/drawingml/2006/main"
+                    for tag in (f"{{{drawing}}}stCxn", f"{{{drawing}}}endCxn"):
+                        for connection in root.iter(tag):
+                            if connection.get("id") in remapped:
+                                connection.set("id", remapped[connection.get("id")])
+                    data = etree.tostring(root, xml_declaration=True, encoding="UTF-8")
                 destination.writestr(info, data)
         os.replace(temporary, pptx_path)
-    except (OSError, zipfile.BadZipFile) as exc:
+    except (OSError, zipfile.BadZipFile, etree.XMLSyntaxError, NativeMathError) as exc:
         temporary.unlink(missing_ok=True)
         raise ExportError(
             "pptx_export_failed",
@@ -314,7 +328,7 @@ def _remaining_stage_timeout(deadline: float | None) -> float:
             "Editable PPTX export reached its workflow runtime budget.",
             details={"stage": "runtime"},
         )
-    return min(90.0, remaining)
+    return remaining
 
 
 def _run(

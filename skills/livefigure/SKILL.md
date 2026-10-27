@@ -1,6 +1,6 @@
 ---
 name: livefigure
-description: One editable single-slide PPTX figure. Use when the user names livefigure or asks for an editable PowerPoint figure. Requires an owner-configured MLLM with image input and image output (`omni config vlm`). Ordinary architecture / system diagrams are scientific-figure (SVG/PNG). Do not use for complete multi-slide decks (research-pptx).
+description: Use when a scientific, architecture or workflow figure benefits from visual composition or native editing in one PPTX slide. Requires VLM image input and output. Choose by scientific fidelity, readability and editing needs. Original paper figures may be reused, poor drawings rejected. Complete posters use scientific-poster.
 license: Apache-2.0
 metadata:
   helixforge:
@@ -24,7 +24,9 @@ metadata:
       dependency_error_code: runtime_dependency_missing
     capabilities:
       - artifact.figure
+      - figure.scientific
       - figure.architecture
+      - figure.workflow
       - figure.editable.pptx
       - artifact.pptx
       - figure.livefigure
@@ -84,8 +86,11 @@ metadata:
         - single editable PPTX
         - editable PPTX scientific figure
         - one-slide editable scientific figure
-      when_to_use: "Use for a user-named livefigure or an editable single-slide PPTX. Requires an MLLM with image input and image output (`omni config vlm`). Ordinary figures and architecture diagrams are scientific-figure."
-      when_not_to_use: "Ordinary figure, architecture, flowchart, or schematic (scientific-figure). Multi-slide decks (research-pptx). If this skill is named and VLM is missing, stop — do not switch to Graphviz."
+        - architecture diagram
+        - workflow diagram
+        - scientific schematic
+      when_to_use: "Scientific, architecture or workflow figure components; choose by fidelity, readability and native editing needs. Requires VLM image input and output. Reuse suitable paper originals; reject poor drawings."
+      when_not_to_use: "Exact DOT/SVG/PNG rendering (scientific-figure); complete posters (scientific-poster); multi-slide decks (research-pptx). A missing VLM blocks livefigure; explicit native PPTX requirements remain unmet."
     notification:
       display_label: "LiveFigure PPTX"
       title_field: "title"
@@ -97,27 +102,29 @@ metadata:
 
 # LiveFigure
 
-Editable single-slide PPTX figure. Use this skill when the user names
-`livefigure` or asks for an editable PowerPoint / one-slide PPTX figure.
+One editable single-slide PPTX figure component for scientific schematics,
+architectures and workflows that benefit from visual composition or native
+PowerPoint shapes, text and connectors. The orchestrator can select it from
+these needs; `scientific-figure` specializes in graph topology and DOT/SVG/PNG.
 
-The deliverable is one editable single-slide PPTX. An owner-configured
-multimodal large language model (MLLM) that supports both image input and image
-output is required (`omni config vlm`). A successful PPTX can pay
-`artifact.figure`, but
-this is not the default drawing skill — ordinary architecture and system
-diagrams are `scientific-figure` (SVG/PNG). Pass natural-language input only.
+Choose by scientific fidelity, readability at the intended size and editing
+needs. The orchestrator may reject an unsuitable drawing or reuse an original
+paper figure, including a permitted bitmap, with its citation and editing limits.
 
-When not to use: a complete multi-slide deck (`research-pptx`), or an ordinary
-figure / Graphviz / SVG-only / PNG-only request (`scientific-figure`). If the
-user named this skill and VLM is missing, stop and configure VLM; do not
-silently switch to Graphviz.
+An owner-configured MLLM with image input and image output is required
+(`omni config vlm`). Pass intent and editing requirements in natural-language
+`input`. A successful component can pay `artifact.figure`.
+
+Deliver only the figure component. `scientific-poster` owns complete poster
+composition, review and export; `research-pptx` owns complete slide decks.
 
 Generate one editable PPTX figure from a research requirement. The default
-workflow creates a whole-figure composition reference, asks the VLM to identify
-and describe complex visual objects, generates an icon sprite sheet, then
-splits it into transparent tightly-cropped PNG assets. Their paths are injected
-into the constrained `python-pptx` source prompt, which explicitly requires
-`slide.shapes.add_picture(...)` instead of redrawing those icons manually.
+workflow creates a whole-figure composition reference. The VLM selects complex
+visual assets using the original figure requirement, including its editing scope.
+Requests for fully native diagrams use editable shapes, text and connectors.
+When raster artwork is permitted and useful, the workflow generates an icon sprite
+sheet and splits it into transparent PNG assets. Their paths are available to the
+`python-pptx` author as optional scientific illustrations.
 It retains syntax/execution repair, but does not render the PPTX to PNG or run
 the old post-generation visual critic/actor revision loop.
 
@@ -153,6 +160,10 @@ directory. LiveFigure never downloads a remote reference.
 The result contains the editable PPTX, the generated Python source, the input
 record, and (when requested) the reference image. Do not claim PNG preview or
 post-generation visual evaluation.
+
+Each build attempt retains its source in the run directory. Executed attempts
+retain process output and exit code. Failed syntax, execution and package checks
+retain the failing stage and error beside that attempt's source.
 
 ## Recovery
 

@@ -10,9 +10,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 from posterlib.runtime import runtime_io
-from posterlib.visual import review_contract
+from posterlib.visual import design_direction, review_contract
 
-from . import revision_state, deadlines, outcomes
+from . import deadlines, outcomes, revision_state
 
 ReviewState = Literal["pending", "passed", "revision-required"]
 ReviewMode = Literal["vlm", "deterministic-only"]
@@ -60,10 +60,7 @@ def runtime_from_env(
     except ImportError:
         return None
     try:
-        config = vlm_client.config_from_env(
-            environ,
-            timeout_s=deadlines.WORKFLOW_RUNTIME_BUDGET_SECONDS,
-        )
+        config = vlm_client.config_from_env(environ)
     except (ValueError, vlm_client.VlmError):
         return None
     if config is None:
@@ -185,10 +182,20 @@ def prepare_candidate_review(
     comparison_baseline: Mapping[str, Any] | None = None,
     comparison_baseline_page: Mapping[str, Any] | None = None,
     request_path: Path | None = None,
+    design_requirements: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], Path]:
     """Bind browser measurements and pixels for independent visual review."""
 
     brief = revision_state.visual_content_brief(page_plan, displayed_html=html_path.read_text(encoding="utf-8"))
+    brief["design_requirements"] = (
+        dict(design_requirements) if design_requirements is not None
+        else design_direction.context(
+            reference_source_kind=(
+                str(quality_reference.get("source_kind") or "custom")
+                if quality_reference is not None else "seed"
+            ),
+        )
+    )
     brief["rendered_inspection"] = {
         "status": inspection.get("status"),
         "issues": [
@@ -258,17 +265,10 @@ async def run_review(
             _REQUEST_ARTIFACT_WARNING,
         )
 
-    remaining = deadline - loop.time()
-    if remaining <= 0:
+    if deadline is not None and deadline <= loop.time():
         _mark_pending_review_mode(result, review_configured)
         return outcomes.visual_loop_pending(result)
 
-    await runtime_io.progress(
-        progress_callback,
-        "poster.visual-review",
-        0.82,
-        iteration=request.get("iteration"),
-    )
     review_kwargs: dict[str, Any] = {
         "output_dir": request_path.parent,
         "ctx": ctx,
@@ -280,7 +280,13 @@ async def run_review(
     if reviewer is not None:
         review_kwargs["reviewer"] = reviewer
     try:
-        async with asyncio.timeout(remaining):
+        async with asyncio.timeout_at(deadline):
+            await runtime_io.progress(
+                progress_callback,
+                "poster.visual-review",
+                0.82,
+                iteration=request.get("iteration"),
+            )
             review = await review_and_persist(request, **review_kwargs)
     except TimeoutError:
         _mark_pending_review_mode(result, review_configured)

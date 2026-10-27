@@ -1,9 +1,4 @@
-"""Prompt assembly adapted from the legacy scientific_figure skill.
-
-The legacy prompt constants are retained verbatim in ``legacy_prompts.py``.
-This module supplies the current runtime's output contract and only omits
-legacy services that do not exist in the portable LiveFigure runtime.
-"""
+"""Assemble the figure requirement, helper contract and available visual assets."""
 
 from __future__ import annotations
 
@@ -27,7 +22,8 @@ Task: Write a COMPLETE, STANDALONE Python script to create an editable scientifi
 Context Requirements:
 1. **Objective**: Create a scientific diagram based on the user's request: "{requirement}".
 2. **Figure Title**: Use "{title}" when a visible title is appropriate.
-3. **Layout Reference**: When an image is attached, mimic its structure, shapes, arrows, and text.
+3. **Layout Reference**: Use the attached image as composition guidance. Preserve the user's
+   scientific relationships and editability requirements when selecting its visual details.
 4. **Text Guidelines**:
    - Always use black or dark-gray text.
    - Center-align text inside shapes or text boxes unless a label needs another alignment.
@@ -61,9 +57,10 @@ def _asset_prompt_section(asset_map: dict[str, Path]) -> str:
     asset_info = "\n".join(f'- "{name}": "{path}"' for name, path in asset_map.items())
     example_path = next(iter(asset_map.values()))
     return f"""
-*** AVAILABLE PRE-GENERATED ICONS (USE THESE!) ***
-The following complex icons have been pre-generated and saved locally.
-You MUST use `slide.shapes.add_picture(path, ...)` to insert them instead of drawing them manually.
+*** AVAILABLE RASTER ICON ASSETS ***
+These optional icons are local PNG/JPEG assets. Choose them only when the user's editing scope
+permits raster artwork and they contribute to the scientific explanation. Fully native diagrams
+use editable shapes, labels and connectors. The user's editability requirements govern selection.
 
 Registry:
 {asset_info}

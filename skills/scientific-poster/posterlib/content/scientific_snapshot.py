@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-import re
+import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any
+
+from css_validation import inline_style_is_hidden
+
+from posterlib.runtime.identifiers import is_sha256
 
 _VOID_TAGS = frozenset(
     {
@@ -27,6 +31,25 @@ _VOID_TAGS = frozenset(
     }
 )
 _NON_VISIBLE_TEXT_TAGS = frozenset({"noscript", "script", "style", "template"})
+_TABLE_STRUCTURE_ATTRIBUTES = {
+    "table": (),
+    "thead": (),
+    "tbody": (),
+    "tfoot": (),
+    "tr": (),
+    "th": ("id", "headers", "scope", "abbr", "colspan", "rowspan"),
+    "td": ("id", "headers", "scope", "abbr", "colspan", "rowspan"),
+    "colgroup": ("span",),
+    "col": ("span",),
+}
+_TABLE_ROLE_TAGS = {
+    "table": "table", "rowgroup": "tbody", "row": "tr",
+    "columnheader": "th", "rowheader": "th", "cell": "td",
+}
+_TABLE_ARIA_ATTRIBUTES = (
+    "role", "aria-rowcount", "aria-colcount", "aria-rowindex", "aria-colindex",
+    "aria-rowspan", "aria-colspan", "aria-labelledby",
+)
 _TEXT_BOUNDARY_TAGS = frozenset(
     {
         "address",
@@ -91,16 +114,19 @@ class _ScientificContentParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.modules: list[dict[str, Any]] = []
-        self.titles: list[list[str]] = []
-        self.authors: list[list[str]] = []
-        self.affiliations: list[list[str]] = []
-        self.venues: list[list[str]] = []
+        self.titles: list[list[Any]] = []
+        self.authors: list[list[Any]] = []
+        self.affiliations: list[list[Any]] = []
+        self.venues: list[list[Any]] = []
         self.venue_logos: list[tuple[str, str]] = []
         self.identity_equation_structures: list[tuple[Any, ...]] = []
         self.all_equation_structures: list[tuple[Any, ...]] = []
         self.all_equation_latex: list[str] = []
         self.unbound_equation_structures: list[tuple[Any, ...]] = []
-        self.unbound_text: list[str] = []
+        self.unbound_source_figures: list[tuple[str, str]] = []
+        self.unbound_native_components: list[str] = []
+        self.unbound_tables: list[list[Any]] = []
+        self.unbound_text: list[Any] = []
         self.title_band_text: list[str] = []
         self.author_text: list[str] = []
         self.author_marker_count = 0
@@ -139,12 +165,6 @@ class _ScientificContentParser(HTMLParser):
         contract_content_role = attributes.get("data-content-role", "").strip() or str(
             parent.get("contract_content_role") or ""
         )
-        inline_style = attributes.get("style", "").replace(" ", "").lower()
-        contract_hidden = (
-            bool(parent.get("contract_hidden"))
-            or "display:none" in inline_style
-            or "visibility:hidden" in inline_style
-        )
 
         if in_title_band:
             self.venue_marker |= attributes.get("data-poster-venue") == "verified"
@@ -154,17 +174,26 @@ class _ScientificContentParser(HTMLParser):
                 self.author_marker_count += 1
 
         source_figure_sha256 = attributes.get("data-source-figure-sha256", "").strip()
+        native_component_sha256 = ""
+        if tag == "img":
+            native_component_sha256 = attributes.get("data-native-component-sha256", "").strip()
+            if attributes.get("data-native-pptx"):
+                from posterlib.delivery.pptx_components import decode_component
+
+                native_component_sha256 = hashlib.sha256(
+                    decode_component(attributes["data-native-pptx"])
+                ).hexdigest()
         if (
             tag == "img"
-            and not contract_hidden
-            and re.fullmatch(r"[0-9a-f]{64}", source_figure_sha256)
+            and not hidden
+            and is_sha256(source_figure_sha256)
         ):
             self.contract_source_figure_sha256s.add(source_figure_sha256)
         if (
             tag == "math"
             and contract_module_id
             and contract_content_role == "equation"
-            and not contract_hidden
+            and not hidden
         ):
             self.contract_equation_latex.setdefault(contract_module_id, []).append(
                 attributes.get("data-latex", "")
@@ -188,10 +217,66 @@ class _ScientificContentParser(HTMLParser):
                     "source_labels": [],
                     "source_figure_sha256s": [],
                     "source_figure_geometry": [],
+                    "native_component_sha256s": [],
                     "equation_latex": [],
                     "equation_structures": [],
+                    "table_structures": [],
+                    "figure_groups": [],
                 }
             )
+
+        figure_capture = parent.get("figure_capture")
+        if (tag == "figure" or attributes.get("role") == "figure") and module_index is not None and not hidden:
+            figure_capture = []
+            self.modules[int(module_index)]["figure_groups"].append(figure_capture)
+        if tag == "img" and source_figure_sha256 and not hidden:
+            if module_index is None:
+                self.unbound_source_figures.append((
+                    source_figure_sha256.casefold(),
+                    attributes.get("data-source-figure-aspect-ratio", "").strip(),
+                ))
+            if isinstance(figure_capture, list):
+                figure_capture.append(("source_figure", source_figure_sha256.casefold()))
+        if tag == "img" and native_component_sha256 and not hidden and module_index is None:
+            self.unbound_native_components.append(native_component_sha256)
+
+        # Table semantics remain independent of module copy ownership. Explicit
+        # presentation tables are layout wrappers; enclosing data cells still
+        # capture their content.
+        table_tag = _TABLE_ROLE_TAGS.get(attributes.get("role", ""), tag)
+        table_attributes = _TABLE_STRUCTURE_ATTRIBUTES.get(table_tag)
+        table_capture = parent.get("table_capture")
+        table_is_data = bool(parent.get("table_is_data"))
+        if tag == "caption":
+            table_capture = None  # Captions are prose; rows and cells own table data.
+        if table_tag == "table" and not hidden:
+            table_is_data = attributes.get("role") not in {"presentation", "none"}
+            if table_is_data:
+                parent_table = table_capture
+                table_capture = []
+                if isinstance(parent_table, list):
+                    parent_table.append(("nested_table", table_capture))
+                if module_index is None:
+                    self.unbound_tables.append(table_capture)
+                else:
+                    self.modules[int(module_index)]["table_structures"].append(table_capture)
+        if isinstance(table_capture, list) and not hidden:
+            if "data-comparison-fraction" in attributes:
+                table_capture.append(("comparison_fraction", attributes["data-comparison-fraction"]))
+            if table_is_data and table_attributes is not None:
+                table_capture.append((
+                    "start", table_tag,
+                    tuple((name, attributes[name])
+                          for name in (*table_attributes, *_TABLE_ARIA_ATTRIBUTES)
+                          if name in attributes),
+                ))
+                if self_closing:
+                    table_capture.append(("end", table_tag))
+            elif tag == "img":
+                table_capture.append((
+                    "figure", native_component_sha256 or source_figure_sha256 or attributes.get("src", ""),
+                    attributes.get("alt", ""),
+                ))
 
         content_role = attributes.get("data-content-role", "").strip() or str(
             parent.get("content_role") or ""
@@ -199,11 +284,12 @@ class _ScientificContentParser(HTMLParser):
         if not content_role and module_index is not None and tag in {"h2", "h3"}:
             content_role = "heading"
         math_capture = parent.get("math_capture")
-        if not contract_hidden and "data-latex" in attributes:
-            self.all_equation_latex.append(_normalize_visible_text(attributes["data-latex"]))
-        if tag == "math" and not contract_hidden:
+        if not hidden and "data-latex" in attributes:
+            self.all_equation_latex.append(attributes["data-latex"].strip())
+        if tag == "math" and not hidden:
             math_capture = {
                 "module_index": module_index, "identity": in_title_band, "tokens": [],
+                "table_capture": table_capture,
             }
         if isinstance(math_capture, dict):
             tokens = math_capture.get("tokens")
@@ -246,6 +332,8 @@ class _ScientificContentParser(HTMLParser):
             if source_label:
                 module["source_labels"].append(source_label)
             if tag == "img":
+                if native_component_sha256:
+                    module["native_component_sha256s"].append(native_component_sha256)
                 digest = attributes.get("data-source-figure-sha256", "").strip()
                 if digest:
                     module["source_figure_sha256s"].append(digest.casefold())
@@ -259,7 +347,7 @@ class _ScientificContentParser(HTMLParser):
                     )
             if "data-latex" in attributes:
                 module["equation_latex"].append(
-                    _normalize_visible_text(attributes["data-latex"])
+                    attributes["data-latex"].strip()
                 )
         if (
             not hidden
@@ -283,16 +371,25 @@ class _ScientificContentParser(HTMLParser):
             "content_role": content_role,
             "title_index": title_index,
             "author_index": author_index,
+            "author_pointer": bool(parent.get("author_pointer")) or (author_index is not None and tag == "sup"),
             "affiliation_index": affiliation_index,
             "venue_index": venue_index,
             "contract_module_id": contract_module_id,
             "contract_content_role": contract_content_role,
-            "contract_hidden": contract_hidden,
             "math_capture": math_capture,
+            "table_capture": table_capture,
+            "table_is_data": table_is_data,
+            "table_tag": table_tag if table_is_data and table_attributes is not None else "",
+            "figure_capture": figure_capture,
+            "in_figure_caption": bool(parent.get("in_figure_caption")) or tag == "figcaption"
+            or attributes.get("data-content-role") == "caption",
+            "text_boundary": tag in _TEXT_BOUNDARY_TAGS or bool(attributes.get("data-content-role")),
         }
+        if tag == "math" and isinstance(math_capture, dict) and attributes.get("display") != "block":
+            math_capture["text_frame"] = {**frame, "math_capture": None, "table_capture": None}
         if self_closing and isinstance(math_capture, dict):
             self._finish_math_capture(math_capture, tag)
-        if tag in _TEXT_BOUNDARY_TAGS:
+        if frame["text_boundary"]:
             self._record_text(frame, " ")
         if not self_closing:
             self._stack.append(frame)
@@ -305,7 +402,13 @@ class _ScientificContentParser(HTMLParser):
                 math_capture = frame.get("math_capture")
                 if isinstance(math_capture, dict):
                     self._finish_math_capture(math_capture, tag)
-                if tag in _TEXT_BOUNDARY_TAGS:
+                table_capture = frame.get("table_capture")
+                if (
+                    isinstance(table_capture, list) and not frame.get("hidden")
+                    and frame.get("table_tag")
+                ):
+                    table_capture.append(("end", frame["table_tag"]))
+                if frame.get("text_boundary"):
                     self._record_text(frame, " ")
                 del self._stack[index:]
                 return
@@ -316,9 +419,9 @@ class _ScientificContentParser(HTMLParser):
         frame = self._stack[-1]
         if frame.get("tag") == "style":
             return
-        if frame.get("in_title_band") and data.strip():
+        if frame.get("in_title_band") and not frame.get("hidden") and data.strip():
             self.title_band_text.append(data)
-            if frame.get("author_index") is not None:
+            if frame.get("author_index") is not None and not frame.get("author_pointer"):
                 self.author_text.append(data)
         math_capture = frame.get("math_capture")
         if isinstance(math_capture, dict):
@@ -339,6 +442,11 @@ class _ScientificContentParser(HTMLParser):
         if tag != "math":
             return
         self.all_equation_structures.append(tuple(tokens))
+        if text_frame := capture.get("text_frame"):
+            self._record_text(text_frame, ("math", tuple(tokens)))
+        table_capture = capture.get("table_capture")
+        if isinstance(table_capture, list):
+            table_capture.append(("math", tuple(tokens)))
         if capture.get("identity"):
             self.identity_equation_structures.append(tuple(tokens))
         module_index = capture.get("module_index")
@@ -348,13 +456,19 @@ class _ScientificContentParser(HTMLParser):
             return
         self.modules[int(module_index)]["equation_structures"].append(tuple(tokens))
 
-    def _record_text(self, frame: Mapping[str, Any], text: str) -> None:
+    def _record_text(self, frame: Mapping[str, Any], text: str | tuple[Any, ...]) -> None:
         if (
             frame.get("hidden")
             or not text
             or isinstance(frame.get("math_capture"), dict)
         ):
             return
+        table_capture = frame.get("table_capture")
+        if isinstance(table_capture, list):
+            table_capture.append(text)
+        figure_capture = frame.get("figure_capture")
+        if isinstance(figure_capture, list) and frame.get("in_figure_caption"):
+            figure_capture.append(text)
         module_index = frame.get("module_index")
         if module_index is not None:
             module = self.modules[int(module_index)]
@@ -420,35 +534,64 @@ def _snapshot_from_parser(parser: _ScientificContentParser) -> dict[str, Any]:
     for raw in parser.modules:
         module = {
             "poster_id": raw["poster_id"],
-            "visible_text": _normalize_visible_text("".join(raw["_text"])),
+            "visible_text": _visible_text(raw["_text"]),
             "text_by_role": {
-                role: _normalize_visible_text("".join(chunks))
+                role: _visible_text(chunks)
                 for role, chunks in sorted(raw["_text_by_role"].items())
             },
-            "unscoped_text": _normalize_visible_text(
-                "".join(raw["_unscoped_text"])
-            ),
+            "unscoped_text": _visible_text(raw["_unscoped_text"]),
+            **_inline_math_context({**raw["_text_by_role"], "": raw["_unscoped_text"]}),
             "source_labels": tuple(sorted(raw["source_labels"])),
             "semantic_roles": raw["semantic_roles"],
             "priority": raw["priority"],
             "visual_kind": raw["visual_kind"],
             "source_figure_sha256s": tuple(sorted(raw["source_figure_sha256s"])),
             "source_figure_geometry": tuple(sorted(raw["source_figure_geometry"])),
+            **({"native_component_sha256s": tuple(sorted(raw["native_component_sha256s"]))}
+               if raw["native_component_sha256s"] else {}),
             "equation_latex": tuple(raw["equation_latex"]),
             "equation_structure": tuple(raw["equation_structures"]),
+            **({"table_structure": tuple(
+                _mixed_content_tokens(tokens) for tokens in raw["table_structures"]
+            )} if raw["table_structures"] else {}),
         }
+        figure_groups = [
+            _mixed_content_tokens(tokens) for tokens in raw["figure_groups"]
+            if any(isinstance(token, tuple) and token[0] == "source_figure" for token in tokens)
+            and (_visible_text(tokens) or any(
+                isinstance(token, tuple) and token[0] == "math" for token in tokens
+            ))
+        ]
+        if figure_groups:
+            module["source_figure_groups"] = tuple(sorted(figure_groups, key=repr))
         modules.setdefault(str(raw["module_id"]), []).append(module)
+    unbound_tables = [
+        _mixed_content_tokens(tokens) for tokens in parser.unbound_tables
+    ]
     return {
         "schema": SCIENTIFIC_CONTENT_SNAPSHOT_SCHEMA,
-        "unbound_text": _normalize_visible_text("".join(parser.unbound_text)),
+        "unbound_text": _visible_text(parser.unbound_text),
+        **_inline_math_context({"": parser.unbound_text}),
         **({"unbound_equation_structure": tuple(parser.unbound_equation_structures)}
            if parser.unbound_equation_structures else {}),
+        **({"unbound_source_figures": tuple(sorted(parser.unbound_source_figures))}
+           if parser.unbound_source_figures else {}),
+        **({"unbound_native_components": tuple(sorted(parser.unbound_native_components))}
+           if parser.unbound_native_components else {}),
+        **({"unbound_table_structure": tuple(sorted(unbound_tables, key=repr))}
+           if unbound_tables else {}),
         "identity": {
             "title": tuple(_normalized_groups(parser.titles)),
             "authors": tuple(_normalized_groups(parser.authors)),
             "affiliations": tuple(_normalized_groups(parser.affiliations)),
             "venue": tuple(_normalized_groups(parser.venues)),
             "venue_logos": tuple(sorted(parser.venue_logos)),
+            **_inline_math_context({
+                f"{name}:{index}": chunks
+                for name, groups in (("title", parser.titles), ("authors", parser.authors),
+                                     ("affiliations", parser.affiliations), ("venue", parser.venues))
+                for index, chunks in enumerate(groups)
+            }),
             **({"equation_structure": tuple(parser.identity_equation_structures)}
                if parser.identity_equation_structures else {}),
         },
@@ -467,7 +610,7 @@ def scientific_content_snapshot_issues(
 
     expected = _coerce_scientific_snapshot(reference)
     observed = _coerce_scientific_snapshot(candidate)
-    issues = _unbound_text_issues(expected, observed)
+    issues = _unbound_content_issues(expected, observed)
     expected_identity = expected.get("identity")
     observed_identity = observed.get("identity")
     if expected_identity != observed_identity:
@@ -535,21 +678,18 @@ def grounded_replan_snapshot_issues(
     candidate: str | Mapping[str, Any],
     *,
     target_module_ids: frozenset[str] | set[str] | list[str],
-    editable_text_roles: frozenset[str] | set[str] | list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Allow grounded copy edits while freezing every other poster fact.
 
-    Content replanning may alter text only inside an existing target module. When
-    ``editable_text_roles`` is supplied, unscoped text and every other content role stay
-    frozen. Source grounding and the HTML contract remain separate gates; this comparator
-    prevents the visual loop from replacing identity, evidence, equations, roles, or
-    module structure.
+    Module targets own their prose; poster targets unowned prose. Identity, table
+    data, native equations, image inventories and non-target content remain fixed.
     """
 
     expected = _coerce_scientific_snapshot(reference)
     observed = _coerce_scientific_snapshot(candidate)
     targets = {str(module_id).strip() for module_id in target_module_ids}
-    issues = _unbound_text_issues(expected, observed)
+    issues = _unbound_content_issues(expected, observed, allow_copy="poster" in targets)
+    targets.discard("poster")
     if expected.get("identity") != observed.get("identity"):
         issues.append(
             _issue(
@@ -611,7 +751,6 @@ def grounded_replan_snapshot_issues(
                 _changed_module_fields_except_text(
                     expected_instance,
                     observed_instance,
-                    editable_text_roles=editable_text_roles,
                 )
                 if module_id in targets
                 else _changed_mapping_fields(expected_instance, observed_instance)
@@ -629,16 +768,19 @@ def grounded_replan_snapshot_issues(
     return issues
 
 
-def _unbound_text_issues(
+def _unbound_content_issues(
     expected: Mapping[str, Any], observed: Mapping[str, Any],
+    *,
+    allow_copy: bool = False,
 ) -> list[dict[str, Any]]:
-    """Preserve unowned copy's reading order, not its incidental DOM wrappers."""
+    """Preserve unowned scientific content independently of incidental wrappers."""
 
-    before = (expected.get("unbound_text") or "", expected.get("unbound_equation_structure") or ())
-    after = (observed.get("unbound_text") or "", observed.get("unbound_equation_structure") or ())
-    if before == after:
-        return []
-    return [{
+    fields = ("unbound_equation_structure",) + (
+        () if allow_copy else ("unbound_text", "inline_math_context")
+    )
+    before = tuple(expected.get(field) for field in fields)
+    after = tuple(observed.get(field) for field in fields)
+    issues = [] if before == after else [{
         **_issue(
             "scientific_unbound_text_changed",
             "Revision changed visible text or mathematics outside scientific modules or verified identity.",
@@ -646,6 +788,22 @@ def _unbound_text_issues(
         "expected": before,
         "observed": after,
     }]
+    if expected.get("unbound_source_figures") != observed.get("unbound_source_figures"):
+        issues.append(_issue(
+            "scientific_unbound_figure_changed",
+            "Revision changed source-figure occurrences outside scientific modules.",
+        ))
+    if expected.get("unbound_native_components") != observed.get("unbound_native_components"):
+        issues.append(_issue(
+            "scientific_unbound_component_changed",
+            "Revision changed native drawing component occurrences outside scientific modules.",
+        ))
+    if expected.get("unbound_table_structure") != observed.get("unbound_table_structure"):
+        issues.append(_issue(
+            "scientific_unbound_table_changed",
+            "Revision changed data-table cells or relationships outside scientific modules.",
+        ))
+    return issues
 
 
 def _coerce_scientific_snapshot(
@@ -694,30 +852,16 @@ def _module_instances_by_poster_id(value: Any) -> dict[str, Mapping[str, Any]] |
 def _changed_module_fields_except_text(
     expected: Mapping[str, Any],
     observed: Mapping[str, Any],
-    *,
-    editable_text_roles: frozenset[str] | set[str] | list[str] | None,
 ) -> list[str]:
-    allowed_fields = {"visible_text", "text_by_role"}
-    if editable_text_roles is None:
-        allowed_fields.add("unscoped_text")
-    changed = {
+    allowed_fields = {
+        "visible_text", "text_by_role", "unscoped_text", "inline_math_context",
+        "source_figure_groups",  # Caption wording; image and math identities have their own fields.
+    }
+    return sorted(
         str(key)
         for key in set(expected) | set(observed)
         if key not in allowed_fields and expected.get(key) != observed.get(key)
-    }
-    if editable_text_roles is not None:
-        editable_roles = {str(role) for role in editable_text_roles}
-        expected_roles = expected.get("text_by_role")
-        observed_roles = observed.get("text_by_role")
-        expected_mapping = expected_roles if isinstance(expected_roles, Mapping) else {}
-        observed_mapping = observed_roles if isinstance(observed_roles, Mapping) else {}
-        changed.update(
-            f"text_by_role.{role}"
-            for role in set(expected_mapping) | set(observed_mapping)
-            if role not in editable_roles
-            and expected_mapping.get(role) != observed_mapping.get(role)
-        )
-    return sorted(changed)
+    )
 
 
 def _module_snapshot_sort_key(module: Mapping[str, Any]) -> tuple[str, ...]:
@@ -726,31 +870,66 @@ def _module_snapshot_sort_key(module: Mapping[str, Any]) -> tuple[str, ...]:
         repr(module.get("source_labels")),
         str(module.get("visible_text") or ""),
         repr(module.get("text_by_role")),
+        repr(module.get("inline_math_context")),
         repr(module.get("semantic_roles")),
         str(module.get("priority") or ""),
         str(module.get("visual_kind") or ""),
         repr(module.get("source_figure_sha256s")),
         repr(module.get("source_figure_geometry")),
+        repr(module.get("native_component_sha256s")),
         repr(module.get("equation_latex")),
         repr(module.get("equation_structure")),
+        repr(module.get("table_structure")),
     )
 
 
-def _normalized_groups(groups: list[list[str]]) -> list[str]:
-    return [_normalize_visible_text("".join(group)) for group in groups]
+def _mixed_content_tokens(tokens: list[Any]) -> tuple[Any, ...]:
+    """Normalize text between exact semantic object and boundary tokens."""
+
+    result: list[Any] = []
+    text: list[str] = []
+    for token in [*tokens, None]:
+        if isinstance(token, str):
+            text.append(token)
+            continue
+        value = _normalize_visible_text("".join(text))
+        if value:
+            result.append(("text", value))
+        text.clear()
+        if token is not None:
+            if token[0] == "nested_table":
+                token = ("nested_table", _mixed_content_tokens(token[1]))
+            result.append(token)
+    return tuple(result)
+
+
+def _inline_math_context(groups: Mapping[str, list[Any]]) -> dict[str, Any]:
+    """Bind inline expressions to surrounding text through the shared token stream."""
+
+    contexts = {
+        role: _mixed_content_tokens(chunks) for role, chunks in groups.items()
+        if any(isinstance(chunk, tuple) for chunk in chunks)
+    }
+    return {"inline_math_context": contexts} if contexts else {}
+
+
+def _visible_text(chunks: list[Any]) -> str:
+    return _normalize_visible_text("".join(chunk for chunk in chunks if isinstance(chunk, str)))
+
+
+def _normalized_groups(groups: list[list[Any]]) -> list[str]:
+    return [_visible_text(group) for group in groups]
 
 
 def _normalize_visible_text(value: str) -> str:
-    return re.sub(r"\s+", " ", value).strip()
+    return " ".join(value.split())
 
 
 def _element_is_hidden(tag: str, attributes: Mapping[str, str]) -> bool:
-    style = re.sub(r"\s+", "", attributes.get("style", "")).casefold()
     return (
         tag in _NON_VISIBLE_TEXT_TAGS
         or "hidden" in attributes
-        or "display:none" in style
-        or "visibility:hidden" in style
+        or inline_style_is_hidden(attributes.get("style", ""))
     )
 
 

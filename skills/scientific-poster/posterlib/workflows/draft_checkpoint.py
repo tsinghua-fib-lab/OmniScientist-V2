@@ -79,10 +79,7 @@ def restore(workspace: Path, source_path: Path) -> bool:
     state = load_path(source_path)
     if state is None:
         return False
-    try:
-        save(workspace, stage=str(state["stage"]), state=state)
-    except (OSError, ValueError):
-        return False
+    save(workspace, stage=str(state["stage"]), state=state)
     return True
 
 
@@ -96,6 +93,9 @@ def _validated_payload(value: Any) -> dict[str, Any] | None:
         "source_figure_observations",
         "reference_image",
         "editing_issue",
+        "workflow_issues",
+        "identity_warnings",
+        "warning_history",
     }
     allowed_fields = {
         "version",
@@ -119,6 +119,17 @@ def _validated_payload(value: Any) -> dict[str, Any] | None:
         return None
     if any(not isinstance(item, str) for item in value["warnings"]):
         return None
+    for field in ("identity_warnings", "warning_history"):
+        if field in value and (
+            not isinstance(value[field], list)
+            or any(not isinstance(item, str) for item in value[field])
+        ):
+            return None
+    diagnostics = value["paper_source"].get("identity_diagnostics", {})
+    if not isinstance(diagnostics, dict) or any(
+        not isinstance(item, str) for item in diagnostics.values()
+    ):
+        return None
     if value["author_model_role"] not in {"main", "vision"}:
         return None
     if "source_figure_observations" in value and not isinstance(
@@ -126,6 +137,8 @@ def _validated_payload(value: Any) -> dict[str, Any] | None:
     ):
         return None
     if "editing_issue" in value and not isinstance(value["editing_issue"], dict):
+        return None
+    if "workflow_issues" in value and not isinstance(value["workflow_issues"], dict):
         return None
     for field in ("asset_sha256s", "source_figure_sha256s"):
         if any(not isinstance(item, str) for item in value[field]):

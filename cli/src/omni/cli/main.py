@@ -1265,7 +1265,7 @@ def _update_menu_text(latest: str) -> Text:
     text.append(f"{update_check.RELEASE_NOTES_URL}\n", "dim underline")
     text.append("\n")
     text.append("  › 1. ", "cyan")
-    text.append("Update now (runs `omni update`)\n", "cyan")
+    text.append("Update now (runs `omni update --force`)\n", "cyan")
     text.append("    2. Skip\n")
     text.append("    3. Skip until next version\n")
     text.append("\n")
@@ -1296,12 +1296,17 @@ def _fresh_cli_command(args: list[str]) -> list[str]:
 
 
 def _run_update_now() -> bool:
-    """Run the same parameterless update command exposed to shell users."""
+    """Reinstall after the user accepts the startup upgrade prompt.
+
+    ``--force`` is required so a current git checkout still replaces a stale
+    copied install. A plain ``omni update`` skips that reinstall when the
+    branch is not behind its upstream.
+    """
     console.print()
-    info("Updating Omni via `omni update`...")
+    info("Updating Omni via `omni update --force`...")
     try:
         proc = subprocess.run(  # noqa: S603 - fixed argv, no shell.
-            _fresh_cli_command(["update"]), check=False
+            _fresh_cli_command(["update", "--force"]), check=False
         )
     except Exception as exc:  # noqa: BLE001
         warn(f"Automatic update failed: {exc}. Run `omni update` manually.")

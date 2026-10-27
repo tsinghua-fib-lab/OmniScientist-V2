@@ -43,11 +43,12 @@ class IconAssetResult:
     sheet_path: Path | None = None
 
 
-# Prompt text below is retained from the old scientific_figure Coder and
-# BatchIconFactory.  It is deliberately not condensed or rewritten.
 _ICON_PLANNER_PROMPT = """
-        Analyze the scientific diagram provided.
-        Your task is to identify **Meaningful Visual Icons** that should be extracted as separate assets.
+        Select useful raster icon assets from the reference according to the figure requirement.
+        The requirement determines the editing scope and which visual details belong in the figure.
+        A reference provides composition guidance. Its decorative icons are optional.
+        When all new elements must be native editable PowerPoint objects, return [].
+        For requests allowing raster artwork, select only icons that help explain the scientific content.
 
         ### What counts as a "Complex Icon"? (Broad Criteria)
         1. **Symbolic Objects**: Any graphic representing a concept (e.g., "Server", "Database", "Document", "User", "Brain", "Globe", "Lock").
@@ -141,6 +142,7 @@ async def prepare_icon_assets(
     *,
     reference_image_uri: str,
     output_dir: Path,
+    requirement: str = "",
 ) -> IconAssetResult:
     """Run the old icon planning and sprite-sheet processing stages.
 
@@ -148,7 +150,10 @@ async def prepare_icon_assets(
     the old workflow did, so code generation can still create a diagram.
     """
     icon_names = _parse_icon_names(
-        await vlm.generate_text(_ICON_PLANNER_PROMPT, reference_image_uri=reference_image_uri)
+        await vlm.generate_text(
+            _ICON_PLANNER_PROMPT + "\nFigure requirement:\n" + requirement,
+            reference_image_uri=reference_image_uri,
+        )
     )
     if not icon_names:
         return IconAssetResult({})

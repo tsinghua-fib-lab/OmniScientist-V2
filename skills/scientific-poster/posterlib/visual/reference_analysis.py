@@ -208,6 +208,7 @@ def _reference_analysis_prompt(
 Record observations of this source image, not recommendations for another poster. In spatial_grammar, describe the actual major regions, their count and arrangement, relative widths and heights, alignment, local subdivisions, dominant masses and open areas. Approximate image-relative fractions or percentages are useful when the visual evidence supports them; label estimates as approximate. These facts describe the reference, not fixed slots, a required column count, or coordinates for a future target poster. Identify regions by visible form and location rather than assigning target scientific roles or content weights.
 
 Describe the actual hierarchy and reading path from type scale, graphic scale, contrast and grouping. In typography, distinguish display, heading, body and utility treatments through visible width, x-height, stroke contrast, weight, case, tracking, leading and relative size. When an exact face or measurement is not identifiable, state the visible qualities and uncertainty rather than inventing a font or value.
+Identify which text roles contain readable sentences and which contain only abstract marks or placeholders. An unobserved role remains unspecified. Describe the proximity of each heading, explanation, evidence carrier and caption, including relationships inside shared panels.
 
 For surfaces, borders and rules, describe what they visibly cover and where they end. Distinguish a heading-only strip from a surface or outline enclosing the entire content region. Keep white background, visible enclosure and spacing separate in the description; a content group is not automatically a bordered panel. Describe color/value relationships and how figures, tables, captions, equations and callouts are scaled and framed. Keep recurring patterns distinct from local exceptions.
 
@@ -235,9 +236,9 @@ def _parse_response(raw: Any) -> dict[str, str]:
         value = vlm_client.parse_json_object(raw)
     except vlm_client.VlmError as exc:
         raise ReferenceAnalysisError(str(exc)) from exc
-    if set(value) != {"design"} or not isinstance(value["design"], Mapping):
+    if not isinstance(value.get("design"), Mapping):
         raise ReferenceAnalysisError(
-            "visual design response must contain exactly one design object"
+            "visual design response must contain a design object"
         )
     design = _normalize_design(value["design"])
     if not design:

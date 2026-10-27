@@ -16,9 +16,26 @@ Excluded third-party assets:
   directory has its own `NOTICE.md` with the official source and permitted-use
   context; no Apache-2.0 license or broader trademark right is granted for it.
 
-`seeds/*.png` contains original, content-free synthetic design boards created
-for this skill. They contain no paper text, research figures, logos, venue
-identity, or other third-party poster material.
+The default reference images are full-page rasterizations of published posters,
+licensed separately under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+They are used as visual references; their scientific content, identity and marks
+remain separate from the generated poster:
+
+- `seeds/reading-research-landscape.png`: Christine M. White, Stephanie Estrera,
+  Emma Friedman, Dana Santangelo, Cristian Vazquez and Chris Schatschneider,
+  *Exploring data availability & reusability in published studies of reading*
+  (2025). [Figshare, version 2](https://doi.org/10.6084/m9.figshare.28903940.v2),
+  deposited by Christine White. PDF file 54096539, rendered at 2600 pixels on its
+  long edge; complete page, unchanged content.
+- `seeds/genomics-portrait.png`: Endika Varela-Martínez and coauthors,
+  *Claudin and Rab proteins are key molecular components involved in coccidiosis
+  resistance in Portuguese Merino sheep* (2025).
+  [AL4AnimalS Poster, version 5](https://doi.org/10.6084/m9.figshare.28989440.v5),
+  deposited by Endika Varela-Martínez. PDF file 54464345, rendered at 2600 pixels
+  on its long edge; complete page, unchanged content.
+
+The five earlier synthetic design boards in `seeds/` are original content-free
+assets retained for existing draft bindings. New drafts select published examples.
 
 Research content retrieved while using the skill may likewise be governed by
 separate publisher, dataset, or service terms.

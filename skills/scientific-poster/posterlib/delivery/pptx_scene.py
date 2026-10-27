@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import math
-import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from posterlib.runtime.identifiers import is_hex, is_identifier
+
 SCHEMA = "scientific-poster.pptx-scene.v3"
-OBJECT_KINDS = frozenset({"equation", "image", "shape", "table", "text"})
-_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
-_COLOR_RE = re.compile(r"^[0-9A-F]{6}$")
+OBJECT_KINDS = frozenset({"component", "equation", "image", "shape", "table", "text"})
 
 
 class SceneError(ValueError):
@@ -76,7 +75,7 @@ def _normalize_page(value: object) -> dict[str, Any]:
 def _normalize_object(value: object, *, index: int) -> dict[str, Any]:
     raw = _mapping(value, f"objects[{index}]")
     object_id = str(raw.get("id") or "").strip()
-    if not _ID_RE.fullmatch(object_id):
+    if not is_identifier(object_id):
         raise SceneError(
             "invalid_object_id",
             f"objects[{index}].id must be a stable identifier",
@@ -87,12 +86,14 @@ def _normalize_object(value: object, *, index: int) -> dict[str, Any]:
             "invalid_object_kind",
             f"{object_id} has unsupported kind: {kind or '<empty>'}",
         )
+    coordinate = _number if kind == "shape" and "rotation" in raw else _nonnegative_number
     item: dict[str, Any] = {
         "id": object_id,
         "kind": kind,
         "role": str(raw.get("role") or kind).strip(),
-        "x": _nonnegative_number(raw.get("x"), f"{object_id}.x"),
-        "y": _nonnegative_number(raw.get("y"), f"{object_id}.y"),
+        # A rotated shape's unrotated frame can start outside its painted bounds.
+        "x": coordinate(raw.get("x"), f"{object_id}.x"),
+        "y": coordinate(raw.get("y"), f"{object_id}.y"),
         "w": _positive_number(raw.get("w"), f"{object_id}.w"),
         "h": _positive_number(raw.get("h"), f"{object_id}.h"),
     }
@@ -101,7 +102,7 @@ def _normalize_object(value: object, *, index: int) -> dict[str, Any]:
         item["module_id"] = module_id
     container_id = str(raw.get("container_id") or "").strip()
     if container_id:
-        if not _ID_RE.fullmatch(container_id):
+        if not is_identifier(container_id):
             raise SceneError(
                 "invalid_container_id",
                 f"{object_id}.container_id must be a stable identifier",
@@ -111,15 +112,25 @@ def _normalize_object(value: object, *, index: int) -> dict[str, Any]:
         item.update(_normalize_text(raw, object_id))
     elif kind == "equation":
         item.update(_normalize_equation(raw, object_id))
-    elif kind == "image":
+    elif kind in {"image", "component"}:
         src = str(raw.get("src") or "").strip()
         if not src:
             raise SceneError("missing_image_source", f"{object_id}.src is required")
         item.update({"src": src, "alt": str(raw.get("alt") or "").strip()})
+        if kind == "image" and raw.get("source_figure_sha256"):
+            item["source_figure_sha256"] = str(raw["source_figure_sha256"]).strip()
     elif kind == "shape":
+        if "rotation" in raw:
+            item["rotation"] = _number(raw["rotation"], f"{object_id}.rotation") % 360
+        if "flip_v" in raw:
+            item["flip_v"] = _boolean(raw["flip_v"], f"{object_id}.flip_v")
+        fill_alpha = _number(raw.get("fill_alpha", 1), f"{object_id}.fill_alpha")
+        if not 0 <= fill_alpha <= 1:
+            raise SceneError("invalid_shape_style", f"{object_id}.fill_alpha must be between 0 and 1")
         item.update(
             {
                 "fill": _color(raw.get("fill", "FFFFFF"), f"{object_id}.fill"),
+                "fill_alpha": fill_alpha,
                 "fill_enabled": _boolean(
                     raw.get("fill_enabled", True), f"{object_id}.fill_enabled"
                 ),
@@ -138,6 +149,24 @@ def _normalize_object(value: object, *, index: int) -> dict[str, Any]:
                 side: _nonnegative_number(widths.get(side), f"{object_id}.border_widths.{side}")
                 for side in ("top", "right", "bottom", "left")
             }
+        if "border_side" in raw:
+            side = raw["border_side"]
+            if "border_widths" not in item or side not in ("top", "right", "bottom", "left"):
+                raise SceneError(
+                    "invalid_shape_style", f"{object_id}.border_side requires border widths and a valid side"
+                )
+            item["border_side"] = side
+        if "path" in raw:
+            operations = {"M": 2, "L": 2, "C": 6, "Z": 0}
+            path = raw["path"]
+            if not isinstance(path, list) or not path:
+                raise SceneError("invalid_shape_path", f"{object_id}.path must contain drawing commands")
+            item["path"] = []
+            for command in path:
+                if (not isinstance(command, list) or not command
+                        or command[0] not in operations or len(command) != operations[command[0]] + 1):
+                    raise SceneError("invalid_shape_path", f"{object_id}.path contains an invalid command")
+                item["path"].append([command[0], *(_number(value, f"{object_id}.path") for value in command[1:])])
     else:
         rows = raw.get("rows")
         if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)) or not rows:
@@ -274,6 +303,9 @@ def _normalize_table_styles(
                 {
                     **_normalize_font_style(style, label),
                     "fill": _color(style.get("fill", "FFFFFF"), f"{label}.fill"),
+                    "fill_enabled": _boolean(
+                        style.get("fill_enabled", True), f"{label}.fill_enabled"
+                    ),
                     "align": style.get("align")
                     if style.get("align") in {"center", "right"}
                     else "left",
@@ -353,8 +385,8 @@ def _normalize_table_runs(
 
 
 def _normalize_text(raw: Mapping[str, Any], object_id: str) -> dict[str, Any]:
-    text = str(raw.get("text") or "").strip()
-    if not text:
+    text = str(raw.get("text") or "")
+    if not text.strip():
         raise SceneError("empty_text", f"{object_id}.text must not be empty")
     align = str(raw.get("align") or "left").lower()
     if align not in {"center", "left", "right"}:
@@ -381,14 +413,15 @@ def _normalize_text(raw: Mapping[str, Any], object_id: str) -> dict[str, Any]:
 
 def _normalize_equation(raw: Mapping[str, Any], object_id: str) -> dict[str, Any]:
     mathml = str(raw.get("mathml") or "").strip()
-    if not mathml.startswith("<math"):
+    flow = raw.get("runs")
+    if flow is None and not mathml.startswith("<math"):
         raise SceneError(
             "invalid_equation_mathml", f"{object_id}.mathml must start with <math"
         )
     align = str(raw.get("align") or "center").lower()
     if align not in {"center", "left", "right"}:
         align = "center"
-    return {
+    result = {
         "mathml": mathml,
         "latex": str(raw.get("latex") or "").strip(),
         "font_size_pt": _positive_number(
@@ -398,6 +431,31 @@ def _normalize_equation(raw: Mapping[str, Any], object_id: str) -> dict[str, Any
         "color": _color(raw.get("color", "111111"), f"{object_id}.color"),
         "align": align,
     }
+    if "normal_text_sizes_pt" in raw:
+        sizes = raw["normal_text_sizes_pt"]
+        if not isinstance(sizes, list):
+            raise SceneError("invalid_equation_text_sizes", f"{object_id}.normal_text_sizes_pt must be an array")
+        result["normal_text_sizes_pt"] = [
+            _positive_number(size, f"{object_id}.normal_text_sizes_pt[{index}]")
+            for index, size in enumerate(sizes)
+        ]
+    if flow is not None:
+        if not isinstance(flow, list) or not flow:
+            raise SceneError("invalid_equation_runs", f"{object_id}.runs must be a nonempty array")
+        runs = []
+        for index, value in enumerate(flow):
+            label = f"{object_id}.runs[{index}]"
+            run = _mapping(value, label)
+            if "mathml" in run:
+                runs.append(_normalize_equation({key: value for key, value in run.items() if key != "runs"}, label))
+            else:
+                text = str(run.get("text") or "")
+                if not text:
+                    raise SceneError("invalid_equation_runs", f"{label}.text must not be empty")
+                runs.append({"text": text, **_normalize_font_style(run, label)})
+        result["runs"] = runs
+        result["rtl"] = _boolean(raw.get("rtl", False), f"{object_id}.rtl")
+    return result
 
 
 def _mapping(value: object, label: str) -> Mapping[str, Any]:
@@ -459,6 +517,6 @@ def _boolean(value: object, label: str) -> bool:
 
 def _color(value: object, label: str) -> str:
     color = str(value or "").strip().removeprefix("#").upper()
-    if not _COLOR_RE.fullmatch(color):
+    if not is_hex(color.lower(), 6):
         raise SceneError("invalid_color", f"{label} must be a six-digit hex color")
     return color

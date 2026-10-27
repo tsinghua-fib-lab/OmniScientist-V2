@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from itertools import combinations
 from typing import Any
 
@@ -11,7 +12,6 @@ def check_scene(scene: dict[str, Any]) -> dict[str, Any]:
 
     page = scene["page"]
     objects = scene["objects"]
-    page_area = page["width_in"] * page["height_in"]
     failures: list[dict[str, str]] = []
     warnings: list[dict[str, str]] = []
 
@@ -29,9 +29,15 @@ def check_scene(scene: dict[str, Any]) -> dict[str, Any]:
             )
         )
     for item in objects:
+        angle = math.radians(item.get("rotation", 0))
+        width = abs(math.cos(angle)) * item["w"] + abs(math.sin(angle)) * item["h"]
+        height = abs(math.sin(angle)) * item["w"] + abs(math.cos(angle)) * item["h"]
+        left = item["x"] + (item["w"] - width) / 2
+        top = item["y"] + (item["h"] - height) / 2
         if (
-            item["x"] + item["w"] > page["width_in"] + 0.01
-            or item["y"] + item["h"] > page["height_in"] + 0.01
+            left < -0.01 or top < -0.01
+            or left + width > page["width_in"] + 0.01
+            or top + height > page["height_in"] + 0.01
         ):
             warnings.append(
                 _issue(
@@ -42,14 +48,20 @@ def check_scene(scene: dict[str, Any]) -> dict[str, Any]:
                     "Reduce or reposition this object inside the slide boundary.",
                 )
             )
-        if item["kind"] == "image" and item["w"] * item["h"] / page_area >= 0.8:
+        if (
+            item["kind"] == "image"
+            and not item.get("source_figure_sha256")
+            and left <= 0.01 and top <= 0.01
+            and left + width >= page["width_in"] - 0.01
+            and top + height >= page["height_in"] - 0.01
+        ):
             failures.append(
                 _issue(
                     item["id"],
                     "editable_coverage",
                     "error",
-                    "A single raster image covers at least 80% of the poster.",
-                    "Export regions as native shapes and text; keep raster content to figures only.",
+                    "An image without a bound paper-figure identity covers the complete poster slide.",
+                    "Capture poster content as native text, tables, equations and shapes; retain bound paper figures as images.",
                 )
             )
         if item["kind"] == "text" and item.get("fit") == "grow":

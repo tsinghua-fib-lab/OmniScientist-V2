@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from itertools import pairwise
 from typing import Any
 
@@ -183,7 +182,18 @@ def editor_feedback(
     for module in result["report"].get("modules", []):
         compact = dict(module)
         module_id = module.get("module_id")
-        if module_id in content_bounds_by_module:
+        internal = module.get("internal_space")
+        if isinstance(internal, dict):
+            # Keep the largest local bands; all measurements remain in the raw
+            # inspection. This is a context bound, independent of visual quality.
+            compact["internal_space"] = {
+                **internal,
+                "vertical_gaps": internal.get("vertical_gaps", [])[:3],
+            }
+            bounds = internal.get("content_bounds_px")
+            compact["content_bounds_px"] = bounds
+            compact["content_bottom_inset_px"] = internal["bottom_inset_px"]
+        elif module_id in content_bounds_by_module:
             bounds = content_bounds_by_module[module_id]
             compact["content_bounds_px"] = bounds
             frame = module.get("rect")
@@ -231,8 +241,14 @@ def editor_feedback(
                 ],
             }
             if relation["display"] == "grid" and columns:
-                relation["computed_column_track_count"] = len(
-                    re.findall(r"(?:^|\s)(?:minmax\([^)]*\)|[^\s]+)", columns)
+                from tinycss2 import parse_component_value_list
+
+                # Computed grid styles contain resolved tracks and optional named
+                # lines. Functions stay atomic; line-name blocks are not tracks.
+                relation["computed_column_track_count"] = sum(
+                    token.type not in {"whitespace", "comment", "[] block"}
+                    and not (token.type == "ident" and token.lower_value == "none")
+                    for token in parse_component_value_list(columns)
                 )
             relations.append(relation)
         if relations:
@@ -299,8 +315,11 @@ def editor_feedback(
         result["report"]["source_figures"] = {
             key: value for key, value in figures.items() if not key.endswith("_sha256s")
         }
-    # The exact HTML already supplies the copy. Do not repeat the per-text-run
-    # arrays here; role warnings and visual observations carry typography facts.
-    if inspection.get("status") == "ok":
-        result["_accepted_inspection"] = inspection
+    type_observations = [
+        item for item in observations
+        if isinstance(item, dict) and item.get("kind") == "typography_distribution"
+    ]
+    if type_observations:
+        result["diagnostics"] = {"observations": type_observations}
+    result["_rendered_inspection"] = inspection
     return result

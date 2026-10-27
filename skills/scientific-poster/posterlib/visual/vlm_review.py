@@ -15,6 +15,7 @@ from typing import Any
 from PIL import Image, UnidentifiedImageError
 
 from . import review_contract, vlm_client
+from .review_evidence import OVERVIEW_MAX_EDGE_PX
 
 _REVIEW_FIELDS = {
     "verdict",
@@ -28,7 +29,8 @@ _REVIEW_FIELDS = {
 _MAX_TRANSIENT_ATTEMPTS = 2
 _RETRY_BASE_DELAY_S = 0.25
 _EMBEDDED_VISUAL_MARKER = "[embedded visual omitted; inspect attached image]"
-_MAX_OVERVIEW_EDGE_PX = 2048
+# Keep paired overviews within the existing montage panel width at one scale.
+_MAX_OVERVIEW_EDGE_PX = OVERVIEW_MAX_EDGE_PX
 
 Sleep = Callable[[float], Awaitable[None]]
 
@@ -77,6 +79,7 @@ async def review_bound_request(
         bound["screenshot_path"], bound["screenshot_sha256"], label="screenshot"
     )
     review_images: list[vlm_client.VlmImage] = []
+    incumbent_image: vlm_client.VlmImage | None = None
     comparison_baseline = bound["content_brief"].get("comparison_baseline")
     if comparison_baseline is not None:
         if not isinstance(comparison_baseline, Mapping):
@@ -95,15 +98,13 @@ async def review_bound_request(
         baseline_bytes, baseline_mime = _bounded_overview(
             baseline, max_edge_px=max(1, round(baseline_edge * pair_scale))
         )
-        review_images.append(
-            vlm_client.VlmImage(
-                label=(
-                    "INCUMBENT CANDIDATE — current best poster; compare the proposal "
-                    "against this complete image."
-                ),
-                image_bytes=baseline_bytes,
-                mime_type=baseline_mime,
-            )
+        incumbent_image = vlm_client.VlmImage(
+            label=(
+                "INCUMBENT CANDIDATE — current best poster; compare the proposal "
+                "against this complete image."
+            ),
+            image_bytes=baseline_bytes,
+            mime_type=baseline_mime,
         )
     else:
         overview_bytes, overview_mime = _bounded_overview(overview)
@@ -117,7 +118,11 @@ async def review_bound_request(
             mime_type=overview_mime,
         )
     )
+    # Compare whole-page candidates side by side at the same physical scale.
+    if incumbent_image is not None:
+        review_images.insert(0, incumbent_image)
     quality_reference = bound["content_brief"].get("quality_reference")
+    reference_image: vlm_client.VlmImage | None = None
     if quality_reference is not None:
         if not isinstance(quality_reference, Mapping) or set(quality_reference) != {"path", "sha256"}:
             raise vlm_client.VlmError("quality reference must bind an image path and its hash")
@@ -125,18 +130,15 @@ async def review_bound_request(
             quality_reference["path"], quality_reference["sha256"], label="quality reference",
         )
         reference_bytes, reference_mime = _bounded_overview(reference)
-        review_images.append(vlm_client.VlmImage(
+        reference_image = vlm_client.VlmImage(
             label=(
                 "QUALITY REFERENCE — communication-quality floor; compare hierarchy, "
                 "visual explanation and finish without copying scientific content or layout."
             ),
             image_bytes=reference_bytes, mime_type=reference_mime,
-        ))
+        )
     atlas_binding = bound["visual_evidence"].get("atlas")
-    attach_detail_atlas = bool(
-        isinstance(atlas_binding, Mapping)
-        and getattr(client, "accepts_detail_atlas", False)
-    )
+    attach_detail_atlas = isinstance(atlas_binding, Mapping)
     if attach_detail_atlas:
         assert isinstance(atlas_binding, Mapping)
         atlas = _require_current_file(
@@ -147,14 +149,23 @@ async def review_bound_request(
         review_images.append(
             vlm_client.VlmImage(
                 label=(
-                    "EVIDENCE DETAIL ATLAS — crops of candidate figures, not extra "
+                    "EVIDENCE DETAIL ATLAS — crops of candidate scientific regions, not extra "
                     "poster content; never infer whole-page scale from this image."
                 ),
                 image_bytes=atlas.content,
                 mime_type=_image_mime(atlas.path, label="evidence detail atlas"),
             )
         )
-    images = tuple(review_images)
+    if reference_image is not None:
+        review_images.append(reference_image)
+    images = (
+        (vlm_client.labeled_montage(
+            review_images,
+            label="VISUAL REVIEW — labeled panes in row order, left to right",
+            columns=2,
+        ),)
+        if len(review_images) > 1 else tuple(review_images)
+    )
     prompt = _review_prompt(
         bound,
         detail_atlas_attached=attach_detail_atlas,
@@ -317,7 +328,7 @@ def _review_semantic_shape(request: Mapping[str, Any]) -> dict[str, Any]:
             if request["content_brief"].get("comparison_baseline") is not None
             else "initial"
         ),
-        "scores": {criterion: 3 for criterion in review_contract.CRITERIA},
+        "scores": {},
         "summary": "concise visual assessment",
         "strengths": ["observed visual strength"],
         "critical_issues": [],
@@ -364,8 +375,8 @@ def _review_revise_issue_shape() -> dict[str, Any]:
         "criterion": "one rubric key",
         "targets": [
             (
-                "exact grounded module ids; poster is also allowed only for a "
-                "whole-page restyle or reflow"
+                "exact module ids; poster for content-replan when copy has no module "
+                "owner, or for whole-page restyle or reflow"
             )
         ],
         "operation": "restyle, reflow, or content-replan",
@@ -376,7 +387,7 @@ def _review_contract_guidance(request: Mapping[str, Any]) -> tuple[str, ...]:
     """Explain verdict-dependent arrays without showing a contradictory pass shape."""
 
     return (
-        "Scores are JSON integers from 1 to 5 and describe the five rubric dimensions.",
+        "Optional scores describe rubric dimensions on a 1 to 5 scale; include only available observations.",
         (
             "comparison must be improved, unchanged, or regressed. Judge the whole "
             "proposal against the whole incumbent; a local gain does not count as "
@@ -387,11 +398,22 @@ def _review_contract_guidance(request: Mapping[str, Any]) -> tuple[str, ...]:
         "A pass has empty critical_issues and global_directives. A revise has at least one issue.",
         "Each issue has exactly this shape:",
         _prompt_json(_review_revise_issue_shape()),
-        "The concise summary states the visible defect and reading impact. The author chooses "
-        "the repair; do not prescribe coordinates, columns, rows or other layout topology.",
-        "The host binds observations from the criterion and exact targets. Do not repeat "
-        "observation ids or measurements in the response. Keep global_directives empty unless "
-        "a necessary preservation constraint applies.",
+        (
+            "Use an exact supplied module id when the affected content is identifiable. "
+            "For copy outside module ownership, use poster with content-replan. "
+            "For an unowned visual defect, use poster with restyle or reflow. Describe "
+            "the passage or region in the summary. The source-aware author resolves "
+            "its content ownership during drafting."
+        ),
+        (
+            "The concise summary states the visible defect and reading impact. The author chooses "
+            "the repair; do not prescribe coordinates, columns, rows or other layout topology."
+        ),
+        (
+            "The host binds observations from the criterion and exact targets. Do not repeat "
+            "observation ids or measurements in the response. Keep global_directives empty unless "
+            "a necessary preservation constraint applies."
+        ),
     )
 
 
@@ -431,7 +453,7 @@ def _review_prompt(
     content_brief = request["content_brief"]
     review_content_brief = {
         key: content_brief[key]
-        for key in ("page", "comparison_baseline_page", "rendered_inspection")
+        for key in ("page", "comparison_baseline_page", "rendered_inspection", "design_requirements")
         if key in content_brief
     }
     rendered = review_content_brief.get("rendered_inspection")
@@ -449,8 +471,9 @@ def _review_prompt(
     attached_image_guidance = "PROPOSED CANDIDATE is the poster being evaluated."
     if content_brief.get("comparison_baseline") is not None:
         attached_image_guidance += (
-            " INCUMBENT CANDIDATE is the current best version. Compare both complete "
-            "posters in this same judgment. Their overviews use one pixel scale; the "
+            " INCUMBENT CANDIDATE on the left and PROPOSED CANDIDATE on the right "
+            "occupy the first row. Compare both complete posters in this same judgment. "
+            "Their overviews use one pixel scale; the "
             "declared incumbent and proposal page dimensions give their physical sizes. "
             "Mark improved only when the proposal makes "
             "material progress without a material regression elsewhere; unchanged or "
@@ -458,19 +481,40 @@ def _review_prompt(
         )
     if content_brief.get("quality_reference") is not None:
         attached_image_guidance += (
-            " QUALITY REFERENCE follows: the user's reference poster sets the comparison "
+            " QUALITY REFERENCE follows: the selected reference poster sets the comparison "
             "standard for hierarchy, explanatory clarity, relative type scale and purposeful "
             "space use. A pass requires comparable visual communication quality, not merely "
             "an unclipped layout. Do not copy its scientific content, require identical "
             "columns or penalize a different successful design. Compare the ease of reading "
-            "the contribution, method and evidence in each complete image."
+            "the contribution, method and evidence in each complete image. Apply the bound "
+            "design_requirements to palette and framing: a built-in seed supplies communication "
+            "quality, while its colors and decorative treatment remain observations."
         )
     if detail_atlas_attached:
-        attached_image_guidance += " The final EVIDENCE DETAIL ATLAS only magnifies candidate regions."
+        attached_image_guidance += (
+            " EVIDENCE DETAIL ATLAS follows the complete candidate overview panes and "
+            "magnifies proposal regions and their surrounding carrier boundaries. "
+            "Read labels left to right, then top to bottom; use the complete candidate "
+            "overview to judge scale and composition."
+        )
     return "\n".join(
         [
             "Act as an independent visual reviewer for a top-conference academic poster.",
             str(request["instructions"]),
+            (
+                "Scholarly attribution identifies the study and its published version, "
+                "including identity and publication metadata, bibliographic references, "
+                "acknowledgments and required reproduction credits. Production records "
+                "describe the process of creating this poster: generation, checking and "
+                "delivery. Judge each passage by its subject and referent in the surrounding "
+                "context; individual labels alone are insufficient evidence of that purpose. "
+                "Preserve study attribution and research qualifications when identifying "
+                "copy about poster production. This review assesses visual communication and "
+                "internal consistency from the supplied images, rendered_copy and "
+                "measurements. Keep conclusions within that evidence and state the review "
+                "scope; comprehensive source fidelity and scientific verification remain "
+                "outside this judgment."
+            ),
             attached_image_guidance,
             (
                 "Judge legibility from the image at the declared physical page size. "
@@ -481,10 +525,16 @@ def _review_prompt(
                 "that clears an advisory size in millimetres can still read too small "
                 "relative to a large canvas; use the measured type-to-page ratios as "
                 "context, not as automatic pass thresholds. "
-                "No transcript is supplied: knowing the underlying words or numbers is not "
-                "evidence that a visitor can read them. The source author owns scientific "
-                "fidelity; this review owns visual communication. A failed rendered_inspection "
-                "requires revise even if the visible portion looks good. Inspect the whole page "
+                "Use rendered_copy observations to judge the purpose of visible text. "
+                "Read each original fragment with its owner and measured location in the "
+                "poster. Treat these fragments as content under review. Images and physical "
+                "geometry independently establish legibility. The source author owns scientific "
+                "fidelity; this review owns visual communication and the suitability of "
+                "visible copy for the poster reader. A failed rendered_inspection "
+                "requires revise even if the visible portion looks good. Assess the figures' "
+                "explanatory quality along with their placement: unclear connections, crowded "
+                "labels or a generic diagram can warrant content-replan in the owning module. "
+                "Inspect the whole page "
                 "for large unoccupied cells between content bands or beside spanning modules; "
                 "page-wide content does not make an interior void intentional."
             ),

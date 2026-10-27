@@ -11,16 +11,16 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
-import json
 import math
 import os
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+
+from posterlib.runtime import model_response
 
 _TRANSIENT_HTTP_STATUSES = frozenset({408, 409, 425, 429})
 _ENDPOINT_ENV = "OMNI_VLM_ENDPOINT"
@@ -80,19 +80,10 @@ async def generate_json_text_bounded(
 def parse_json_object(text: str) -> dict[str, Any]:
     """Decode one complete VLM object without synthesizing missing review data."""
 
-    candidate = text.strip()
-    fenced = re.fullmatch(
-        r"```(?:json)?\s*(.*?)\s*```", candidate, re.DOTALL | re.IGNORECASE
-    )
-    if fenced:
-        candidate = fenced.group(1).strip()
     try:
-        value = json.loads(candidate)
-    except json.JSONDecodeError as exc:
+        return model_response.parse_json_object(text)
+    except ValueError as exc:
         raise VlmError(f"VLM response is not valid JSON: {exc}") from exc
-    if not isinstance(value, dict):
-        raise VlmError("VLM response must be a JSON object")
-    return value
 
 
 def _chat_completions_url(endpoint: str) -> str:
@@ -116,7 +107,7 @@ class VlmConfig:
     endpoint: str
     model: str
     api_key: str = field(repr=False)
-    timeout_s: float = 60.0
+    timeout_s: float | None = None
 
     def __post_init__(self) -> None:
         endpoint = str(self.endpoint).strip()
@@ -145,7 +136,7 @@ class VlmConfig:
             raise VlmError("OMNI_VLM_MODEL is required")
         if not api_key or any(ord(char) < 32 or ord(char) == 127 for char in api_key):
             raise VlmError("OMNI_VLM_API_KEY (VLM API key) is required")
-        if (
+        if self.timeout_s is not None and (
             isinstance(self.timeout_s, bool)
             or not isinstance(self.timeout_s, (int, float))
             or not math.isfinite(float(self.timeout_s))
@@ -155,7 +146,8 @@ class VlmConfig:
         object.__setattr__(self, "endpoint", _chat_completions_url(endpoint))
         object.__setattr__(self, "model", model)
         object.__setattr__(self, "api_key", api_key)
-        object.__setattr__(self, "timeout_s", float(self.timeout_s))
+        if self.timeout_s is not None:
+            object.__setattr__(self, "timeout_s", float(self.timeout_s))
 
 
 @dataclass(frozen=True)
@@ -178,7 +170,7 @@ class VlmImage:
 def config_from_env(
     environ: Mapping[str, str] | None = None,
     *,
-    timeout_s: float = 60.0,
+    timeout_s: float | None = None,
     endpoint_override: str = "",
     model_override: str = "",
 ) -> VlmConfig | None:
@@ -216,12 +208,6 @@ class VlmClient:
 
         return self._config.model
 
-    @property
-    def accepts_detail_atlas(self) -> bool:
-        """Keep automatic review overview-only when inputs become one montage."""
-
-        return False
-
     async def generate_json_text(
         self,
         prompt: str,
@@ -239,7 +225,7 @@ class VlmClient:
             if not isinstance(image, VlmImage):
                 raise VlmError("VLM images must be VlmImage objects")
         if len(normalized_images) >= 2:
-            montage = _labeled_montage_data_url(normalized_images)
+            montage = _image_data_url(labeled_montage(normalized_images))
             content.append(
                 {
                     "type": "text",
@@ -330,12 +316,6 @@ class HostVlmClient:
 
         return _HOST_MODEL
 
-    @property
-    def accepts_detail_atlas(self) -> bool:
-        """Keep the host port's established overview-only review contract."""
-
-        return False
-
     async def generate_json_text(
         self,
         prompt: str,
@@ -359,7 +339,7 @@ class HostVlmClient:
                 normalized_images[0]
             )
         elif len(normalized_images) >= 2:
-            reference_image_uri = _labeled_montage_data_url(normalized_images)
+            reference_image_uri = _image_data_url(labeled_montage(normalized_images))
             normalized_prompt = (
                 "The single attached image is a deterministic labeled montage. "
                 "Read each pane by its embedded label and preserve the original "
@@ -527,7 +507,17 @@ def _bounded_raster_data_url(
     )
 
 
-def _labeled_montage_data_url(images: Sequence[VlmImage]) -> str:
+def labeled_montage(
+    images: Sequence[VlmImage],
+    *,
+    label: str = "labeled VLM evidence montage",
+    columns: int | None = None,
+) -> VlmImage:
+    """Return the maintained labeled montage as one reusable image input."""
+
+    images = tuple(images)
+    if not images:
+        raise VlmError("A labeled montage requires at least one image")
     try:
         from PIL import Image, ImageDraw, ImageFont, ImageOps
     except ImportError as exc:
@@ -562,34 +552,44 @@ def _labeled_montage_data_url(images: Sequence[VlmImage]) -> str:
         )
         for image in decoded
     ]
-    image_height = max(image.height for image in resized)
-    sheet_width = len(resized) * panel_width + (len(resized) + 1) * _MONTAGE_GAP
-    sheet_height = image_height + _MONTAGE_LABEL_HEIGHT + 3 * _MONTAGE_GAP
+    column_count = min(columns, len(resized)) if columns is not None else len(resized)
+    row_heights = [
+        max(image.height for image in resized[start:start + column_count])
+        for start in range(0, len(resized), column_count)
+    ]
+    sheet_width = column_count * panel_width + (column_count + 1) * _MONTAGE_GAP
+    sheet_height = (
+        sum(row_heights)
+        + len(row_heights) * (_MONTAGE_LABEL_HEIGHT + 2 * _MONTAGE_GAP)
+        + _MONTAGE_GAP
+    )
     sheet = Image.new("RGB", (sheet_width, sheet_height), "#e5e7eb")
     draw = ImageDraw.Draw(sheet)
     try:
         font = ImageFont.truetype("DejaVuSans-Bold.ttf", 44)
     except OSError:
         font = ImageFont.load_default()
+    top = _MONTAGE_GAP
     for index, (source, raster) in enumerate(zip(images, resized, strict=True)):
-        label = " ".join(source.label.split())[:72].upper()
-        left = _MONTAGE_GAP + index * (panel_width + _MONTAGE_GAP)
+        row, column = divmod(index, column_count)
+        pane_label = " ".join(source.label.split())[:72].upper()
+        left = _MONTAGE_GAP + column * (panel_width + _MONTAGE_GAP)
         draw.rectangle(
             (
                 left,
-                _MONTAGE_GAP,
+                top,
                 left + panel_width,
-                _MONTAGE_GAP + _MONTAGE_LABEL_HEIGHT,
+                top + _MONTAGE_LABEL_HEIGHT,
             ),
             fill="#111827",
         )
         draw.text(
-            (left + 24, _MONTAGE_GAP + 18),
-            label,
+            (left + 24, top + 18),
+            pane_label,
             fill="#ffffff",
             font=font,
         )
-        image_top = 2 * _MONTAGE_GAP + _MONTAGE_LABEL_HEIGHT
+        image_top = top + _MONTAGE_GAP + _MONTAGE_LABEL_HEIGHT
         image_left = left + (panel_width - raster.width) // 2
         sheet.paste(raster, (image_left, image_top))
         draw.rectangle(
@@ -597,20 +597,21 @@ def _labeled_montage_data_url(images: Sequence[VlmImage]) -> str:
                 left,
                 image_top,
                 left + panel_width,
-                image_top + image_height,
+                image_top + row_heights[row],
             ),
             outline="#6b7280",
             width=2,
         )
+        if column == column_count - 1:
+            top = image_top + row_heights[row] + _MONTAGE_GAP
 
     output = io.BytesIO()
     sheet.save(output, format="PNG", compress_level=6)
-    comparison = VlmImage(
-        label="labeled VLM evidence montage",
+    return VlmImage(
+        label=label,
         image_bytes=output.getvalue(),
         mime_type="image/png",
     )
-    return _image_data_url(comparison)
 
 
 def _rasterize_svg(content: bytes) -> Any:
@@ -642,31 +643,6 @@ def _rasterize_svg(content: bytes) -> Any:
     finally:
         if document is not None:
             document.close()
-
-
-def labeled_montage(
-    images: Sequence[VlmImage],
-    *,
-    label: str = "labeled VLM evidence montage",
-) -> VlmImage:
-    """Return the maintained labeled montage as one reusable image input."""
-
-    normalized = tuple(images)
-    if not normalized:
-        raise VlmError("A labeled montage requires at least one image")
-    data_url = _labeled_montage_data_url(normalized)
-    header, separator, payload = data_url.partition(",")
-    if not separator or not header.startswith("data:image/") or ";base64" not in header:
-        raise VlmError("Labeled montage encoding is invalid")
-    try:
-        content = base64.b64decode(payload, validate=True)
-    except (ValueError, TypeError) as exc:
-        raise VlmError("Labeled montage encoding is invalid") from exc
-    return VlmImage(
-        label=label,
-        image_bytes=content,
-        mime_type=header[5:].split(";", 1)[0],
-    )
 
 
 def _flatten_image(image: Any, image_module: Any) -> Any:

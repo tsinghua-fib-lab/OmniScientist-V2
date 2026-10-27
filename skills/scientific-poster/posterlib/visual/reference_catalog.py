@@ -3,26 +3,20 @@
 from __future__ import annotations
 
 import hashlib
-import math
 import mimetypes
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
 
-import poster_contract
-
 from posterlib.paths import SKILL_ROOT
+from posterlib.runtime.identifiers import is_sha256
 
 Orientation = Literal["landscape", "portrait"]
 ReferenceSourceKind = Literal["custom", "generated", "seed"]
 
-_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _SEED_ROOT = SKILL_ROOT / "seeds"
-_DENSITIES = frozenset({"open", "balanced", "dense"})
-_ROLE_EMPHASES = frozenset({"balanced", "claim", "evidence", "method"})
 _CUSTOM_REFERENCE_ID = "custom-reference"
 
 
@@ -32,15 +26,12 @@ class ReferenceSeedError(ValueError):
 
 @dataclass(frozen=True)
 class SeedSpec:
-    """Content-shape metadata for selecting one reference image."""
+    """Stable identity, orientation and attribution for one reference image."""
 
     seed_id: str
     image_path: Path
     orientation: Orientation
-    density: str
-    organization_modes: tuple[str, ...]
-    role_emphasis: str
-    figure_preference: float
+    source_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -54,20 +45,12 @@ class ReferenceBundle:
     warning: str | None = None
 
     def __post_init__(self) -> None:
-        raw_image = Path(self.image_path).expanduser()
-        if raw_image.is_symlink():
-            raise ReferenceSeedError("reference image may not be a symlink")
-        try:
-            image = raw_image.resolve(strict=True)
-        except OSError as exc:
-            raise ReferenceSeedError(
-                f"reference image is not readable: {self.image_path}"
-            ) from exc
-        if not image.is_file():
-            raise ReferenceSeedError(f"reference image must be a file: {image}")
+        if not str(self.image_path).strip():
+            raise ReferenceSeedError("reference image path must be non-empty")
+        image = Path(self.image_path).expanduser().absolute()
         digest = str(self.image_sha256)
-        if _HASH_RE.fullmatch(digest) is None or _sha256_file(image) != digest:
-            raise ReferenceSeedError("reference image hash does not match its bytes")
+        if not is_sha256(digest):
+            raise ReferenceSeedError("reference image hash is invalid")
         if self.source_kind not in {"custom", "generated", "seed"}:
             raise ReferenceSeedError(
                 "reference source_kind must be custom, generated, or seed"
@@ -82,18 +65,6 @@ class ReferenceBundle:
                 raise ReferenceSeedError("custom reference must use an image file")
         elif self.seed_id not in SEED_REGISTRY:
             raise ReferenceSeedError(f"unknown reference seed: {self.seed_id}")
-        if self.source_kind == "seed":
-            registered = SEED_REGISTRY[self.seed_id]
-            try:
-                registered_path = registered.image_path.resolve(strict=True)
-            except OSError as exc:
-                raise ReferenceSeedError(
-                    f"registered seed image is missing: {registered.image_path}"
-                ) from exc
-            if image != registered_path:
-                raise ReferenceSeedError(
-                    "seed reference image does not use its registered path"
-                )
         warning = None if self.warning is None else str(self.warning).strip()
         if self.warning is not None and not warning:
             raise ReferenceSeedError(
@@ -101,6 +72,26 @@ class ReferenceBundle:
             )
         object.__setattr__(self, "image_path", str(image))
         object.__setattr__(self, "warning", warning)
+
+    def verified_image_path(self) -> Path:
+        """Resolve exact reference pixels when needed, including relocated seeds."""
+
+        candidates = [Path(self.image_path)]
+        if self.source_kind == "seed":
+            candidates.append(SEED_REGISTRY[self.seed_id].image_path)
+        for image in dict.fromkeys(candidates):
+            try:
+                if (
+                    not image.is_symlink()
+                    and image.is_file()
+                    and _sha256_file(image) == self.image_sha256
+                ):
+                    return image.resolve(strict=True)
+            except OSError:
+                continue
+        raise ReferenceSeedError(
+            f"reference image is unavailable or changed: {self.image_path}"
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """Return a stable JSON-safe reference identity."""
@@ -115,7 +106,7 @@ class ReferenceBundle:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> ReferenceBundle:
-        """Validate and restore one serialized reference bundle."""
+        """Restore reference identity independently of optional image availability."""
 
         required = {
             "image_path",
@@ -143,63 +134,48 @@ def _seed(
     seed_id: str,
     *,
     orientation: Orientation,
-    density: str,
-    organization_modes: tuple[str, ...],
-    role_emphasis: str,
-    figure_preference: float,
+    source_url: str = "",
 ) -> SeedSpec:
     return SeedSpec(
         seed_id=seed_id,
         image_path=_SEED_ROOT / f"{seed_id}.png",
         orientation=orientation,
-        density=density,
-        organization_modes=organization_modes,
-        role_emphasis=role_emphasis,
-        figure_preference=figure_preference,
+        source_url=source_url,
     )
 
 
 SEED_REGISTRY: Mapping[str, SeedSpec] = MappingProxyType(
     {
+        "reading-research-landscape": _seed(
+            "reading-research-landscape",
+            orientation="landscape",
+            source_url="https://doi.org/10.6084/m9.figshare.28903940.v2",
+        ),
+        "genomics-portrait": _seed(
+            "genomics-portrait",
+            orientation="portrait",
+            source_url="https://doi.org/10.6084/m9.figshare.28989440.v5",
+        ),
+        # Synthetic boards retain their identity for saved draft checkpoints.
         "dense-classic-three-column": _seed(
             "dense-classic-three-column",
             orientation="landscape",
-            density="dense",
-            organization_modes=("scan-first", "figure-led"),
-            role_emphasis="balanced",
-            figure_preference=0.7,
         ),
         "central-method-stage": _seed(
             "central-method-stage",
             orientation="landscape",
-            density="balanced",
-            organization_modes=("method-led", "scan-first"),
-            role_emphasis="method",
-            figure_preference=0.4,
         ),
         "claim-led-asymmetric": _seed(
             "claim-led-asymmetric",
             orientation="landscape",
-            density="balanced",
-            organization_modes=("result-led", "narrative", "scan-first"),
-            role_emphasis="claim",
-            figure_preference=0.3,
         ),
         "open-evidence-gallery": _seed(
             "open-evidence-gallery",
             orientation="landscape",
-            density="dense",
-            organization_modes=("figure-led", "scan-first", "result-led"),
-            role_emphasis="evidence",
-            figure_preference=0.95,
         ),
         "portrait-image-grid": _seed(
             "portrait-image-grid",
             orientation="portrait",
-            density="balanced",
-            organization_modes=tuple(poster_contract.ORGANIZATION_MODES),
-            role_emphasis="balanced",
-            figure_preference=0.8,
         ),
     }
 )
@@ -214,83 +190,18 @@ def seed_by_id(seed_id: str) -> SeedSpec:
         raise ReferenceSeedError(f"unknown reference seed: {seed_id}") from exc
 
 
-def select_seed(
-    *,
-    orientation: str,
-    organization_mode: str,
-    figure_count: int,
-    module_weights: Mapping[str, float],
-    density: str,
-) -> SeedSpec:
-    """Select one reference from content-shape signals, never layout fit."""
+def select_seed(*, orientation: str) -> SeedSpec:
+    """Select the first attributed reference registered for the page orientation."""
 
     page_mode = str(orientation).strip().lower()
     if page_mode not in {"landscape", "portrait"}:
         raise ReferenceSeedError("orientation must be landscape or portrait")
-    mode = str(organization_mode).strip().lower()
-    if mode not in poster_contract.ORGANIZATION_MODES:
-        raise ReferenceSeedError("unsupported organization_mode")
-    if isinstance(figure_count, bool) or not isinstance(figure_count, int):
-        raise ReferenceSeedError("figure_count must be a non-negative integer")
-    if figure_count < 0:
-        raise ReferenceSeedError("figure_count must be a non-negative integer")
-    weights = _normalize_weights(module_weights)
-    density_mode = normalize_density(density)
-
-    method_weight = _role_weight(weights, "method", "method-flow", "architecture")
-    claim_weight = _role_weight(weights, "claim", "result", "context")
-    evidence_weight = _role_weight(
-        weights, "evidence", "figure", "figures", "comparison", "metrics"
+    for seed in SEED_REGISTRY.values():
+        if seed.orientation == page_mode and seed.source_url:
+            return seed
+    raise ReferenceSeedError(
+        f"no attributed reference is registered for {page_mode} orientation"
     )
-    role_total = method_weight + claim_weight + evidence_weight
-    if role_total > 0:
-        method_share = method_weight / role_total
-        claim_share = claim_weight / role_total
-        evidence_share = evidence_weight / role_total
-    else:
-        method_share = claim_share = evidence_share = 0.0
-
-    figure_pressure = figure_count / (figure_count + 1.0) if figure_count else 0.0
-    role_shares = {
-        "balanced": (
-            method_share
-            + claim_share
-            + evidence_share
-            - max(method_share, claim_share, evidence_share)
-        )
-        / 2.0,
-        "method": method_share,
-        "claim": claim_share,
-        "evidence": evidence_share,
-    }
-    density_index = {"open": 0, "balanced": 1, "dense": 2}
-    candidates = [
-        seed for seed in SEED_REGISTRY.values() if seed.orientation == page_mode
-    ]
-    if not candidates:
-        raise ReferenceSeedError(
-            f"no reference seed is registered for {page_mode} orientation"
-        )
-
-    def score(seed: SeedSpec) -> float:
-        if seed.role_emphasis not in _ROLE_EMPHASES:
-            raise ReferenceSeedError(
-                f"reference seed {seed.seed_id!r} has invalid role metadata"
-            )
-        value = 1.0 if mode in seed.organization_modes else 0.0
-        value += role_shares[seed.role_emphasis]
-        value += 1.0 - abs(seed.figure_preference - figure_pressure)
-        density_distance = abs(
-            density_index[normalize_density(seed.density)] - density_index[density_mode]
-        )
-        return value + 1.0 - density_distance / 2.0
-
-    ranked = sorted(
-        enumerate(candidates),
-        key=lambda item: (score(item[1]), -item[0]),
-        reverse=True,
-    )
-    return ranked[0][1]
 
 
 def load_seed_bundle(
@@ -311,6 +222,8 @@ def load_seed_bundle(
         raise ReferenceSeedError(
             f"reference seed image is missing: {registered.image_path}"
         ) from exc
+    if not image.is_file():
+        raise ReferenceSeedError(f"reference image must be a file: {image}")
     return ReferenceBundle(
         image_path=str(image),
         image_sha256=_sha256_file(image),
@@ -332,6 +245,8 @@ def load_custom_bundle(image_path: str | Path) -> ReferenceBundle:
         raise ReferenceSeedError(
             f"custom reference image is not readable: {image_path}"
         ) from exc
+    if not resolved.is_file():
+        raise ReferenceSeedError(f"reference image must be a file: {resolved}")
     return ReferenceBundle(
         image_path=str(resolved),
         image_sha256=_sha256_file(resolved),
@@ -354,39 +269,6 @@ def custom_reference_orientation(image_path: str | Path) -> Orientation:
         raise ReferenceSeedError("custom reference image has no readable dimensions") from exc
 
 
-def normalize_density(value: str) -> str:
-    """Validate one explicit seed-density value."""
-
-    key = str(value).strip().lower()
-    if key not in _DENSITIES:
-        raise ReferenceSeedError("density must be one of: open, balanced, dense")
-    return key
-
-
-def _normalize_weights(value: Mapping[str, float]) -> dict[str, float]:
-    if not isinstance(value, Mapping):
-        raise ReferenceSeedError("module_weights must be an object")
-    normalized: dict[str, float] = {}
-    for raw_key, raw_weight in value.items():
-        key = str(raw_key).strip().lower()
-        if not key or isinstance(raw_weight, bool):
-            raise ReferenceSeedError("module_weights are invalid")
-        try:
-            weight = float(raw_weight)
-        except (TypeError, ValueError) as exc:
-            raise ReferenceSeedError("module_weights are invalid") from exc
-        if not math.isfinite(weight) or weight < 0:
-            raise ReferenceSeedError(
-                "module_weights must be finite and non-negative"
-            )
-        normalized[key] = weight
-    return normalized
-
-
-def _role_weight(weights: Mapping[str, float], *keys: str) -> float:
-    return sum(weights.get(key, 0.0) for key in keys)
-
-
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -402,7 +284,6 @@ __all__ = [
     "SeedSpec",
     "load_custom_bundle",
     "load_seed_bundle",
-    "normalize_density",
     "seed_by_id",
     "select_seed",
 ]

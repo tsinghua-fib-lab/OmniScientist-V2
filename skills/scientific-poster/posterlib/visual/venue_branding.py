@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import hashlib
-import re
+import string
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Literal
+
+import pyparsing as pp
 
 from posterlib.paths import SKILL_ROOT
 
@@ -21,11 +23,6 @@ _NEURIPS_LOGO_SHA256 = (
 )
 _ICLR_LOGO_SHA256 = "4f13044841d3450c51ea4200da1e0414d3dc22a61902775263e7fc3f21cdcca5"
 _CVPR_LOGO_SHA256 = "f2f873218d52d84d91fa9ba2daf8f44b9dd232157f1f95c3cd5bb97780c2eae0"
-_VENUE_RE = re.compile(
-    r"(?<![A-Za-z0-9])(?P<name>ICML|NeurIPS|NIPS|ICLR|CVPR)(?![A-Za-z0-9])"
-    r"(?:\s*[-–—:/]?\s*(?P<year>\d{4})(?!\d))?",
-    re.IGNORECASE,
-)
 
 
 class VenueBrandingError(ValueError):
@@ -93,24 +90,30 @@ def resolve_venue_branding(
     Award or track distinctions are never inferred; callers must supply them explicitly.
     """
 
-    matches = list(_VENUE_RE.finditer(str(target)))
+    name = pp.MatchFirst([
+        pp.CaselessKeyword(value, ident_chars=string.ascii_letters + string.digits)
+        for value in (*_SPECS, "nips")
+    ])("name")
+    year = pp.Word(pp.nums, exact=4)("year") + ~pp.Char(pp.nums).leave_whitespace()
+    mention = name + pp.Opt(pp.Opt(pp.Char("-–—:/")).suppress() + year)
+    matches = [tokens for tokens, _, _ in mention.scan_string(" ".join(str(target).split()))]
     if not matches:
         return None
 
-    identities = {_canonical_id(match.group("name")) for match in matches}
+    identities = {_canonical_id(match.name) for match in matches}
     if len(identities) > 1:
-        dated = [match for match in matches if match.group("year")]
+        dated = [match for match in matches if match.year]
         if len(dated) != 1:
             return None
         matches = dated
-        identities = {_canonical_id(matches[0].group("name"))}
-    years = {match.group("year") for match in matches if match.group("year")}
+        identities = {_canonical_id(matches[0].name)}
+    years = {match.year for match in matches if match.year}
     if len(years) > 1:
         return None
 
     venue_id = identities.pop()
     year = next(iter(years), None)
-    first_name = matches[0].group("name")
+    first_name = matches[0].name
     display_name = _display_name(venue_id, matched_name=first_name)
     label = f"{display_name} {year}" if year else display_name
     normalized_distinction = " ".join(str(distinction or "").split()) or None

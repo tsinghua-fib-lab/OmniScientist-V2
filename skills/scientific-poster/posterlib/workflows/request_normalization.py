@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import math
+import json
 from collections.abc import Mapping
 from typing import Any
 
@@ -10,6 +10,7 @@ import poster_contract
 
 from posterlib.generation import model_runtime
 from posterlib.sources import source_preparation
+from posterlib.visual import design_direction, reference_analysis
 
 from . import deadlines, outcomes
 
@@ -42,13 +43,15 @@ def validate_action_boundary(
     if action == poster_contract.ACTION_REVISE and not (
         str(data.get("source_html_uri") or "").strip()
         and (
-            str(data.get("feedback") or "").strip()
+            source_preparation.authoring_request(data)
+            or str(data.get("feedback") or "").strip()
+            or data.get("visual_preferences")
             or str(data.get("visual_review_path") or "").strip()
         )
     ):
         return None, outcomes.error_result(
             "missing_input",
-            "source_html_uri plus feedback or visual_review_path are required.",
+            "source_html_uri plus current direction, visual_preferences, or visual_review_path are required.",
         )
     if action in {
         poster_contract.ACTION_DRAFT, poster_contract.ACTION_ESTIMATE, poster_contract.ACTION_REVISE
@@ -113,27 +116,46 @@ def author_model_role(input_data: Mapping[str, Any]) -> str:
     return role
 
 
-def authoring_transport_options(input_data: dict[str, Any]) -> tuple[float, int]:
-    """Return bounded HTML authoring timeout and transient retry settings."""
+def effective_authoring_request(
+    input_data: dict[str, Any],
+    stored: Mapping[str, Any],
+) -> tuple[dict[str, Any], str]:
+    """Resolve current author settings and the explicit direction still to execute."""
 
-    raw_timeout = input_data.get(
-        "authoring_timeout_seconds",
-        model_runtime.DEFAULT_AUTHORING_TIMEOUT_SECONDS,
-    )
-    if isinstance(raw_timeout, bool) or not isinstance(raw_timeout, (int, float)):
-        raise model_runtime.ModelBoundaryError(
-            "invalid_payload", "authoring_timeout_seconds must be a number"
-        )
-    timeout = float(raw_timeout)
-    if (
-        not math.isfinite(timeout)
-        or not 0 < timeout <= model_runtime.MAX_AUTHORING_TIMEOUT_SECONDS
-    ):
-        raise model_runtime.ModelBoundaryError(
-            "invalid_payload",
-            f"authoring_timeout_seconds must be greater than 0 and at most "
-            f"{model_runtime.MAX_AUTHORING_TIMEOUT_SECONDS:g}",
-        )
+    original = str(stored.get("authoring_request") or "")
+    direction = source_preparation.authoring_request(input_data)
+    feedback = "\n\n".join(dict.fromkeys(
+        value for value in (
+            direction if direction != original else "",
+            str(input_data.get("feedback") or "").strip(),
+        ) if value
+    ))
+    preferences = reference_analysis.normalize_preferences(stored.get("visual_preferences"))
+    updates = input_data.get("visual_preferences")
+    if updates is not None:
+        reference_analysis.normalize_preferences(updates)
+        preferences = reference_analysis.normalize_preferences({**preferences, **updates})
+    effective = {
+        "authoring_request": design_direction.update_user_direction(original, feedback),
+        "visual_preferences": preferences,
+        "author_model_role": author_model_role({
+            "author_model_role": input_data.get(
+                "author_model_role", stored.get("author_model_role", "main"),
+            ),
+        }),
+    }
+    delta = feedback
+    if preferences != stored.get("visual_preferences", {}):
+        delta = "\n\n".join(filter(None, (
+            delta, "Current visual preferences:\n" + json.dumps(preferences, ensure_ascii=False),
+        )))
+    return effective, delta
+
+
+def authoring_transport_options(input_data: dict[str, Any]) -> tuple[float | None, int]:
+    """Return the explicit authoring timeout and transient retry settings."""
+
+    timeout = deadlines.optional_timeout_seconds(input_data, "authoring_timeout_seconds")
 
     retries = input_data.get(
         "authoring_transport_retries",

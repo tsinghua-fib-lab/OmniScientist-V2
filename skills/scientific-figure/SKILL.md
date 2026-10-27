@@ -1,6 +1,6 @@
 ---
 name: scientific-figure
-description: Default drawing skill for architecture, system, and workflow diagrams (DOT/SVG/PNG). Also use when the user names Graphviz, leaves a .dot, or asks for SVG-only / PNG-only. Use livefigure only for an editable single-slide PPTX. Do not bash `dot`.
+description: Use for Graphviz/DOT architecture diagrams and workflow flowcharts with explicit topology and SVG/PNG output. Choose by scientific fidelity, readability and editing needs; livefigure offers native PPTX. Original paper figures may be reused, poor drawings rejected. Complete posters use scientific-poster.
 license: Apache-2.0
 metadata:
   helixforge:
@@ -11,7 +11,7 @@ metadata:
     role: task
     research_contract: portable_provenance_v1
     status: stable
-    priority: 80
+    priority: 60
     capabilities:
       - artifact.figure
       - figure.scientific
@@ -24,13 +24,10 @@ metadata:
     deliverables:
       - artifact.figure
     default_for:
-      - scientific figure
-      - architecture diagram
-      - system diagram
       - graphviz diagram
       - DOT diagram
-      - 架构图
-      - 示意图
+      - SVG diagram
+      - PNG diagram
     delivery_mode: async_task
     kind: python_engine
     execution:
@@ -158,8 +155,8 @@ metadata:
         - source_artifact_dot
         - 架构图
         - 示意图
-      when_to_use: "Default drawing skill for ordinary figures, architecture diagrams, and Graphviz DOT/SVG/PNG. Use livefigure only when the user asked for an editable single-slide PPTX."
-      when_not_to_use: "Editable single-slide PPTX (livefigure). Complete multi-slide decks (research-pptx). Do not invent a .dot file unless the user left one."
+      when_to_use: "Graphviz/DOT architecture diagrams and workflow flowcharts with explicit topology and SVG/PNG output. Choose by scientific fidelity, readability and editing needs; livefigure offers native PPTX. Reuse suitable paper originals; reject poor drawings."
+      when_not_to_use: "Native PPTX shapes, text and connectors (livefigure); complete posters (scientific-poster); multi-slide decks (research-pptx)."
     notification:
       display_label: "Scientific figure"
       title_field: "title"
@@ -172,22 +169,18 @@ metadata:
 
 # scientific-figure
 
-Default drawing skill (DOT/SVG/PNG) for unspecified architecture, flow, and
-system schematics. Also use it when the user names Graphviz, leaves a `.dot`,
-or asks for SVG-only / PNG-only. A configured VLM does not move this work to
-`livefigure`.
+Graphviz figure components (DOT/SVG/PNG) for explicit topology, reproducible
+layout, supplied `.dot` files and SVG-only / PNG-only requests. `livefigure` is
+also a candidate for architecture and workflow diagrams, especially native
+PowerPoint editing.
 
-When not to use: an editable single-slide PPTX (`livefigure`) or a complete
-multi-slide deck (`research-pptx`). Do not invent a `.dot` file and then look
-for a renderer.
+The orchestrator judges scientific fidelity, readability at the intended size
+and editing needs. It may reject an unsuitable drawing or reuse an original
+paper figure, including a permitted bitmap, with its citation and editing limits.
 
-Use this skill when the user asked for a figure, DOT/SVG/PNG, left a `.dot` to
-render, or named Graphviz. A closed
-perceive/act/reflect (or other non-template) topology is synthesized as a weaker
-Graphviz schematic (`status=partial`); the engine does not stamp a linear
-placeholder or require the caller to author DOT.
-
-Produce a clean, publication-quality figure from a description.
+Deliver only the figure component and its source/rendered files.
+`scientific-poster` owns complete poster composition, review and export;
+`research-pptx` owns complete slide decks.
 
 Procedure:
 1. Clarify the figure's intent: the stages/components, their relationships, and
@@ -211,9 +204,8 @@ OmniScientist execution contract:
   and a rendering run so the figure is auditable and reproducible.
 - When the python_engine has already produced PNG/SVG, do not re-render with
   `bash` `dot`. The engine already calls Graphviz in-process.
-- First-time creation takes natural-language `input` only. The engine generates
-  DOT and renders SVG/PNG. Do not write a `.dot` and then shell out to
-  `dot -Tpng`. Do not require `source_artifact_dot` for a new figure.
+- For natural-language creation, pass `input`; the engine generates DOT and
+  renders SVG/PNG.
 - Built-in templates are only `generic`, `rag`, and `transformer`. A closed
   perceive/act/reflect (or other non-template) topology is synthesized from the
   named stages (`status=partial`, `outcome.code=instruction_graph`): the engine
