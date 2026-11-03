@@ -46,6 +46,7 @@ metadata:
         steps: {type: object}
         final_idea: {type: object}
         report_uri: {type: string}
+        draft_report_uri: {type: string, description: "Pre-critique draft report persisted after idea generation, so a killed critique stage still leaves output"}
         artifacts: {type: array}
         sources: {type: array}
         summary: {type: string}
@@ -60,9 +61,9 @@ metadata:
       required: ["status"]
     execution:
       effects: [user_files.write]
-      # The pipeline reports progress at six coarse stages, so silence — not
-      # elapsed time — is what distinguishes a stuck run from a slow one. The
-      # wall clock is only the runaway backstop.
+      # Progress is emitted at every coarse stage and once per completed
+      # critique, so silence — not elapsed time — is what distinguishes a stuck
+      # run from a slow one. The wall clock is only the runaway backstop.
       max_seconds: 1800
       stall_seconds: 600
     workflow:
@@ -128,11 +129,33 @@ the ambient environment. Run standalone, outside Omni, there is no funnel to
 borrow: the pipeline queries Semantic Scholar directly and reads `S2_API_KEY`
 from the environment to avoid the public tier's strict limits.
 
+## Grounding depth
+
+The entire pipeline reasons over paper titles and abstracts; it never fetches
+full texts or PDFs. That makes it strong on breadth — structured gap analysis,
+multiple differentiated candidates, citation-grounded hedging — but its novelty
+conclusions are abstract-level, not full-text-verified. Every report states
+this in a grounding note. When a decision rests on a detail that an abstract
+may omit, read the full text of the most relevant retained papers before
+relying on the report's novelty verdict.
+
+Relevance filtering is also surfaced rather than silent: papers dropped by the
+LLM relevance filter are listed in the report under "Excluded by relevance
+filter" (and in `steps.search.filtered_out`), and if a single filter pass keeps
+fewer than 30% of the retrieved papers it is treated as a misfire and all
+papers are retained instead.
+
 ## Output
 
 For successful and partial runs, `text` is the complete Markdown report. It
 includes retrieved paper titles, available concept-level reasoning, research
 gaps, and the final proposal. `summary` remains a compact lifecycle summary.
+
+As soon as candidate ideas exist — before the critique stage spends one LLM
+round-trip per idea — a draft report is checkpointed: inside Omni as an
+artifact (`draft_report_uri`), and in the portable runner as
+`report.draft.md` when `--output-dir` is set. A run killed during critique
+therefore still leaves its generated ideas behind.
 
 ## External agent portability
 

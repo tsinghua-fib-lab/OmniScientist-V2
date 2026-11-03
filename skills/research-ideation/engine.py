@@ -5,8 +5,14 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any
+
+# One LLM round-trip that exceeds this is a runaway, not a slow answer. The
+# portable retry loop treats the resulting error as retryable, so a single
+# stuck call costs one timeout instead of silently eating the whole run.
+LLM_CALL_TIMEOUT_SECONDS = 180.0
 
 
 def _load_core():
@@ -44,7 +50,13 @@ class _OmniLLMPort:
             ),
             self._loop,
         )
-        result = future.result()
+        try:
+            result = future.result(timeout=LLM_CALL_TIMEOUT_SECONDS)
+        except FutureTimeoutError as exc:
+            future.cancel()
+            raise TimeoutError(
+                f"Host LLM call exceeded {LLM_CALL_TIMEOUT_SECONDS:.0f}s"
+            ) from exc
         message: dict[str, Any] = {"content": str(getattr(result, "content", "") or "")}
         tool_calls = [
             _tool_call_fragment(call, index)
@@ -164,6 +176,32 @@ class ResearchIdeationEngine:
                 lambda: asyncio.create_task(_notify_progress(msg, frac))
             )
 
+        # Persist a draft report the moment the candidate ideas exist. If the
+        # critique stage then stalls past the host's kill threshold, the run
+        # still leaves this artifact behind instead of zero output.
+        draft: dict[str, str] = {}
+
+        def _checkpoint(partial: dict[str, Any]) -> None:
+            if ctx is None or getattr(ctx, "artifacts", None) is None:
+                return
+            stored_draft = asyncio.run_coroutine_threadsafe(
+                ctx.artifacts.put_bytes(
+                    _build_markdown_report(partial).encode("utf-8"),
+                    kind="report",
+                    title=f"Research ideation draft: {question[:50]}",
+                    ext="md",
+                    mime="text/markdown",
+                    session_id=getattr(ctx, "session_id", ""),
+                    task_id=getattr(ctx, "task_id", ""),
+                    subtask_id=(
+                        getattr(ctx, "subtask_id", "")
+                        or getattr(ctx, "task_id", "")
+                    ),
+                ),
+                loop,
+            ).result(timeout=60)
+            draft["uri"] = stored_draft.uri
+
         try:
             result = await asyncio.to_thread(
                 _core.run_pipeline,
@@ -174,9 +212,13 @@ class ResearchIdeationEngine:
                 llm=llm,
                 s2_api_key=s2_api_key,
                 search=search,
+                checkpoint=_checkpoint,
             )
         except Exception as exc:
             return _pipeline_error(exc)
+
+        if draft.get("uri"):
+            result["draft_report_uri"] = draft["uri"]
 
         report = _build_markdown_report(result)
         result["text"] = report
@@ -409,6 +451,23 @@ def _build_markdown_report(result: dict) -> str:
                 for index, title in enumerate(titles, 1)
             )
             lines.append("")
+        raw_filtered = search.get("filtered_out")
+        filtered_titles = [
+            str(entry.get("title") if isinstance(entry, dict) else entry).strip()
+            for entry in (raw_filtered if isinstance(raw_filtered, list) else [])
+        ]
+        filtered_titles = [title for title in filtered_titles if title]
+        if filtered_titles:
+            lines.append("### Excluded by relevance filter")
+            lines.extend(f"- {title}" for title in filtered_titles)
+            lines.append("")
+        if search.get("filter_fallback"):
+            lines += [
+                "> Note: the relevance filter retained too few papers in a "
+                "single pass, so all retrieved papers were kept instead.",
+                "",
+            ]
+        lines += [_core.GROUNDING_NOTE, ""]
 
     gaps = steps.get("gaps")
     if isinstance(gaps, list) and gaps:

@@ -435,15 +435,18 @@ Return JSON only:
 """
 
 
-PAPER_RELEVANCE_FILTER_PROMPT = """Select papers directly relevant to the research question.
+PAPER_RELEVANCE_FILTER_PROMPT = """Select papers relevant to the research question.
 
 Research question:
 {research_question}
 
-Numbered paper titles:
-{paper_titles}
+Numbered papers (title, then abstract when available):
+{paper_entries}
 
-Be strict: retain papers whose main topic directly addresses the question.
+Retain papers whose topic is relevant to the question. Judge by the abstract
+when the title alone is ambiguous, and prefer keeping a borderline paper over
+dropping it: a later stage reasons across the retained set, so recall matters
+more than precision here.
 Return JSON only:
 {{
   "relevant_indices": [0, 2, 5]
@@ -831,6 +834,10 @@ def _run_s2_search(
 MAX_QUERIES = 3
 MAX_TOTAL_PAPERS = 24
 CONCEPT_EXTRACTION_CONCURRENCY = 10
+CRITIQUE_CONCURRENCY = 4
+# Floor for the relevance filter: a single LLM pass that keeps less than this
+# fraction of the retrieved papers is treated as a misfire and ignored.
+MIN_RETAINED_FRACTION = 0.3
 DEFAULT_N_IDEAS = 2
 DEFAULT_PAPER_LIMIT = 8
 
@@ -886,13 +893,21 @@ def search_and_extract(
     if progress:
         progress(f"Found {len(all_papers)} papers", 0.2)
 
-    # 1c. Filter by relevance
+    # 1c. Filter by relevance. The judgement sees title plus abstract — a title
+    # alone misreads papers whose phrasing is indirect — and a floor guards the
+    # survey against one over-strict LLM pass discarding nearly everything.
+    # Dropped papers are kept in ``filtered_out`` so the report can show them.
+    filtered_out: list[dict[str, str]] = []
+    filter_fallback = False
     if all_papers:
-        titles_text = "\n".join(f"[{i}] {p['title']}" for i, p in enumerate(all_papers))
+        entries_text = "\n".join(
+            f"[{i}] {p['title']}\n{(p.get('abstract') or '')[:300]}"
+            for i, p in enumerate(all_papers)
+        )
         filter_result = _llm_chat_json(
             PAPER_RELEVANCE_FILTER_PROMPT.format(
                 research_question=research_question,
-                paper_titles=titles_text,
+                paper_entries=entries_text,
             ),
             llm=llm,
         )
@@ -908,10 +923,28 @@ def search_and_extract(
             }
         else:
             relevant_ids = set(range(len(all_papers)))
-        all_papers = [p for i, p in enumerate(all_papers) if i in relevant_ids]
+        retained = [p for i, p in enumerate(all_papers) if i in relevant_ids]
+        if len(retained) < max(1, round(len(all_papers) * MIN_RETAINED_FRACTION)):
+            filter_fallback = True
+        else:
+            filtered_out = [
+                {
+                    "title": str(p.get("title") or ""),
+                    "reason": "relevance_filter",
+                }
+                for i, p in enumerate(all_papers)
+                if i not in relevant_ids
+            ]
+            all_papers = retained
 
     if progress:
-        progress(f"Retained {len(all_papers)} relevant papers", 0.3)
+        if filter_fallback:
+            progress(
+                f"Relevance filter kept too few papers; retained all {len(all_papers)}",
+                0.3,
+            )
+        else:
+            progress(f"Retained {len(all_papers)} relevant papers", 0.3)
 
     # 1d. Extract concepts concurrently
     paper_concepts: dict[str, dict] = {}
@@ -991,6 +1024,8 @@ def search_and_extract(
         "core_concepts": merged_core,
         "domain_concepts": merged_domains,
         "search_failures": search_failures,
+        "filtered_out": filtered_out,
+        "filter_fallback": filter_fallback,
     }
 
 
@@ -1221,6 +1256,16 @@ def refine_idea(
 # ---------------------------------------------------------------------------
 
 
+# The whole pipeline reasons over titles and abstracts; nothing fetches full
+# texts. Reports must say so rather than let abstract-level novelty conclusions
+# read as full-text-verified ones.
+GROUNDING_NOTE = (
+    "> Grounding note: this report reasons over paper titles and abstracts "
+    "only; no full texts were retrieved. Verify novelty conclusions against "
+    "the full text of the most relevant papers before relying on them."
+)
+
+
 def format_reference(paper: dict[str, Any], index: int) -> str:
     """Render one paper as a human-readable citation line.
 
@@ -1283,6 +1328,20 @@ def _portable_provenance(papers: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _search_step_payload(step1: dict[str, Any]) -> dict[str, Any]:
+    """The search-stage slice shared by checkpoints and the final result."""
+    return {
+        "queries": step1["queries"],
+        "paper_count": len(step1["papers"]),
+        "papers": step1["papers"],
+        "core_concepts": step1["core_concepts"],
+        "domain_concepts": step1["domain_concepts"],
+        "search_failures": step1.get("search_failures", []),
+        "filtered_out": step1.get("filtered_out", []),
+        "filter_fallback": step1.get("filter_fallback", False),
+    }
+
+
 def run_pipeline(
     research_question: str,
     n_ideas: int = DEFAULT_N_IDEAS,
@@ -1294,6 +1353,7 @@ def run_pipeline(
     llm: LLMPort,
     s2_api_key: str | None = None,
     search: SearchPort | None = None,
+    checkpoint: Any = None,
 ) -> dict:
     """Run the four-stage research ideation pipeline.
 
@@ -1307,6 +1367,9 @@ def run_pipeline(
         llm: Host-provided synchronous completion interface.
         s2_api_key: Optional Semantic Scholar API key injected for this run.
         search: Optional host retrieval port; Semantic Scholar is used without one.
+        checkpoint: Optional callback receiving a partial result dict once the
+            candidate ideas exist, so a host can persist a draft before the
+            critique stage. A checkpoint failure never fails the run.
 
     Returns:
         Complete structured pipeline result.
@@ -1408,31 +1471,78 @@ def run_pipeline(
             **_portable_provenance(step1["papers"]),
         }
 
-    # Step 4: critique
-    _prog("Critique candidate ideas", 0.85)
-    best_idea = ideas[0]
-    best_score = -1.0
-    best_critique: dict[str, Any] = {}
-    critiques = []
-
-    for idea in ideas:
+    # Checkpoint: the candidate ideas now exist, but critique still means one
+    # LLM round-trip per idea. Hand the host a partial result first so a timeout
+    # or kill during Stage 4 leaves a draft instead of zero output.
+    if checkpoint is not None:
         try:
-            c = critique_idea(
+            checkpoint(
+                {
+                    "status": "partial",
+                    "outcome": {"code": "ideas_uncritiqued", "count": len(ideas)},
+                    "research_question": research_question,
+                    "steps": {
+                        "search": _search_step_payload(step1),
+                        "gaps": gaps,
+                        "selected_gap": selected_gap,
+                        "raw_ideas": ideas,
+                    },
+                    "summary": (
+                        f"Draft: {len(ideas)} candidate idea(s) generated, "
+                        "not yet critiqued"
+                    ),
+                    **_portable_provenance(step1["papers"]),
+                }
+            )
+        except Exception:  # noqa: BLE001 — checkpointing must never fail the run
+            pass
+
+    # Step 4: critique — concurrent like Stage 3, with one progress heartbeat
+    # per completed critique so stall detection sees a live run, not a black box.
+    _prog("Critique candidate ideas", 0.85)
+    critiques_by_index: dict[int, dict[str, Any]] = {}
+    completed = 0
+
+    with ThreadPoolExecutor(max_workers=min(len(ideas), CRITIQUE_CONCURRENCY)) as pool:
+        futures = {
+            pool.submit(
+                critique_idea,
                 idea,
                 research_question,
                 step1["core_concepts"],
                 llm=llm,
+            ): index
+            for index, idea in enumerate(ideas)
+        }
+        for fut in as_completed(futures):
+            index = futures[fut]
+            try:
+                critiques_by_index[index] = fut.result()
+            except Exception as exc:
+                if is_non_retryable_llm_error(exc):
+                    raise
+                critiques_by_index[index] = {"error": "Critique failed"}
+            completed += 1
+            _prog(
+                f"Critiqued {completed}/{len(ideas)} candidate ideas",
+                0.85 + 0.06 * completed / len(ideas),
             )
-            critiques.append(c)
-            score = float(c.get("overall_score", 0))
-            if score > best_score:
-                best_score = score
-                best_idea = idea
-                best_critique = c
-        except Exception as exc:
-            if is_non_retryable_llm_error(exc):
-                raise
-            critiques.append({"error": "Critique failed"})
+
+    critiques = [critiques_by_index[index] for index in range(len(ideas))]
+    best_idea = ideas[0]
+    best_score = -1.0
+    best_critique: dict[str, Any] = {}
+    for idea, critique in zip(ideas, critiques):
+        if "error" in critique:
+            continue
+        try:
+            score = float(critique.get("overall_score", 0))
+        except (TypeError, ValueError):
+            score = 0.0
+        if score > best_score:
+            best_score = score
+            best_idea = idea
+            best_critique = critique
 
     # Refine
     final_idea = best_idea
@@ -1459,14 +1569,7 @@ def run_pipeline(
         "outcome": {"code": outcome_code, "count": len(ideas)},
         "research_question": research_question,
         "steps": {
-            "search": {
-                "queries": step1["queries"],
-                "paper_count": len(step1["papers"]),
-                "papers": step1["papers"],
-                "core_concepts": step1["core_concepts"],
-                "domain_concepts": step1["domain_concepts"],
-                "search_failures": step1.get("search_failures", []),
-            },
+            "search": _search_step_payload(step1),
             "gaps": gaps,
             "selected_gap": selected_gap,
             "raw_ideas": ideas,

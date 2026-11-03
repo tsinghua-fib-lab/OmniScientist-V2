@@ -711,3 +711,312 @@ async def test_omni_engine_records_real_source_and_run_provenance(
     runs = await store.list_runs(session_id="sess-ideation")
     assert [run.id for run in runs] == [result["run_id"]]
     assert runs[0].inputs["research_question"] == "How should ideas be grounded?"
+
+
+def test_relevance_filter_sees_abstracts_and_reports_dropped_papers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Title-only filtering misread indirect titles; dropped papers were invisible.
+
+    The filter prompt must carry each paper's abstract, and whatever it drops
+    must surface in ``filtered_out`` instead of vanishing from the run.
+    """
+    core = _load_module("core.py", "research_ideation_filter_visibility_core")
+    papers = [
+        {"title": "Direct Match", "abstract": "Privacy masking for GUI agents.", "year": 2025},
+        {"title": "Oblique Title", "abstract": "Redacting on-screen PII before agent perception.", "year": 2024},
+        {"title": "Unrelated A", "abstract": "Protein folding dynamics.", "year": 2023},
+        {"title": "Unrelated B", "abstract": "Traffic flow prediction.", "year": 2023},
+    ]
+    monkeypatch.setattr(core, "search_papers", lambda *_a, **_k: list(papers))
+    seen_filter_prompt: dict[str, str] = {}
+
+    class FilterLLM:
+        def complete(self, payload: dict[str, Any]) -> dict[str, Any]:
+            prompt = payload["messages"][-1]["content"]
+            if prompt.startswith("Generate 1-3"):
+                content = '{"queries":["gui agent privacy masking"]}'
+            elif prompt.startswith("Select papers"):
+                seen_filter_prompt["prompt"] = prompt
+                content = '{"relevant_indices":[0,1]}'
+            elif prompt.startswith("Extract the most important"):
+                content = '{"core_concepts":["privacy masking"],"domain_concepts":["gui agents"]}'
+            elif prompt.startswith("Normalize and merge"):
+                content = (
+                    '{"merged_core":["privacy masking"],'
+                    '"merged_domains":["gui agents"],"mapping":{}}'
+                )
+            else:  # pragma: no cover - unexpected prompt drift is actionable
+                raise AssertionError(f"unexpected prompt: {prompt[:80]}")
+            return {"choices": [{"message": {"content": content}}]}
+
+    result = core.search_and_extract("GUI agent privacy masking", llm=FilterLLM())
+
+    assert "Redacting on-screen PII" in seen_filter_prompt["prompt"]
+    assert [p["title"] for p in result["papers"]] == ["Direct Match", "Oblique Title"]
+    assert result["filtered_out"] == [
+        {"title": "Unrelated A", "reason": "relevance_filter"},
+        {"title": "Unrelated B", "reason": "relevance_filter"},
+    ]
+    assert result["filter_fallback"] is False
+
+
+def test_relevance_filter_floor_ignores_an_overpruning_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One strict LLM pass used to cut 24 papers to 1 with no recourse.
+
+    When a single judgement keeps less than the floor fraction, the filter is
+    treated as a misfire: every retrieved paper is retained and the run says so.
+    """
+    core = _load_module("core.py", "research_ideation_filter_floor_core")
+    papers = [
+        {"title": f"Paper {index}", "abstract": f"Abstract {index}", "year": 2025}
+        for index in range(10)
+    ]
+    monkeypatch.setattr(core, "search_papers", lambda *_a, **_k: list(papers))
+    progress_events: list[tuple[str, float]] = []
+
+    class StrictFilterLLM:
+        def complete(self, payload: dict[str, Any]) -> dict[str, Any]:
+            prompt = payload["messages"][-1]["content"]
+            if prompt.startswith("Generate 1-3"):
+                content = '{"queries":["wide topic"]}'
+            elif prompt.startswith("Select papers"):
+                content = '{"relevant_indices":[3]}'
+            elif prompt.startswith("Extract the most important"):
+                content = '{"core_concepts":["c"],"domain_concepts":["d"]}'
+            elif prompt.startswith("Normalize and merge"):
+                content = '{"merged_core":["c"],"merged_domains":["d"],"mapping":{}}'
+            else:  # pragma: no cover - unexpected prompt drift is actionable
+                raise AssertionError(f"unexpected prompt: {prompt[:80]}")
+            return {"choices": [{"message": {"content": content}}]}
+
+    result = core.search_and_extract(
+        "wide topic",
+        progress=lambda msg, frac: progress_events.append((msg, frac)),
+        llm=StrictFilterLLM(),
+    )
+
+    assert len(result["papers"]) == 10
+    assert result["filter_fallback"] is True
+    assert result["filtered_out"] == []
+    assert any("kept too few papers" in msg for msg, _frac in progress_events)
+
+
+def test_critique_stage_is_concurrent_and_heartbeats_each_idea(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stage 4 was a serial loop with one progress call before it.
+
+    N ideas must be critiqued concurrently (proved by a barrier that only two
+    simultaneous workers can pass) and every completion must emit a progress
+    heartbeat, so the host's stall detector never watches a silent black box.
+    """
+    import threading
+
+    core = _load_module("core.py", "research_ideation_critique_concurrency_core")
+    ideas = [
+        {"id": 0, "title": "Idea A", "proposed_method": "m"},
+        {"id": 1, "title": "Idea B", "proposed_method": "m"},
+    ]
+    barrier = threading.Barrier(2)
+
+    def fake_search_and_extract(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "papers": [{"title": "P", "abstract": "a", "year": 2025}],
+            "paper_count": 1,
+            "queries": ["q"],
+            "paper_concepts": {},
+            "core_concepts": ["c"],
+            "domain_concepts": [],
+            "search_failures": [],
+            "filtered_out": [],
+            "filter_fallback": False,
+        }
+
+    def fake_critique(idea: dict[str, Any], *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        barrier.wait(timeout=20)
+        return {"overall_score": 7.0 + float(idea["id"])}
+
+    monkeypatch.setattr(core, "search_and_extract", fake_search_and_extract)
+    monkeypatch.setattr(core, "identify_gaps", lambda *_a, **_k: [{"gap_id": 1, "gap": "g"}])
+    monkeypatch.setattr(core, "generate_ideas", lambda *_a, **_k: list(ideas))
+    monkeypatch.setattr(core, "critique_idea", fake_critique)
+    monkeypatch.setattr(core, "refine_idea", lambda idea, _c, **_k: dict(idea))
+    progress_events: list[str] = []
+
+    result = core.run_pipeline(
+        "A question",
+        use_tools=False,
+        progress=lambda msg, _frac: progress_events.append(msg),
+        llm=object(),
+    )
+
+    assert result["status"] == "ok"
+    assert result["final_idea"]["title"] == "Idea B"
+    assert "Critiqued 1/2 candidate ideas" in progress_events
+    assert "Critiqued 2/2 candidate ideas" in progress_events
+    assert len(result["steps"]["critiques"]) == 2
+
+
+def test_checkpoint_hands_over_ideas_before_critique_and_never_fails_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run killed during critique used to leave zero output.
+
+    The checkpoint fires after Stage 3 with the generated ideas, and a raising
+    checkpoint is swallowed rather than failing the pipeline.
+    """
+    core = _load_module("core.py", "research_ideation_checkpoint_core")
+    ideas = [{"id": 0, "title": "Idea A", "proposed_method": "m"}]
+
+    def fake_search_and_extract(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "papers": [{"title": "P", "abstract": "a", "year": 2025}],
+            "paper_count": 1,
+            "queries": ["q"],
+            "paper_concepts": {},
+            "core_concepts": ["c"],
+            "domain_concepts": [],
+            "search_failures": [],
+            "filtered_out": [],
+            "filter_fallback": False,
+        }
+
+    monkeypatch.setattr(core, "search_and_extract", fake_search_and_extract)
+    monkeypatch.setattr(core, "identify_gaps", lambda *_a, **_k: [{"gap_id": 1, "gap": "g"}])
+    monkeypatch.setattr(core, "generate_ideas", lambda *_a, **_k: list(ideas))
+    monkeypatch.setattr(core, "critique_idea", lambda *_a, **_k: {"overall_score": 9.5})
+    checkpoints: list[dict[str, Any]] = []
+
+    def exploding_checkpoint(partial: dict[str, Any]) -> None:
+        checkpoints.append(partial)
+        raise OSError("artifact store unavailable")
+
+    result = core.run_pipeline(
+        "A question",
+        use_tools=False,
+        llm=object(),
+        checkpoint=exploding_checkpoint,
+    )
+
+    assert result["status"] == "ok"
+    assert len(checkpoints) == 1
+    partial = checkpoints[0]
+    assert partial["status"] == "partial"
+    assert partial["outcome"] == {"code": "ideas_uncritiqued", "count": 1}
+    assert partial["steps"]["raw_ideas"] == ideas
+    assert partial["steps"]["search"]["paper_count"] == 1
+    assert "critiques" not in partial["steps"]
+
+
+@pytest.mark.asyncio
+async def test_omni_llm_port_times_out_a_runaway_call_as_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``future.result()`` without a timeout blocked forever on a runaway call.
+
+    A single stuck round-trip must surface as a retryable timeout instead of
+    silently eating the whole run's budget.
+    """
+    import asyncio
+
+    engine_module = _load_module("engine.py", "research_ideation_llm_timeout_engine")
+    monkeypatch.setattr(engine_module, "LLM_CALL_TIMEOUT_SECONDS", 0.2)
+
+    class RunawayLLM:
+        async def chat_with_tools(self, *_args: Any, **_kwargs: Any) -> SimpleNamespace:
+            await asyncio.sleep(30)
+            return SimpleNamespace(content="late", tool_calls=())
+
+    port = engine_module._OmniLLMPort(RunawayLLM(), asyncio.get_running_loop())
+
+    with pytest.raises(TimeoutError, match="exceeded") as excinfo:
+        await asyncio.to_thread(port.complete, {"messages": []})
+
+    assert not engine_module._core.is_non_retryable_llm_error(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_omni_engine_persists_a_draft_report_at_the_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine_module = _load_module("engine.py", "research_ideation_draft_engine")
+    artifact_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(engine_module, "_resolve_s2_key", lambda _ctx: "")
+
+    class Artifacts:
+        async def put_bytes(self, _data: bytes, **kwargs: Any) -> SimpleNamespace:
+            artifact_calls.append(kwargs)
+            return SimpleNamespace(
+                uri=f"artifact://research-ideation/{len(artifact_calls)}.md"
+            )
+
+    def fake_pipeline(**kwargs: Any) -> dict[str, Any]:
+        kwargs["checkpoint"](
+            {
+                "status": "partial",
+                "outcome": {"code": "ideas_uncritiqued", "count": 1},
+                "research_question": "Draft question",
+                "steps": {"raw_ideas": [{"title": "Draft Idea"}]},
+            }
+        )
+        return {
+            "status": "ok",
+            "outcome": {"code": "ideas_generated", "count": 1},
+            "research_question": "Draft question",
+            "steps": {},
+            "summary": "Generated one idea",
+        }
+
+    monkeypatch.setattr(engine_module._core, "run_pipeline", fake_pipeline)
+    engine = engine_module.ResearchIdeationEngine()
+    engine.ctx = SimpleNamespace(
+        llm=object(),
+        artifacts=Artifacts(),
+        settings=None,
+        paths=None,
+        session_id="session-1",
+        task_id="task-1",
+        subtask_id="subtask-1",
+    )
+
+    result = await engine.execute(input="Draft question", use_tools=False)
+
+    assert len(artifact_calls) == 2
+    assert artifact_calls[0]["title"].startswith("Research ideation draft:")
+    assert artifact_calls[1]["title"].startswith("Research ideation:")
+    assert result["draft_report_uri"] == "artifact://research-ideation/1.md"
+    assert result["report_uri"] == "artifact://research-ideation/2.md"
+
+
+def test_markdown_report_shows_filtered_papers_and_grounding_note() -> None:
+    engine_module = _load_module(
+        "engine.py", "research_ideation_report_filter_engine"
+    )
+
+    report = engine_module._build_markdown_report(
+        {
+            "research_question": "GUI agent privacy",
+            "steps": {
+                "search": {
+                    "queries": ["gui privacy"],
+                    "paper_count": 1,
+                    "papers": [{"title": "Kept Paper"}],
+                    "core_concepts": ["privacy"],
+                    "domain_concepts": ["gui agents"],
+                    "filtered_out": [
+                        {"title": "Dropped Paper", "reason": "relevance_filter"}
+                    ],
+                    "filter_fallback": False,
+                },
+            },
+            "final_idea": {"title": "Masked Perception"},
+        }
+    )
+
+    assert "### Excluded by relevance filter" in report
+    assert "- Dropped Paper" in report
+    assert "Grounding note" in report
+    assert "no full texts were retrieved" in report

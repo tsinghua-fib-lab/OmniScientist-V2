@@ -501,6 +501,42 @@ def _exact_install_plan(
     return kind, argv, f"{kind} owner; current interpreter: {sys.executable}"
 
 
+def _snapshot_published_override(
+    current: str,
+    *,
+    editable: bool,
+    force: bool,
+    settings: object,
+) -> tuple[str, list[str], str] | str | None:
+    """Prefer the published release over a copied source snapshot.
+
+    An explicit ``omni update`` asks for the latest release now. The startup
+    banner may use its one-day cache; this path fetches PyPI directly. Editable
+    checkouts stay on git so a development tree is not replaced. Returns
+    ``"current"`` when the snapshot already matches PyPI, an install plan when
+    the published package should be installed, or ``None`` to keep the git plan.
+    """
+
+    if editable:
+        return None
+    from omni.runtime import update_check
+
+    latest = update_check.fetch_latest_version(settings)
+    if not latest:
+        warn("Could not fetch the latest PyPI version; updating the source snapshot instead.")
+        return None
+    if update_check.newer_available(latest, current):
+        warn(
+            f"This install ({current}) is newer than PyPI ({latest}); "
+            "keeping the source snapshot."
+        )
+        return None
+    if update_check.newer_available(current, latest) or force:
+        kind, argv, label = _exact_install_plan(DIST, reinstall=force)
+        return kind, argv, f"PyPI {latest}; {label}"
+    return "current"
+
+
 def _plan(
     ref: str = "",
     *,
@@ -892,12 +928,29 @@ def update_command(
     else:
         _kind, cmd, label = _plan(ref=ref, force_reinstall=force)
         if _kind == "git":
-            # Source checkout: git state decides whether to pull. A clean,
-            # up-to-date branch still reinstalls when the installed snapshot is
-            # older than the checkout (or when --force was requested). ``--check``
-            # only displays the plan, so it never probes the network or
-            # short-circuits here.
-            if not check and not force:
+            checkout = _source_checkout()
+            editable = bool(checkout and checkout[2])
+            published = _snapshot_published_override(
+                current,
+                editable=editable,
+                force=force,
+                settings=settings,
+            )
+            if published == "current":
+                package_change = False
+                cmd = []
+                label = f"package matches PyPI ({current}); converge managed runtime and service"
+                success(
+                    f"Python package already matches PyPI ({current}); "
+                    "checking managed runtime and service."
+                )
+            elif published is not None:
+                _kind, cmd, label = published
+                info(f"PyPI release will replace this source snapshot ({current}).")
+            # A copied snapshot prefers PyPI above. Editable checkouts, and a
+            # snapshot that is newer than PyPI or could not reach it, still use
+            # git. ``--check`` does not short-circuit that git plan here.
+            if published != "current" and _kind == "git" and not check and not force:
                 checkout = _source_checkout()
                 if checkout is not None:
                     repo_root, src, editable = checkout
@@ -909,10 +962,11 @@ def update_command(
                         package_change = False
                         cmd = []
                         label = "source checkout is current; converge managed runtime and service"
-            if package_change:
-                info("Source checkout detected; will fast-forward and reinstall.")
-            else:
-                success("Source checkout is current; checking managed runtime and service.")
+            if published != "current" and _kind == "git":
+                if package_change:
+                    info("Source checkout detected; will fast-forward and reinstall.")
+                else:
+                    success("Source checkout is current; checking managed runtime and service.")
         elif _kind == "manual":
             pass  # no automatic path; guidance is rendered below
         elif _spec_is_moving_git(_installed_source_spec(_distribution())):

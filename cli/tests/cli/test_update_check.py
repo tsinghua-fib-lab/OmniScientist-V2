@@ -749,6 +749,63 @@ def test_source_checkout_short_circuits_when_current(monkeypatch):
     assert "No Python package download is required" in res.output
 
 
+def test_snapshot_update_installs_newer_pypi_release(monkeypatch):
+    """An explicit update of a copied snapshot installs the published release."""
+    from types import SimpleNamespace
+
+    import omni.cli.commands.update_cmd as uc
+
+    repo = uc.Path("/repo")
+    monkeypatch.setattr(uc, "_source_checkout", lambda *_a, **_k: (repo, repo / "cli", False))
+    monkeypatch.setattr(update_check, "fetch_latest_version", lambda *_a, **_k: "9.9.9")
+    monkeypatch.setattr(uc.shutil, "which", lambda _name: "/usr/bin/uv")
+    monkeypatch.setattr(uc, "installation_method_for_prefix", lambda _prefix: "env")
+    monkeypatch.setattr(
+        uc,
+        "_prepare_bundled_skill_runtimes_with_updated_cli",
+        lambda _paths: None,
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **_kwargs):  # noqa: ANN001, ANN202
+        calls.append(list(argv))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(uc.subprocess, "run", fake_run)
+    res = runner.invoke(app, ["update", "--no-restart-serve"])
+    assert res.exit_code == 0, res.output
+    assert "PyPI release will replace this source snapshot" in res.output
+    assert calls
+    assert calls[0][-1] == uc.DIST
+    assert "git" not in calls[0]
+
+
+def test_snapshot_update_keeps_git_when_pypi_is_unreachable(monkeypatch, tmp_path):
+    import omni.cli.commands.update_cmd as uc
+
+    repo = tmp_path / "repo"
+    cli = repo / "cli"
+    package = cli / "src" / "omni"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text('__version__ = "9.9.9"\n', encoding="utf-8")
+    monkeypatch.setattr(uc, "_source_checkout", lambda *_a, **_k: (repo, cli, False))
+    monkeypatch.setattr(update_check, "fetch_latest_version", lambda *_a, **_k: None)
+    monkeypatch.setattr(uc, "_git_behind_count", lambda *_a, **_k: 0)
+    monkeypatch.setattr(uc, "_git_tree_is_dirty", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        uc,
+        "_prepare_bundled_skill_runtimes_with_updated_cli",
+        lambda _paths: None,
+    )
+    executed: list[dict] = []
+    monkeypatch.setattr(uc, "_execute_git_update", lambda **kwargs: executed.append(kwargs))
+
+    res = runner.invoke(app, ["update", "--no-restart-serve"])
+    assert res.exit_code == 0, res.output
+    assert "Could not fetch the latest PyPI version" in res.output
+    assert executed == [{"repo_root": repo, "src": cli, "editable": False, "ref": ""}]
+
+
 def test_stale_snapshot_reinstalls_when_git_checkout_is_current(monkeypatch, tmp_path):
     """A copied install must be replaced when the checkout version moved ahead."""
     import omni.cli.commands.update_cmd as uc
@@ -759,6 +816,7 @@ def test_stale_snapshot_reinstalls_when_git_checkout_is_current(monkeypatch, tmp
     package.mkdir(parents=True)
     (package / "__init__.py").write_text('__version__ = "9.9.9"\n', encoding="utf-8")
     monkeypatch.setattr(uc, "_source_checkout", lambda *_a, **_k: (repo, cli, False))
+    monkeypatch.setattr(update_check, "fetch_latest_version", lambda *_a, **_k: None)
     monkeypatch.setattr(uc, "_git_behind_count", lambda *_a, **_k: 0)
     monkeypatch.setattr(uc, "_git_tree_is_dirty", lambda *_a, **_k: False)
     monkeypatch.setattr(

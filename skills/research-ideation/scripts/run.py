@@ -132,7 +132,7 @@ def _self_test() -> dict:
         SEARCH_QUERY_PROMPT.format(research_question="test")
         PAPER_RELEVANCE_FILTER_PROMPT.format(
             research_question="test",
-            paper_titles="[0] paper",
+            paper_entries="[0] paper\nabstract",
         )
         CONCEPT_EXTRACTION_PROMPT.format(title="paper", abstract="abstract")
         CONCEPT_MERGE_PROMPT.format(core_concepts="core", domain_concepts="domain")
@@ -258,6 +258,16 @@ def main() -> None:
     def _progress(msg: str, frac: float) -> None:
         print(f"  [{frac*100:.0f}%] {msg}", file=sys.stderr)
 
+    def _write_draft(partial: dict) -> None:
+        # A kill during the critique stage then leaves this draft behind
+        # instead of zero output. Overwritten by report.md on a full run.
+        if not args.output_dir:
+            return
+        os.makedirs(args.output_dir, exist_ok=True)
+        draft_path = os.path.join(args.output_dir, "report.draft.md")
+        with open(draft_path, "w", encoding="utf-8") as f:
+            f.write(_build_report(partial))
+
     try:
         llm = OpenAICompatibleLLM(build_llm_config())
         result = run_pipeline(
@@ -272,6 +282,7 @@ def main() -> None:
             use_tools=bool(input_data.get("use_tools", True)),
             progress=_progress,
             llm=llm,
+            checkpoint=_write_draft if args.output_dir else None,
         )
     except Exception as e:
         message = str(e).replace(secret, "[REDACTED]") if secret else str(e)
@@ -339,6 +350,8 @@ def main() -> None:
 
 
 def _build_report(result: dict) -> str:
+    from core import GROUNDING_NOTE, build_reference_lines
+
     question = result.get("research_question", "")
     lines = [f"# Research Ideation Report: {question}", ""]
 
@@ -352,6 +365,23 @@ def _build_report(result: dict) -> str:
             f"- Core concepts: {', '.join(search.get('core_concepts', [])[:10])}",
             "",
         ]
+        filtered = search.get("filtered_out") or []
+        filtered_titles = [
+            str(entry.get("title") if isinstance(entry, dict) else entry).strip()
+            for entry in filtered
+        ]
+        filtered_titles = [title for title in filtered_titles if title]
+        if filtered_titles:
+            lines.append("### Excluded by relevance filter")
+            lines.extend(f"- {title}" for title in filtered_titles)
+            lines.append("")
+        if search.get("filter_fallback"):
+            lines += [
+                "> Note: the relevance filter retained too few papers in a "
+                "single pass, so all retrieved papers were kept instead.",
+                "",
+            ]
+        lines += [GROUNDING_NOTE, ""]
 
     gaps = steps.get("gaps", [])
     if gaps:
@@ -372,8 +402,6 @@ def _build_report(result: dict) -> str:
         ]
 
     # Cite the retrieved literature so the report is self-contained.
-    from core import build_reference_lines
-
     sources = result.get("sources")
     reference_papers = sources if isinstance(sources, list) and sources else search.get("papers", [])
     lines += build_reference_lines(

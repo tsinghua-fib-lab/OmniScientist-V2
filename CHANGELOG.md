@@ -4,6 +4,27 @@ This project follows [Keep a Changelog](https://keepachangelog.com/) and semanti
 
 ## Unreleased
 
+## [2.0.0rc11] - 2026-11-03
+
+### Fixed
+
+- `omni update`, `omni upgrade`, and `omni update --force` fetch PyPI
+  immediately. A copied source snapshot is replaced by that published release
+  when PyPI is newer, or when `--force` asks to match it. Editable checkouts
+  still update from git. The one-day cache remains only for the passive
+  startup notice.
+- ``research-ideation`` runs critique concurrently, reports progress as each
+  critique finishes, and bounds each host model call with a 180s retryable
+  timeout. A draft report is saved once candidate ideas exist, so stopping
+  during critique still leaves that draft. The relevance filter reads the
+  title and abstract, keeps the full retrieval when a pass would drop more
+  than 70% of the papers, and lists the excluded papers. Reports state that
+  grounding is abstract-level and does not retrieve full text.
+
+### Changed
+
+- Bumped the release candidate to `2.0.0rc11` (Git tag `v2.0.0rc11`).
+
 ## [2.0.0rc10] - 2026-10-27
 
 ### Fixed
