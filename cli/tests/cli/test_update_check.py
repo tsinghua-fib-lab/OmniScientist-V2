@@ -749,6 +749,62 @@ def test_source_checkout_short_circuits_when_current(monkeypatch):
     assert "No Python package download is required" in res.output
 
 
+def test_snapshot_published_override_keeps_a_newer_local_tree(monkeypatch):
+    """A snapshot newer than PyPI stays on git; an older one installs the release."""
+    import omni.cli.commands.update_cmd as uc
+
+    monkeypatch.setattr(uc.shutil, "which", lambda _name: "/usr/bin/uv")
+    monkeypatch.setattr(uc, "installation_method_for_prefix", lambda _prefix: "env")
+    assert (
+        uc._snapshot_published_override(
+            "2.0.0", editable=True, force=False, settings=object()
+        )
+        is None
+    )
+
+    monkeypatch.setattr(update_check, "fetch_latest_version", lambda *_a, **_k: "1.0.0")
+    assert (
+        uc._snapshot_published_override(
+            "2.0.0", editable=False, force=False, settings=object()
+        )
+        is None
+    )
+
+    monkeypatch.setattr(update_check, "fetch_latest_version", lambda *_a, **_k: "2.0.0")
+    assert (
+        uc._snapshot_published_override(
+            "2.0.0", editable=False, force=False, settings=object()
+        )
+        == "current"
+    )
+
+    monkeypatch.setattr(update_check, "fetch_latest_version", lambda *_a, **_k: "9.9.9")
+    kind, argv, label = uc._snapshot_published_override(
+        "2.0.0", editable=False, force=False, settings=object()
+    )
+    assert kind
+    assert argv[-1] == uc.DIST
+    assert "PyPI 9.9.9" in label
+
+
+def test_matching_snapshot_skips_the_package_download(monkeypatch):
+    import omni.cli.commands.update_cmd as uc
+
+    repo = uc.Path("/repo")
+    monkeypatch.setattr(
+        uc, "_plan", lambda ref="", **_k: ("git", ["git", "pull"], "git snapshot")
+    )
+    monkeypatch.setattr(
+        uc, "_source_checkout", lambda *_a, **_k: (repo, repo / "cli", False)
+    )
+    monkeypatch.setattr(update_check, "fetch_latest_version", lambda *_a, **_k: __version__)
+
+    res = runner.invoke(app, ["update", "--check", "--no-restart-serve"])
+
+    assert res.exit_code == 0, res.output
+    assert f"Python package already matches PyPI ({__version__})" in res.output
+
+
 def test_snapshot_update_installs_newer_pypi_release(monkeypatch):
     """An explicit update of a copied snapshot installs the published release."""
     from types import SimpleNamespace
